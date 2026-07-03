@@ -1,0 +1,87 @@
+{
+  "_note": "Golden HMAC vectors for Queuey signed requests. Values produced by the backend reference client (QueueyHmacTestHelper) and are the authoritative canonical/signature outputs. They are reproducible from the public signed-requests docs: signature = lowercase-hex HMAC-SHA256(secret_utf8, canonical_utf8) where canonical = METHOD\\nPATH\\nQUERY\\nTIMESTAMP\\nNONCE\\nCONTENT_SHA256 with METHOD upper, PATH trim (empty=\u003E/), QUERY flatten\u002Bordinal-sort\u002BUri.EscapeDataString join \u0027\u0026\u0027, CONTENT_SHA256 lowercase-hex sha256 of the raw body. The SDK signer must reproduce these exactly.",
+  "keyId": "kid_test_01",
+  "secret": "sk_signing_secret_do_not_use_in_prod",
+  "timestamp": 1700000000,
+  "nonce": "nonce-fixed-0123456789abcdef",
+  "vectors": [
+    {
+      "name": "post_json_no_query",
+      "method": "POST",
+      "url": "https://ingress.queuey.ai/events/ten_abc/orders",
+      "bodyUtf8": "{\u0022hello\u0022:\u0022world\u0022}",
+      "contentType": "application/json",
+      "keyId": "kid_test_01",
+      "secret": "sk_signing_secret_do_not_use_in_prod",
+      "timestamp": 1700000000,
+      "nonce": "nonce-fixed-0123456789abcdef",
+      "expectedContentSha256": "93a23971a914e5eacbf0a8d25154cda309c3c1c72fbb9914d47c60f3cb681588",
+      "expectedSignature": "ee54808b0d077e03530282826242c06b8548593e1e89b16ee92ab36ef8d2e6d7"
+    },
+    {
+      "name": "post_empty_body",
+      "method": "POST",
+      "url": "https://ingress.queuey.ai/events/ten_abc/orders",
+      "bodyUtf8": "",
+      "contentType": null,
+      "keyId": "kid_test_01",
+      "secret": "sk_signing_secret_do_not_use_in_prod",
+      "timestamp": 1700000000,
+      "nonce": "nonce-fixed-0123456789abcdef",
+      "expectedContentSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "expectedSignature": "d5217d1e41418c34614c3418dca715ba23f56aabe57c840dc2961bea154a19dd"
+    },
+    {
+      "name": "post_single_query",
+      "method": "POST",
+      "url": "https://ingress.queuey.ai/events/ten_abc/orders?runId=run_1",
+      "bodyUtf8": "{\u0022a\u0022:1}",
+      "contentType": "application/json",
+      "keyId": "kid_test_01",
+      "secret": "sk_signing_secret_do_not_use_in_prod",
+      "timestamp": 1700000000,
+      "nonce": "nonce-fixed-0123456789abcdef",
+      "expectedContentSha256": "015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862",
+      "expectedSignature": "9bc61ccebc6691ad3364ceff59ed60eca69d3c777288e64aff8976d8ed196e26"
+    },
+    {
+      "name": "post_multi_query_sort",
+      "method": "POST",
+      "url": "https://ingress.queuey.ai/events/ten_abc/orders?b=2\u0026a=1\u0026a=0",
+      "bodyUtf8": "{}",
+      "contentType": "application/json",
+      "keyId": "kid_test_01",
+      "secret": "sk_signing_secret_do_not_use_in_prod",
+      "timestamp": 1700000000,
+      "nonce": "nonce-fixed-0123456789abcdef",
+      "expectedContentSha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "expectedSignature": "1c3cb39c6c18c543ad64a9a9a2741e839ce164972579f722de099f818ee2a2e2"
+    },
+    {
+      "name": "post_encoded_query",
+      "method": "POST",
+      "url": "https://ingress.queuey.ai/events/ten_abc/orders?q=hello%20world\u0026x=a%2Bb\u0026city=%C3%A6",
+      "bodyUtf8": "x",
+      "contentType": "text/plain",
+      "keyId": "kid_test_01",
+      "secret": "sk_signing_secret_do_not_use_in_prod",
+      "timestamp": 1700000000,
+      "nonce": "nonce-fixed-0123456789abcdef",
+      "expectedContentSha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+      "expectedSignature": "c69220a8e96977c264d486a16215a6dde744fb7785ac32115598a528b116e993"
+    },
+    {
+      "name": "post_sandbox_route",
+      "method": "POST",
+      "url": "https://ingress.queuey.ai/events/sandbox/ten_abc/orders?sb_fail_code=500\u0026sb_fail_count=1\u0026runId=run_9",
+      "bodyUtf8": "{\u0022n\u0022:1}",
+      "contentType": "application/json",
+      "keyId": "kid_test_01",
+      "secret": "sk_signing_secret_do_not_use_in_prod",
+      "timestamp": 1700000000,
+      "nonce": "nonce-fixed-0123456789abcdef",
+      "expectedContentSha256": "2bfd14f43d17fc7cea24e0917a8879b4b2f880b8baeec1b9d90fbaad655e71bd",
+      "expectedSignature": "973b6d186a85557baff5b996ef253f3433b5b7f1fb67d65979a03532c584232e"
+    }
+  ]
+}

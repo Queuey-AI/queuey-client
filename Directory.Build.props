@@ -1,0 +1,25 @@
+<Project>
+
+  <PropertyGroup>
+    <Version>0.1.0-preview.4</Version>
+    <Authors>Queuey</Authors>
+    <Company>Queuey</Company>
+    <Product>Queuey.Client</Product>
+    <Copyright>Copyright © Queuey</Copyright>
+
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Deterministic>true</Deterministic>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+
+    <!-- Only the SDK project is packable; tests/samples opt out via this default. -->
+    <IsPackable>false</IsPackable>
+
+    <!-- SourceLink / reproducible builds -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+</Project>

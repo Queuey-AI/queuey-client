@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>netstandard2.0;net8.0</TargetFrameworks>
+    <IsPackable>true</IsPackable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+
+    <PackageId>Queuey.Client.Waas</PackageId>
+    <Title>Queuey.Client.Waas</Title>
+    <Description>Webhooks-as-a-Service onboarding for Queuey.Client — decorate your event models with [QueueyModel], register the service, SyncModels on deploy, and PushEvent on save. Builds on Queuey.Client.</Description>
+    <PackageTags>queuey;webhooks;events;waas;producer;sync;sdk</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/queuey-ai/queuey-client</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/queuey-ai/queuey-client</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Queuey.Client.Waas.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Queuey.Client/Queuey.Client.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
+    <!-- AddQueuey DI extension over IHttpClientFactory (transitively brings DI abstractions). -->
+    <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.1" />
+  </ItemGroup>
+
+  <!-- System.Text.Json is in-box for net8.0; only netstandard2.0 needs the package. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+
+</Project>

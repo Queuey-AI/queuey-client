@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>netstandard2.0;net8.0</TargetFrameworks>
+    <IsPackable>true</IsPackable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+
+    <PackageId>Queuey.Client</PackageId>
+    <Title>Queuey.Client</Title>
+    <Description>Official .NET SDK for Queuey — decorate, sync, publish. A tiny, dependency-light client for the Queuey webhooks/event-distribution platform: System.Text.Json + HttpClient, public IDs only, HMAC and API-key auth handled invisibly.</Description>
+    <PackageTags>queuey;webhooks;events;eventdriven;hmac;sdk;waas</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/queuey-ai/queuey-client</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/queuey-ai/queuey-client</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Queuey.Client.Tests" />
+    <!-- The WaaS onboarding layer reuses the frozen transport (connection, auth, URI, error mapper). -->
+    <InternalsVisibleTo Include="Queuey.Client.Waas" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
+    <!-- IHttpClientFactory-friendly DI extension (AddQueueyClient). -->
+    <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.1" />
+  </ItemGroup>
+
+  <!-- System.Text.Json is in-box for net8.0; only netstandard2.0 needs the package. -->
+  <ItemGroup Condition="'$(TargetFramework)' == 'netstandard2.0'">
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+
+</Project>
