@@ -17,6 +17,15 @@ public interface IQueueyManagement
 
     /// <summary>Creates a queue under a tenant.</summary>
     Task<QueueResult> CreateQueueAsync(string tenantPublicId, string displayName, CancellationToken cancellationToken = default);
+
+    /// <summary>Reads a queue's traffic snapshot (<c>GET /queues/{q}/metrics/snapshot</c>).</summary>
+    Task<QueueMetricsSnapshot> GetQueueMetricsSnapshotAsync(string queuePublicId, CancellationToken cancellationToken = default);
+
+    /// <summary>Lists a tenant's issues (cursor-paged; optional status/severity/queue filter).</summary>
+    Task<IssueListPage> ListIssuesAsync(string tenantPublicId, IssueQuery? query = null, CancellationToken cancellationToken = default);
+
+    /// <summary>Reads one issue's detail.</summary>
+    Task<IssueDetails> GetIssueAsync(string tenantPublicId, string issuePublicId, CancellationToken cancellationToken = default);
 }
 
 /// <summary>A created/summarized tenant.</summary>

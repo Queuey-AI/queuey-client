@@ -1,7 +1,7 @@
 <Project>
 
   <PropertyGroup>
-    <Version>0.1.0-preview.4</Version>
+    <Version>0.1.0-preview.5</Version>
     <Authors>Queuey</Authors>
     <Company>Queuey</Company>
     <Product>Queuey.Client</Product>

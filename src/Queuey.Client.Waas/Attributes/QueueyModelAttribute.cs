@@ -47,4 +47,10 @@ public sealed class QueueyModelAttribute : Attribute
     /// A stream is only visible to a partner once one of its packages is granted to that partner.
     /// </summary>
     public string[]? Packages { get; set; }
+
+    /// <summary>
+    /// Generate an advisory JSON <c>payloadSchema</c> from this type on sync (honoring
+    /// <see cref="QueueyIgnoreAttribute"/>/<c>[JsonIgnore]</c>). Off by default.
+    /// </summary>
+    public bool GenerateSchema { get; set; }
 }

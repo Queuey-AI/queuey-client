@@ -1,5 +1,5 @@
 <Query Kind="Program">
-  <NuGetReference Version="0.1.0-preview.4" Prerelease="true">Queuey.Client.Waas</NuGetReference>
+  <NuGetReference Version="0.1.0-preview.5" Prerelease="true">Queuey.Client.Waas</NuGetReference>
   <NuGetReference>Microsoft.Extensions.DependencyInjection</NuGetReference>
   <Namespace>Microsoft.Extensions.DependencyInjection</Namespace>
   <Namespace>Queuey.Client</Namespace>

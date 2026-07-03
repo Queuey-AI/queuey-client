@@ -10,13 +10,18 @@ namespace Queuey.Client.Waas;
 /// </summary>
 internal static class StreamDefinitionFactory
 {
-    public static StreamDefinition FromType(Type type, StreamOptions? overrides)
+    public static StreamDefinition FromType(Type type, StreamOptions? overrides, bool generateSchemasDefault = false)
     {
         if (type is null) throw new ArgumentNullException(nameof(type));
 
         var attr = (QueueyModelAttribute?)Attribute.GetCustomAttribute(type, typeof(QueueyModelAttribute), inherit: false);
 
         string name = FirstNonBlank(overrides?.Name, attr?.Name) ?? type.Name;
+
+        // Precedence: explicit pre-rendered schema > (inline > attribute > builder-default) generation.
+        bool generate = overrides?.GenerateSchema ?? (attr?.GenerateSchema == true ? true : generateSchemasDefault);
+        string? payloadSchema = overrides?.PayloadSchema
+                                ?? (generate ? SchemaWriter.ForType(type) : null);
 
         return new StreamDefinition
         {
@@ -26,7 +31,7 @@ internal static class StreamDefinitionFactory
             EventTypes = ResolveEventTypes(overrides, attr?.EventTypes),
             IsPublic = overrides?.IsPublic ?? attr?.IsPublic ?? true,
             Packages = ResolvePackages(overrides, attr?.Packages),
-            PayloadSchema = overrides?.PayloadSchema, // Phase 1: schema generation is off
+            PayloadSchema = payloadSchema,
         };
     }
 

@@ -9,14 +9,21 @@ namespace Queuey.Client.Waas;
 internal sealed class QueueyBuilder : IQueueyBuilder
 {
     private readonly List<StreamDefinition> _streams = new();
+    private bool _generateSchemas;
 
     public QueueyBuilder(IServiceCollection services) => Services = services;
 
     public IServiceCollection Services { get; }
 
+    public IQueueyBuilder GenerateSchemas(bool enabled = true)
+    {
+        _generateSchemas = enabled;
+        return this;
+    }
+
     public IQueueyBuilder AddStream<T>(Action<StreamOptions>? configure = null)
     {
-        _streams.Add(StreamDefinitionFactory.FromType(typeof(T), BuildOptions(configure)));
+        _streams.Add(StreamDefinitionFactory.FromType(typeof(T), BuildOptions(configure), _generateSchemas));
         return this;
     }
 
@@ -31,7 +38,7 @@ internal sealed class QueueyBuilder : IQueueyBuilder
         if (assemblies is null) throw new ArgumentNullException(nameof(assemblies));
         foreach (Assembly assembly in assemblies)
             foreach (Type type in StreamDiscovery.TypesWithQueueyModel(assembly))
-                _streams.Add(StreamDefinitionFactory.FromType(type, null));
+                _streams.Add(StreamDefinitionFactory.FromType(type, null, _generateSchemas));
         return this;
     }
 

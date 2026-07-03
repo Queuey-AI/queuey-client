@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text.Json;
@@ -223,6 +225,50 @@ internal sealed class QueueyControlPlaneClient
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "waas", "producer", tenant, "packages", packagePublicId, "streams", catalogEntryPublicId);
         await _connection.SendAsync(HttpMethod.Delete, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    // ── Observability reads (metrics + issues) ─────────────────────────────────
+
+    /// <summary>Reads a queue traffic snapshot (<c>GET /queues/{q}/metrics/snapshot</c>).</summary>
+    public async Task<QueueMetricsSnapshot> GetQueueMetricsSnapshotAsync(string queuePublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues", queuePublicId, "metrics", "snapshot");
+        return await _connection.SendForJsonAsync<QueueMetricsSnapshot>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Lists a tenant's issues (<c>GET /issues/{tenant}?status&amp;severity&amp;queuePublicId&amp;limit&amp;cursor</c>).</summary>
+    public async Task<IssueListPage> ListIssuesAsync(string tenantPublicId, IssueQuery? query, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), BuildIssueQuery(query), "issues", tenantPublicId);
+        return await _connection.SendForJsonAsync<IssueListPage>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Reads one issue's detail (<c>GET /issues/{tenant}/{issue}</c>).</summary>
+    public async Task<IssueDetails> GetIssueAsync(string tenantPublicId, string issuePublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "issues", tenantPublicId, issuePublicId);
+        return await _connection.SendForJsonAsync<IssueDetails>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    private static string? BuildIssueQuery(IssueQuery? q)
+    {
+        if (q is null) return null;
+        var parts = new List<string>();
+        if (q.Status is { } s) parts.Add("status=" + s);           // enum name — ASP.NET binds it
+        if (q.Severity is { } sv) parts.Add("severity=" + sv);
+        if (!string.IsNullOrWhiteSpace(q.QueuePublicId)) parts.Add("queuePublicId=" + Uri.EscapeDataString(q.QueuePublicId!));
+        if (q.Limit is { } l) parts.Add("limit=" + l.ToString(CultureInfo.InvariantCulture));
+        if (!string.IsNullOrWhiteSpace(q.Cursor)) parts.Add("cursor=" + Uri.EscapeDataString(q.Cursor!));
+        return parts.Count == 0 ? null : string.Join("&", parts);
     }
 
     private static Action<HttpRequestHeaders> LicenseHeader(string license)

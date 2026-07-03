@@ -23,6 +23,9 @@ public sealed class StreamOptions
     /// <summary>Packages this stream belongs to. When non-empty, replaces the attribute's packages.</summary>
     public IList<string> Packages { get; } = new List<string>();
 
-    /// <summary>Supplies a pre-rendered JSON-schema string directly.</summary>
+    /// <summary>Overrides schema generation for this stream. Null inherits the attribute/builder default.</summary>
+    public bool? GenerateSchema { get; set; }
+
+    /// <summary>Supplies a pre-rendered JSON-schema string directly (wins over generation).</summary>
     public string? PayloadSchema { get; set; }
 }

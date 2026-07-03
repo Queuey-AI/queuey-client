@@ -24,4 +24,7 @@ public interface IQueueyBuilder
 
     /// <summary>Opt-in: registers every decorated type in the assembly containing <typeparamref name="TMarker"/>.</summary>
     IQueueyBuilder AddStreamsFromAssemblyContaining<TMarker>();
+
+    /// <summary>Turns on advisory <c>payloadSchema</c> generation for streams registered after this call.</summary>
+    IQueueyBuilder GenerateSchemas(bool enabled = true);
 }

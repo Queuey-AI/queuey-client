@@ -34,4 +34,23 @@ internal sealed class QueueyManagement : IQueueyManagement
 
         return new QueueResult { PublicId = r.PublicId, TenantPublicId = r.TenantPublicId, DisplayName = r.DisplayName };
     }
+
+    public Task<QueueMetricsSnapshot> GetQueueMetricsSnapshotAsync(string queuePublicId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(queuePublicId)) throw new ArgumentException("A queue public id is required.", nameof(queuePublicId));
+        return _controlPlane.GetQueueMetricsSnapshotAsync(queuePublicId, cancellationToken);
+    }
+
+    public Task<IssueListPage> ListIssuesAsync(string tenantPublicId, IssueQuery? query = null, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(tenantPublicId)) throw new ArgumentException("A tenant public id is required.", nameof(tenantPublicId));
+        return _controlPlane.ListIssuesAsync(tenantPublicId, query, cancellationToken);
+    }
+
+    public Task<IssueDetails> GetIssueAsync(string tenantPublicId, string issuePublicId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(tenantPublicId)) throw new ArgumentException("A tenant public id is required.", nameof(tenantPublicId));
+        if (string.IsNullOrWhiteSpace(issuePublicId)) throw new ArgumentException("An issue public id is required.", nameof(issuePublicId));
+        return _controlPlane.GetIssueAsync(tenantPublicId, issuePublicId, cancellationToken);
+    }
 }
