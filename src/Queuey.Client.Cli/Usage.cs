@@ -14,6 +14,7 @@ COMMANDS
   create-queue   Create a queue under a tenant.
   metrics        Show a queue's traffic snapshot.
   issues         List a tenant's issues.
+  listen         Receive webhooks locally over a secure push session (Stripe-listen style).
   whoami         Show the resolved host / environment / tenant / license (masks the key).
 
 SYNC
@@ -36,6 +37,14 @@ METRICS
 ISSUES
   queuey issues <ten_...> [--status open|resolved] [--severity critical|warning|info]
                 [--queue <que_...>] [--limit N] [--cursor <c>] [--json]
+
+LISTEN
+  queuey listen --forward-to <url> [--queue <que_...> | --tenant <ten_...>] [--tee]
+                 Receives delivered webhooks over an outbound push session (no inbound port
+                 exposed) and replays each — same method, path, query, headers, and body — to
+                 --forward-to (only the host is swapped). Scope defaults to the configured tenant.
+                 --tee also lets the real endpoint fire; default (redirect) sends only to you.
+                 Ctrl-C to stop.
 
 WHOAMI
   queuey whoami [--json]

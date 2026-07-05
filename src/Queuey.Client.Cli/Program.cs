@@ -24,6 +24,7 @@ try
         "create-queue" => await CreateQueueCommand.RunAsync(rest),
         "metrics" => await MetricsCommand.RunAsync(rest),
         "issues" => await IssuesCommand.RunAsync(rest),
+        "listen" => await ListenCommand.RunAsync(rest),
         _ => Unknown(command),
     };
 }
