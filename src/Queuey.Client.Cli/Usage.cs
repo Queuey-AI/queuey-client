@@ -15,6 +15,7 @@ COMMANDS
   metrics        Show a queue's traffic snapshot.
   issues         List a tenant's issues.
   listen         Receive webhooks locally over a secure push session (Stripe-listen style).
+  replay         Replay one existing event to your connected listener (read-only DLQ debugging).
   whoami         Show the resolved host / environment / tenant / license (masks the key).
 
 SYNC
@@ -39,12 +40,21 @@ ISSUES
                 [--queue <que_...>] [--limit N] [--cursor <c>] [--json]
 
 LISTEN
-  queuey listen --forward-to <url> [--queue <que_...> | --tenant <ten_...>] [--tee]
+  queuey listen --forward-to <url> [--queue <que_...> | --tenant <ten_...>] [--tee] [--yes]
                  Receives delivered webhooks over an outbound push session (no inbound port
                  exposed) and replays each — same method, path, query, headers, and body — to
-                 --forward-to (only the host is swapped). Scope defaults to the configured tenant.
-                 --tee also lets the real endpoint fire; default (redirect) sends only to you.
-                 Ctrl-C to stop.
+                 --forward-to (only the host is swapped; each queue keeps its own route, so a
+                 tenant with a base URL + per-queue routes mirrors fully). Scope defaults to the
+                 configured tenant. Default (redirect) sends only to you and returns your local
+                 response code to the delivery record; --tee also delivers to the real endpoint.
+                 A tenant-wide redirect asks for confirmation (--yes to skip). Ctrl-C to stop.
+
+REPLAY
+  queuey replay <event-id> --queue <que_...> [--json]
+                 Replays one existing event to your connected `queuey listen` session for local
+                 debugging (Stripe-replay style). Read-only — the event isn't modified and the real
+                 endpoint is never contacted; works on any event, including a DLQ'd one. Run
+                 `queuey listen` first so there's a listener to receive it.
 
 WHOAMI
   queuey whoami [--json]

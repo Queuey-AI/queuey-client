@@ -32,6 +32,11 @@ internal static class ListenForwarder
                 req.Content.Headers.TryAddWithoutValidation(h.Name, h.Value);
         }
 
+        // Dispatch aid: which queue this event came from, so one local server can route by queue as well as
+        // by path. Queuey-namespaced, added on top of the faithfully-replayed original headers.
+        if (!string.IsNullOrWhiteSpace(env.QueuePublicId))
+            req.Headers.TryAddWithoutValidation("X-Queuey-Queue", env.QueuePublicId);
+
         return req;
     }
 

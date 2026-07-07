@@ -13,7 +13,7 @@ namespace Queuey.Client.Cli;
 /// </summary>
 internal static class ListenCommand
 {
-    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal) { "tee", "help", "h" };
+    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal) { "tee", "help", "h", "yes", "y" };
     private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(8);
 
     public static async Task<int> RunAsync(string[] args)
@@ -46,6 +46,27 @@ internal static class ListenCommand
         }
 
         string mode = map.Has("tee") ? "tee" : "redirect";
+        bool redirect = mode == "redirect";
+
+        // Redirect suppresses the real endpoint for the whole scope — loud on any scope, and a required
+        // confirmation for a tenant (which covers every queue under it). There is no server-side "is this
+        // prod" signal to check, so this is the safety net.
+        if (redirect)
+        {
+            Console.Error.WriteLine("⚠  redirect: the real endpoint will NOT fire — all matching deliveries come to you only.");
+            Console.Error.WriteLine("   Don't run this against production traffic. Use --tee to also deliver for real.");
+        }
+        if (redirect && scopeKind == "tenant" && !map.Has("yes") && !map.Has("y"))
+        {
+            Console.Error.Write($"Divert ALL of tenant {publicId}'s deliveries to you (redirect)? [y/N] ");
+            string? answer = Console.ReadLine();
+            if (!string.Equals(answer?.Trim(), "y", StringComparison.OrdinalIgnoreCase))
+            {
+                Console.Error.WriteLine("Aborted.");
+                return ExitCodes.Usage;
+            }
+        }
+
         string hubUrl = config.ResolvedApiBase().ToString().TrimEnd('/') + "/hubs/listen";
 
         HubConnection connection = new HubConnectionBuilder()
@@ -60,19 +81,51 @@ internal static class ListenCommand
         {
             Interlocked.Increment(ref received);
             string label = env.EventType ?? env.EventId ?? "event";
+            int status;
+            long ms;
+            string? error = null;
             try
             {
-                (int status, long ms) = await ListenForwarder.ForwardAsync(http, env, forwardTo!, CancellationToken.None);
+                (status, ms) = await ListenForwarder.ForwardAsync(http, env, forwardTo!, CancellationToken.None);
                 Console.WriteLine($"  {env.Method,-6} {env.PathAndQuery}  →  {status} ({ms}ms)  [{label}]");
             }
             catch (Exception ex)
             {
+                // Your local receiver is unreachable — report it as a 502 so a redirect delivery records the
+                // failure honestly (rather than the backend timing out waiting for an ack).
+                status = 502;
+                ms = 0;
+                error = ex.Message;
                 Console.Error.WriteLine($"  {env.Method,-6} {env.PathAndQuery}  →  forward failed: {ex.Message}  [{label}]");
+            }
+
+            // Redirect: return the local response so the delivery records the real status code. Best-effort —
+            // if this never lands, the backend falls back to a timeout outcome. Tee needs no ack (the real
+            // endpoint drives the record).
+            if (string.Equals(env.Mode, "Redirect", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(env.CorrelationId))
+            {
+                try { await connection.InvokeAsync("Ack", env.CorrelationId, status, ms, error); }
+                catch { /* connection dropped — the delivery's ack-timeout covers it */ }
             }
         });
 
         connection.Reconnecting += _ => { Console.Error.WriteLine("… connection lost, reconnecting"); return Task.CompletedTask; };
-        connection.Reconnected += _ => { Console.Error.WriteLine("… reconnected"); return Task.CompletedTask; };
+        connection.Reconnected += async _ =>
+        {
+            // Automatic reconnect gets a NEW ConnectionId. The server cleared our scope on the drop
+            // (OnDisconnectedAsync) and does NOT re-hydrate it, so we must re-invoke Listen to re-join the
+            // group + re-mark the session active. Without this the CLI stays "connected" but silently
+            // receives nothing (and, for a redirect session, the queue just holds — awaiting_local_listener).
+            try
+            {
+                ListenAck ack = await connection.InvokeAsync<ListenAck>("Listen", scopeKind, publicId, mode);
+                Console.Error.WriteLine($"… reconnected — re-listening on {ack.ScopeKey}");
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"… reconnected, but could not re-establish the listen scope: {ex.Message}");
+            }
+        };
 
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };

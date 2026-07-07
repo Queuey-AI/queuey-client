@@ -14,7 +14,9 @@ internal sealed record ListenEnvelope(
     string? OriginalUrl,
     List<ListenHeader>? Headers,
     string? ContentType,
-    string BodyBase64);
+    string BodyBase64,
+    string? CorrelationId = null,
+    string? Mode = null);
 
 internal sealed record ListenHeader(string Name, string Value);
 

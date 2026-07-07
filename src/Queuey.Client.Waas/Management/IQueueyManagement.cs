@@ -26,6 +26,28 @@ public interface IQueueyManagement
 
     /// <summary>Reads one issue's detail.</summary>
     Task<IssueDetails> GetIssueAsync(string tenantPublicId, string issuePublicId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Replays an existing event to a connected <c>queuey listen</c> session for local debugging
+    /// (<c>POST /queues/{q}/replay-to-listener/{e}</c>). Read-only: the event is not modified and the real
+    /// endpoint is never contacted. Requires a listener connected on the queue's / tenant's scope.
+    /// </summary>
+    Task<ReplayResult> ReplayToListenerAsync(string queuePublicId, string eventPublicId, CancellationToken cancellationToken = default);
+}
+
+/// <summary>The outcome of a replay-to-listener: whether a listener was connected, and its local response.</summary>
+public sealed class ReplayResult
+{
+    /// <summary>False when no <c>queuey listen</c> session is connected — nothing was forwarded.</summary>
+    public bool ListenerConnected { get; init; }
+    /// <summary>True when the local listener returned a 2xx.</summary>
+    public bool Delivered { get; init; }
+    /// <summary>The local listener's HTTP status, if it responded.</summary>
+    public int? StatusCode { get; init; }
+    /// <summary>Round-trip time to the listener.</summary>
+    public long DurationMs { get; init; }
+    /// <summary>Error/diagnostic, when not delivered.</summary>
+    public string? Error { get; init; }
 }
 
 /// <summary>A created/summarized tenant.</summary>

@@ -53,4 +53,11 @@ internal sealed class QueueyManagement : IQueueyManagement
         if (string.IsNullOrWhiteSpace(issuePublicId)) throw new ArgumentException("An issue public id is required.", nameof(issuePublicId));
         return _controlPlane.GetIssueAsync(tenantPublicId, issuePublicId, cancellationToken);
     }
+
+    public Task<ReplayResult> ReplayToListenerAsync(string queuePublicId, string eventPublicId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(queuePublicId)) throw new ArgumentException("A queue public id is required.", nameof(queuePublicId));
+        if (string.IsNullOrWhiteSpace(eventPublicId)) throw new ArgumentException("An event public id is required.", nameof(eventPublicId));
+        return _controlPlane.ReplayToListenerAsync(queuePublicId, eventPublicId, cancellationToken);
+    }
 }

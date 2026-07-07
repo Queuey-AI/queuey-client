@@ -239,6 +239,16 @@ internal sealed class QueueyControlPlaneClient
             HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Replays an event to a connected listener (<c>POST /queues/{q}/replay-to-listener/{e}</c>).</summary>
+    public async Task<ReplayResult> ReplayToListenerAsync(string queuePublicId, string eventPublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues", queuePublicId, "replay-to-listener", eventPublicId);
+        return await _connection.SendForJsonAsync<ReplayResult>(
+            HttpMethod.Post, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Lists a tenant's issues (<c>GET /issues/{tenant}?status&amp;severity&amp;queuePublicId&amp;limit&amp;cursor</c>).</summary>
     public async Task<IssueListPage> ListIssuesAsync(string tenantPublicId, IssueQuery? query, CancellationToken cancellationToken)
     {

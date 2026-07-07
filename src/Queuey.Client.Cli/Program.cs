@@ -25,6 +25,7 @@ try
         "metrics" => await MetricsCommand.RunAsync(rest),
         "issues" => await IssuesCommand.RunAsync(rest),
         "listen" => await ListenCommand.RunAsync(rest),
+        "replay" => await ReplayCommand.RunAsync(rest),
         _ => Unknown(command),
     };
 }
