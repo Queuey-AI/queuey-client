@@ -14,7 +14,7 @@ internal static class QueueyUri
     {
         if (baseAddress is null) throw new ArgumentNullException(nameof(baseAddress));
 
-        // Preserve any base path (e.g. a self-hosted instance behind "https://acme.io/queuey/"),
+        // Preserve any base path on an override (e.g. a local instance behind "http://localhost/queuey/"),
         // while staying correct for authority-only hosts like "https://ingress.queuey.ai".
         string authority = baseAddress.GetLeftPart(UriPartial.Authority).TrimEnd('/');
         string basePath = baseAddress.AbsolutePath.Trim('/');

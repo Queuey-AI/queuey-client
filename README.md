@@ -29,13 +29,11 @@ the SDK talks to both. `Environment` selects the defaults (defaults to `Producti
 | `QueueyEnvironment` | API host | Ingress host |
 | --- | --- | --- |
 | `Production` (default) | `https://api.queuey.ai` | `https://ingress.queuey.ai` |
-| `Development` | `https://devapi.queuey.ai` | `https://devingress.queuey.ai` |
 
-### Point at a local or self-hosted instance
+### Point at a local instance
 
-To test against a locally running Queuey — or any self-hosted / dedicated instance — override
-either host with `ApiBaseAddress` / `IngressBaseAddress`. Any absolute `http`/`https` URL works
-(plain `http` on `localhost` included); a base path (e.g. behind a gateway prefix) is preserved.
+To test against a locally running Queuey, override either host with `ApiBaseAddress` /
+`IngressBaseAddress`. Any absolute `http`/`https` URL works (plain `http` on `localhost` included).
 
 ```csharp
 var queuey = new QueueyClient(new QueueyOptions
@@ -43,7 +41,6 @@ var queuey = new QueueyClient(new QueueyOptions
     // Local Queuey (default AppHost/project ports):
     ApiBaseAddress     = new Uri("http://localhost:5223"), // Queuey.Api
     IngressBaseAddress = new Uri("http://localhost:5084"), // Queuey.Ingress
-    // …or a self-hosted instance: new Uri("https://queuey.acme.io")
 
     TenantPublicId = "ten_…",
     ApiKey         = "qak_…",
@@ -119,11 +116,12 @@ delivered event to a local URL — Stripe-`listen` style. Scope it to one queue 
 tenant (`--tenant`, where one listener covers every queue under it):
 
 ```bash
-# against dev, forwarding to a local receiver — Ctrl-C to stop
-queuey listen --env dev \
+# receive this queue's deliveries on your machine and forward them locally — Ctrl-C to stop
+queuey listen \
   --api-key qak_… \
   --queue que_… \
   --forward-to http://localhost:5094/webhook
+# targets production by default; add --api-base http://localhost:5223 to point at a local instance
 ```
 
 **Two forwarding modes:**
@@ -132,11 +130,11 @@ queuey listen --env dev \
   body), appending the original delivery path onto `--forward-to`. Use it to replay a webhook to a
   local server that expects the same route.
 - **`--forward-exact`** — posts to `--forward-to` **verbatim**, ignoring the original path. Use it to
-  bridge deliveries into a **fixed** local endpoint — e.g. piping a dev queue straight into a local
+  bridge deliveries into a **fixed** local endpoint — e.g. piping a queue straight into a local
   Queuey ingress route:
 
   ```bash
-  queuey listen --env dev --api-key qak_… \
+  queuey listen --api-key qak_… \
     --queue que_… \
     --forward-to http://localhost:5084/events/ten_…/first.queue \
     --forward-exact
@@ -153,9 +151,9 @@ Read-only DLQ debugging: forwards an existing event (including a DLQ'd one) to y
 
 ```bash
 # terminal 1 — start a listener
-queuey listen --env dev --api-key qak_… --queue que_… --forward-to http://localhost:5094/webhook
+queuey listen --api-key qak_… --queue que_… --forward-to http://localhost:5094/webhook
 # terminal 2 — replay an event to it
-queuey replay evt_… --env dev --api-key qak_… --queue que_…
+queuey replay evt_… --api-key qak_… --queue que_…
 ```
 
 ### Configuration
@@ -164,16 +162,15 @@ Every command resolves settings as **flag → environment variable → `queuey.j
 
 | Setting | Flag | Env var |
 | --- | --- | --- |
-| Environment | `--env production\|development` | `QUEUEY_ENV` |
-| API host override | `--api-base <uri>` | `QUEUEY_API_BASE` |
-| Ingress host override | `--ingress-base <uri>` | `QUEUEY_INGRESS_BASE` |
+| API host | `--api-base <uri>` | `QUEUEY_API_BASE` |
+| Ingress host | `--ingress-base <uri>` | `QUEUEY_INGRESS_BASE` |
 | API key | `--api-key qak_…` | `QUEUEY_API_KEY` |
 | Tenant | `--tenant ten_…` | `QUEUEY_TENANT` |
 | License | `--license lic_…` | `QUEUEY_LICENSE` |
 
-`--env dev` resolves to `https://devapi.queuey.ai` (+ `devingress.queuey.ai`); omit it for production.
-A `queuey.json` can hold `apiBase` / `apiKey` / `tenant` / `license` so you don't repeat flags — but
-**keep it out of git** (it holds your key; it's already in `.gitignore`).
+The CLI targets production (`https://api.queuey.ai`) by default; pass `--api-base <uri>` to point at a
+locally-running instance. A `queuey.json` can hold `apiBase` / `apiKey` / `tenant` / `license` so you
+don't repeat flags — but **keep it out of git** (it holds your key; it's already in `.gitignore`).
 
 ## License
 

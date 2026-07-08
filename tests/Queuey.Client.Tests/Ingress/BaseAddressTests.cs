@@ -36,14 +36,14 @@ public class BaseAddressTests
     }
 
     [Fact]
-    public async Task Self_hosted_base_path_prefix_is_preserved()
+    public async Task Base_path_prefix_on_override_is_preserved()
     {
         var handler = Ok202();
-        using var client = new QueueyClient(LocalOptions(new Uri("https://queuey.acme.io/gw/")), new HttpClient(handler));
+        using var client = new QueueyClient(LocalOptions(new Uri("http://localhost:8080/gw/")), new HttpClient(handler));
 
         await client.Ingress.PublishAsync("orders", new { x = 1 });
 
-        Assert.Equal("https://queuey.acme.io/gw/events/ten_abc/orders", handler.LastRequest!.RequestUri!.ToString());
+        Assert.Equal("http://localhost:8080/gw/events/ten_abc/orders", handler.LastRequest!.RequestUri!.ToString());
     }
 
     [Fact]
@@ -56,7 +56,7 @@ public class BaseAddressTests
     [Fact]
     public void Non_http_scheme_base_address_throws_configuration_exception()
     {
-        var options = LocalOptions(new Uri("ftp://queuey.acme.io"));
+        var options = LocalOptions(new Uri("ftp://localhost"));
         Assert.Throws<QueueyConfigurationException>(() => new QueueyClient(options, new HttpClient(Ok202())));
     }
 }

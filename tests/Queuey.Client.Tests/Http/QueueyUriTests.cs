@@ -20,12 +20,12 @@ public class QueueyUriTests
     }
 
     [Theory]
-    [InlineData("https://acme.io/queuey/")]  // trailing slash
-    [InlineData("https://acme.io/queuey")]   // no trailing slash
+    [InlineData("http://localhost:8080/queuey/")]  // trailing slash
+    [InlineData("http://localhost:8080/queuey")]   // no trailing slash
     public void Base_path_prefix_is_preserved(string baseAddress)
     {
         Uri uri = QueueyUri.Build(new Uri(baseAddress), null, "events", "ten_abc", "orders");
-        Assert.Equal("https://acme.io/queuey/events/ten_abc/orders", uri.ToString());
+        Assert.Equal("http://localhost:8080/queuey/events/ten_abc/orders", uri.ToString());
     }
 
     [Fact]

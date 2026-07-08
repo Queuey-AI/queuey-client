@@ -49,7 +49,7 @@ dotnet run --project samples/Queuey.Examples.Console
 dotnet run --project samples/Queuey.Examples.Console -- 7
 ```
 
-Against production/dev instead of localhost, add `QUEUEY_API_BASE`/`QUEUEY_INGRESS_BASE`
+Against production instead of localhost, add `QUEUEY_API_BASE`/`QUEUEY_INGRESS_BASE`
 (e.g. `https://api.queuey.ai` / `https://ingress.queuey.ai`).
 
 ## The WaaS model in 30 seconds

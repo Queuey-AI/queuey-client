@@ -5,8 +5,8 @@ using Queuey.Client;
 
 // Minimal "publish" happy path.
 //
-// Defaults to Production (api.queuey.ai + ingress.queuey.ai). To test against a local or
-// self-hosted Queuey, point the SDK at its hosts with QUEUEY_API_BASE / QUEUEY_INGRESS_BASE:
+// Defaults to Production (api.queuey.ai + ingress.queuey.ai). To test against a locally-running
+// Queuey, point the SDK at its hosts with QUEUEY_API_BASE / QUEUEY_INGRESS_BASE:
 //
 //   QUEUEY_TENANT=ten_...  QUEUEY_API_KEY=qak_... \
 //   QUEUEY_INGRESS_BASE=http://localhost:5084  QUEUEY_API_BASE=http://localhost:5223 \

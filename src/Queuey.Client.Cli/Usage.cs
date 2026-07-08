@@ -63,9 +63,9 @@ WHOAMI
   queuey whoami [--json]
 
 GLOBAL OPTIONS (all commands)
-  --env production|development     Target environment (default: production)
-  --api-base <uri>                Override the control-plane (API) host
-  --ingress-base <uri>            Override the ingress (publish) host
+  --api-base <uri>                Control-plane (API) host (default: https://api.queuey.ai).
+                                  Set it to point at a locally-running instance, e.g. for testing.
+  --ingress-base <uri>            Ingress (publish) host (default: https://ingress.queuey.ai).
   --api-key <qak_...>             License-wide API key
   --tenant <ten_...>              Producer tenant public id
   --license <lic id>              License public id (required for sync)
@@ -73,7 +73,7 @@ GLOBAL OPTIONS (all commands)
   --config <path>                 Path to a queuey.json (default: ./queuey.json)
 
 CONFIG PRECEDENCE
-  flag  >  environment (QUEUEY_ENV / QUEUEY_API_BASE / QUEUEY_INGRESS_BASE /
+  flag  >  environment (QUEUEY_API_BASE / QUEUEY_INGRESS_BASE /
            QUEUEY_API_KEY / QUEUEY_TENANT / QUEUEY_LICENSE / QUEUEY_SOURCE)  >
            queuey.json  >  default
 

@@ -71,8 +71,8 @@ public sealed class QueueyOptions
         ApiBaseAddress is null ? QueueyHosts.Api(Environment) : ValidateOverride(ApiBaseAddress, nameof(ApiBaseAddress));
 
     /// <summary>
-    /// Validates a host override. Any absolute <c>http</c>/<c>https</c> URI is accepted — a local instance
-    /// (<c>http://localhost:5084</c>) or a self-hosted one (<c>https://queuey.acme.io</c>) alike.
+    /// Validates a host override. Any absolute <c>http</c>/<c>https</c> URI is accepted — e.g. a
+    /// locally-running instance (<c>http://localhost:5084</c>), typically for testing.
     /// </summary>
     private static Uri ValidateOverride(Uri value, string propertyName)
     {

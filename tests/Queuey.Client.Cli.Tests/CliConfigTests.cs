@@ -45,12 +45,14 @@ public class CliConfigTests
     }
 
     [Fact]
-    public void Environment_development_resolves_dev_hosts()
+    public void Only_production_is_built_in_env_is_ignored()
     {
+        // Production is the only built-in environment; a non-production instance is reached via --api-base.
+        // Even a legacy QUEUEY_ENV value must resolve to production (never a dev host).
         ResolvedConfig config = CliConfig.Resolve(ArgMap.Parse(Array.Empty<string>(), NoFlags), Env(("QUEUEY_ENV", "development")), null);
 
-        Assert.Equal(QueueyEnvironment.Development, config.Environment);
-        Assert.Equal("https://devapi.queuey.ai/", config.ResolvedApiBase().ToString());
+        Assert.Equal(QueueyEnvironment.Production, config.Environment);
+        Assert.Equal("https://api.queuey.ai/", config.ResolvedApiBase().ToString());
     }
 
     [Fact]

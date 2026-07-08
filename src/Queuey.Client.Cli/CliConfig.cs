@@ -62,11 +62,9 @@ internal static class CliConfig
     private static string? First(params string?[] values)
         => values.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
 
-    private static QueueyEnvironment ParseEnvironment(string? value) => value?.Trim().ToLowerInvariant() switch
-    {
-        "development" or "dev" => QueueyEnvironment.Development,
-        _ => QueueyEnvironment.Production,
-    };
+    // Only Production is a built-in environment; point at a locally-running instance with
+    // --api-base / --ingress-base (QUEUEY_API_BASE / QUEUEY_INGRESS_BASE) — e.g. for testing.
+    private static QueueyEnvironment ParseEnvironment(string? value) => QueueyEnvironment.Production;
 
     private static Uri? ParseUri(string? value)
     {
