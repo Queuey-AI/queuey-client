@@ -40,11 +40,14 @@ ISSUES
                 [--queue <que_...>] [--limit N] [--cursor <c>] [--json]
 
 LISTEN
-  queuey listen --forward-to <url> [--queue <que_...> | --tenant <ten_...>] [--tee] [--yes]
+  queuey listen --forward-to <url> [--queue <que_...> | --tenant <ten_...>]
+                [--forward-exact] [--tee] [--yes]
                  Receives delivered webhooks over an outbound push session (no inbound port
-                 exposed) and replays each — same method, path, query, headers, and body — to
-                 --forward-to (only the host is swapped; each queue keeps its own route, so a
-                 tenant with a base URL + per-queue routes mirrors fully). Scope defaults to the
+                 exposed) and replays each to --forward-to. By default it preserves fidelity —
+                 same method, path, query, headers, and body (only the host is swapped, so a
+                 tenant with a base URL + per-queue routes mirrors fully). --forward-exact posts
+                 to --forward-to VERBATIM (ignoring the original path), for bridging deliveries
+                 into a FIXED local endpoint such as a local ingress route. Scope defaults to the
                  configured tenant. Default (redirect) sends only to you and returns your local
                  response code to the delivery record; --tee also delivers to the real endpoint.
                  A tenant-wide redirect asks for confirmation (--yes to skip). Ctrl-C to stop.

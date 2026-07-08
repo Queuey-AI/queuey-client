@@ -488,3 +488,14 @@ $RECYCLE.BIN/
 
 # Playwright MCP screenshots/artifacts
 .playwright-mcp/
+
+# Queuey CLI config — holds an API key / tenant / license. NEVER commit it.
+# Ship a queuey.example.json template instead if you want a checked-in sample.
+queuey.json
+**/queuey.json
+
+# Local env files & secrets (belt-and-suspenders on top of the .env rule above)
+.env.*
+*.env
+secrets.json
+appsettings.*.local.json

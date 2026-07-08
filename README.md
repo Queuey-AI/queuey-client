@@ -84,7 +84,96 @@ await queuey.SyncModelsAsync();          //  or:  queuey sync --assembly App.dll
 await queuey.PushEventAsync("order-events", "order.created", order.OrderId, order);
 ```
 
-The CLI (`Queuey.Cli`) mirrors the same core: `queuey sync`, `queuey publish`, `queuey whoami`.
+## CLI (`queuey`)
+
+The `Queuey.Cli` tool mirrors the SDK and adds local-debugging verbs. Run it from source, or install
+it once as a global .NET tool and call `queuey`:
+
+```bash
+# from source (this repo)
+dotnet run --project src/Queuey.Client.Cli -- <command> [options]
+
+# …or install as a global tool (invoked as `queuey`)
+dotnet pack src/Queuey.Client.Cli -c Release
+dotnet tool install --global --add-source src/Queuey.Client.Cli/bin/Release Queuey.Cli
+# (once it's on NuGet:  dotnet tool install --global Queuey.Cli)
+```
+
+| Command | What it does |
+| --- | --- |
+| `sync` | Apply every `[QueueyModel]` stream found in an assembly |
+| `publish` | Publish an event to a stream |
+| `create-tenant` / `create-queue` | Provision a tenant / queue |
+| `metrics <que_…>` | A queue's traffic snapshot |
+| `issues <ten_…>` | List a tenant's issues |
+| **`listen`** | Receive webhooks locally over a secure push session |
+| **`replay <event-id>`** | Replay one existing event to your listener (read-only) |
+| `whoami` | Resolved host / env / tenant / license (key masked) |
+
+Run `queuey` with no args for full usage.
+
+### `queuey listen` — receive webhooks on your machine
+
+Opens an **outbound** authenticated push session (no inbound port exposed) and forwards each
+delivered event to a local URL — Stripe-`listen` style. Scope it to one queue (`--queue`) or a whole
+tenant (`--tenant`, where one listener covers every queue under it):
+
+```bash
+# against dev, forwarding to a local receiver — Ctrl-C to stop
+queuey listen --env dev \
+  --api-key qak_… \
+  --queue que_… \
+  --forward-to http://localhost:5094/webhook
+```
+
+**Two forwarding modes:**
+
+- **Path fidelity (default)** — replays the request faithfully (same method, path, query, headers,
+  body), appending the original delivery path onto `--forward-to`. Use it to replay a webhook to a
+  local server that expects the same route.
+- **`--forward-exact`** — posts to `--forward-to` **verbatim**, ignoring the original path. Use it to
+  bridge deliveries into a **fixed** local endpoint — e.g. piping a dev queue straight into a local
+  Queuey ingress route:
+
+  ```bash
+  queuey listen --env dev --api-key qak_… \
+    --queue que_… \
+    --forward-to http://localhost:5084/events/ten_…/first.queue \
+    --forward-exact
+  ```
+
+`--tee` also delivers to the real endpoint (default is redirect — only you receive it); a tenant-wide
+redirect asks to confirm (`--yes` to skip). The API key needs **`queue.read`** on the queue/tenant (a
+FullAccess or ProducerAdmin key — an ingress-only publish key can't listen).
+
+### `queuey replay` — re-send one event to your listener
+
+Read-only DLQ debugging: forwards an existing event (including a DLQ'd one) to your connected
+`queuey listen` session. The event is **not** modified and the real endpoint is never contacted.
+
+```bash
+# terminal 1 — start a listener
+queuey listen --env dev --api-key qak_… --queue que_… --forward-to http://localhost:5094/webhook
+# terminal 2 — replay an event to it
+queuey replay evt_… --env dev --api-key qak_… --queue que_…
+```
+
+### Configuration
+
+Every command resolves settings as **flag → environment variable → `queuey.json` → default**:
+
+| Setting | Flag | Env var |
+| --- | --- | --- |
+| Environment | `--env production\|development` | `QUEUEY_ENV` |
+| API host override | `--api-base <uri>` | `QUEUEY_API_BASE` |
+| Ingress host override | `--ingress-base <uri>` | `QUEUEY_INGRESS_BASE` |
+| API key | `--api-key qak_…` | `QUEUEY_API_KEY` |
+| Tenant | `--tenant ten_…` | `QUEUEY_TENANT` |
+| License | `--license lic_…` | `QUEUEY_LICENSE` |
+
+`--env dev` resolves to `https://devapi.queuey.ai` (+ `devingress.queuey.ai`); omit it for production.
+A `queuey.json` can hold `apiBase` / `apiKey` / `tenant` / `license` so you don't repeat flags — but
+**keep it out of git** (it holds your key; it's already in `.gitignore`).
 
 ## License
 
