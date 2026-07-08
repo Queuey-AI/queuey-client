@@ -485,3 +485,6 @@ $RECYCLE.BIN/
 
 # Internal working notes — not shipped in the open-source package
 .internal/
+
+# Playwright MCP screenshots/artifacts
+.playwright-mcp/

@@ -10,8 +10,8 @@
     <Description>Webhooks-as-a-Service onboarding for Queuey.Client — decorate your event models with [QueueyModel], register the service, SyncModels on deploy, and PushEvent on save. Builds on Queuey.Client.</Description>
     <PackageTags>queuey;webhooks;events;waas;producer;sync;sdk</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageProjectUrl>https://github.com/queuey-ai/queuey-client</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/queuey-ai/queuey-client</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/Queuey-AI/queuey-client</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/Queuey-AI/queuey-client</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
 
     <IncludeSymbols>true</IncludeSymbols>
