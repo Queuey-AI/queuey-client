@@ -32,6 +32,11 @@ internal static class ListenCommand
             return ExitCodes.Usage;
         }
 
+        // By default the original request path is appended to --forward-to (path fidelity — replay the webhook
+        // at the same path). --forward-exact posts to --forward-to VERBATIM instead, for bridging to a fixed
+        // local endpoint (e.g. a local ingress route /events/{tenant}/{queue}).
+        bool preservePath = !(map.Has("forward-exact") || map.Has("exact"));
+
         ResolvedConfig config = CliHost.Resolve(map);
         if (string.IsNullOrWhiteSpace(config.ApiKey))
         {
@@ -86,7 +91,7 @@ internal static class ListenCommand
             string? error = null;
             try
             {
-                (status, ms) = await ListenForwarder.ForwardAsync(http, env, forwardTo!, CancellationToken.None);
+                (status, ms) = await ListenForwarder.ForwardAsync(http, env, forwardTo!, CancellationToken.None, preservePath);
                 Console.WriteLine($"  {env.Method,-6} {env.PathAndQuery}  →  {status} ({ms}ms)  [{label}]");
             }
             catch (Exception ex)

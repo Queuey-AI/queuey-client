@@ -10,10 +10,15 @@ namespace Queuey.Client.Cli;
 /// <summary>Replays a received envelope as a local HTTP request — faithful except the host, which becomes <c>--forward-to</c>.</summary>
 internal static class ListenForwarder
 {
-    /// <summary>Rebuilds the outbound request against the local base: same method, path+query, headers, and body.</summary>
-    public static HttpRequestMessage BuildLocalRequest(ListenEnvelope env, string forwardTo)
+    /// <summary>Rebuilds the outbound request against the local base: same method, path+query, headers, and body.
+    /// When <paramref name="preservePath"/> is false, forwards to <paramref name="forwardTo"/> VERBATIM (the
+    /// original request path is ignored) — for bridging to a fixed local endpoint (e.g. a local ingress route)
+    /// rather than replaying the webhook at its original path.</summary>
+    public static HttpRequestMessage BuildLocalRequest(ListenEnvelope env, string forwardTo, bool preservePath = true)
     {
-        var url = new Uri(forwardTo.TrimEnd('/') + env.PathAndQuery, UriKind.Absolute);
+        var url = preservePath
+            ? new Uri(forwardTo.TrimEnd('/') + env.PathAndQuery, UriKind.Absolute)
+            : new Uri(forwardTo, UriKind.Absolute);
         var body = Convert.FromBase64String(env.BodyBase64);
 
         var req = new HttpRequestMessage(new HttpMethod(env.Method), url)
@@ -40,9 +45,9 @@ internal static class ListenForwarder
         return req;
     }
 
-    public static async Task<(int Status, long Ms)> ForwardAsync(HttpClient http, ListenEnvelope env, string forwardTo, CancellationToken ct)
+    public static async Task<(int Status, long Ms)> ForwardAsync(HttpClient http, ListenEnvelope env, string forwardTo, CancellationToken ct, bool preservePath = true)
     {
-        using HttpRequestMessage req = BuildLocalRequest(env, forwardTo);
+        using HttpRequestMessage req = BuildLocalRequest(env, forwardTo, preservePath);
         var sw = Stopwatch.StartNew();
         using HttpResponseMessage res = await http.SendAsync(req, ct).ConfigureAwait(false);
         sw.Stop();
