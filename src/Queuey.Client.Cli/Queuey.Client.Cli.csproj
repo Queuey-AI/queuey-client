@@ -29,6 +29,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../Queuey.Client.Waas/Queuey.Client.Waas.csproj" />
+    <ProjectReference Include="../Queuey.Edge/Queuey.Edge.csproj" />
   </ItemGroup>
 
   <ItemGroup>

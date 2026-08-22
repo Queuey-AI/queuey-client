@@ -16,6 +16,7 @@ COMMANDS
   issues         List a tenant's issues.
   listen         Receive webhooks locally over a secure push session (Stripe-listen style).
   replay         Replay one existing event to your connected listener (read-only DLQ debugging).
+  edge           Operate a Queuey Edge spool: status | retry | discard | recover | reset.
   whoami         Show the resolved host / environment / tenant / license (masks the key).
 
 SYNC
@@ -58,6 +59,20 @@ REPLAY
                  debugging (Stripe-replay style). Read-only — the event isn't modified and the real
                  endpoint is never contacted; works on any event, including a DLQ'd one. Run
                  `queuey listen` first so there's a listener to receive it.
+
+EDGE
+  queuey edge status  --spool <path> [--json]
+  queuey edge retry   --spool <path> (--id N | --all)
+  queuey edge discard --spool <path> --id N
+  queuey edge recover --spool <path>
+  queuey edge reset   --spool <path> --accept-data-loss
+                 Operates a Queuey Edge spool file directly (WAL allows this alongside a running
+                 host). status shows pending/quarantined/oldest-age; retry returns a quarantined
+                 event to the drain after remediation; discard drops ONE quarantined event (an
+                 explicit, logged operator decision — pending events cannot be discarded); recover
+                 salvages readable events from a faulted spool into a fresh one, reporting exactly
+                 how many were unreadable; reset abandons the spool (requires --accept-data-loss,
+                 the old file is preserved for support either way).
 
 WHOAMI
   queuey whoami [--json]

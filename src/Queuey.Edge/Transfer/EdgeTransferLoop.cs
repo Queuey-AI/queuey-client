@@ -113,7 +113,7 @@ internal sealed class EdgeTransferLoop : BackgroundService
         {
             case TransferClass.Accepted:
                 await _spool.SettleAsync(claim.SpoolId, attempt.Ack!, ct).ConfigureAwait(false);
-                _state.RecordSuccess(attempt.Ack!.AtUtc);
+                _state.RecordSuccess(attempt.Ack!.AtUtc, attempt.Ack.Replayed);
                 if (attempt.Ack.Replayed)
                 {
                     _logger.LogInformation(EdgeLogEvents.SettledAsReplay,
