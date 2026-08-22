@@ -44,6 +44,8 @@ public sealed class QueueyEdgeOptions
 
     public EdgeTransferOptions Transfer { get; } = new();
 
+    public EdgeLocalEndpointOptions LocalEndpoint { get; } = new();
+
     /// <summary>The effective ingress base address (override or environment default).</summary>
     public Uri ResolveIngressBaseAddress()
         => new QueueyOptions { Environment = Environment, IngressBaseAddress = IngressBaseAddress }
@@ -103,6 +105,21 @@ public sealed class EdgeStorageOptions
 
     /// <summary>v1 supports only <see cref="SpoolDurability.Durable"/>.</summary>
     public SpoolDurability Durability { get; set; } = SpoolDurability.Durable;
+}
+
+/// <summary>
+/// The opt-in loopback publish endpoint — the polyglot one-liner. When
+/// <see cref="Port"/> is set, the daemon serves
+/// <c>POST http://localhost:{port}/events/{tenant}/{queue}</c> with the SAME
+/// wire shape as cloud ingress, answering 202 only after the durable local
+/// commit — so any language's existing publish snippet gains offline
+/// survival by swapping the base URL. Loopback only, always: the machine is
+/// the trust boundary, exactly as for the spool file.
+/// </summary>
+public sealed class EdgeLocalEndpointOptions
+{
+    /// <summary>Null (default) = endpoint off. Set a port to enable.</summary>
+    public int? Port { get; set; }
 }
 
 /// <summary>Transfer-loop knobs. Defaults tuned for the motivating workload (~1 event/min/node).</summary>

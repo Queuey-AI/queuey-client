@@ -124,6 +124,35 @@ in-process `PublishAsync`. No daemon running? The event still sits durably
 and drains when one next starts. Microcontroller fleets that can't run Edge
 publish over the LAN to one gateway that does.
 
+### TypeScript, Java, Python — the same one-liner, now durable
+
+Add `--listen 7311` to `edge run` and the daemon serves a **loopback**
+endpoint with the *same wire shape as cloud ingress*. Any language's plain
+HTTP publish becomes durable by swapping the base URL — the 202 answers
+only after the fsync'd local commit, and the daemon owns retries, offline
+buffering and reconnect from there. The thin client carries **zero**
+reliability logic:
+
+```ts
+// TypeScript — identical to the cloud quickstart, base URL swapped:
+await fetch(`http://localhost:7311/events/${tenant}/sensor-readings`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json", "X-Queuey-Group-Key": "unit-7" },
+  body: JSON.stringify(reading),
+}); // 202 = Queuey has it durably, even with the internet cable pulled
+```
+
+```python
+# Python
+requests.post(f"http://localhost:7311/events/{tenant}/sensor-readings",
+              json=reading, headers={"X-Queuey-Group-Key": "unit-7"})
+```
+
+Failure semantics stay honest: connection refused = the daemon is down and
+Queuey did **not** take custody (run it under systemd with
+`Restart=always`); `507` = spool full; `503` = storage faulted. A `GET
+/health` on the same port serves the health snapshot for local probes.
+
 ## Operator verbs
 
 The `queuey` CLI ([Queuey.Cli](https://www.nuget.org/packages/Queuey.Cli))

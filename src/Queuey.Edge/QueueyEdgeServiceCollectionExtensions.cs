@@ -67,6 +67,10 @@ public static class QueueyEdgeServiceCollectionExtensions
         services.TryAddSingleton<IQueueyEdgeHealth>(sp => sp.GetRequiredService<EdgeHealthService>());
         services.AddHostedService(sp => sp.GetRequiredService<EdgeHealthService>());
 
+        // The opt-in loopback publish endpoint (LocalEndpoint.Port). A no-op
+        // hosted service when the port is unset.
+        services.AddHostedService<EdgeLocalEndpoint>();
+
         return services;
     }
 }

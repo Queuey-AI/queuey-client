@@ -207,11 +207,24 @@ internal static class EdgeCommand
         builder.Logging.SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Warning);
         builder.Logging.AddFilter("Queuey", Microsoft.Extensions.Logging.LogLevel.Information);
 
+        int? listenPort = null;
+        if (map.Get("listen") is { Length: > 0 } listenRaw)
+        {
+            if (!int.TryParse(listenRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var port)
+                || port is < 1 or > 65535)
+            {
+                Console.Error.WriteLine($"--listen must be a port number (got '{listenRaw}').");
+                return ExitCodes.Usage;
+            }
+            listenPort = port;
+        }
+
         builder.Services.AddQueueyEdge(o =>
         {
             o.ApiKey = apiKey;
             o.TenantPublicId = tenant;
             o.Storage.Path = spoolPath;
+            o.LocalEndpoint.Port = listenPort;
             if (!string.IsNullOrWhiteSpace(ingressBase))
                 o.IngressBaseAddress = new Uri(ingressBase);
             if (map.Get("source") is { Length: > 0 } source)
@@ -221,6 +234,12 @@ internal static class EdgeCommand
         Console.WriteLine($"Queuey Edge daemon. Spool: {spoolPath}");
         Console.WriteLine("Publish from anything on this machine with 'queuey edge publish …'; " +
                           "inspect with 'queuey edge status'. Ctrl-C to stop (accepted events survive restarts).");
+        if (listenPort is { } lp)
+        {
+            Console.WriteLine(
+                $"Local publish endpoint: POST http://localhost:{lp}/events/{tenant}/{{queue}} " +
+                "(loopback only; same wire shape as cloud ingress — 202 = durably accepted locally).");
+        }
 
         await builder.Build().RunAsync();
         return ExitCodes.Success;
