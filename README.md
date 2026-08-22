@@ -21,6 +21,40 @@ await queuey.Ingress.PublishAsync("orders", order);
 - Public IDs only (`ten_`, `que_`, `cat_`, `pkg_`).
 - HMAC and API-key auth handled invisibly.
 
+## Durable local publishing (`Queuey.Edge`)
+
+For producers on unreliable networks — factories, kiosks, vehicles, on-prem
+services — `Queuey.Edge` makes one call transfer the operational delivery
+problem to Queuey:
+
+```csharp
+builder.Services.AddQueueyEdge(o =>
+{
+    o.ApiKey = "qak_…";           // publish-only, tenant-scoped Edge key
+    o.TenantPublicId = "ten_…";
+});
+
+// The whole delivery story in application code:
+await queuey.PublishAsync("temperature.updated", payload);
+```
+
+When that call returns, the event is committed to a **local durable store**
+(SQLite, fsync'd) under a permanent transfer identity, and Queuey owns
+everything after: transfer to Queuey Cloud, retries, backoff, reconnect,
+lost-ACK resolution, idempotent resend, recovery across process/machine
+restarts, backlog draining. Kill the network for two days — events accumulate
+durably and drain in order when it returns, with honest `occurred_at`
+history. No buffering, retry or reconnect code ever appears in your
+application.
+
+See [`src/Queuey.Edge/README.md`](src/Queuey.Edge/README.md) for the precise
+contract, [`samples/Queuey.Edge.Demo`](samples/Queuey.Edge.Demo) for a
+runnable kill-Queuey-and-watch-it-recover demo, and
+[`docs/edge-operations.md`](docs/edge-operations.md) for operations (spool
+sizing, the one metric worth alerting on, the StorageFaulted runbook). The
+CLI gains `queuey edge status | retry | discard | recover | reset` for
+operating a spool alongside a running host.
+
 ## Hosts & environments
 
 Queuey runs on **two** hosts — a control-plane **API** host and a publish **ingress** host — and
