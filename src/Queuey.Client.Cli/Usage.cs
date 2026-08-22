@@ -61,18 +61,34 @@ REPLAY
                  `queuey listen` first so there's a listener to receive it.
 
 EDGE
+  queuey edge run     --spool <path> --tenant <ten_...> --api-key <qak_...>
+                [--ingress-base <uri>] [--source <s>]
+                 Hosts the Edge transfer loop as a standalone daemon (systemd-friendly) — the
+                 complete Edge for machines with no .NET app of their own: run this, and anything
+                 on the box publishes durably with 'queuey edge publish'. Ctrl-C/SIGTERM to stop;
+                 accepted events survive restarts.
+  queuey edge publish <queue> --spool <path> --tenant <ten_...>
+                (--data '<json>' | --file <path>) [--content-type <ct>]
+                [--idempotency-key <k>] [--event-type <t>] [--group-key <k>]
+                [--occurred-at <iso8601>] [--source <s>] [--json]
   queuey edge status  --spool <path> [--json]
+  queuey edge drain   --spool <path> [--timeout <seconds>]
   queuey edge retry   --spool <path> (--id N | --all)
   queuey edge discard --spool <path> --id N
   queuey edge recover --spool <path>
   queuey edge reset   --spool <path> --accept-data-loss
                  Operates a Queuey Edge spool file directly (WAL allows this alongside a running
-                 host). status shows pending/quarantined/oldest-age; retry returns a quarantined
-                 event to the drain after remediation; discard drops ONE quarantined event (an
-                 explicit, logged operator decision — pending events cannot be discarded); recover
-                 salvages readable events from a faulted spool into a fresh one, reporting exactly
-                 how many were unreadable; reset abandons the spool (requires --accept-data-loss,
-                 the old file is preserved for support either way).
+                 host). publish DURABLY enqueues one event into the local spool — the shell/IoT
+                 path: any program on the machine (bash, Python, cron) hands events to the
+                 co-resident Edge host, which transfers them with full retry/offline handling;
+                 no host running means the event waits durably for the next one. status shows
+                 pending/quarantined/oldest-age; drain waits until a running host has emptied
+                 the backlog (the uninstall gate — never delete a spool with pending events);
+                 retry returns a quarantined event to the drain after remediation; discard drops
+                 ONE quarantined event (an explicit, logged operator decision — pending events
+                 cannot be discarded); recover salvages readable events from a faulted spool,
+                 reporting exactly how many were unreadable; reset abandons the spool (requires
+                 --accept-data-loss, the old file is preserved for support either way).
 
 WHOAMI
   queuey whoami [--json]

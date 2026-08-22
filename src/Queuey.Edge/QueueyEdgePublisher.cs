@@ -76,28 +76,19 @@ internal sealed class QueueyEdgePublisher : IQueueyPublisher
                 "Fix the producer, or raise the local cap to match the queue's server-side limit.");
         }
 
-        var now = _clock.UtcNow;
-        var occurredAt = options?.OccurredAtUtc ?? now;
-
-        // One key, one dedup domain: a caller-supplied idempotency key IS the
-        // transfer identity — a second, separate transfer key would create
-        // two domains that can disagree. Absent one, Edge mints a UUIDv7 so
-        // ids sort by publish time.
-        var transferId = string.IsNullOrWhiteSpace(options?.IdempotencyKey)
-            ? Uuid7.NewString(now)
-            : options!.IdempotencyKey!.Trim();
-
-        var envelope = new EventEnvelope(
-            Version: EventEnvelope.CurrentVersion,
-            TransferId: transferId,
-            Queue: queue.Trim(),
-            TenantPublicId: _options.TenantPublicId!,
-            ContentType: contentType,
-            Payload: payload,
-            OccurredAtUtc: occurredAt,
-            EventType: options?.EventType,
-            GroupKey: options?.GroupKey,
-            Source: options?.Source ?? _options.Source);
+        // Identity rules (caller key IS the transfer id; UUIDv7 otherwise)
+        // live in the factory — one source, shared with the CLI publish path.
+        var envelope = EventEnvelope.Create(
+            queue: queue,
+            tenantPublicId: _options.TenantPublicId!,
+            payload: payload,
+            contentType: contentType,
+            idempotencyKey: options?.IdempotencyKey,
+            eventType: options?.EventType,
+            groupKey: options?.GroupKey,
+            source: options?.Source ?? _options.Source,
+            occurredAtUtc: options?.OccurredAtUtc,
+            nowUtc: _clock.UtcNow);
 
         // The durable boundary. Everything before this line is the caller's
         // failure; everything after is Queuey's.
@@ -110,7 +101,7 @@ internal sealed class QueueyEdgePublisher : IQueueyPublisher
             TransferId = accept.TransferId,
             Queue = envelope.Queue,
             AcceptedAtUtc = accept.AcceptedAtUtc,
-            OccurredAtUtc = occurredAt
+            OccurredAtUtc = envelope.OccurredAtUtc
         };
     }
 }

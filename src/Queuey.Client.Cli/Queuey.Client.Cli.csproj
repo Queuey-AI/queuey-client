@@ -35,6 +35,8 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.1" />
+    <!-- `queuey edge run` hosts the Edge transfer loop as a standalone daemon. -->
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
     <PackageReference Include="Microsoft.AspNetCore.SignalR.Client" Version="8.0.11" />
   </ItemGroup>
 
