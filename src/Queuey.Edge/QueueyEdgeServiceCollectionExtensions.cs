@@ -47,6 +47,19 @@ public static class QueueyEdgeServiceCollectionExtensions
             sp.GetRequiredService<IEdgeClock>(),
             sp.GetRequiredService<EdgeWake>()));
 
+        // Transfer machinery. ITransferChannel is TryAdd so tests (or a
+        // future transport) can pre-register their own before this call.
+        services.TryAddSingleton<ITransferOutcomeClassifier, TransferOutcomeClassifier>();
+        services.TryAddSingleton<EdgeRuntimeState>();
+        services.TryAddSingleton(sp => new BackoffPolicy(
+            sp.GetRequiredService<QueueyEdgeOptions>().Transfer));
+        services.TryAddSingleton<ITransferChannel>(sp => new HttpTransferChannel(
+            new System.Net.Http.HttpClient(),
+            sp.GetRequiredService<QueueyEdgeOptions>(),
+            sp.GetRequiredService<ITransferOutcomeClassifier>(),
+            sp.GetRequiredService<IEdgeClock>()));
+        services.AddHostedService<EdgeTransferLoop>();
+
         return services;
     }
 }
