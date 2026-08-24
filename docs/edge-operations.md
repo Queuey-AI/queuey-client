@@ -1,5 +1,83 @@
 # Queuey Edge — operations notes
 
+## Linux IoT runbook — from zero to durable telemetry
+
+What it takes on a Pi-class device or industrial gateway, end to end:
+
+**1. Queuey side (once, in the console):** create a workspace + queue, then
+mint an API key with *Limit to ingress* + scoped to that one workspace —
+the key will live on a machine you don't control, and must not be able to
+do anything else.
+
+**2. Get the binary onto the device.** One self-contained file, no .NET
+runtime needed on the device:
+
+```bash
+# on your build machine (linux-arm64 for Pi-class, linux-x64 for industrial PCs)
+dotnet publish src/Queuey.Client.Cli -c Release -r linux-arm64 \
+  --self-contained -p:PublishSingleFile=true
+scp bin/Release/net8.0/linux-arm64/publish/queuey device:/opt/queuey/queuey
+```
+
+(Once the packages are on NuGet, `dotnet tool install -g Queuey.Cli` on
+devices that have the SDK.)
+
+**3. Run it under systemd** so the daemon survives reboots and restarts
+itself — which is what makes "connection refused = daemon down" a
+non-event:
+
+```ini
+# /etc/systemd/system/queuey-edge.service
+[Unit]
+Description=Queuey Edge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/opt/queuey/queuey edge run --spool /var/lib/queuey/spool.db --listen 7311
+EnvironmentFile=/etc/queuey/edge.env
+Restart=always
+RestartSec=2
+User=queuey
+StateDirectory=queuey
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+# /etc/queuey/edge.env  (chmod 600, owned by the queuey user)
+QUEUEY_TENANT=ten_...
+QUEUEY_API_KEY=qak_...
+# QUEUEY_INGRESS_BASE=http://localhost:5084   # only for testing against a local Queuey
+```
+
+`sudo systemctl enable --now queuey-edge` — done. `StateDirectory` gives
+the spool a durable home at `/var/lib/queuey` with the right ownership.
+
+**4. Publish from whatever the device runs** — all three are the same
+durable accept boundary:
+
+```bash
+# shell / cron / C binary
+queuey edge publish sensor-readings --spool /var/lib/queuey/spool.db \
+  --tenant ten_... --data "$(read_sensor)" --group-key unit-7
+```
+
+```python
+# Python / TypeScript / Java — plain HTTP to the loopback endpoint
+requests.post(f"http://localhost:7311/events/ten_.../sensor-readings", json=reading)
+```
+
+```csharp
+// or a .NET app embeds Queuey.Edge directly (no daemon needed)
+await queuey.PublishAsync("sensor-readings", reading);
+```
+
+**5. Wire one alert** — `queuey.edge.spool.oldest_age_seconds` (or poll
+`GET localhost:7311/health` / `queuey edge status --json` from your
+existing agent). Then pull the network cable and watch nothing break.
+
 Queuey Edge makes `PublishAsync` mean: *the event is durably accepted on
 this machine, and Queuey owns the delivery mechanics from here.* This page
 is what an operator needs to know about the machine's side of that bargain.

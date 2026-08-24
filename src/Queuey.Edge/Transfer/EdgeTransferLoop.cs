@@ -186,4 +186,6 @@ internal static class EdgeLogEvents
     public static readonly EventId StorageFaulted = new(7308, "queuey.edge.storage_faulted");
     public static readonly EventId StorageFull = new(7309, "queuey.edge.storage_full");
     public static readonly EventId EphemeralPath = new(7310, "queuey.edge.ephemeral_path_warning");
+    public static readonly EventId LocalEndpointStarted = new(7311, "queuey.edge.local_endpoint_started");
+    public static readonly EventId LocalEndpointError = new(7312, "queuey.edge.local_endpoint_error");
 }
