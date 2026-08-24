@@ -1,0 +1,93 @@
+name: Release
+
+# Tag-driven publishing: push a tag like `v0.1.0-preview.6` and this
+# (1) packs every packable project in the solution and pushes to NuGet.org,
+# (2) publishes SELF-CONTAINED single-file `queuey` CLI binaries per
+#     architecture and attaches them to a GitHub Release — the install path
+#     for Linux IoT devices and gateways that have no .NET runtime at all
+#     (`dotnet tool install` requires the SDK; a Pi usually doesn't have it).
+#
+# The version comes from the tag (overrides Directory.Build.props), so a
+# release is exactly one `git tag && git push --tags`.
+#
+# Required secret: NUGET_API_KEY (nuget.org API key with push rights for the
+# Queuey.* packages).
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # create the GitHub Release + upload assets
+
+jobs:
+  nuget:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Resolve version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Test (the gate travels with the release)
+        run: dotnet test Queuey.Client.sln --configuration Release
+
+      - name: Pack
+        run: dotnet pack Queuey.Client.sln --configuration Release -o artifacts -p:Version=$VERSION
+
+      - name: Push to NuGet
+        run: >
+          dotnet nuget push "artifacts/*.nupkg"
+          --api-key "${{ secrets.NUGET_API_KEY }}"
+          --source https://api.nuget.org/v3/index.json
+          --skip-duplicate
+
+  cli-binaries:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        rid: [linux-x64, linux-arm64, osx-arm64, win-x64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Resolve version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Publish self-contained single file
+        run: >
+          dotnet publish src/Queuey.Client.Cli -c Release -r ${{ matrix.rid }}
+          --self-contained -p:PublishSingleFile=true -p:Version=$VERSION
+          -o publish/${{ matrix.rid }}
+
+      - name: Archive
+        # The published binary carries the assembly name (Queuey.Client.Cli);
+        # ship it as `queuey` — the name every doc and script uses.
+        run: |
+          cd publish/${{ matrix.rid }}
+          if [[ "${{ matrix.rid }}" == win-* ]]; then
+            mv Queuey.Client.Cli.exe queuey.exe
+            zip -q "../../queuey-$VERSION-${{ matrix.rid }}.zip" queuey.exe
+          else
+            mv Queuey.Client.Cli queuey
+            tar -czf "../../queuey-$VERSION-${{ matrix.rid }}.tar.gz" queuey
+          fi
+
+      - name: Attach to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" --generate-notes 2>/dev/null || true
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            queuey-$VERSION-${{ matrix.rid }}.* --clobber

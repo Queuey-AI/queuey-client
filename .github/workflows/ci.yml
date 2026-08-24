@@ -1,0 +1,43 @@
+name: CI
+
+# The test gate for the SDK repo (the same testport principle as the
+# backend and frontend repos): every PR and every push to main or a
+# feature branch builds the WHOLE solution and runs every test project.
+# Whole-solution on purpose — new projects (Queuey.Edge et al.) are
+# covered the moment they join the .sln, with no workflow edit to forget.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "feat/**"
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          # 9.x builds every TFM in the solution (netstandard2.0 / net8.0
+          # libraries, net9.0 test projects).
+          dotnet-version: 9.0.x
+
+      - name: Restore
+        run: dotnet restore Queuey.Client.sln
+
+      - name: Build
+        run: dotnet build Queuey.Client.sln --no-restore --configuration Release
+
+      - name: Test
+        run: dotnet test Queuey.Client.sln --no-build --configuration Release --logger "trx;LogFileName=results.trx"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: "**/TestResults/*.trx"
+          retention-days: 14
