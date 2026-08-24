@@ -60,6 +60,13 @@ public static class QueueyEdgeServiceCollectionExtensions
             sp.GetRequiredService<IEdgeClock>()));
         services.AddHostedService<EdgeTransferLoop>();
 
+        // Health: the in-process snapshot and the OpenTelemetry meter
+        // "Queuey.Edge". Hosted so the meter publishes eagerly and the
+        // ephemeral-path warning lands at startup.
+        services.TryAddSingleton<EdgeHealthService>();
+        services.TryAddSingleton<IQueueyEdgeHealth>(sp => sp.GetRequiredService<EdgeHealthService>());
+        services.AddHostedService(sp => sp.GetRequiredService<EdgeHealthService>());
+
         return services;
     }
 }
