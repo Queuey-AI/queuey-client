@@ -87,6 +87,16 @@ public interface IEventSpool
     Task<int> SweepAsync(CancellationToken cancellationToken);
 
     /// <summary>
+    /// The operator's "I fixed the cause — try NOW": makes every pending
+    /// (Accepted) row due immediately and resets its backoff ladder.
+    /// Ordering is untouched (rows keep their ids, lanes keep FIFO) — this
+    /// only collapses WAITING, so it can never cause a duplicate or an
+    /// overtake. Returns rows kicked. Quarantined rows are deliberately NOT
+    /// included — they exit only via explicit retry/discard.
+    /// </summary>
+    Task<int> KickAsync(CancellationToken cancellationToken);
+
+    /// <summary>
     /// Returns a quarantined row to the retry schedule (operator action),
     /// or removes it (explicit discard — logged and counted by the caller).
     /// </summary>

@@ -309,6 +309,20 @@ public sealed class SqliteEventSpool : IEventSpool
             return touched;
         }, cancellationToken);
 
+    public Task<int> KickAsync(CancellationToken cancellationToken)
+        => WriteLockedAsync(conn =>
+        {
+            // Collapse waiting only: due-now + ladder reset. States, ids and
+            // lane order are untouched, so FIFO and dedup semantics hold.
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                UPDATE spool SET next_attempt_utc = @now, last_delay_ms = 0
+                WHERE state = 'Accepted' AND next_attempt_utc > @now;
+                """;
+            cmd.Parameters.AddWithValue("@now", Format(_clock.UtcNow));
+            return cmd.ExecuteNonQuery();
+        }, cancellationToken);
+
     public Task<bool> RetryQuarantinedAsync(long spoolId, CancellationToken cancellationToken)
         => WriteLockedAsync(conn =>
         {

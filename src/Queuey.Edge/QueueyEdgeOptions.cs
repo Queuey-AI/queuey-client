@@ -143,6 +143,13 @@ public sealed class EdgeTransferOptions
     /// <summary>First probe delay on RequiresAction (auth/route/billing) — never hot-loop a known non-transient failure.</summary>
     public TimeSpan RequiresActionProbeInitial { get; set; } = TimeSpan.FromMinutes(5);
 
+    /// <summary>
+    /// Probe interval while the queue is PAUSED — deliberately faster and
+    /// flat (no doubling): pausing is an intentional operator state, and
+    /// the operator who unpauses expects flow to resume within about this.
+    /// </summary>
+    public TimeSpan QueuePausedProbe { get; set; } = TimeSpan.FromMinutes(1);
+
     /// <summary>Probe-delay ceiling on RequiresAction.</summary>
     public TimeSpan RequiresActionProbeCap { get; set; } = TimeSpan.FromHours(1);
 

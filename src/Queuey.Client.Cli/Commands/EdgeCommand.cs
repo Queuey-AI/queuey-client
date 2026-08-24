@@ -62,6 +62,7 @@ internal static class EdgeCommand
             "status" => await StatusAsync(spoolPath!, map.Has("json")),
             "publish" => await PublishAsync(spoolPath!, positional, map),
             "run" => await RunHostAsync(spoolPath!, map),
+            "kick" => await KickAsync(spoolPath!),
             "drain" => await DrainAsync(spoolPath!, map),
             "retry" => await RetryAsync(spoolPath!, map),
             "discard" => await DiscardAsync(spoolPath!, map),
@@ -243,6 +244,31 @@ internal static class EdgeCommand
 
         await builder.Build().RunAsync();
         return ExitCodes.Success;
+    }
+
+    // ── kick ────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// "I fixed the cause — try NOW": collapses every pending event's
+    /// backoff wait to zero (unpaused the queue, rotated the key, restored
+    /// the route). Ordering and dedup are untouched; only the waiting goes.
+    /// </summary>
+    private static async Task<int> KickAsync(string spoolPath)
+    {
+        var spool = OpenSpool(spoolPath);
+        try
+        {
+            var kicked = await spool.KickAsync(CancellationToken.None);
+            Console.WriteLine(kicked > 0
+                ? $"Kicked {kicked} pending event(s) — due now; a running Edge host picks them up within its idle poll."
+                : "Nothing waiting on a backoff — pending events (if any) are already due.");
+            return ExitCodes.Success;
+        }
+        catch (QueueyStorageFaultedException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return ExitCodes.RuntimeError;
+        }
     }
 
     // ── drain ───────────────────────────────────────────────────────────

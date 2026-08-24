@@ -137,6 +137,22 @@ public class ClassifierAndBackoffTests
     }
 
     [Fact]
+    public void A_paused_queue_probes_fast_and_flat()
+    {
+        // Pausing is an INTENTIONAL operator state — the operator who
+        // unpauses expects flow to resume within about a minute, not after
+        // a 5-minute-doubling auth-failure ladder. (Learned live: the first
+        // LINQPad run against a paused dev queue sat "stuck" for exactly
+        // this reason.)
+        var policy = new BackoffPolicy(TransferOptions());
+        var paused = new TransferOutcome(TransferClass.RequiresAction, TransferReason.QueuePaused, null);
+
+        Assert.Equal(TimeSpan.FromMinutes(1), policy.NextDelay(paused, TimeSpan.Zero));
+        // Flat, not a ladder — however long it has been paused.
+        Assert.Equal(TimeSpan.FromMinutes(1), policy.NextDelay(paused, TimeSpan.FromMinutes(30)));
+    }
+
+    [Fact]
     public void Requires_action_ladder_starts_at_probe_initial_and_caps_at_an_hour()
     {
         var policy = new BackoffPolicy(TransferOptions());
