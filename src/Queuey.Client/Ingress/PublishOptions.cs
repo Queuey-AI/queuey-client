@@ -1,3 +1,5 @@
+using System;
+
 namespace Queuey.Client;
 
 /// <summary>Per-publish options for <see cref="IQueueyIngress.PublishAsync{T}"/>.</summary>
@@ -26,4 +28,14 @@ public sealed class PublishOptions
 
     /// <summary>Overrides the request content type (defaults to <c>application/json</c> for typed payloads).</summary>
     public string? ContentType { get; set; }
+
+    /// <summary>
+    /// When the event actually occurred, for producers that publish after
+    /// the fact. Honoured by <c>Queuey.Edge</c>, which asserts it to Queuey
+    /// Cloud as <c>X-Queuey-Occurred-At</c> during transfer so a drained
+    /// backlog keeps honest history. The direct ingress client publishes
+    /// immediately (occurrence ≈ receipt) and does not send it. Display and
+    /// history context only — never billing or ordering.
+    /// </summary>
+    public DateTimeOffset? OccurredAtUtc { get; set; }
 }

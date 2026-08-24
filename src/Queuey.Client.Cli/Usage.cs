@@ -16,6 +16,7 @@ COMMANDS
   issues         List a tenant's issues.
   listen         Receive webhooks locally over a secure push session (Stripe-listen style).
   replay         Replay one existing event to your connected listener (read-only DLQ debugging).
+  edge           Operate a Queuey Edge spool: status | retry | discard | recover | reset.
   whoami         Show the resolved host / environment / tenant / license (masks the key).
 
 SYNC
@@ -58,6 +59,39 @@ REPLAY
                  debugging (Stripe-replay style). Read-only — the event isn't modified and the real
                  endpoint is never contacted; works on any event, including a DLQ'd one. Run
                  `queuey listen` first so there's a listener to receive it.
+
+EDGE
+  queuey edge run     --spool <path> --tenant <ten_...> --api-key <qak_...>
+                [--listen <port>] [--ingress-base <uri>] [--source <s>]
+                 Hosts the Edge transfer loop as a standalone daemon (systemd-friendly) — the
+                 complete Edge for machines with no .NET app of their own: run this, and anything
+                 on the box publishes durably with 'queuey edge publish'. --listen additionally
+                 serves a LOOPBACK publish endpoint with the same wire shape as cloud ingress
+                 (POST http://localhost:<port>/events/{tenant}/{queue}) — any language's plain
+                 HTTP one-liner becomes durable by swapping the base URL; 202 = committed to the
+                 local spool. Ctrl-C/SIGTERM to stop; accepted events survive restarts.
+  queuey edge publish <queue> --spool <path> --tenant <ten_...>
+                (--data '<json>' | --file <path>) [--content-type <ct>]
+                [--idempotency-key <k>] [--event-type <t>] [--group-key <k>]
+                [--occurred-at <iso8601>] [--source <s>] [--json]
+  queuey edge status  --spool <path> [--json]
+  queuey edge drain   --spool <path> [--timeout <seconds>]
+  queuey edge retry   --spool <path> (--id N | --all)
+  queuey edge discard --spool <path> --id N
+  queuey edge recover --spool <path>
+  queuey edge reset   --spool <path> --accept-data-loss
+                 Operates a Queuey Edge spool file directly (WAL allows this alongside a running
+                 host). publish DURABLY enqueues one event into the local spool — the shell/IoT
+                 path: any program on the machine (bash, Python, cron) hands events to the
+                 co-resident Edge host, which transfers them with full retry/offline handling;
+                 no host running means the event waits durably for the next one. status shows
+                 pending/quarantined/oldest-age; drain waits until a running host has emptied
+                 the backlog (the uninstall gate — never delete a spool with pending events);
+                 retry returns a quarantined event to the drain after remediation; discard drops
+                 ONE quarantined event (an explicit, logged operator decision — pending events
+                 cannot be discarded); recover salvages readable events from a faulted spool,
+                 reporting exactly how many were unreadable; reset abandons the spool (requires
+                 --accept-data-loss, the old file is preserved for support either way).
 
 WHOAMI
   queuey whoami [--json]

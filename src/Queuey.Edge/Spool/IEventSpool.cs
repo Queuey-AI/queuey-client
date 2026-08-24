@@ -22,6 +22,14 @@ namespace Queuey.Edge;
 public interface IEventSpool
 {
     /// <summary>
+    /// Null while storage is healthy; the fault description once the spool
+    /// has faulted (corruption detected, file preserved, operator recovery
+    /// required). Part of the health contract — the snapshot derives
+    /// <see cref="EdgeState.StorageFaulted"/> from it.
+    /// </summary>
+    string? FaultReason { get; }
+
+    /// <summary>
     /// Durably persists one envelope at the configured
     /// <see cref="SpoolDurability"/> level. Returns only after the commit —
     /// this call IS the <c>PublishAsync</c> success boundary. Throws
