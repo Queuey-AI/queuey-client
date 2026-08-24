@@ -34,6 +34,53 @@ public sealed record EventEnvelope(
     public const int CurrentVersion = 1;
 
     /// <summary>
+    /// THE way an envelope comes into existence — one place for the identity
+    /// rules, shared by the in-process publisher and the CLI's
+    /// <c>queuey edge publish</c> (the shell/IoT path where a non-.NET
+    /// program hands events to a co-resident Edge via the spool file):
+    /// a caller-supplied idempotency key IS the transfer identity (one key,
+    /// one dedup domain); absent one, a UUIDv7 minted at accept so ids sort
+    /// by publish time. Occurrence defaults to now.
+    /// </summary>
+    public static EventEnvelope Create(
+        string queue,
+        string tenantPublicId,
+        byte[] payload,
+        string contentType,
+        string? idempotencyKey = null,
+        string? eventType = null,
+        string? groupKey = null,
+        string? source = null,
+        DateTimeOffset? occurredAtUtc = null,
+        DateTimeOffset? nowUtc = null)
+    {
+        if (string.IsNullOrWhiteSpace(queue))
+            throw new Client.QueueyConfigurationException("A queue name is required.");
+        if (string.IsNullOrWhiteSpace(tenantPublicId))
+            throw new Client.QueueyConfigurationException("A tenant public id is required.");
+        if (payload is null)
+            throw new QueueyPayloadRejectedException("The payload cannot be null.");
+        if (string.IsNullOrWhiteSpace(contentType))
+            throw new Client.QueueyConfigurationException("A content type is required.");
+
+        var now = nowUtc ?? DateTimeOffset.UtcNow;
+
+        return new EventEnvelope(
+            Version: CurrentVersion,
+            TransferId: string.IsNullOrWhiteSpace(idempotencyKey)
+                ? Uuid7.NewString(now)
+                : idempotencyKey!.Trim(),
+            Queue: queue.Trim(),
+            TenantPublicId: tenantPublicId.Trim(),
+            ContentType: contentType.Trim(),
+            Payload: payload,
+            OccurredAtUtc: occurredAtUtc ?? now,
+            EventType: eventType,
+            GroupKey: groupKey,
+            Source: source);
+    }
+
+    /// <summary>
     /// Edge's ordering unit: <c>(queue, groupKey)</c>, with a null group key
     /// forming the queue's default lane. Strict FIFO holds within a lane
     /// (at most one in-flight transfer per lane); concurrency applies across

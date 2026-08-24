@@ -100,6 +100,30 @@ Edge resumes by itself when the cause clears.
 | `state` | 0 Healthy · 1 Backlogged · 2 RequiresAction · 3 StorageFull · 4 StorageFaulted |
 | `transfer.accepted{replayed}` / `transfer.failed{class,reason}` | throughput and diagnosis |
 
+## No .NET app? Shell, Python, cron — the IoT path
+
+The spool file is the local contract, and SQLite (WAL) lets multiple
+processes share it safely. So on a Linux box / IoT gateway you can run Edge
+as a **standalone daemon** and publish durably from *anything*:
+
+```bash
+# once, e.g. as a systemd service:
+queuey edge run --spool /var/lib/queuey/spool.db \
+  --tenant ten_... --api-key qak_...          # publish-only, workspace-scoped key
+
+# from any program on the machine (bash, Python, cron, a C binary):
+queuey edge publish sensor-readings \
+  --spool /var/lib/queuey/spool.db --tenant ten_... \
+  --data '{"temp":21.5}' \
+  --event-type temperature.updated --group-key unit-7 \
+  --occurred-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+```
+
+`publish` returns after the **durable local commit** — same contract as the
+in-process `PublishAsync`. No daemon running? The event still sits durably
+and drains when one next starts. Microcontroller fleets that can't run Edge
+publish over the LAN to one gateway that does.
+
 ## Operator verbs
 
 The `queuey` CLI ([Queuey.Cli](https://www.nuget.org/packages/Queuey.Cli))

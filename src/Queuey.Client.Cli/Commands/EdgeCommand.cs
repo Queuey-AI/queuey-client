@@ -5,6 +5,8 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Queuey.Edge;
 
 namespace Queuey.Client.Cli;
@@ -31,7 +33,16 @@ internal static class EdgeCommand
     public static async Task<int> RunAsync(string[] args)
     {
         var sub = args.Length > 0 ? args[0] : string.Empty;
-        var map = ArgMap.Parse(args.Length > 1 ? args[1..] : Array.Empty<string>(), Flags);
+
+        // "publish <queue> ..." carries a positional queue name; every other
+        // verb is options-only.
+        var positional = sub == "publish" && args.Length > 1 && !args[1].StartsWith('-')
+            ? args[1]
+            : null;
+        var optionArgs = positional is null
+            ? (args.Length > 1 ? args[1..] : Array.Empty<string>())
+            : args[2..];
+        var map = ArgMap.Parse(optionArgs, Flags);
 
         if (map.Has("help") || map.Has("h") || sub is "" or "help")
         {
@@ -49,12 +60,230 @@ internal static class EdgeCommand
         return sub switch
         {
             "status" => await StatusAsync(spoolPath!, map.Has("json")),
+            "publish" => await PublishAsync(spoolPath!, positional, map),
+            "run" => await RunHostAsync(spoolPath!, map),
+            "drain" => await DrainAsync(spoolPath!, map),
             "retry" => await RetryAsync(spoolPath!, map),
             "discard" => await DiscardAsync(spoolPath!, map),
             "recover" => await RecoverAsync(spoolPath!),
             "reset" => Reset(spoolPath!, map.Has("accept-data-loss")),
             _ => UnknownSub(sub)
         };
+    }
+
+    // ── publish ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The shell/IoT publish path: durably enqueue ONE event into the local
+    /// spool — the same accept boundary as the in-process
+    /// <c>PublishAsync</c>. Because the spool is SQLite in WAL mode, any
+    /// program on the machine (bash, Python, cron, a C binary) can hand
+    /// events to a co-resident Edge host this way; the host's transfer loop
+    /// picks new rows up within its idle poll (~1 s). No host running? The
+    /// event still sits durably and drains whenever one next starts.
+    /// </summary>
+    private static async Task<int> PublishAsync(string spoolPath, string? queue, ArgMap map)
+    {
+        if (string.IsNullOrWhiteSpace(queue))
+        {
+            Console.Error.WriteLine("Usage: queuey edge publish <queue> --spool <path> --tenant <ten_...> (--data <json> | --file <path>)");
+            return ExitCodes.Usage;
+        }
+
+        var tenant = map.Get("tenant") ?? Environment.GetEnvironmentVariable("QUEUEY_TENANT");
+        if (string.IsNullOrWhiteSpace(tenant))
+        {
+            Console.Error.WriteLine("Missing --tenant <ten_...> (or QUEUEY_TENANT).");
+            return ExitCodes.Usage;
+        }
+
+        byte[] payload;
+        var data = map.Get("data");
+        var file = map.Get("file");
+        if (!string.IsNullOrEmpty(data))
+        {
+            payload = System.Text.Encoding.UTF8.GetBytes(data);
+        }
+        else if (!string.IsNullOrEmpty(file))
+        {
+            if (!File.Exists(file))
+            {
+                Console.Error.WriteLine($"No payload file at '{file}'.");
+                return ExitCodes.RuntimeError;
+            }
+            payload = await File.ReadAllBytesAsync(file);
+        }
+        else
+        {
+            Console.Error.WriteLine("Missing payload: provide --data '<json>' or --file <path>.");
+            return ExitCodes.Usage;
+        }
+
+        DateTimeOffset? occurredAt = null;
+        if (map.Get("occurred-at") is { Length: > 0 } occurredRaw)
+        {
+            if (!DateTimeOffset.TryParse(occurredRaw, CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                    out var parsed))
+            {
+                Console.Error.WriteLine($"--occurred-at is not a valid ISO 8601 timestamp: '{occurredRaw}'.");
+                return ExitCodes.Usage;
+            }
+            occurredAt = parsed;
+        }
+
+        var envelope = EventEnvelope.Create(
+            queue: queue!,
+            tenantPublicId: tenant!,
+            payload: payload,
+            contentType: map.Get("content-type") ?? "application/json",
+            idempotencyKey: map.Get("idempotency-key"),
+            eventType: map.Get("event-type"),
+            groupKey: map.Get("group-key"),
+            source: map.Get("source"),
+            occurredAtUtc: occurredAt);
+
+        var spool = OpenSpool(spoolPath);
+        try
+        {
+            var accept = await spool.EnqueueAsync(envelope, CancellationToken.None);
+            var stats = await spool.GetStatsAsync(CancellationToken.None);
+
+            if (map.Has("json"))
+            {
+                Console.WriteLine(JsonSerializer.Serialize(new
+                {
+                    transferId = accept.TransferId,
+                    queue = envelope.Queue,
+                    acceptedAtUtc = accept.AcceptedAtUtc,
+                    occurredAtUtc = envelope.OccurredAtUtc,
+                    pending = stats.PendingCount
+                }, CliHost.JsonOut));
+            }
+            else
+            {
+                Console.WriteLine($"Accepted durably. transferId={accept.TransferId} pending={stats.PendingCount}");
+                Console.WriteLine("A running Queuey Edge host on this machine transfers it; check with 'queuey edge status'.");
+            }
+            return ExitCodes.Success;
+        }
+        catch (QueueySpoolFullException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return ExitCodes.RuntimeError;
+        }
+        catch (QueueyStorageFaultedException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return ExitCodes.RuntimeError;
+        }
+    }
+
+    // ── run ─────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Hosts the Edge transfer loop as a STANDALONE daemon — the complete
+    /// Edge story for machines with no .NET application of their own:
+    /// <c>queuey edge run</c> under systemd, and anything on the box
+    /// publishes durably with <c>queuey edge publish</c> (or its own
+    /// embedded Queuey.Edge). Runs until Ctrl-C / SIGTERM; the spool is the
+    /// contract, so restarts resume exactly where they left off.
+    /// </summary>
+    private static async Task<int> RunHostAsync(string spoolPath, ArgMap map)
+    {
+        var tenant = map.Get("tenant") ?? Environment.GetEnvironmentVariable("QUEUEY_TENANT");
+        var apiKey = map.Get("api-key") ?? Environment.GetEnvironmentVariable("QUEUEY_API_KEY");
+        if (string.IsNullOrWhiteSpace(tenant) || string.IsNullOrWhiteSpace(apiKey))
+        {
+            Console.Error.WriteLine(
+                "edge run needs --tenant <ten_...> and --api-key <qak_...> " +
+                "(or QUEUEY_TENANT / QUEUEY_API_KEY). Use a publish-only, workspace-scoped key.");
+            return ExitCodes.Configuration;
+        }
+
+        var ingressBase = map.Get("ingress-base") ?? Environment.GetEnvironmentVariable("QUEUEY_INGRESS_BASE");
+
+        var builder = Microsoft.Extensions.Hosting.Host.CreateApplicationBuilder();
+        builder.Logging.SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Warning);
+        builder.Logging.AddFilter("Queuey", Microsoft.Extensions.Logging.LogLevel.Information);
+
+        builder.Services.AddQueueyEdge(o =>
+        {
+            o.ApiKey = apiKey;
+            o.TenantPublicId = tenant;
+            o.Storage.Path = spoolPath;
+            if (!string.IsNullOrWhiteSpace(ingressBase))
+                o.IngressBaseAddress = new Uri(ingressBase);
+            if (map.Get("source") is { Length: > 0 } source)
+                o.Source = source;
+        });
+
+        Console.WriteLine($"Queuey Edge daemon. Spool: {spoolPath}");
+        Console.WriteLine("Publish from anything on this machine with 'queuey edge publish …'; " +
+                          "inspect with 'queuey edge status'. Ctrl-C to stop (accepted events survive restarts).");
+
+        await builder.Build().RunAsync();
+        return ExitCodes.Success;
+    }
+
+    // ── drain ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Waits until the spool has no pending events — the uninstall/shutdown
+    /// gate: removing Edge must never silently abandon accepted events. The
+    /// draining itself is done by a RUNNING Edge host; this verb only
+    /// watches, and exits non-zero if the backlog doesn't empty in time.
+    /// </summary>
+    private static async Task<int> DrainAsync(string spoolPath, ArgMap map)
+    {
+        if (!File.Exists(spoolPath))
+        {
+            Console.WriteLine("No spool file — nothing to drain.");
+            return ExitCodes.Success;
+        }
+
+        var timeout = TimeSpan.FromSeconds(
+            long.TryParse(map.Get("timeout"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var s) ? s : 600);
+
+        var spool = OpenSpool(spoolPath);
+        var deadline = DateTime.UtcNow + timeout;
+        long lastPending = -1;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            SpoolStats stats;
+            try
+            {
+                stats = await spool.GetStatsAsync(CancellationToken.None);
+            }
+            catch (QueueyStorageFaultedException ex)
+            {
+                Console.Error.WriteLine(ex.Message);
+                return ExitCodes.RuntimeError;
+            }
+
+            if (stats.PendingCount == 0)
+            {
+                Console.WriteLine(stats.QuarantinedCount > 0
+                    ? $"Drained. NOTE: {stats.QuarantinedCount} quarantined event(s) remain — retry or discard them explicitly before removing the spool."
+                    : "Drained. The spool holds no pending events.");
+                return ExitCodes.Success;
+            }
+
+            if (stats.PendingCount != lastPending)
+            {
+                lastPending = stats.PendingCount;
+                Console.WriteLine($"pending={stats.PendingCount} oldest={(stats.OldestPendingAge is { } age ? $"{(int)age.TotalSeconds}s" : "-")}");
+            }
+
+            await Task.Delay(500);
+        }
+
+        Console.Error.WriteLine(
+            $"Timed out after {timeout.TotalSeconds:F0}s with {lastPending} event(s) still pending. " +
+            "Draining requires a RUNNING Queuey Edge host with working connectivity — check 'queuey edge status' " +
+            "and the host's logs. Do not delete the spool: it holds accepted events.");
+        return ExitCodes.RuntimeError;
     }
 
     // ── status ──────────────────────────────────────────────────────────
