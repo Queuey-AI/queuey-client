@@ -112,10 +112,17 @@ public sealed record SpoolAccept(long SpoolId, string TransferId, DateTimeOffset
 /// <summary>A leased row handed to the transfer loop.</summary>
 public sealed record ClaimedEvent(long SpoolId, EventEnvelope Envelope, int Attempts, TimeSpan LastDelay);
 
-/// <summary>Counters the health surface derives state from.</summary>
+/// <summary>
+/// Counters the health surface derives state from. NextAttemptUtc is the
+/// earliest scheduled attempt among LANE HEADS — a row queued behind a
+/// backing-off head does not count, so "due now" never lies about a lane
+/// that is in fact waiting. Null when nothing is waiting (empty, or every
+/// eligible head is in flight right now).
+/// </summary>
 public sealed record SpoolStats(
     long PendingCount,
     long QuarantinedCount,
     TimeSpan? OldestPendingAge,
     long StorageUsageBytes,
-    DateTimeOffset? LastSettledAtUtc);
+    DateTimeOffset? LastSettledAtUtc,
+    DateTimeOffset? NextAttemptUtc = null);

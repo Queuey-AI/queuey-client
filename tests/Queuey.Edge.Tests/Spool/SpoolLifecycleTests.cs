@@ -140,10 +140,16 @@ public class SpoolLifecycleTests
             new TransferOutcome(TransferClass.EventRejected, TransferReason.PayloadTooLarge, null),
             CancellationToken.None);
 
+        // While the head waits out its probe, stats say exactly when the
+        // next attempt is due — the operator's "is it stuck or waiting?".
+        var waiting = await fx.Spool.GetStatsAsync(CancellationToken.None);
+        Assert.Equal(fx.Clock.UtcNow.AddMinutes(5), waiting.NextAttemptUtc);
+
         // The operator unpauses the queue and kicks: the head is due NOW —
         // no waiting out the probe — and FIFO still holds (head first).
         var kicked = await fx.Spool.KickAsync(CancellationToken.None);
         Assert.Equal(1, kicked);
+        Assert.True((await fx.Spool.GetStatsAsync(CancellationToken.None)).NextAttemptUtc <= fx.Clock.UtcNow);
 
         var claims = await fx.Spool.ClaimReadyAsync(10, Lease, CancellationToken.None);
         Assert.Equal(head.SpoolId, Assert.Single(claims).SpoolId);

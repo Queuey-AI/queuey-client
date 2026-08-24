@@ -258,7 +258,11 @@ public sealed class SqliteEventSpool : IEventSpool
                     (SELECT COUNT(*) FROM spool WHERE state = 'Quarantined'),
                     (SELECT MIN(accepted_at_utc) FROM spool WHERE state IN ('Accepted', 'Claimed')),
                     (SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()),
-                    (SELECT MAX(transferred_utc) FROM spool WHERE state = 'Transferred');
+                    (SELECT MAX(transferred_utc) FROM spool WHERE state = 'Transferred'),
+                    (SELECT MIN(s.next_attempt_utc) FROM spool s
+                     WHERE s.state = 'Accepted'
+                       AND s.id = (SELECT MIN(h.id) FROM spool h
+                                   WHERE h.lane = s.lane AND h.state IN ('Accepted', 'Claimed')));
                 """;
             using var reader = cmd.ExecuteReader();
             reader.Read();
@@ -269,7 +273,8 @@ public sealed class SqliteEventSpool : IEventSpool
                 QuarantinedCount: reader.GetInt64(1),
                 OldestPendingAge: oldest is null ? null : _clock.UtcNow - oldest.Value,
                 StorageUsageBytes: reader.GetInt64(3),
-                LastSettledAtUtc: reader.IsDBNull(4) ? null : Parse(reader.GetString(4)));
+                LastSettledAtUtc: reader.IsDBNull(4) ? null : Parse(reader.GetString(4)),
+                NextAttemptUtc: reader.IsDBNull(5) ? null : Parse(reader.GetString(5)));
         }, cancellationToken);
 
     public Task<int> SweepAsync(CancellationToken cancellationToken)
