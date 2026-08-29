@@ -117,6 +117,36 @@ it is what lets Edge keep *recording* successes at the limit.)
   AV locks can stall accepts. The spool is not a backup target — Cloud is
   the system of record once events transfer.
 
+## Data at rest on the device
+
+The spool holds event payloads until Cloud has acknowledged them — on the
+customer's own equipment, which is the most exposed copy of a payload Queuey
+ever keeps. What Edge does about it, and what remains yours:
+
+- **The payload leaves the spool at settle.** The moment Cloud acknowledges an
+  event, its payload is blanked; the row stays for `SettledRetention` (24 h)
+  with the transfer id and Cloud event id only, then the sweep removes it.
+- **Freed pages are overwritten** (`PRAGMA secure_delete`), so a settled
+  payload does not linger in unused pages of the file.
+- **`spool.db` is created `0600` in a `0700` directory** on Linux/macOS; the
+  WAL/SHM sidecars inherit the mode. Windows uses the directory's ACL.
+- **Encryption at rest is opt-in**: set `QUEUEY_SPOOL_KEY` to a base64
+  32-byte key (`openssl rand -base64 32`) and payloads are stored AES-256-GCM
+  encrypted (`EdgeStorageOptions.PayloadKey` from code). Keep the key in the
+  environment file or a secret store the device already has — a systemd
+  credential, a TPM-backed keychain — never next to the spool. Rows written
+  before the key was set keep draining; a row that cannot be opened with the
+  configured key is quarantined (`PayloadUnreadable`), never sent, never
+  dropped. Rotating the key means draining first.
+- **What Edge cannot do for you**: a process that holds the key can read the
+  spool, and a device without a secret store has nowhere safe to put one.
+  Full-disk encryption (LUKS, BitLocker, the device vendor's option) is the
+  baseline; the spool measures are defence in depth on top of it.
+- **`spool.db.faulted-*` and `.salvage` files hold payloads.** `recover` and
+  `reset` keep the previous file on purpose (it may contain events nothing
+  else has). Once you have confirmed the recovery, delete them yourself —
+  Edge never removes a file that might be the only copy of an event.
+
 ## The one metric worth alerting on
 
 `queuey.edge.spool.oldest_age_seconds` (OpenTelemetry meter `Queuey.Edge`).

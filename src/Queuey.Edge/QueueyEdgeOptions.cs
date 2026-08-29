@@ -105,6 +105,16 @@ public sealed class EdgeStorageOptions
 
     /// <summary>v1 supports only <see cref="SpoolDurability.Durable"/>.</summary>
     public SpoolDurability Durability { get; set; } = SpoolDurability.Durable;
+
+    /// <summary>
+    /// Optional 32-byte key: when set, payloads are AES-256-GCM encrypted at
+    /// rest in the spool (<see cref="SpoolPayloadProtection"/>). Read it from
+    /// an environment variable or a secret store the device already has —
+    /// a key stored next to the spool protects nothing. Rows written before
+    /// the key was set keep draining as plain rows; a row that cannot be
+    /// opened with this key is quarantined, never sent, never dropped.
+    /// </summary>
+    public byte[]? PayloadKey { get; set; }
 }
 
 /// <summary>
