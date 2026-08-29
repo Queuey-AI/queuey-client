@@ -63,6 +63,7 @@ REPLAY
 EDGE
   queuey edge run     --spool <path> --tenant <ten_...> --api-key <qak_...>
                 [--listen <port>] [--report-health] [--node-name <name>] [--ingress-base <uri>] [--source <s>]
+                [--mqtt <host[:port]> --mqtt-routes ""filter=queue[@segment];…"" [--mqtt-user <u> --mqtt-password <p>] [--mqtt-tls]]
                  Hosts the Edge transfer loop as a standalone daemon (systemd-friendly) — the
                  complete Edge for machines with no .NET app of their own: run this, and anything
                  on the box publishes durably with 'queuey edge publish'. --listen additionally
@@ -73,6 +74,9 @@ EDGE
                  --report-health (or QUEUEY_REPORT_HEALTH=1) makes the node check in to the
                  console under Edge nodes (outbound only; reports are not events, never billed);
                  --node-name (QUEUEY_NODE_NAME) is the label shown there, default: machine name.
+                 --mqtt subscribes to a (usually local) broker and spools every message durably
+                 BEFORE acking it (QoS 1); a route's @segment makes that topic level the lane
+                 (FIFO per machine). Env: QUEUEY_MQTT, QUEUEY_MQTT_ROUTES, QUEUEY_MQTT_USER/PASSWORD.
   queuey edge publish <queue> --spool <path> --tenant <ten_...>
                 (--data '<json>' | --file <path>) [--content-type <ct>]
                 [--idempotency-key <k>] [--event-type <t>] [--group-key <k>]

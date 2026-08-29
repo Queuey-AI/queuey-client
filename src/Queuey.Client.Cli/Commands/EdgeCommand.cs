@@ -8,6 +8,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Queuey.Edge;
+using Queuey.Edge.Mqtt;
 
 namespace Queuey.Client.Cli;
 
@@ -28,7 +29,7 @@ namespace Queuey.Client.Cli;
 internal static class EdgeCommand
 {
     private static readonly System.Collections.Generic.HashSet<string> Flags =
-        new(StringComparer.Ordinal) { "json", "all", "accept-data-loss", "report-health", "help", "h" };
+        new(StringComparer.Ordinal) { "json", "all", "accept-data-loss", "report-health", "mqtt-tls", "help", "h" };
 
     public static async Task<int> RunAsync(string[] args)
     {
@@ -241,6 +242,42 @@ internal static class EdgeCommand
                 o.Source = source;
         });
 
+        // MQTT intake: --mqtt host[:port] --mqtt-routes "filter=queue[@segment];…"
+        // (or QUEUEY_MQTT / QUEUEY_MQTT_ROUTES). The broker is normally on this
+        // same gateway; every message is fsync'd into the spool before it is acked.
+        var mqtt = map.Get("mqtt") ?? Environment.GetEnvironmentVariable("QUEUEY_MQTT");
+        var mqttRoutes = map.Get("mqtt-routes") ?? Environment.GetEnvironmentVariable("QUEUEY_MQTT_ROUTES");
+        if (!string.IsNullOrWhiteSpace(mqtt) || !string.IsNullOrWhiteSpace(mqttRoutes))
+        {
+            if (string.IsNullOrWhiteSpace(mqtt) || string.IsNullOrWhiteSpace(mqttRoutes))
+            {
+                Console.Error.WriteLine("MQTT intake needs BOTH --mqtt <host[:port]> and --mqtt-routes \"filter=queue[@segment];…\" (or QUEUEY_MQTT / QUEUEY_MQTT_ROUTES).");
+                return ExitCodes.Configuration;
+            }
+            var hostPort = mqtt.Split(':', 2);
+            var mqttUser = map.Get("mqtt-user") ?? Environment.GetEnvironmentVariable("QUEUEY_MQTT_USER");
+            var mqttPass = map.Get("mqtt-password") ?? Environment.GetEnvironmentVariable("QUEUEY_MQTT_PASSWORD");
+            try
+            {
+                var routes = Queuey.Edge.Mqtt.MqttRoute.ParseMany(mqttRoutes);
+                builder.Services.AddQueueyEdgeMqttSource(m =>
+                {
+                    m.Server = hostPort[0];
+                    if (hostPort.Length == 2 && int.TryParse(hostPort[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var mp))
+                        m.Port = mp;
+                    m.UseTls = map.Has("mqtt-tls");
+                    m.Username = mqttUser;
+                    m.Password = mqttPass;
+                    m.Routes.AddRange(routes);
+                });
+            }
+            catch (Queuey.Client.QueueyConfigurationException ex)
+            {
+                Console.Error.WriteLine(ex.Message);
+                return ExitCodes.Configuration;
+            }
+        }
+
         Console.WriteLine($"Queuey Edge daemon. Spool: {spoolPath}");
         Console.WriteLine("Publish from anything on this machine with 'queuey edge publish …'; " +
                           "inspect with 'queuey edge status'. Ctrl-C to stop (accepted events survive restarts).");
@@ -249,6 +286,10 @@ internal static class EdgeCommand
             Console.WriteLine(
                 $"Health reporting: ON — this node appears as '{nodeName ?? Environment.MachineName}' under Edge nodes " +
                 "in the Queuey console (outbound only; reports are not events).");
+        }
+        if (!string.IsNullOrWhiteSpace(mqtt))
+        {
+            Console.WriteLine($"MQTT intake: {mqtt} → {mqttRoutes} (QoS 1; a message is acked only after it is durably in the spool).");
         }
         if (listenPort is { } lp)
         {
