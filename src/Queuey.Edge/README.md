@@ -100,6 +100,25 @@ Edge resumes by itself when the cause clears.
 | `state` | 0 Healthy · 1 Backlogged · 2 RequiresAction · 3 StorageFull · 4 StorageFaulted |
 | `transfer.accepted{replayed}` / `transfer.failed{class,reason}` | throughput and diagnosis |
 
+### Fleet view: let the node check in (opt-in)
+
+```csharp
+o.Health.ReportToCloud = true;   // or: queuey edge run --report-health --node-name barge-07
+o.Health.NodeName = "barge-07";  // defaults to the machine name
+```
+
+The node then POSTs its health snapshot to Queuey Cloud — at startup, on
+every state change, and every 5 minutes otherwise — and appears under
+**Edge nodes** in the console with pending count, oldest age, last failure
+and "last seen". Three things are fixed by design: traffic is **outbound
+only** (Cloud never reaches into a node; the loopback endpoint stays
+loopback), reports are **not events** (not spooled, not retried, never
+billed — a stale report is worthless, the next one supersedes it), and the
+node's identity is a UUID minted once into the spool file, so a reinstall
+on the same disk is the same node and a fresh spool is a new one. A node
+that stops reporting shows as **silent** in the console — Cloud derives
+that from `last seen`; the node itself never escalates.
+
 ## No .NET app? Shell, Python, cron — the IoT path
 
 The spool file is the local contract, and SQLite (WAL) lets multiple

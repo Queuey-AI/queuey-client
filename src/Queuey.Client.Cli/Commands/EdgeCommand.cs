@@ -28,7 +28,7 @@ namespace Queuey.Client.Cli;
 internal static class EdgeCommand
 {
     private static readonly System.Collections.Generic.HashSet<string> Flags =
-        new(StringComparer.Ordinal) { "json", "all", "accept-data-loss", "help", "h" };
+        new(StringComparer.Ordinal) { "json", "all", "accept-data-loss", "report-health", "help", "h" };
 
     public static async Task<int> RunAsync(string[] args)
     {
@@ -220,12 +220,21 @@ internal static class EdgeCommand
             listenPort = port;
         }
 
+        // Fleet view: --report-health (or QUEUEY_REPORT_HEALTH=1) makes the
+        // node check in to the console. Outbound only; never billed.
+        var reportHealth = map.Has("report-health")
+            || Environment.GetEnvironmentVariable("QUEUEY_REPORT_HEALTH") is "1" or "true";
+        var nodeName = map.Get("node-name") ?? Environment.GetEnvironmentVariable("QUEUEY_NODE_NAME");
+
         builder.Services.AddQueueyEdge(o =>
         {
             o.ApiKey = apiKey;
             o.TenantPublicId = tenant;
             o.Storage.Path = spoolPath;
             o.LocalEndpoint.Port = listenPort;
+            o.Health.ReportToCloud = reportHealth;
+            if (!string.IsNullOrWhiteSpace(nodeName))
+                o.Health.NodeName = nodeName;
             if (!string.IsNullOrWhiteSpace(ingressBase))
                 o.IngressBaseAddress = new Uri(ingressBase);
             if (map.Get("source") is { Length: > 0 } source)
@@ -235,6 +244,12 @@ internal static class EdgeCommand
         Console.WriteLine($"Queuey Edge daemon. Spool: {spoolPath}");
         Console.WriteLine("Publish from anything on this machine with 'queuey edge publish …'; " +
                           "inspect with 'queuey edge status'. Ctrl-C to stop (accepted events survive restarts).");
+        if (reportHealth)
+        {
+            Console.WriteLine(
+                $"Health reporting: ON — this node appears as '{nodeName ?? Environment.MachineName}' under Edge nodes " +
+                "in the Queuey console (outbound only; reports are not events).");
+        }
         if (listenPort is { } lp)
         {
             Console.WriteLine(
@@ -346,12 +361,14 @@ internal static class EdgeCommand
         {
             var stats = await spool.GetStatsAsync(CancellationToken.None);
             var quarantined = await ListQuarantinedAsync(spoolPath);
+            var nodeId = await spool.GetMetaAsync(EdgeMetaKeys.NodeId, CancellationToken.None);
 
             if (json)
             {
                 Console.WriteLine(JsonSerializer.Serialize(new
                 {
                     spool = spoolPath,
+                    nodeId,
                     pending = stats.PendingCount,
                     quarantined = stats.QuarantinedCount,
                     oldestPendingAgeSeconds = stats.OldestPendingAge?.TotalSeconds,
@@ -365,6 +382,7 @@ internal static class EdgeCommand
 
             Console.WriteLine("Queuey Edge spool");
             Console.WriteLine($"  Spool        : {spoolPath}");
+            Console.WriteLine($"  Node id      : {nodeId ?? "- (health reporting never enabled)"}");
             Console.WriteLine($"  Pending      : {stats.PendingCount}");
             Console.WriteLine($"  Quarantined  : {stats.QuarantinedCount}");
             Console.WriteLine($"  Oldest age   : {(stats.OldestPendingAge is { } age ? Humanize(age) : "-")}");

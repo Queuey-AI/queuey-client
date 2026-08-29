@@ -46,6 +46,8 @@ public sealed class QueueyEdgeOptions
 
     public EdgeLocalEndpointOptions LocalEndpoint { get; } = new();
 
+    public EdgeHealthReportOptions Health { get; } = new();
+
     /// <summary>The effective ingress base address (override or environment default).</summary>
     public Uri ResolveIngressBaseAddress()
         => new QueueyOptions { Environment = Environment, IngressBaseAddress = IngressBaseAddress }
@@ -158,4 +160,28 @@ public sealed class EdgeTransferOptions
 
     /// <summary>Idle poll interval when the spool is empty (publishes also wake the loop directly).</summary>
     public TimeSpan IdlePollInterval { get; set; } = TimeSpan.FromSeconds(1);
+}
+
+/// <summary>
+/// Opt-in health reporting to Queuey Cloud — the fleet view. The node
+/// POSTs its <see cref="EdgeHealth"/> snapshot OUTBOUND to Cloud (never the
+/// other way: a node behind 4G or a plant firewall has no inbound path, and
+/// Queuey never wants one). Reports are never events: they are not spooled,
+/// not retried, not billed. A stale report is worthless, so a failed send is
+/// simply superseded by the next one.
+/// </summary>
+public sealed class EdgeHealthReportOptions
+{
+    /// <summary>Off by default. When true the node appears under "Edge nodes" in the console.</summary>
+    public bool ReportToCloud { get; set; }
+
+    /// <summary>
+    /// Human-readable node name shown in the console (e.g. "barge-07",
+    /// "press-line-2"). Defaults to the machine name. The node's stable
+    /// IDENTITY is separate: a UUID minted once and stored in the spool.
+    /// </summary>
+    public string? NodeName { get; set; }
+
+    /// <summary>Steady-state cadence. A state change reports immediately regardless.</summary>
+    public TimeSpan ReportInterval { get; set; } = TimeSpan.FromMinutes(5);
 }

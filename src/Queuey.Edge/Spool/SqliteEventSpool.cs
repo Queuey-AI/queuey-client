@@ -372,6 +372,26 @@ public sealed class SqliteEventSpool : IEventSpool
         return (mode, level);
     }
 
+    public Task<string?> GetMetaAsync(string key, CancellationToken cancellationToken)
+        => GuardedAsync(conn =>
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT v FROM edge_meta WHERE k = $k;";
+            cmd.Parameters.AddWithValue("$k", key);
+            return cmd.ExecuteScalar() as string;
+        }, cancellationToken);
+
+    public Task SetMetaAsync(string key, string value, CancellationToken cancellationToken)
+        => WriteLockedAsync(conn =>
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "INSERT INTO edge_meta (k, v) VALUES ($k, $v) ON CONFLICT(k) DO UPDATE SET v = excluded.v;";
+            cmd.Parameters.AddWithValue("$k", key);
+            cmd.Parameters.AddWithValue("$v", value);
+            cmd.ExecuteNonQuery();
+            return true;
+        }, cancellationToken);
+
     // ── plumbing ────────────────────────────────────────────────────────
 
     private async Task<T> WriteLockedAsync<T>(Func<SqliteConnection, T> work, CancellationToken ct)

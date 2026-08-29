@@ -62,7 +62,7 @@ REPLAY
 
 EDGE
   queuey edge run     --spool <path> --tenant <ten_...> --api-key <qak_...>
-                [--listen <port>] [--ingress-base <uri>] [--source <s>]
+                [--listen <port>] [--report-health] [--node-name <name>] [--ingress-base <uri>] [--source <s>]
                  Hosts the Edge transfer loop as a standalone daemon (systemd-friendly) — the
                  complete Edge for machines with no .NET app of their own: run this, and anything
                  on the box publishes durably with 'queuey edge publish'. --listen additionally
@@ -70,6 +70,9 @@ EDGE
                  (POST http://localhost:<port>/events/{tenant}/{queue}) — any language's plain
                  HTTP one-liner becomes durable by swapping the base URL; 202 = committed to the
                  local spool. Ctrl-C/SIGTERM to stop; accepted events survive restarts.
+                 --report-health (or QUEUEY_REPORT_HEALTH=1) makes the node check in to the
+                 console under Edge nodes (outbound only; reports are not events, never billed);
+                 --node-name (QUEUEY_NODE_NAME) is the label shown there, default: machine name.
   queuey edge publish <queue> --spool <path> --tenant <ten_...>
                 (--data '<json>' | --file <path>) [--content-type <ct>]
                 [--idempotency-key <k>] [--event-type <t>] [--group-key <k>]
