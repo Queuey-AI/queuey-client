@@ -46,7 +46,6 @@ internal sealed class QueueApplyResponse
 internal sealed class QueuePolicyPatchRequest
 {
     public string? Ordering { get; set; }
-    public int? MaxAttempts { get; set; }
     public bool? DlqEnabled { get; set; }
     public int? DlqAfterAttempts { get; set; }
     public int? RetentionDays { get; set; }

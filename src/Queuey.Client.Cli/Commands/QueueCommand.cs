@@ -176,7 +176,6 @@ internal static class QueueCommand
 
         var parts = new List<string>();
         if (p.Ordering != null) parts.Add($"ordering={p.Ordering}");
-        if (p.MaxAttempts is { } a) parts.Add($"maxAttempts={a}");
         if (p.DlqEnabled is { } d) parts.Add($"dlq={(d ? "on" : "off")}");
         if (p.DlqAfterAttempts is { } da) parts.Add($"dlqAfter={da}");
         if (p.RetentionDays is { } rd) parts.Add($"retentionDays={rd}");
@@ -194,7 +193,6 @@ internal static class QueueCommand
         policy = new
         {
             d.Policy.Ordering,
-            d.Policy.MaxAttempts,
             d.Policy.DlqEnabled,
             d.Policy.DlqAfterAttempts,
             d.Policy.RetentionDays,

@@ -44,7 +44,6 @@ public static class QueueCodeWriter
         var args = new List<string> { $"\"{name}\"" };
 
         if (!string.IsNullOrWhiteSpace(q.Ordering)) args.Add($"Ordering = \"{q.Ordering}\"");
-        if (q.MaxAttempts is { } a) args.Add($"MaxAttempts = {a}");
         if (q.DlqEnabled is { } d) args.Add($"DlqEnabled = {(d ? "true" : "false")}");
         if (q.DlqAfterAttempts is { } da) args.Add($"DlqAfterAttempts = {da}");
         if (q.RetentionDays is { } rd) args.Add($"RetentionDays = {rd}");

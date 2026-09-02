@@ -30,7 +30,7 @@ public class SyncQueuesTests
                 : StubHttpMessageHandler.Json(HttpStatusCode.OK, ApplyBody("orders")));
 
         QueueyService service = Build(api,
-            QueueDefinitionFactory.FromType(typeof(OrderQueue), null),      // declares ordering + maxAttempts
+            QueueDefinitionFactory.FromType(typeof(OrderQueue), null),      // declares ordering + dlqAfterAttempts
             QueueDefinitionFactory.FromType(typeof(ShipmentUpdates), null)); // declares nothing
 
         QueueSyncResult result = await service.SyncQueuesAsync();
@@ -63,7 +63,7 @@ public class SyncQueuesTests
         using JsonDocument doc = JsonDocument.Parse(api.Bodies[patchIndex]!);
 
         Assert.Equal("bykey", doc.RootElement.GetProperty("ordering").GetString());
-        Assert.Equal(8, doc.RootElement.GetProperty("maxAttempts").GetInt32());
+        Assert.Equal(8, doc.RootElement.GetProperty("dlqAfterAttempts").GetInt32());
 
         // Undeclared fields are ABSENT from the body, not sent as null. Absence is the unambiguous
         // way to say "leave it alone" — an explicit null could just as easily read as "clear it".

@@ -40,16 +40,13 @@ public sealed class QueueyQueueAttribute : Attribute
     /// </summary>
     public string? Ordering { get; set; }
 
-    /// <summary>
-    /// How many delivery attempts before the event is parked. Null inherits the workspace.
-    /// Declared as a nullable-backed pair because attribute arguments cannot be <c>int?</c>.
-    /// </summary>
-    public int MaxAttempts { get => _maxAttempts ?? 0; set => _maxAttempts = value; }
-
     /// <summary>Whether a dead-letter queue collects events that exhaust their attempts. Null inherits.</summary>
     public bool DlqEnabled { get => _dlqEnabled ?? false; set => _dlqEnabled = value; }
 
-    /// <summary>How many attempts before an event is dead-lettered. Null inherits.</summary>
+    /// <summary>
+    /// How many attempts before an event is dead-lettered — the queue's attempt budget. Null inherits
+    /// the workspace.
+    /// </summary>
     public int DlqAfterAttempts { get => _dlqAfterAttempts ?? 0; set => _dlqAfterAttempts = value; }
 
     /// <summary>How many days events are retained. Null inherits the workspace.</summary>
@@ -58,7 +55,6 @@ public sealed class QueueyQueueAttribute : Attribute
     /// <summary>Whether duplicate publishes are collapsed by idempotency key. Null inherits.</summary>
     public bool Idempotent { get => _idempotent ?? false; set => _idempotent = value; }
 
-    private int? _maxAttempts;
     private bool? _dlqEnabled;
     private int? _dlqAfterAttempts;
     private int? _retentionDays;
@@ -68,7 +64,6 @@ public sealed class QueueyQueueAttribute : Attribute
     internal QueuePolicy ToPolicy() => new()
     {
         Ordering = Ordering,
-        MaxAttempts = _maxAttempts,
         DlqEnabled = _dlqEnabled,
         DlqAfterAttempts = _dlqAfterAttempts,
         RetentionDays = _retentionDays,

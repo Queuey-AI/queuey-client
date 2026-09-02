@@ -14,7 +14,7 @@ public sealed class DriftItem
         Actual = actual;
     }
 
-    /// <summary>Where the difference is, e.g. <c>queues.orders.maxAttempts</c>.</summary>
+    /// <summary>Where the difference is, e.g. <c>queues.orders.dlqAfterAttempts</c>.</summary>
     public string Path { get; }
 
     /// <summary>What the file says, or <c>null</c> when it declares nothing there.</summary>
@@ -64,7 +64,6 @@ public static class DeploymentDrift
             }
 
             Compare(prefix + ".ordering", want.Ordering, have.Ordering, drift);
-            Compare(prefix + ".maxAttempts", want.MaxAttempts, have.MaxAttempts, drift);
             Compare(prefix + ".dlqEnabled", want.DlqEnabled, have.DlqEnabled, drift);
             Compare(prefix + ".dlqAfterAttempts", want.DlqAfterAttempts, have.DlqAfterAttempts, drift);
             Compare(prefix + ".retentionDays", want.RetentionDays, have.RetentionDays, drift);
