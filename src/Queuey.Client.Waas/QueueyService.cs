@@ -16,11 +16,13 @@ public sealed class QueueyService : IQueueyService
         QueueyClient client,
         QueueyControlPlaneClient controlPlane,
         StreamRegistry registry,
-        QueueyOptions options)
+        QueueyOptions options,
+        QueueRegistry? queues = null)
     {
         Client = client ?? throw new ArgumentNullException(nameof(client));
         _controlPlane = controlPlane ?? throw new ArgumentNullException(nameof(controlPlane));
         Registry = registry ?? throw new ArgumentNullException(nameof(registry));
+        Queues = queues ?? new QueueRegistry(Array.Empty<QueueDefinition>());
         _options = options ?? throw new ArgumentNullException(nameof(options));
         Integrations = new QueueyIntegrations(controlPlane);
         Management = new QueueyManagement(controlPlane);
@@ -34,6 +36,9 @@ public sealed class QueueyService : IQueueyService
 
     /// <inheritdoc />
     public StreamRegistry Registry { get; }
+
+    /// <inheritdoc />
+    public QueueRegistry Queues { get; }
 
     /// <inheritdoc />
     public QueueyClient Client { get; }
@@ -98,11 +103,11 @@ public sealed class QueueyService : IQueueyService
     // ---- sync ----
 
     /// <inheritdoc />
-    public Task<SyncResult> SyncModelsAsync(SyncOptions? options = null, CancellationToken cancellationToken = default)
+    public Task<SyncResult> SyncStreamsAsync(SyncOptions? options = null, CancellationToken cancellationToken = default)
         => SyncDefinitionsAsync(Registry.Streams, options, cancellationToken);
 
     /// <inheritdoc />
-    public Task<SyncResult> SyncModelsAsync(IEnumerable<Type> modelTypes, SyncOptions? options = null, CancellationToken cancellationToken = default)
+    public Task<SyncResult> SyncStreamsAsync(IEnumerable<Type> modelTypes, SyncOptions? options = null, CancellationToken cancellationToken = default)
     {
         if (modelTypes is null) throw new ArgumentNullException(nameof(modelTypes));
         var definitions = modelTypes.Select(t => StreamDefinitionFactory.FromType(t, null)).ToArray();
@@ -114,6 +119,11 @@ public sealed class QueueyService : IQueueyService
     public async Task<StreamApplyResult> ApplyStreamAsync(StreamDefinition definition, CancellationToken cancellationToken = default)
     {
         if (definition is null) throw new ArgumentNullException(nameof(definition));
+
+        // Last gate before the wire: definitions from the factory are already validated, but a
+        // hand-constructed one reaches this method directly. The server rejects a bad name with an
+        // unhelpful error, so fail here with the rule instead.
+        QueueyName.EnsureValid(definition.Name, "stream name");
 
         var request = new StreamApplyRequest
         {
@@ -195,15 +205,26 @@ public sealed class QueueyService : IQueueyService
 
         var selected = (options.Filter is null ? definitions : definitions.Where(options.Filter)).ToList();
 
-        // Fail fast on missing credentials before any network call (dry runs need none).
+        // ── Preflight: everything checkable without the network, before the first write ──
+        // A sync is not a transaction, so the cheapest way to avoid a half-converged workspace is to
+        // fail on the whole plan before any of it is applied. Names and duplicates are already
+        // enforced at registration; re-checking here also covers hand-built definitions and the
+        // by-type overload. Credentials are checked once, not per stream (dry runs need none).
+        foreach (StreamDefinition def in selected)
+            QueueyName.EnsureValid(def.Name, "stream name");
+
         if (!options.DryRun)
             RequireForSync();
 
         var streamResults = new List<StreamApplyResult>();
         var applied = new List<(StreamDefinition Def, string CatalogId)>(); // succeeded streams + their cat_ ids
+        var notAttempted = new List<string>();
+        bool stopped = false;
 
-        foreach (StreamDefinition def in selected)
+        for (int i = 0; i < selected.Count; i++)
         {
+            StreamDefinition def = selected[i];
+
             if (options.DryRun)
             {
                 streamResults.Add(new StreamApplyResult
@@ -217,36 +238,309 @@ public sealed class QueueyService : IQueueyService
                 continue;
             }
 
+            QueueyException? failure = null;
             try
             {
                 StreamApplyResult r = await ApplyStreamAsync(def, cancellationToken).ConfigureAwait(false);
-                streamResults.Add(r);
+
                 if (r.PublicId is { } catId)
+                {
+                    streamResults.Add(r);
                     applied.Add((def, catId));
+                }
+                else
+                {
+                    // A 2xx with no catalog id used to count as success while silently dropping the
+                    // stream from the package phase — a stream that reports "applied" but reaches no
+                    // partner. Treat the missing id as the failure it is.
+                    failure = new QueueyException(
+                        $"Queuey accepted stream '{def.Name}' but returned no catalog id, so it cannot be " +
+                        "assigned to its packages.");
+                }
             }
             catch (QueueyException ex)
             {
-                streamResults.Add(new StreamApplyResult
+                failure = ex;
+            }
+
+            if (failure is null)
+                continue;
+
+            streamResults.Add(new StreamApplyResult
+            {
+                ModelType = def.ModelType?.FullName ?? string.Empty,
+                Name = def.Name,
+                Succeeded = false,
+                Error = failure,
+                Packages = def.Packages,
+            });
+
+            if (!options.ContinueOnError)
+            {
+                // Name what we are NOT going to do, so a stopped run can never read as a clean one.
+                for (int rest = i + 1; rest < selected.Count; rest++)
+                    notAttempted.Add(selected[rest].Name);
+
+                stopped = true;
+                break;
+            }
+        }
+
+        // Skip the package phase entirely on a stopped run: assigning packages for a partially applied
+        // set of streams deepens the divergence the stop was meant to contain.
+        IReadOnlyList<PackageApplyResult> packageResults = stopped
+            ? Array.Empty<PackageApplyResult>()
+            : await ApplyPackagesAsync(selected, applied, options, cancellationToken).ConfigureAwait(false);
+
+        var result = new SyncResult(streamResults, packageResults, notAttempted);
+
+        // All-or-nothing in every mode: a run that did not fully converge throws, so partial success can
+        // never be mistaken for success. ContinueOnError only decides how much of the picture is
+        // gathered before that happens.
+        result.ThrowIfAnyFailed();
+
+        return result;
+    }
+
+    // ---- queues ----
+
+    /// <inheritdoc />
+    public Task<QueueSyncResult> SyncQueuesAsync(SyncOptions? options = null, CancellationToken cancellationToken = default)
+        => SyncQueueDefinitionsAsync(Queues.Queues, options, cancellationToken);
+
+    /// <inheritdoc />
+    public Task<QueueApplyResult> ApplyQueueAsync(QueueDefinition definition, CancellationToken cancellationToken = default)
+        => ApplyQueueAsync(definition, afterApply: null, cancellationToken);
+
+    private async Task<QueueApplyResult> ApplyQueueAsync(
+        QueueDefinition definition,
+        Func<QueueDefinition, string, CancellationToken, Task>? afterApply,
+        CancellationToken cancellationToken = default)
+    {
+        if (definition is null) throw new ArgumentNullException(nameof(definition));
+        QueueyName.EnsureValid(definition.Name, "queue name");
+
+        QueueApplyResponse response = await _controlPlane.ApplyQueueAsync(
+            new QueueApplyRequest
+            {
+                TenantPublicId = RequireTenant(),
+                DisplayName = definition.Name,
+            },
+            cancellationToken).ConfigureAwait(false);
+
+        if (response.PublicId is not { } queueId)
+        {
+            throw new QueueyException(
+                $"Queuey accepted queue '{definition.Name}' but returned no queue id, so its policy cannot be applied.");
+        }
+
+        // Policy is a separate PATCH, and only when something is actually declared — an all-inherit
+        // queue must not send a patch that could pin values it meant to keep inheriting.
+        bool policyApplied = false;
+        if (!definition.Policy.IsEmpty)
+        {
+            await _controlPlane.PatchQueuePolicyAsync(queueId, ToPatch(definition.Policy), cancellationToken).ConfigureAwait(false);
+            policyApplied = true;
+        }
+
+        // Delivery, when the deployment file gave this queue one. Inside the same try/apply as the
+        // rest, so a destination that fails to land fails the queue rather than leaving it "applied"
+        // while pointing nowhere.
+        if (afterApply is not null)
+            await afterApply(definition, queueId, cancellationToken).ConfigureAwait(false);
+
+        return new QueueApplyResult
+        {
+            ModelType = definition.ModelType?.FullName ?? string.Empty,
+            Name = definition.Name,
+            Succeeded = true,
+            PublicId = queueId,
+            Created = response.Created,
+            PolicyApplied = policyApplied,
+            // A queue that just got its own destination is ready regardless of what the apply said —
+            // the readiness answer predates the patch we just sent.
+            Warnings = afterApply is null ? ReadinessWarnings(definition, response) : Array.Empty<string>(),
+        };
+    }
+
+    /// <inheritdoc />
+    public IReadOnlyList<QueuePlan> PlanQueues()
+        => Queues.Queues.Select(d => new QueuePlan
+        {
+            ModelType = d.ModelType?.FullName,
+            Name = d.Name,
+            Policy = d.Policy,
+        }).ToArray();
+
+    /// <inheritdoc />
+    public async Task<(QueueSyncResult Queues, SyncResult Streams)> SyncAsync(SyncOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        // Queues first: a stream is published on top of a queue, so converging queues first means a
+        // stream apply never races the queue it needs. A queue failure throws before any stream is
+        // touched, which is the same all-or-nothing contract one level up.
+        QueueSyncResult queues = await SyncQueuesAsync(options, cancellationToken).ConfigureAwait(false);
+        SyncResult streams = await SyncStreamsAsync(options, cancellationToken).ConfigureAwait(false);
+        return (queues, streams);
+    }
+
+    /// <inheritdoc />
+    public Task<DeploymentFile> PullDeploymentAsync(string? tenantPublicId = null, CancellationToken cancellationToken = default)
+        => new DeploymentPuller(_controlPlane, Management)
+            .PullAsync(tenantPublicId ?? RequireTenant(), cancellationToken);
+
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<DriftItem>> CheckDeploymentAsync(
+        DeploymentFile file, string? tenantPublicId = null, CancellationToken cancellationToken = default)
+    {
+        if (file is null) throw new ArgumentNullException(nameof(file));
+
+        DeploymentFile declared = file.Expand();
+        _ = declared.Resolve();   // a file that cannot be applied is a failure, not "no drift"
+
+        string tenant = declared.Tenant ?? tenantPublicId ?? RequireTenant();
+        DeploymentFile actual = await PullDeploymentAsync(tenant, cancellationToken).ConfigureAwait(false);
+
+        return DeploymentDrift.Compare(declared, actual);
+    }
+
+    /// <inheritdoc />
+    public async Task<QueueSyncResult> ApplyDeploymentAsync(
+        DeploymentFile file, SyncOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        if (file is null) throw new ArgumentNullException(nameof(file));
+        options ??= new SyncOptions();
+
+        // Expand ${VAR} first: a file that names an unset variable must fail before a single write,
+        // not halfway through one.
+        file = file.Expand();
+
+        IReadOnlyList<DeploymentQueuePlan> plans = file.Resolve();   // validates names + policy locally
+        var byName = plans.ToDictionary(p => p.Definition.Name, StringComparer.Ordinal);
+
+        string tenant = file.Tenant ?? (options.DryRun ? _options.TenantPublicId ?? string.Empty : RequireTenant());
+        var credentials = new CredentialResolver(Management, tenant);
+
+        // Workspace first: queues inherit their destination from it, so converging it first means a
+        // queue that means to inherit already has something to inherit. A failure here throws before
+        // any queue is touched — same all-or-nothing contract, one level up.
+        if (!options.DryRun && file.Workspace is { } workspace && !workspace.IsEmpty)
+        {
+            WorkspaceDelivery resolved = await credentials.ResolveAsync(workspace, cancellationToken).ConfigureAwait(false);
+            await Management.SetWorkspaceDeliveryAsync(tenant, resolved, cancellationToken).ConfigureAwait(false);
+        }
+
+        QueueSyncResult result = await SyncQueueDefinitionsAsync(
+            plans.Select(p => p.Definition).ToArray(),
+            options,
+            cancellationToken,
+            afterApply: async (definition, queuePublicId, ct) =>
+            {
+                if (byName.TryGetValue(definition.Name, out DeploymentQueuePlan? plan) && plan.Delivery is { } delivery)
+                {
+                    QueueDelivery resolved = await credentials.ResolveAsync(delivery, ct).ConfigureAwait(false);
+                    await Management.SetQueueDeliveryAsync(queuePublicId, resolved, ct).ConfigureAwait(false);
+                }
+            }).ConfigureAwait(false);
+
+        return result;
+    }
+
+    /// <summary>
+    /// Readiness observations — never failures. The declared state landed; these say the workspace is
+    /// not fully wired yet. A queue a sync just created legitimately has no endpoint and starts in
+    /// LogOnly, which CONSUMES events to terminal Logged rather than delivering them — so saying
+    /// nothing would leave a producer publishing into something that looks like it works.
+    /// </summary>
+    private static IReadOnlyList<string> ReadinessWarnings(QueueDefinition definition, QueueApplyResponse response)
+    {
+        if (response.HasDeliveryTarget)
+            return Array.Empty<string>();
+
+        return new[]
+        {
+            $"Queue '{definition.Name}' has no delivery target — neither its own nor one inherited from the " +
+            "workspace. It accepts events and logs them without delivering. Set the workspace's default " +
+            "endpoint, or give this queue one, to start delivering.",
+        };
+    }
+
+    private static QueuePolicyPatchRequest ToPatch(QueuePolicy policy) => new()
+    {
+        Ordering = policy.Ordering,
+        MaxAttempts = policy.MaxAttempts,
+        DlqEnabled = policy.DlqEnabled,
+        DlqAfterAttempts = policy.DlqAfterAttempts,
+        RetentionDays = policy.RetentionDays,
+        Idempotent = policy.Idempotent,
+    };
+
+    /// <summary>
+    /// The queue twin of <see cref="SyncDefinitionsAsync"/> — same contract, deliberately: preflight
+    /// locally, stop at the first failure, name what was not attempted, and throw unless everything
+    /// converged.
+    /// </summary>
+    private async Task<QueueSyncResult> SyncQueueDefinitionsAsync(
+        IReadOnlyList<QueueDefinition> definitions,
+        SyncOptions? options,
+        CancellationToken cancellationToken,
+        Func<QueueDefinition, string, CancellationToken, Task>? afterApply = null)
+    {
+        options ??= new SyncOptions();
+
+        var selected = (options.QueueFilter is null ? definitions : definitions.Where(options.QueueFilter)).ToList();
+
+        foreach (QueueDefinition def in selected)
+            QueueyName.EnsureValid(def.Name, "queue name");
+
+        if (!options.DryRun)
+            RequireForSync();
+
+        var results = new List<QueueApplyResult>();
+        var notAttempted = new List<string>();
+
+        for (int i = 0; i < selected.Count; i++)
+        {
+            QueueDefinition def = selected[i];
+
+            if (options.DryRun)
+            {
+                results.Add(new QueueApplyResult
+                {
+                    ModelType = def.ModelType?.FullName ?? string.Empty,
+                    Name = def.Name,
+                    Succeeded = true,
+                    DryRun = true,
+                    PolicyApplied = !def.Policy.IsEmpty,
+                });
+                continue;
+            }
+
+            try
+            {
+                results.Add(await ApplyQueueAsync(def, afterApply, cancellationToken).ConfigureAwait(false));
+                continue;
+            }
+            catch (QueueyException ex)
+            {
+                results.Add(new QueueApplyResult
                 {
                     ModelType = def.ModelType?.FullName ?? string.Empty,
                     Name = def.Name,
                     Succeeded = false,
                     Error = ex,
-                    Packages = def.Packages,
                 });
+            }
 
-                if (options.StopOnFirstError)
-                    break;
+            if (!options.ContinueOnError)
+            {
+                for (int rest = i + 1; rest < selected.Count; rest++)
+                    notAttempted.Add(selected[rest].Name);
+                break;
             }
         }
 
-        IReadOnlyList<PackageApplyResult> packageResults =
-            await ApplyPackagesAsync(selected, applied, options, cancellationToken).ConfigureAwait(false);
-
-        var result = new SyncResult(streamResults, packageResults);
-        if (options.StopOnFirstError)
-            result.ThrowIfAnyFailed();
-
+        var result = new QueueSyncResult(results, notAttempted);
+        result.ThrowIfAnyFailed();
         return result;
     }
 
@@ -293,14 +587,14 @@ public sealed class QueueyService : IQueueyService
             catch (QueueyException ex)
             {
                 results.Add(new PackageApplyResult { Name = name, Succeeded = false, Error = ex });
-                if (options.StopOnFirstError) break;
+                if (!options.ContinueOnError) break;
                 continue;
             }
 
             if (packageId is null)
             {
                 results.Add(new PackageApplyResult { Name = name, Succeeded = false });
-                if (options.StopOnFirstError) break;
+                if (!options.ContinueOnError) break;
                 continue;
             }
 
@@ -331,7 +625,7 @@ public sealed class QueueyService : IQueueyService
                 Error = assignError,
             });
 
-            if (assignError is not null && options.StopOnFirstError)
+            if (assignError is not null && !options.ContinueOnError)
                 break;
         }
 
@@ -353,15 +647,15 @@ public sealed class QueueyService : IQueueyService
     {
         RequireTenant();
         if (string.IsNullOrWhiteSpace(_options.LicensePublicId))
-            throw new QueueyConfigurationException("LicensePublicId is required for SyncModels. Set QueueyOptions.LicensePublicId.");
+            throw new QueueyConfigurationException("LicensePublicId is required for SyncStreams. Set QueueyOptions.LicensePublicId.");
         if (string.IsNullOrWhiteSpace(_options.ApiKey))
-            throw new QueueyConfigurationException("An API key is required for SyncModels. Set QueueyOptions.ApiKey.");
+            throw new QueueyConfigurationException("An API key is required for SyncStreams. Set QueueyOptions.ApiKey.");
     }
 
     private string RequireTenant()
     {
         if (string.IsNullOrWhiteSpace(_options.TenantPublicId))
-            throw new QueueyConfigurationException("TenantPublicId (the producer tenant) is required for SyncModels. Set QueueyOptions.TenantPublicId.");
+            throw new QueueyConfigurationException("TenantPublicId (the producer tenant) is required for SyncStreams. Set QueueyOptions.TenantPublicId.");
         return _options.TenantPublicId!;
     }
 }

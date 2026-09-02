@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -17,6 +18,41 @@ public interface IQueueyManagement
 
     /// <summary>Creates a queue under a tenant.</summary>
     Task<QueueResult> CreateQueueAsync(string tenantPublicId, string displayName, CancellationToken cancellationToken = default);
+
+    /// <summary>Lists a workspace's queues — name, id, mode and whether each has anywhere to deliver.</summary>
+    Task<IReadOnlyList<QueueListItem>> ListQueuesAsync(string tenantPublicId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Patches the workspace's default delivery endpoint — the layer every queue inherits from. Null
+    /// properties are left alone, so this can never clear config it was not told about.
+    /// </summary>
+    Task SetWorkspaceDeliveryAsync(string tenantPublicId, WorkspaceDelivery delivery, CancellationToken cancellationToken = default);
+
+    /// <summary>Patches one queue's destination. Null properties are left alone.</summary>
+    Task SetQueueDeliveryAsync(string queuePublicId, QueueDelivery delivery, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Stores a delivery credential under a workspace and returns its label. The secret is encrypted
+    /// at rest and never readable again — a <c>credentialRef</c> points at it by name, which is what
+    /// keeps a deployment file safe to commit.
+    /// </summary>
+    Task<CredentialResult> CreateCredentialAsync(
+        string tenantPublicId, string name, string type, string secret,
+        string? keyId = null, string? username = null, CancellationToken cancellationToken = default);
+
+    /// <summary>Lists a workspace's delivery credentials — labels and types only, never values.</summary>
+    Task<IReadOnlyList<CredentialResult>> ListCredentialsAsync(string tenantPublicId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Mints an ingress signing key for a queue, so producers can publish with HMAC instead of an API
+    /// key. The secret is returned <b>once</b>.
+    /// </summary>
+    /// <remarks>
+    /// Needs <c>ApiKeyManage</c>, which a deploy key deliberately does not carry: a key that could
+    /// mint keys would turn pipeline access into account access. Run this from an admin credential,
+    /// once, and put the result in your producer's secret store.
+    /// </remarks>
+    Task<IngressSigningKey> MintIngressKeyAsync(string queuePublicId, string name, CancellationToken cancellationToken = default);
 
     /// <summary>Reads a queue's traffic snapshot (<c>GET /queues/{q}/metrics/snapshot</c>).</summary>
     Task<QueueMetricsSnapshot> GetQueueMetricsSnapshotAsync(string queuePublicId, CancellationToken cancellationToken = default);
@@ -68,4 +104,29 @@ public sealed class QueueResult
     public string? PublicId { get; init; }
     public string? TenantPublicId { get; init; }
     public string? DisplayName { get; init; }
+}
+
+/// <summary>One row of a workspace's queue listing.</summary>
+public sealed class QueueListItem
+{
+    /// <summary>Queue public id (<c>que_…</c>).</summary>
+    public string? PublicId { get; init; }
+
+    /// <summary>The queue name — what you publish to.</summary>
+    public string? DisplayName { get; init; }
+
+    /// <summary>Run mode: <c>Deliver</c> or <c>LogOnly</c>.</summary>
+    public string? Mode { get; init; }
+
+    /// <summary>Whether the queue resolves to somewhere to deliver, its own or the workspace's.</summary>
+    public bool HasDeliveryTarget { get; init; }
+
+    /// <summary>Ingress is closed — new events are rejected while the backlog drains.</summary>
+    public bool IngressClosed { get; init; }
+
+    /// <summary>Delivery is held — events accumulate without being delivered.</summary>
+    public bool DeliveryHeld { get; init; }
+
+    /// <summary>Platform-suspended.</summary>
+    public bool Suspended { get; init; }
 }

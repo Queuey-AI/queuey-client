@@ -1,6 +1,6 @@
 namespace Queuey.Client.Waas;
 
-/// <summary>The outcome of applying one package (and assigning its streams) during <c>SyncModels</c>.</summary>
+/// <summary>The outcome of applying one package (and assigning its streams) during <c>SyncStreams</c>.</summary>
 public sealed class PackageApplyResult
 {
     /// <summary>The package name.</summary>

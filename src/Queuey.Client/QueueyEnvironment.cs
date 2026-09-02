@@ -17,7 +17,7 @@ public enum QueueyEnvironment
 /// is reached by overriding <c>ApiBaseAddress</c>/<c>IngressBaseAddress</c>.</summary>
 internal static class QueueyHosts
 {
-    /// <summary>The control-plane (management / WaaS / SyncModels) host.</summary>
+    /// <summary>The control-plane (management / WaaS / SyncStreams) host.</summary>
     public static Uri Api(QueueyEnvironment environment) => new Uri("https://api.queuey.ai");
 
     /// <summary>The ingress (publish) host.</summary>

@@ -189,6 +189,140 @@ internal sealed class QueueyControlPlaneClient
             HttpMethod.Post, uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
     }
 
+    // ── Queues: declarative apply + policy patch ──────────────────────────────
+
+    /// <summary>Applies a queue via <c>PUT /queues</c> (idempotent by tenant + name; existence only).</summary>
+    public async Task<QueueApplyResponse> ApplyQueueAsync(QueueApplyRequest request, CancellationToken cancellationToken)
+    {
+        if (request is null) throw new ArgumentNullException(nameof(request));
+
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues");
+        byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
+
+        return await _connection.SendForJsonAsync<QueueApplyResponse>(
+            HttpMethod.Put, uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Patches a queue's policy (<c>PATCH /queues/{que}/policy</c>). Null fields are left alone — this
+    /// is deliberately NOT the full-state <c>PUT /queues/{que}/config</c>, which would also rewrite
+    /// (and on an empty base URL, clear) the queue's delivery config.
+    /// </summary>
+    public async Task PatchQueuePolicyAsync(string queuePublicId, QueuePolicyPatchRequest request, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(queuePublicId)) throw new ArgumentException("A queue public id is required.", nameof(queuePublicId));
+        if (request is null) throw new ArgumentNullException(nameof(request));
+
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues", queuePublicId, "policy");
+        byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
+
+        await _connection.SendAsync(
+            new HttpMethod("PATCH"), uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    // ── Delivery + credentials (the destination, and the secrets it uses) ─────
+
+    /// <summary>Patches the workspace's default endpoint (<c>PATCH /tenants/{ten}/delivery</c>). Returns 204.</summary>
+    public async Task PatchTenantDeliveryAsync(string tenantPublicId, PatchTenantDeliveryWireRequest request, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "delivery");
+        byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
+
+        await _connection.SendAsync(
+            new HttpMethod("PATCH"), uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Patches one queue's destination (<c>PATCH /queues/{que}/delivery</c>). Returns 204.</summary>
+    public async Task PatchQueueDeliveryAsync(string queuePublicId, PatchQueueDeliveryWireRequest request, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues", queuePublicId, "delivery");
+        byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
+
+        await _connection.SendAsync(
+            new HttpMethod("PATCH"), uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Stores a delivery credential (<c>POST /tenants/{ten}/credentials</c>). The value is never readable again.</summary>
+    public async Task<CredentialWireResponse> CreateCredentialAsync(string tenantPublicId, CreateCredentialWireRequest request, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "credentials");
+        byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
+
+        return await _connection.SendForJsonAsync<CredentialWireResponse>(
+            HttpMethod.Post, uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Lists a workspace's delivery credentials — labels only (<c>GET /tenants/{ten}/credentials</c>).</summary>
+    public async Task<List<CredentialWireResponse>> ListCredentialsAsync(string tenantPublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "credentials");
+        return await _connection.SendForJsonAsync<List<CredentialWireResponse>>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Lists a tenant's queues (<c>GET /tenants/{ten}/queues</c>).</summary>
+    public async Task<List<QueueListItemResponse>> ListQueuesAsync(string tenantPublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "queues");
+        return await _connection.SendForJsonAsync<List<QueueListItemResponse>>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Reads the workspace's delivery + policy config (<c>GET /tenants/{ten}/config</c>).</summary>
+    public async Task<TenantConfigResponse> GetTenantConfigAsync(string tenantPublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "config");
+        return await _connection.SendForJsonAsync<TenantConfigResponse>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Reads one queue's config with its per-section inherit flags (<c>GET /queues/{que}/config</c>).</summary>
+    public async Task<QueueConfigResponse> GetQueueConfigAsync(string queuePublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues", queuePublicId, "config");
+        return await _connection.SendForJsonAsync<QueueConfigResponse>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Mints an ingress signing key for a queue (<c>POST /hmacclients/queues/{que}</c>).</summary>
+    public async Task<CreateQueueHmacClientWireResponse> MintIngressKeyAsync(
+        string queuePublicId, CreateQueueHmacClientWireRequest request, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "hmacclients", "queues", queuePublicId);
+        byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
+
+        return await _connection.SendForJsonAsync<CreateQueueHmacClientWireResponse>(
+            HttpMethod.Post, uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
     // ── Package lifecycle (update / archive / remove stream) ───────────────────
 
     /// <summary>Updates a package's name/description (<c>PUT …/packages/{pkg}</c>).</summary>
@@ -296,7 +430,7 @@ internal sealed class QueueyControlPlaneClient
     {
         if (string.IsNullOrWhiteSpace(_options.ApiKey))
             throw new QueueyConfigurationException(
-                "An API key is required for control-plane operations (SyncModels). Set QueueyOptions.ApiKey.");
+                "An API key is required for control-plane operations (SyncStreams). Set QueueyOptions.ApiKey.");
         return _options.ApiKey!;
     }
 
@@ -304,7 +438,7 @@ internal sealed class QueueyControlPlaneClient
     {
         if (string.IsNullOrWhiteSpace(_options.LicensePublicId))
             throw new QueueyConfigurationException(
-                "LicensePublicId is required for control-plane operations (SyncModels). Set QueueyOptions.LicensePublicId.");
+                "LicensePublicId is required for control-plane operations (SyncStreams). Set QueueyOptions.LicensePublicId.");
         return _options.LicensePublicId!;
     }
 }

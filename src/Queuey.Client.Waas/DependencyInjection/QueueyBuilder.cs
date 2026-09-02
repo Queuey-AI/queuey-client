@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 namespace Queuey.Client.Waas;
 
@@ -9,6 +10,7 @@ namespace Queuey.Client.Waas;
 internal sealed class QueueyBuilder : IQueueyBuilder
 {
     private readonly List<StreamDefinition> _streams = new();
+    private readonly List<QueueDefinition> _queues = new();
     private bool _generateSchemas;
 
     public QueueyBuilder(IServiceCollection services) => Services = services;
@@ -18,6 +20,19 @@ internal sealed class QueueyBuilder : IQueueyBuilder
     public IQueueyBuilder GenerateSchemas(bool enabled = true)
     {
         _generateSchemas = enabled;
+        return this;
+    }
+
+    public IQueueyBuilder SyncOnStartup(Action<SyncOptions>? configure = null)
+    {
+        var options = new SyncOptions();
+        configure?.Invoke(options);
+
+        Services.AddSingleton(options);
+        Services.AddSingleton<IHostedService>(sp => new QueueyStartupSync(
+            sp.GetRequiredService<IQueueyService>(),
+            sp.GetRequiredService<SyncOptions>()));
+
         return this;
     }
 
@@ -45,8 +60,43 @@ internal sealed class QueueyBuilder : IQueueyBuilder
     public IQueueyBuilder AddStreamsFromAssemblyContaining<TMarker>()
         => AddStreamsFromAssembly(typeof(TMarker).Assembly);
 
+    public IQueueyBuilder AddQueue<T>(Action<QueueOptions>? configure = null)
+    {
+        _queues.Add(QueueDefinitionFactory.FromType(typeof(T), BuildQueueOptions(configure)));
+        return this;
+    }
+
+    public IQueueyBuilder AddQueue(string name, Action<QueueOptions>? configure = null)
+    {
+        _queues.Add(QueueDefinitionFactory.FromName(name, BuildQueueOptions(configure)));
+        return this;
+    }
+
+    public IQueueyBuilder AddQueuesFromAssembly(params Assembly[] assemblies)
+    {
+        if (assemblies is null) throw new ArgumentNullException(nameof(assemblies));
+        foreach (Assembly assembly in assemblies)
+            foreach (Type type in QueueDiscovery.TypesWithQueueyQueue(assembly))
+                _queues.Add(QueueDefinitionFactory.FromType(type, null));
+        return this;
+    }
+
+    public IQueueyBuilder AddQueuesFromAssemblyContaining<TMarker>()
+        => AddQueuesFromAssembly(typeof(TMarker).Assembly);
+
     /// <summary>Builds the registry (throws on duplicate stream names / model types).</summary>
     public StreamRegistry BuildRegistry() => new(_streams);
+
+    /// <summary>Builds the queue registry (throws on duplicate queue names / types).</summary>
+    public QueueRegistry BuildQueueRegistry() => new(_queues);
+
+    private static QueueOptions? BuildQueueOptions(Action<QueueOptions>? configure)
+    {
+        if (configure is null) return null;
+        var options = new QueueOptions();
+        configure(options);
+        return options;
+    }
 
     private static StreamOptions? BuildOptions(Action<StreamOptions>? configure)
     {
