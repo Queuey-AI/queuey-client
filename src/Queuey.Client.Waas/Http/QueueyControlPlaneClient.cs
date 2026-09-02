@@ -189,6 +189,43 @@ internal sealed class QueueyControlPlaneClient
             HttpMethod.Post, uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
     }
 
+    // ── Queues: declarative apply + policy patch ──────────────────────────────
+
+    /// <summary>Applies a queue via <c>PUT /queues</c> (idempotent by tenant + name; existence only).</summary>
+    public async Task<QueueApplyResponse> ApplyQueueAsync(QueueApplyRequest request, CancellationToken cancellationToken)
+    {
+        if (request is null) throw new ArgumentNullException(nameof(request));
+
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues");
+        byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
+
+        return await _connection.SendForJsonAsync<QueueApplyResponse>(
+            HttpMethod.Put, uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Patches a queue's policy (<c>PATCH /queues/{que}/policy</c>). Null fields are left alone — this
+    /// is deliberately NOT the full-state <c>PUT /queues/{que}/config</c>, which would also rewrite
+    /// (and on an empty base URL, clear) the queue's delivery config.
+    /// </summary>
+    public async Task PatchQueuePolicyAsync(string queuePublicId, QueuePolicyPatchRequest request, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(queuePublicId)) throw new ArgumentException("A queue public id is required.", nameof(queuePublicId));
+        if (request is null) throw new ArgumentNullException(nameof(request));
+
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues", queuePublicId, "policy");
+        byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
+
+        await _connection.SendAsync(
+            new HttpMethod("PATCH"), uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
     // ── Package lifecycle (update / archive / remove stream) ───────────────────
 
     /// <summary>Updates a package's name/description (<c>PUT …/packages/{pkg}</c>).</summary>

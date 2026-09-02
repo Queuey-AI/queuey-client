@@ -25,4 +25,7 @@ public sealed class SyncOptions
 
     /// <summary>Optional predicate to sync only a subset of streams (e.g. the CLI's <c>--only</c>).</summary>
     public Func<StreamDefinition, bool>? Filter { get; set; }
+
+    /// <summary>Optional predicate to sync only a subset of queues. The queue twin of <see cref="Filter"/>.</summary>
+    public Func<QueueDefinition, bool>? QueueFilter { get; set; }
 }

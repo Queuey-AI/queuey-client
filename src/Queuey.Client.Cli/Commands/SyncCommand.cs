@@ -76,7 +76,7 @@ internal static class SyncCommand
             {
                 // A run that did not fully converge always throws — render the ledger it carries
                 // (including what was never attempted) rather than just the stack trace.
-                result = ex.Result;
+                result = ex.Streams!;
             }
         }
 

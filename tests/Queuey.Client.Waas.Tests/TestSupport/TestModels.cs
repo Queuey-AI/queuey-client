@@ -41,3 +41,17 @@ public sealed class Sandbox
 {
     public string Id { get; init; } = string.Empty;
 }
+
+/// <summary>A queue declared with an explicit name and a partial policy — the rest inherits.</summary>
+[QueueyQueue("orders", Description = "Order pipeline", Ordering = "bykey", MaxAttempts = 8)]
+public sealed class OrderQueue
+{
+    public string OrderId { get; init; } = string.Empty;
+}
+
+/// <summary>A queue with no attribute values at all — name by convention, behaviour fully inherited.</summary>
+[QueueyQueue]
+public sealed class ShipmentUpdates
+{
+    public string ShipmentId { get; init; } = string.Empty;
+}

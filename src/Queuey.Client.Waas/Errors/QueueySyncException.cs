@@ -11,18 +11,28 @@ namespace Queuey.Client.Waas;
 public sealed class QueueySyncException : QueueyException
 {
     /// <summary>Creates the exception from an aggregate message and the run's result.</summary>
-    public QueueySyncException(string message, SyncResult result)
-        : base(message, statusCode: null, errorCode: null, innerException: FirstError(result?.Applied))
+    public QueueySyncException(string message, ISyncRunResult run)
+        : base(message, statusCode: null, errorCode: null, innerException: FirstError(run))
     {
-        Result = result ?? throw new ArgumentNullException(nameof(result));
+        Run = run ?? throw new ArgumentNullException(nameof(run));
     }
 
-    /// <summary>The full run: applied streams, packages, and the streams never attempted.</summary>
-    public SyncResult Result { get; }
+    /// <summary>The run, whatever it applied. Cast to <see cref="SyncResult"/> or <see cref="QueueSyncResult"/> for detail.</summary>
+    public ISyncRunResult Run { get; }
 
-    /// <summary>The per-stream outcomes of the sync run (both succeeded and failed).</summary>
-    public IReadOnlyList<StreamApplyResult> Results => Result.Applied;
+    /// <summary>The stream run, when this came from <c>SyncStreams</c>; otherwise <c>null</c>.</summary>
+    public SyncResult? Streams => Run as SyncResult;
 
-    private static Exception? FirstError(IReadOnlyList<StreamApplyResult>? results)
-        => results?.FirstOrDefault(r => !r.Succeeded && r.Error != null)?.Error;
+    /// <summary>The queue run, when this came from <c>SyncQueues</c>; otherwise <c>null</c>.</summary>
+    public QueueSyncResult? Queues => Run as QueueSyncResult;
+
+    /// <summary>The per-stream outcomes, when this came from a stream run; otherwise empty.</summary>
+    public IReadOnlyList<StreamApplyResult> Results => Streams?.Applied ?? Array.Empty<StreamApplyResult>();
+
+    private static Exception? FirstError(ISyncRunResult? run) => run switch
+    {
+        SyncResult s => s.Applied.FirstOrDefault(r => !r.Succeeded && r.Error != null)?.Error,
+        QueueSyncResult q => q.Applied.FirstOrDefault(r => !r.Succeeded && r.Error != null)?.Error,
+        _ => null,
+    };
 }

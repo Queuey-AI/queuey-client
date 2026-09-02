@@ -81,7 +81,7 @@ public class SyncStreamsTests
         // Default is all-or-nothing: the run stops at "bad-stream" and throws rather than returning a
         // half-converged result the caller might read as success.
         QueueySyncException ex = await Assert.ThrowsAsync<QueueySyncException>(() => service.SyncStreamsAsync());
-        SyncResult result = ex.Result;
+        SyncResult result = ex.Streams!;
 
         Assert.Equal(3, result.Total);                       // all three were selected
         Assert.Equal(1, result.Succeeded);                   // good-stream applied
@@ -117,9 +117,9 @@ public class SyncStreamsTests
         QueueySyncException ex = await Assert.ThrowsAsync<QueueySyncException>(
             () => service.SyncStreamsAsync(new SyncOptions { ContinueOnError = true }));
 
-        Assert.Equal(2, ex.Result.Succeeded);        // good-stream and later-stream both applied
-        Assert.Equal(1, ex.Result.Failed);
-        Assert.Empty(ex.Result.NotAttempted);        // nothing was skipped — the whole picture was gathered
+        Assert.Equal(2, ex.Streams!.Succeeded);        // good-stream and later-stream both applied
+        Assert.Equal(1, ex.Streams!.Failed);
+        Assert.Empty(ex.Streams!.NotAttempted);        // nothing was skipped — the whole picture was gathered
     }
 
     [Fact]
@@ -135,8 +135,8 @@ public class SyncStreamsTests
 
         QueueySyncException ex = await Assert.ThrowsAsync<QueueySyncException>(() => service.SyncStreamsAsync());
 
-        Assert.Equal(0, ex.Result.Succeeded);
-        Assert.Contains("returned no catalog id", ex.Result.Applied.Single().Error!.Message);
+        Assert.Equal(0, ex.Streams!.Succeeded);
+        Assert.Contains("returned no catalog id", ex.Streams!.Applied.Single().Error!.Message);
     }
 
     [Fact]

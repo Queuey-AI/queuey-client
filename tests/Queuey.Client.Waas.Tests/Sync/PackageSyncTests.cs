@@ -116,7 +116,7 @@ public class PackageSyncTests
         });
 
         QueueySyncException ex = await Assert.ThrowsAsync<QueueySyncException>(() => service.SyncStreamsAsync());
-        SyncResult result = ex.Result;
+        SyncResult result = ex.Streams!;
 
         Assert.False(result.AllSucceeded);              // a package failed
         Assert.Equal(1, result.Succeeded);              // the stream itself applied

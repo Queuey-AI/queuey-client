@@ -14,7 +14,7 @@ namespace Queuey.Client.Waas;
 /// <see cref="NotAttempted"/> names exactly what did not happen, and <see cref="AllSucceeded"/> is
 /// false whenever anything failed <i>or</i> was skipped.
 /// </remarks>
-public sealed class SyncResult
+public sealed class SyncResult : ISyncRunResult
 {
     /// <summary>Creates a result from the per-stream and per-package outcomes.</summary>
     /// <param name="applied">The streams the run attempted, in apply order.</param>
@@ -55,6 +55,10 @@ public sealed class SyncResult
 
     /// <summary>Whether every selected stream and every package succeeded, with nothing left unattempted.</summary>
     public bool AllSucceeded => Failed == 0 && NotAttempted.Count == 0 && Packages.All(p => p.Succeeded);
+
+    /// <inheritdoc />
+    /// <remarks>Stream runs raise no readiness warnings today — a stream's queue is created by the apply itself.</remarks>
+    public IReadOnlyList<string> Warnings => Array.Empty<string>();
 
     /// <summary>Throws a <see cref="QueueySyncException"/> aggregating every failure, if anything failed.</summary>
     public void ThrowIfAnyFailed()

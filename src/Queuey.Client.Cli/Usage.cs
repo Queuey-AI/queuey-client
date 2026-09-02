@@ -9,6 +9,7 @@ USAGE
 
 COMMANDS
   sync           Apply every [QueueyModel] stream found in an assembly (PUT /waas/streams).
+  queue          Declare queues from [QueueyQueue] types: queue plan | queue sync.
   publish        Publish an event to a stream.
   create-tenant  Create a tenant under the current license.
   create-queue   Create a queue under a tenant.
@@ -25,6 +26,14 @@ SYNC
                  --continue-on-error applies the rest first to collect every failure. Either
                  way a run that did not fully converge exits non-zero. Applying is idempotent,
                  so a fixed re-run converges.
+
+QUEUE
+  queuey queue plan --assembly <path.dll> [--only a,b] [--json]
+                 Network-free preview of the [QueueyQueue] declarations — no credentials needed.
+  queuey queue sync --assembly <path.dll> [--only a,b] [--continue-on-error] [--json]
+                 Ensures each queue exists and patches the policy of those that declare one.
+                 A queue with no delivery target is reported as a warning, not a failure: it
+                 accepts events and logs them without delivering until an endpoint is set.
 
 PUBLISH
   queuey publish <stream> --event <type> [--key <k>]

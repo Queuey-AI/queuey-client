@@ -65,6 +65,27 @@ public interface IQueueyService
     /// <summary>A network-free preview of what <see cref="SyncStreamsAsync(SyncOptions,CancellationToken)"/> would apply.</summary>
     IReadOnlyList<StreamPlan> Plan();
 
+    /// <summary>
+    /// Applies every registered queue via <c>PUT /queues</c>, patching the policy of those that
+    /// declare one. Safe to run on every deploy — applying is idempotent.
+    /// </summary>
+    Task<QueueSyncResult> SyncQueuesAsync(SyncOptions? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>Applies a single explicit queue definition (ensure it exists, then patch its policy).</summary>
+    Task<QueueApplyResult> ApplyQueueAsync(QueueDefinition definition, CancellationToken cancellationToken = default);
+
+    /// <summary>A network-free preview of what <see cref="SyncQueuesAsync"/> would apply.</summary>
+    IReadOnlyList<QueuePlan> PlanQueues();
+
+    /// <summary>
+    /// Applies queues, then streams. Queues go first because a stream is published on top of one, so a
+    /// queue failure stops the run before any stream is touched.
+    /// </summary>
+    Task<(QueueSyncResult Queues, SyncResult Streams)> SyncAsync(SyncOptions? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>The registered queues (inspectable in tests).</summary>
+    QueueRegistry Queues { get; }
+
     /// <summary>Producer-side integration-partner management (invite, grant packages, activate group keys).</summary>
     IQueueyIntegrations Integrations { get; }
 

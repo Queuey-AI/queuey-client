@@ -137,6 +137,38 @@ b => b.AddStream<OrderCreated>().SyncOnStartup();
 would have every replica applying the same streams at once. A deploy step (`queuey sync --assembly`)
 is the better home for it in production.
 
+## Queues: declare where your events land
+
+A **queue** is the pipeline you publish into and Queuey delivers from. Declare one when you deliver
+to your own endpoint; declare a **stream** (above) when integration partners subscribe. A stream has
+a queue underneath it, so a full sync applies queues first.
+
+```csharp
+[QueueyQueue("orders", Ordering = "bykey", MaxAttempts = 8)]
+public sealed class OrderQueue { }
+
+builder.Services.AddQueuey(
+    o => { /* credentials */ },
+    b => b.AddQueue<OrderQueue>());
+
+await queuey.SyncQueuesAsync();     //  or:  queuey queue sync --assembly App.dll
+await queuey.SyncAsync();           //  queues, then streams
+```
+
+Every policy field you leave off **inherits from the workspace** — declaring a field is how the code
+takes ownership of it. The attribute covers behaviour only: `Ordering`, `MaxAttempts`, `DlqEnabled`,
+`DlqAfterAttempts`, `RetentionDays`, `Idempotent`. The destination — endpoint URL, outbound auth,
+signing — is deliberately not declarable here. It differs per environment and carries secrets, so it
+belongs in configuration, not in a type that ships in your assembly.
+
+```bash
+queuey queue plan --assembly App.dll     # network-free, no credentials needed
+```
+
+A queue that has nowhere to deliver yet is reported as a **warning, not a failure**: the state you
+declared did land, the workspace just isn't wired up. Such a queue starts in log-only mode, so it
+accepts events and records them without delivering — worth knowing before you point production at it.
+
 ## CLI (`queuey`)
 
 The `Queuey.Cli` tool mirrors the SDK and adds local-debugging verbs. Run it from source, or install
