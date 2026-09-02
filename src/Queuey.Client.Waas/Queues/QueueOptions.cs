@@ -12,9 +12,6 @@ public sealed class QueueOptions
     /// </summary>
     public string? Name { get; set; }
 
-    /// <summary>Overrides the description.</summary>
-    public string? Description { get; set; }
-
     /// <summary>
     /// Policy overrides, laid over the attribute's per field — a value set here wins, a null here
     /// keeps whatever the attribute declared, and null in both means inherit from the workspace.

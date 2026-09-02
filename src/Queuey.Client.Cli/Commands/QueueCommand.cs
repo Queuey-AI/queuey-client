@@ -191,7 +191,6 @@ internal static class QueueCommand
     {
         d.Name,
         modelType = d.ModelType?.FullName,
-        d.Description,
         policy = new
         {
             d.Policy.Ordering,

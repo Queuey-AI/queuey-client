@@ -15,9 +15,6 @@ public sealed class QueueDefinition
     /// <summary>The queue name — the string you publish to, and the ingress URL segment.</summary>
     public string Name { get; init; } = default!;
 
-    /// <summary>Optional description.</summary>
-    public string? Description { get; init; }
-
     /// <summary>The declared behaviour. Null fields inherit from the workspace.</summary>
     public QueuePolicy Policy { get; init; } = new();
 }

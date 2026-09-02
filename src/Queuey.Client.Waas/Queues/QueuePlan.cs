@@ -12,9 +12,6 @@ public sealed class QueuePlan
     /// <summary>The queue name that would be applied.</summary>
     public string Name { get; init; } = default!;
 
-    /// <summary>The description that would be applied.</summary>
-    public string? Description { get; init; }
-
     /// <summary>The behaviour that would be declared. Null fields inherit from the workspace.</summary>
     public QueuePolicy Policy { get; init; } = new();
 

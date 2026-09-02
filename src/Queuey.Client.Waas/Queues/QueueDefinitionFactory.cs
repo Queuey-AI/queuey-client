@@ -22,7 +22,6 @@ internal static class QueueDefinitionFactory
         {
             ModelType = type,
             Name = name,
-            Description = overrides?.Description ?? attr?.Description,
             Policy = policy,
         };
     }
@@ -42,7 +41,6 @@ internal static class QueueDefinitionFactory
         {
             ModelType = null,
             Name = resolved,
-            Description = overrides?.Description,
             Policy = policy,
         };
     }

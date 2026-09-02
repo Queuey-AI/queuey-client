@@ -9,7 +9,6 @@ internal sealed class QueueApplyRequest
 {
     public string TenantPublicId { get; set; } = default!;
     public string DisplayName { get; set; } = default!;
-    public string? Description { get; set; }
 }
 
 /// <summary>

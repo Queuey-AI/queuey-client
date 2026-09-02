@@ -12,7 +12,6 @@ public class QueueDeclarationTests
         QueueDefinition def = QueueDefinitionFactory.FromType(typeof(OrderQueue), null);
 
         Assert.Equal("orders", def.Name);
-        Assert.Equal("Order pipeline", def.Description);
         Assert.Equal("bykey", def.Policy.Ordering);
         Assert.Equal(8, def.Policy.MaxAttempts);
 

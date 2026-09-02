@@ -43,7 +43,7 @@ public sealed class Sandbox
 }
 
 /// <summary>A queue declared with an explicit name and a partial policy — the rest inherits.</summary>
-[QueueyQueue("orders", Description = "Order pipeline", Ordering = "bykey", MaxAttempts = 8)]
+[QueueyQueue("orders", Ordering = "bykey", MaxAttempts = 8)]
 public sealed class OrderQueue
 {
     public string OrderId { get; init; } = string.Empty;

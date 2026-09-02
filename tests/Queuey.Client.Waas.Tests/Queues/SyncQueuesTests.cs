@@ -74,6 +74,25 @@ public class SyncQueuesTests
     }
 
     [Fact]
+    public async Task The_apply_body_is_just_the_tenant_and_the_name()
+    {
+        // Existence only. Policy travels in its own PATCH so that an apply never has to round-trip
+        // (and risk clearing) the queue's delivery config.
+        var api = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(HttpStatusCode.OK, ApplyBody("orders")));
+        QueueyService service = Build(api, QueueDefinitionFactory.FromName("orders", null));
+
+        await service.SyncQueuesAsync();
+
+        Assert.Equal(HttpMethod.Put, api.Requests[0].Method);
+        Assert.EndsWith("/queues", api.Requests[0].RequestUri!.AbsolutePath);
+
+        using JsonDocument doc = JsonDocument.Parse(api.Bodies[0]!);
+        Assert.Equal("ten_abc", doc.RootElement.GetProperty("tenantPublicId").GetString());
+        Assert.Equal("orders", doc.RootElement.GetProperty("displayName").GetString());
+        Assert.Equal(2, doc.RootElement.EnumerateObject().Count());
+    }
+
+    [Fact]
     public async Task A_queue_with_nowhere_to_deliver_warns_but_does_not_fail()
     {
         // The decided semantics: the declared state landed, so this is readiness, not convergence.

@@ -319,7 +319,6 @@ public sealed class QueueyService : IQueueyService
             {
                 TenantPublicId = RequireTenant(),
                 DisplayName = definition.Name,
-                Description = definition.Description,
             },
             cancellationToken).ConfigureAwait(false);
 
@@ -356,7 +355,6 @@ public sealed class QueueyService : IQueueyService
         {
             ModelType = d.ModelType?.FullName,
             Name = d.Name,
-            Description = d.Description,
             Policy = d.Policy,
         }).ToArray();
 

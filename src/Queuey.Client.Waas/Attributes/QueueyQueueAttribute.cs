@@ -35,9 +35,6 @@ public sealed class QueueyQueueAttribute : Attribute
     /// </summary>
     public string? Name { get; set; }
 
-    /// <summary>Optional human-readable description.</summary>
-    public string? Description { get; set; }
-
     /// <summary>
     /// Delivery ordering: <c>fifo</c>, <c>bykey</c> or <c>besteffort</c>. Null inherits the workspace.
     /// </summary>
