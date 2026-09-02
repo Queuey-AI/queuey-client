@@ -10,6 +10,8 @@ USAGE
 COMMANDS
   sync           Apply every [QueueyModel] stream found in an assembly (PUT /waas/streams).
   queue          Declare queues from [QueueyQueue] types: queue plan | queue sync.
+  apply          Converge Queuey from a declarative deployment file (queuey.deploy.json).
+  credentials    Store delivery secrets a deployment file refers to: credentials set | list.
   publish        Publish an event to a stream.
   create-tenant  Create a tenant under the current license.
   create-queue   Create a queue under a tenant.
@@ -34,6 +36,24 @@ QUEUE
                  Ensures each queue exists and patches the policy of those that declare one.
                  A queue with no delivery target is reported as a warning, not a failure: it
                  accepts events and logs them without delivering until an endpoint is set.
+
+APPLY
+  queuey apply [--file queuey.deploy.json] [--dry-run] [--continue-on-error] [--json]
+                 Converges the workspace's delivery defaults, then each declared queue's
+                 behaviour and destination. Idempotent; exits non-zero unless it fully
+                 converged. --dry-run validates the file locally and sends nothing.
+                 The file carries NO secrets: auth and signing name a credentialRef, so it is
+                 meant to be committed. Keep it separate from queuey.json, which holds your
+                 API key and must not be.
+
+CREDENTIALS
+  queuey credentials set --name <name> --from-env <ENV_VAR> [--type <type>]
+                [--key-id <id>] [--username <u>] [--json]
+                 Stores a delivery secret under the workspace and names it, so a deployment
+                 file can refer to it as credentialRef. The value is read from the
+                 environment — never an argument, which would land in shell history and CI
+                 logs — is encrypted at rest, and is never readable again.
+  queuey credentials list [--json]
 
 PUBLISH
   queuey publish <stream> --event <type> [--key <k>]

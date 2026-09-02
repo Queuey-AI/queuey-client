@@ -52,3 +52,15 @@ internal sealed class QueuePolicyPatchRequest
     public int? RetentionDays { get; set; }
     public bool? Idempotent { get; set; }
 }
+
+/// <summary>Wire shape of one row from <c>GET /tenants/{ten}/queues</c>.</summary>
+internal sealed class QueueListItemResponse
+{
+    public string? PublicId { get; set; }
+    public string? DisplayName { get; set; }
+    public string? Mode { get; set; }
+    public bool HasDeliveryTarget { get; set; }
+    public bool IngressClosed { get; set; }
+    public bool DeliveryHeld { get; set; }
+    public bool Suspended { get; set; }
+}

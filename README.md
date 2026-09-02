@@ -169,6 +169,45 @@ A queue that has nowhere to deliver yet is reported as a **warning, not a failur
 declared did land, the workspace just isn't wired up. Such a queue starts in log-only mode, so it
 accepts events and records them without delivering — worth knowing before you point production at it.
 
+## Delivery as code (`queuey.deploy.json`)
+
+Where a queue delivers, and how it authenticates, differs per environment and carries secrets — so
+it lives in a file, not in an attribute. The **workspace** owns the destination; each queue owns only
+its path:
+
+```jsonc
+{
+  "workspace": {
+    "baseUrl": "https://hooks.example.com",
+    "authMode": "ApiKey",
+    "credentialRef": "partner-key",     // a name, never the secret
+    "authHeaderName": "X-Api-Key"
+  },
+  "queues": {
+    "orders":   { "ordering": "bykey", "maxAttempts": 8, "delivery": { "url": "/orders" } },
+    "invoices": { "retentionDays": 30 }   // no delivery block — inherits the workspace
+  }
+}
+```
+
+```bash
+queuey credentials set --name partner-key --from-env PARTNER_KEY
+queuey apply --dry-run     # validates locally, sends nothing
+queuey apply
+```
+
+A relative `url` appends to the workspace base, so moving hosts is one edit instead of N. An absolute
+URL overrides outright. A queue with no `delivery` block inherits — the shape to reach for.
+
+**This file carries no secrets and is meant to be committed.** `credentialRef` names a credential
+stored encrypted by `queuey credentials set`, which reads the value from an environment variable
+(never an argument — those land in shell history and CI logs) and can never read it back. Keep it
+separate from `queuey.json`, which holds your API key and must *not* be committed.
+
+Every omitted field means **leave alone**, everywhere: a file that names only a base URL changes only
+the base URL. A misspelled field is rejected rather than ignored — a declarative file that reports
+success while quietly skipping what you wrote is worse than one that fails.
+
 ## CLI (`queuey`)
 
 The `Queuey.Cli` tool mirrors the SDK and adds local-debugging verbs. Run it from source, or install

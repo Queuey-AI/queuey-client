@@ -226,6 +226,69 @@ internal sealed class QueueyControlPlaneClient
             new HttpMethod("PATCH"), uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
     }
 
+    // ── Delivery + credentials (the destination, and the secrets it uses) ─────
+
+    /// <summary>Patches the workspace's default endpoint (<c>PATCH /tenants/{ten}/delivery</c>). Returns 204.</summary>
+    public async Task PatchTenantDeliveryAsync(string tenantPublicId, PatchTenantDeliveryWireRequest request, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "delivery");
+        byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
+
+        await _connection.SendAsync(
+            new HttpMethod("PATCH"), uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Patches one queue's destination (<c>PATCH /queues/{que}/delivery</c>). Returns 204.</summary>
+    public async Task PatchQueueDeliveryAsync(string queuePublicId, PatchQueueDeliveryWireRequest request, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues", queuePublicId, "delivery");
+        byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
+
+        await _connection.SendAsync(
+            new HttpMethod("PATCH"), uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Stores a delivery credential (<c>POST /tenants/{ten}/credentials</c>). The value is never readable again.</summary>
+    public async Task<CredentialWireResponse> CreateCredentialAsync(string tenantPublicId, CreateCredentialWireRequest request, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "credentials");
+        byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
+
+        return await _connection.SendForJsonAsync<CredentialWireResponse>(
+            HttpMethod.Post, uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Lists a workspace's delivery credentials — labels only (<c>GET /tenants/{ten}/credentials</c>).</summary>
+    public async Task<List<CredentialWireResponse>> ListCredentialsAsync(string tenantPublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "credentials");
+        return await _connection.SendForJsonAsync<List<CredentialWireResponse>>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Lists a tenant's queues (<c>GET /tenants/{ten}/queues</c>).</summary>
+    public async Task<List<QueueListItemResponse>> ListQueuesAsync(string tenantPublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "queues");
+        return await _connection.SendForJsonAsync<List<QueueListItemResponse>>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
     // ── Package lifecycle (update / archive / remove stream) ───────────────────
 
     /// <summary>Updates a package's name/description (<c>PUT …/packages/{pkg}</c>).</summary>

@@ -1,0 +1,147 @@
+using System;
+using System.Collections.Generic;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+
+namespace Queuey.Client.Waas;
+
+/// <summary>
+/// A declarative deployment file — <c>queuey.deploy.json</c> by default. Describes the workspace's
+/// delivery defaults and each queue's behaviour and destination, so a deploy converges Queuey from
+/// something reviewable in a pull request.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Deliberately a <b>separate file</b> from <c>queuey.json</c>. That one holds connection config —
+/// an API key among it — and must not be committed; this one is meant to be. Keeping them apart is
+/// what stops "commit your Queuey config" from becoming "commit your API key".
+/// </para>
+/// <para>
+/// It carries no secrets by construction: auth and signing name a <c>credentialRef</c>, and the
+/// value behind that name is written once with <c>queuey credentials set</c> and stored encrypted.
+/// </para>
+/// <para>
+/// Every field is optional and an omitted one means <b>leave alone</b> — the same contract the whole
+/// sync path uses. A file that names only a base URL changes only the base URL.
+/// </para>
+/// </remarks>
+public sealed class DeploymentFile
+{
+    /// <summary>The default file name a deploy looks for.</summary>
+    public const string DefaultFileName = "queuey.deploy.json";
+
+    /// <summary>
+    /// The workspace (<c>ten_…</c>) this file describes. Optional — the CLI falls back to the tenant
+    /// in the connection config, so the same file can be applied to staging and production.
+    /// </summary>
+    public string? Tenant { get; set; }
+
+    /// <summary>The workspace's default delivery endpoint — what queues inherit their destination from.</summary>
+    public WorkspaceDelivery? Workspace { get; set; }
+
+    /// <summary>The queues to converge, keyed by queue name.</summary>
+    public Dictionary<string, DeploymentQueue> Queues { get; set; } = new(StringComparer.Ordinal);
+
+    /// <summary>Parses a deployment file. Throws <see cref="QueueyConfigurationException"/> on malformed JSON.</summary>
+    public static DeploymentFile Parse(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+            return new DeploymentFile();
+
+        try
+        {
+            return JsonSerializer.Deserialize<DeploymentFile>(json, ReadOptions) ?? new DeploymentFile();
+        }
+        catch (JsonException ex)
+        {
+            throw new QueueyConfigurationException($"Could not parse the deployment file: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Resolves the file into the definitions and delivery patches a sync applies, validating names
+    /// and policy locally so a typo fails before anything is written.
+    /// </summary>
+    public IReadOnlyList<DeploymentQueuePlan> Resolve()
+    {
+        var plans = new List<DeploymentQueuePlan>();
+
+        foreach (KeyValuePair<string, DeploymentQueue> entry in Queues)
+        {
+            DeploymentQueue declared = entry.Value ?? new DeploymentQueue();
+
+            // The key is the queue name — validated as written, like every other name a caller chose.
+            QueueyName.EnsureValid(entry.Key, "queue name");
+
+            var definition = QueueDefinitionFactory.FromName(entry.Key, new QueueOptions
+            {
+                Policy =
+                {
+                    Ordering = declared.Ordering,
+                    MaxAttempts = declared.MaxAttempts,
+                    DlqEnabled = declared.DlqEnabled,
+                    DlqAfterAttempts = declared.DlqAfterAttempts,
+                    RetentionDays = declared.RetentionDays,
+                    Idempotent = declared.Idempotent,
+                },
+            });
+
+            plans.Add(new DeploymentQueuePlan(definition, declared.Delivery));
+        }
+
+        return plans;
+    }
+
+    private static readonly JsonSerializerOptions ReadOptions = new(JsonSerializerDefaults.Web)
+    {
+        ReadCommentHandling = JsonCommentHandling.Skip,
+        AllowTrailingCommas = true,
+        // A misspelled field is a silent no-op otherwise — exactly the failure a declarative file
+        // must not have, since the deploy would report success while ignoring what you wrote.
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+    };
+}
+
+/// <summary>One queue's declaration: behaviour, and optionally its own destination.</summary>
+public sealed class DeploymentQueue
+{
+    /// <summary>Delivery ordering: <c>fifo</c>, <c>bykey</c> or <c>besteffort</c>.</summary>
+    public string? Ordering { get; set; }
+
+    /// <summary>Delivery attempts before an event is parked.</summary>
+    public int? MaxAttempts { get; set; }
+
+    /// <summary>Whether a dead-letter queue collects exhausted events.</summary>
+    public bool? DlqEnabled { get; set; }
+
+    /// <summary>Attempts before an event is dead-lettered.</summary>
+    public int? DlqAfterAttempts { get; set; }
+
+    /// <summary>Days events are retained.</summary>
+    public int? RetentionDays { get; set; }
+
+    /// <summary>Whether duplicate publishes are collapsed by idempotency key.</summary>
+    public bool? Idempotent { get; set; }
+
+    /// <summary>
+    /// This queue's destination. Omit it — the usual case — and the queue inherits the workspace.
+    /// A relative <c>url</c> appends to the workspace base, which is the shape to reach for.
+    /// </summary>
+    public QueueDelivery? Delivery { get; set; }
+}
+
+/// <summary>One resolved queue from a deployment file: what to apply, and what to point it at.</summary>
+public sealed class DeploymentQueuePlan
+{
+    internal DeploymentQueuePlan(QueueDefinition definition, QueueDelivery? delivery)
+    {
+        Definition = definition;
+        Delivery = delivery is null || delivery.IsEmpty ? null : delivery;
+    }
+
+    /// <summary>The queue to converge (name + behaviour).</summary>
+    public QueueDefinition Definition { get; }
+
+    /// <summary>Its destination patch, or <c>null</c> when the queue inherits the workspace.</summary>
+    public QueueDelivery? Delivery { get; }
+}

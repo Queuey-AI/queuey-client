@@ -78,6 +78,13 @@ public interface IQueueyService
     IReadOnlyList<QueuePlan> PlanQueues();
 
     /// <summary>
+    /// Converges Queuey from a declarative deployment file: the workspace's delivery defaults first,
+    /// then each queue's behaviour and destination. Workspace before queues, because a queue that
+    /// means to inherit needs something to inherit.
+    /// </summary>
+    Task<QueueSyncResult> ApplyDeploymentAsync(DeploymentFile file, SyncOptions? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Applies queues, then streams. Queues go first because a stream is published on top of one, so a
     /// queue failure stops the run before any stream is touched.
     /// </summary>

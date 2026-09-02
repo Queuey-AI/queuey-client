@@ -309,7 +309,13 @@ public sealed class QueueyService : IQueueyService
         => SyncQueueDefinitionsAsync(Queues.Queues, options, cancellationToken);
 
     /// <inheritdoc />
-    public async Task<QueueApplyResult> ApplyQueueAsync(QueueDefinition definition, CancellationToken cancellationToken = default)
+    public Task<QueueApplyResult> ApplyQueueAsync(QueueDefinition definition, CancellationToken cancellationToken = default)
+        => ApplyQueueAsync(definition, afterApply: null, cancellationToken);
+
+    private async Task<QueueApplyResult> ApplyQueueAsync(
+        QueueDefinition definition,
+        Func<QueueDefinition, string, CancellationToken, Task>? afterApply,
+        CancellationToken cancellationToken = default)
     {
         if (definition is null) throw new ArgumentNullException(nameof(definition));
         QueueyName.EnsureValid(definition.Name, "queue name");
@@ -337,6 +343,12 @@ public sealed class QueueyService : IQueueyService
             policyApplied = true;
         }
 
+        // Delivery, when the deployment file gave this queue one. Inside the same try/apply as the
+        // rest, so a destination that fails to land fails the queue rather than leaving it "applied"
+        // while pointing nowhere.
+        if (afterApply is not null)
+            await afterApply(definition, queueId, cancellationToken).ConfigureAwait(false);
+
         return new QueueApplyResult
         {
             ModelType = definition.ModelType?.FullName ?? string.Empty,
@@ -345,7 +357,9 @@ public sealed class QueueyService : IQueueyService
             PublicId = queueId,
             Created = response.Created,
             PolicyApplied = policyApplied,
-            Warnings = ReadinessWarnings(definition, response),
+            // A queue that just got its own destination is ready regardless of what the apply said —
+            // the readiness answer predates the patch we just sent.
+            Warnings = afterApply is null ? ReadinessWarnings(definition, response) : Array.Empty<string>(),
         };
     }
 
@@ -367,6 +381,38 @@ public sealed class QueueyService : IQueueyService
         QueueSyncResult queues = await SyncQueuesAsync(options, cancellationToken).ConfigureAwait(false);
         SyncResult streams = await SyncStreamsAsync(options, cancellationToken).ConfigureAwait(false);
         return (queues, streams);
+    }
+
+    /// <inheritdoc />
+    public async Task<QueueSyncResult> ApplyDeploymentAsync(
+        DeploymentFile file, SyncOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        if (file is null) throw new ArgumentNullException(nameof(file));
+        options ??= new SyncOptions();
+
+        IReadOnlyList<DeploymentQueuePlan> plans = file.Resolve();   // validates names + policy locally
+        var byName = plans.ToDictionary(p => p.Definition.Name, StringComparer.Ordinal);
+
+        // Workspace first: queues inherit their destination from it, so converging it first means a
+        // queue that means to inherit already has something to inherit. A failure here throws before
+        // any queue is touched — same all-or-nothing contract, one level up.
+        if (!options.DryRun && file.Workspace is { } workspace && !workspace.IsEmpty)
+        {
+            string tenant = file.Tenant ?? RequireTenant();
+            await Management.SetWorkspaceDeliveryAsync(tenant, workspace, cancellationToken).ConfigureAwait(false);
+        }
+
+        QueueSyncResult result = await SyncQueueDefinitionsAsync(
+            plans.Select(p => p.Definition).ToArray(),
+            options,
+            cancellationToken,
+            afterApply: async (definition, queuePublicId, ct) =>
+            {
+                if (byName.TryGetValue(definition.Name, out DeploymentQueuePlan? plan) && plan.Delivery is { } delivery)
+                    await Management.SetQueueDeliveryAsync(queuePublicId, delivery, ct).ConfigureAwait(false);
+            }).ConfigureAwait(false);
+
+        return result;
     }
 
     /// <summary>
@@ -404,7 +450,10 @@ public sealed class QueueyService : IQueueyService
     /// converged.
     /// </summary>
     private async Task<QueueSyncResult> SyncQueueDefinitionsAsync(
-        IReadOnlyList<QueueDefinition> definitions, SyncOptions? options, CancellationToken cancellationToken)
+        IReadOnlyList<QueueDefinition> definitions,
+        SyncOptions? options,
+        CancellationToken cancellationToken,
+        Func<QueueDefinition, string, CancellationToken, Task>? afterApply = null)
     {
         options ??= new SyncOptions();
 
@@ -438,7 +487,7 @@ public sealed class QueueyService : IQueueyService
 
             try
             {
-                results.Add(await ApplyQueueAsync(def, cancellationToken).ConfigureAwait(false));
+                results.Add(await ApplyQueueAsync(def, afterApply, cancellationToken).ConfigureAwait(false));
                 continue;
             }
             catch (QueueyException ex)

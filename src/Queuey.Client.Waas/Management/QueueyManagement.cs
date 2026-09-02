@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -34,6 +36,97 @@ internal sealed class QueueyManagement : IQueueyManagement
 
         return new QueueResult { PublicId = r.PublicId, TenantPublicId = r.TenantPublicId, DisplayName = r.DisplayName };
     }
+
+    public async Task<IReadOnlyList<QueueListItem>> ListQueuesAsync(string tenantPublicId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(tenantPublicId)) throw new ArgumentException("A tenant public id is required.", nameof(tenantPublicId));
+
+        List<QueueListItemResponse> rows = await _controlPlane.ListQueuesAsync(tenantPublicId, cancellationToken).ConfigureAwait(false);
+        return rows.Select(r => new QueueListItem
+        {
+            PublicId = r.PublicId,
+            DisplayName = r.DisplayName,
+            Mode = r.Mode,
+            HasDeliveryTarget = r.HasDeliveryTarget,
+            IngressClosed = r.IngressClosed,
+            DeliveryHeld = r.DeliveryHeld,
+            Suspended = r.Suspended,
+        }).ToArray();
+    }
+
+    public Task SetWorkspaceDeliveryAsync(string tenantPublicId, WorkspaceDelivery delivery, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(tenantPublicId)) throw new ArgumentException("A tenant public id is required.", nameof(tenantPublicId));
+        if (delivery is null) throw new ArgumentNullException(nameof(delivery));
+
+        return _controlPlane.PatchTenantDeliveryAsync(tenantPublicId, new PatchTenantDeliveryWireRequest
+        {
+            BaseUrl = delivery.BaseUrl,
+            AuthMode = delivery.AuthMode,
+            CredentialRef = delivery.CredentialRef,
+            AuthHeaderName = delivery.AuthHeaderName,
+            Method = delivery.Method,
+            TimeoutMs = delivery.TimeoutMs,
+            Signing = ToWire(delivery.Signing),
+            RateLimit = ToWire(delivery.RateLimit),
+        }, cancellationToken);
+    }
+
+    public Task SetQueueDeliveryAsync(string queuePublicId, QueueDelivery delivery, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(queuePublicId)) throw new ArgumentException("A queue public id is required.", nameof(queuePublicId));
+        if (delivery is null) throw new ArgumentNullException(nameof(delivery));
+
+        return _controlPlane.PatchQueueDeliveryAsync(queuePublicId, new PatchQueueDeliveryWireRequest
+        {
+            Url = delivery.Url,
+            Inherit = delivery.Inherit,
+            AuthMode = delivery.AuthMode,
+            CredentialRef = delivery.CredentialRef,
+            AuthHeaderName = delivery.AuthHeaderName,
+            TimeoutMs = delivery.TimeoutMs,
+            Signing = ToWire(delivery.Signing),
+            RateLimit = ToWire(delivery.RateLimit),
+        }, cancellationToken);
+    }
+
+    public async Task<CredentialResult> CreateCredentialAsync(
+        string tenantPublicId, string name, string type, string secret,
+        string? keyId = null, string? username = null, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(tenantPublicId)) throw new ArgumentException("A tenant public id is required.", nameof(tenantPublicId));
+        if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("A credential name is required.", nameof(name));
+        if (string.IsNullOrWhiteSpace(type)) throw new ArgumentException("A credential type is required.", nameof(type));
+        if (string.IsNullOrWhiteSpace(secret)) throw new ArgumentException("A secret is required.", nameof(secret));
+
+        CredentialWireResponse r = await _controlPlane.CreateCredentialAsync(tenantPublicId, new CreateCredentialWireRequest
+        {
+            Name = name.Trim(),
+            Type = type.Trim(),
+            Secret = secret,
+            KeyId = keyId,
+            Username = username,
+        }, cancellationToken).ConfigureAwait(false);
+
+        return ToResult(r);
+    }
+
+    public async Task<IReadOnlyList<CredentialResult>> ListCredentialsAsync(string tenantPublicId, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(tenantPublicId)) throw new ArgumentException("A tenant public id is required.", nameof(tenantPublicId));
+
+        List<CredentialWireResponse> rows = await _controlPlane.ListCredentialsAsync(tenantPublicId, cancellationToken).ConfigureAwait(false);
+        return rows.Select(ToResult).ToArray();
+    }
+
+    private static CredentialResult ToResult(CredentialWireResponse r)
+        => new() { PublicId = r.PublicId, Name = r.Name, Type = r.Type, KeyId = r.KeyId };
+
+    private static PatchSigningWire? ToWire(DeliverySigning? s)
+        => s is null ? null : new PatchSigningWire { Enabled = s.Enabled, CredentialRef = s.CredentialRef, TemplateKey = s.TemplateKey };
+
+    private static PatchRateLimitWire? ToWire(DeliveryRateLimit? r)
+        => r is null ? null : new PatchRateLimitWire { MaxRequests = r.MaxRequests, PerSeconds = r.PerSeconds };
 
     public Task<QueueMetricsSnapshot> GetQueueMetricsSnapshotAsync(string queuePublicId, CancellationToken cancellationToken = default)
     {
