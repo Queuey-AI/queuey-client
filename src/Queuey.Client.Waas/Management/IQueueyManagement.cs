@@ -43,6 +43,17 @@ public interface IQueueyManagement
     /// <summary>Lists a workspace's delivery credentials — labels and types only, never values.</summary>
     Task<IReadOnlyList<CredentialResult>> ListCredentialsAsync(string tenantPublicId, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Mints an ingress signing key for a queue, so producers can publish with HMAC instead of an API
+    /// key. The secret is returned <b>once</b>.
+    /// </summary>
+    /// <remarks>
+    /// Needs <c>ApiKeyManage</c>, which a deploy key deliberately does not carry: a key that could
+    /// mint keys would turn pipeline access into account access. Run this from an admin credential,
+    /// once, and put the result in your producer's secret store.
+    /// </remarks>
+    Task<IngressSigningKey> MintIngressKeyAsync(string queuePublicId, string name, CancellationToken cancellationToken = default);
+
     /// <summary>Reads a queue's traffic snapshot (<c>GET /queues/{q}/metrics/snapshot</c>).</summary>
     Task<QueueMetricsSnapshot> GetQueueMetricsSnapshotAsync(string queuePublicId, CancellationToken cancellationToken = default);
 

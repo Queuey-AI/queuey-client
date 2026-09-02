@@ -92,6 +92,13 @@ public interface IQueueyService
     Task<DeploymentFile> PullDeploymentAsync(string? tenantPublicId = null, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Reports what applying <paramref name="file"/> would change — the CI gate. Only what the file
+    /// declares is compared: a workspace holding settings the file says nothing about is inheritance
+    /// working as designed, not drift.
+    /// </summary>
+    Task<IReadOnlyList<DriftItem>> CheckDeploymentAsync(DeploymentFile file, string? tenantPublicId = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Applies queues, then streams. Queues go first because a stream is published on top of one, so a
     /// queue failure stops the run before any stream is touched.
     /// </summary>

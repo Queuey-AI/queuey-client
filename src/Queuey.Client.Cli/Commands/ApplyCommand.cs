@@ -18,7 +18,7 @@ internal static class ApplyCommand
 {
     private static readonly HashSet<string> Flags = new(StringComparer.Ordinal)
     {
-        "dry-run", "continue-on-error", "json", "help", "h",
+        "dry-run", "check", "continue-on-error", "json", "help", "h",
     };
 
     public static async Task<int> RunAsync(string[] args)
@@ -40,17 +40,23 @@ internal static class ApplyCommand
         {
             // Network-free: resolving validates names and policy, which is the failure worth catching
             // before a deploy window rather than during one.
-            IReadOnlyList<DeploymentQueuePlan> plans = file.Resolve();
+            // Expanding first means an unset ${VAR} fails here, in the dry run, rather than during
+            // the deploy it was meant to protect.
+            IReadOnlyList<DeploymentQueuePlan> plans = file.Expand().Resolve();
             if (map.Has("json"))
                 Console.WriteLine(JsonSerializer.Serialize(plans.Select(ToJsonPlan), CliHost.JsonOut));
             else
                 WritePlan(path, file, plans);
             return ExitCodes.Success;
+
         }
 
         ResolvedConfig config = CliHost.Resolve(map);
         using ServiceProvider provider = CliHost.BuildProvider(config);
         var service = provider.GetRequiredService<IQueueyService>();
+
+        if (map.Has("check"))
+            return await CheckAsync(service, file, path, map);
 
         QueueSyncResult result;
         try
@@ -68,6 +74,38 @@ internal static class ApplyCommand
             WriteHuman(result, path, config);
 
         return result.AllSucceeded ? ExitCodes.Success : ExitCodes.RuntimeError;
+    }
+
+    /// <summary>
+    /// The CI gate: report what applying would change, write nothing, and exit non-zero on drift so a
+    /// divergence is noticed at review time rather than during an incident.
+    /// </summary>
+    private static async Task<int> CheckAsync(IQueueyService service, DeploymentFile file, string path, ArgMap map)
+    {
+        IReadOnlyList<DriftItem> drift = await service.CheckDeploymentAsync(file);
+
+        if (map.Has("json"))
+        {
+            Console.WriteLine(JsonSerializer.Serialize(new
+            {
+                file = path,
+                inSync = drift.Count == 0,
+                drift = drift.Select(d => new { d.Path, d.Declared, d.Actual }),
+            }, CliHost.JsonOut));
+        }
+        else if (drift.Count == 0)
+        {
+            Console.WriteLine($"{path} matches the workspace — applying it would change nothing.");
+        }
+        else
+        {
+            Console.WriteLine($"{path} has drifted from the workspace ({drift.Count} difference(s)):");
+            foreach (DriftItem d in drift)
+                Console.WriteLine($"  ~ {d}");
+            Console.WriteLine("Run `queuey apply` to converge, or `queuey pull` if the workspace is right.");
+        }
+
+        return drift.Count == 0 ? ExitCodes.Success : ExitCodes.RuntimeError;
     }
 
     private static void WritePlan(string path, DeploymentFile file, IReadOnlyList<DeploymentQueuePlan> plans)

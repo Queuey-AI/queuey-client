@@ -389,11 +389,30 @@ public sealed class QueueyService : IQueueyService
             .PullAsync(tenantPublicId ?? RequireTenant(), cancellationToken);
 
     /// <inheritdoc />
+    public async Task<IReadOnlyList<DriftItem>> CheckDeploymentAsync(
+        DeploymentFile file, string? tenantPublicId = null, CancellationToken cancellationToken = default)
+    {
+        if (file is null) throw new ArgumentNullException(nameof(file));
+
+        DeploymentFile declared = file.Expand();
+        _ = declared.Resolve();   // a file that cannot be applied is a failure, not "no drift"
+
+        string tenant = declared.Tenant ?? tenantPublicId ?? RequireTenant();
+        DeploymentFile actual = await PullDeploymentAsync(tenant, cancellationToken).ConfigureAwait(false);
+
+        return DeploymentDrift.Compare(declared, actual);
+    }
+
+    /// <inheritdoc />
     public async Task<QueueSyncResult> ApplyDeploymentAsync(
         DeploymentFile file, SyncOptions? options = null, CancellationToken cancellationToken = default)
     {
         if (file is null) throw new ArgumentNullException(nameof(file));
         options ??= new SyncOptions();
+
+        // Expand ${VAR} first: a file that names an unset variable must fail before a single write,
+        // not halfway through one.
+        file = file.Expand();
 
         IReadOnlyList<DeploymentQueuePlan> plans = file.Resolve();   // validates names + policy locally
         var byName = plans.ToDictionary(p => p.Definition.Name, StringComparer.Ordinal);

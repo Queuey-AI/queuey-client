@@ -221,6 +221,37 @@ Every omitted field means **leave alone**, everywhere: a file that names only a 
 the base URL. A misspelled field is rejected rather than ignored — a declarative file that reports
 success while quietly skipping what you wrote is worse than one that fails.
 
+### One file, every environment
+
+Most of a deployment file is already portable — a queue that owns only `/orders` says the same thing
+everywhere. For the few values that aren't, `${VAR}` is expanded from the environment at apply time:
+
+```bash
+queuey pull --as staging          # rewrites the non-portable values into ${VAR} references
+queuey apply --check              # CI gate: writes nothing, exits non-zero on drift
+```
+
+An unset variable is an **error**, never an empty string — expanding to nothing would quietly give
+you a base URL of `https://` and a deploy that "succeeded" while pointing at nowhere. Use
+`${VAR:-default}` when a default is genuinely intended.
+
+`--check` compares only what the file declares. A workspace holding settings your file is silent
+about is inheritance working as designed, not drift — so you can put as much or as little under code
+as you want.
+
+Adopting a workspace that was configured before anyone wrote it down? `queuey pull --emit-code
+Queues.cs` generates the `[QueueyQueue]` declarations. Behaviour only: destinations stay in the
+deployment file, where they belong.
+
+### Publishing with HMAC instead of an API key
+
+```bash
+queuey keys mint --queue que_...
+```
+
+The secret is shown once. This needs a credential with key-management rights — a deploy key
+deliberately has none, since a key that can mint keys turns pipeline access into account access.
+
 ## CLI (`queuey`)
 
 The `Queuey.Cli` tool mirrors the SDK and adds local-debugging verbs. Run it from source, or install

@@ -13,6 +13,7 @@ COMMANDS
   apply          Converge Queuey from a declarative deployment file (queuey.deploy.json).
   pull           Read a workspace back into a deployment file (the inverse of apply).
   credentials    Store delivery secrets a deployment file refers to: credentials set | list.
+  keys           Mint an ingress signing key for a queue: keys mint.
   publish        Publish an event to a stream.
   create-tenant  Create a tenant under the current license.
   create-queue   Create a queue under a tenant.
@@ -39,22 +40,41 @@ QUEUE
                  accepts events and logs them without delivering until an endpoint is set.
 
 APPLY
-  queuey apply [--file queuey.deploy.json] [--dry-run] [--continue-on-error] [--json]
+  queuey apply [--file queuey.deploy.json] [--dry-run] [--check] [--continue-on-error] [--json]
                  Converges the workspace's delivery defaults, then each declared queue's
                  behaviour and destination. Idempotent; exits non-zero unless it fully
                  converged. --dry-run validates the file locally and sends nothing.
                  The file carries NO secrets: auth and signing name a credentialRef, so it is
                  meant to be committed. Keep it separate from queuey.json, which holds your
                  API key and must not be.
+                 --check writes nothing and exits non-zero when the file and the workspace
+                 have diverged — the CI gate. Only what the file declares is compared, so a
+                 workspace holding settings the file is silent about is not drift.
+                 ${VAR} in a value is expanded from the environment; an unset one is an
+                 error, never an empty string. Use ${VAR:-default} when a default is meant.
 
 PULL
   queuey pull [--file queuey.deploy.json] [--force] [--stdout]
+              [--as <environment>] [--emit-code <path.cs>] [--namespace <ns>]
                  Reads the workspace's delivery defaults and every queue back into a
                  deployment file. Inherit-aware — a queue that inherits a section writes
                  nothing for it, so the file says what is actually owned rather than freezing
                  today's defaults as permanent overrides. No secrets: credentials appear by
                  name. Refuses to overwrite an existing file without --force; use --stdout to
                  diff first.
+                 --as <env> rewrites the values that do not travel between workspaces (the
+                 workspace binding, the base URL, absolute queue URLs) into ${VAR} references,
+                 so one file converges every environment. Paths and credential names travel
+                 as they are.
+                 --emit-code writes [QueueyQueue] declarations for the pulled queues —
+                 behaviour only; destinations stay in the deployment file.
+
+KEYS
+  queuey keys mint --queue <que_...> [--name <label>] [--json]
+                 Mints an ingress signing key so producers can publish with HMAC instead of
+                 an API key. The secret is shown ONCE. Needs a credential with key-management
+                 rights — a deploy key deliberately has none, since a key that can mint keys
+                 turns pipeline access into account access.
 
 CREDENTIALS
   queuey credentials set --name <name> --from-env <ENV_VAR> [--type <type>]

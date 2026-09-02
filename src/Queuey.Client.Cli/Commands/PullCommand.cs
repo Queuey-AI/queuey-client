@@ -29,6 +29,21 @@ internal static class PullCommand
         var service = provider.GetRequiredService<IQueueyService>();
 
         DeploymentFile file = await service.PullDeploymentAsync(config.TenantPublicId);
+
+        // --as rewrites the handful of values that do not travel between environments into ${VAR}
+        // references, so one committed file converges them all.
+        string? asEnvironment = map.Get("as");
+        if (asEnvironment is not null)
+            file = DeploymentTemplate.ToTemplate(file, asEnvironment);
+
+        if (map.Get("emit-code") is { } codePath)
+        {
+            string code = QueueCodeWriter.ForFile(file, map.Get("namespace") ?? "Queues");
+            File.WriteAllText(codePath, code);
+            Console.WriteLine($"Wrote {codePath} — {file.Queues.Count} [QueueyQueue] declaration(s). "
+                              + "Behaviour only; destinations stay in the deployment file.");
+        }
+
         string json = file.ToJson();
 
         if (map.Has("stdout"))
@@ -49,9 +64,19 @@ internal static class PullCommand
 
         File.WriteAllText(path, json + Environment.NewLine);
 
-        Console.WriteLine($"Wrote {path} — {file.Queues.Count} queue(s) from {file.Tenant}.");
+        Console.WriteLine($"Wrote {path} — {file.Queues.Count} queue(s)"
+                          + (file.Tenant is null ? "" : $" from {file.Tenant}") + ".");
         Console.WriteLine("No secrets are in it: credentials appear by name only. Safe to commit "
                           + "(keep it separate from queuey.json, which holds your API key).");
+
+        IReadOnlyList<string> variables = file.ReferencedVariables();
+        if (variables.Count > 0)
+        {
+            Console.WriteLine($"Set these before applying it: {string.Join(", ", variables)}");
+            Console.WriteLine("Everything else travels as-is — a queue that owns only a path says the "
+                              + "same thing in every environment.");
+        }
+
         return ExitCodes.Success;
     }
 }

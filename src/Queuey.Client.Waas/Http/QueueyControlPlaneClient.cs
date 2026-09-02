@@ -309,6 +309,20 @@ internal sealed class QueueyControlPlaneClient
             HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Mints an ingress signing key for a queue (<c>POST /hmacclients/queues/{que}</c>).</summary>
+    public async Task<CreateQueueHmacClientWireResponse> MintIngressKeyAsync(
+        string queuePublicId, CreateQueueHmacClientWireRequest request, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "hmacclients", "queues", queuePublicId);
+        byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
+
+        return await _connection.SendForJsonAsync<CreateQueueHmacClientWireResponse>(
+            HttpMethod.Post, uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
     // ── Package lifecycle (update / archive / remove stream) ───────────────────
 
     /// <summary>Updates a package's name/description (<c>PUT …/packages/{pkg}</c>).</summary>

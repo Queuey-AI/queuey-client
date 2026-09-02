@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -56,6 +57,79 @@ public sealed class DeploymentFile
         {
             throw new QueueyConfigurationException($"Could not parse the deployment file: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Expands every <c>${VAR}</c> in the file against the environment, returning the file with the
+    /// values a deploy will actually send. An unset variable throws — see
+    /// <see cref="DeploymentVariables"/> for why that is not an empty string.
+    /// </summary>
+    /// <param name="lookup">Variable resolver; defaults to the process environment.</param>
+    public DeploymentFile Expand(Func<string, string?>? lookup = null)
+    {
+        var expanded = new DeploymentFile
+        {
+            Tenant = DeploymentVariables.Expand(Tenant, lookup, "tenant"),
+            Workspace = Workspace is null ? null : new WorkspaceDelivery
+            {
+                BaseUrl = DeploymentVariables.Expand(Workspace.BaseUrl, lookup, "workspace.baseUrl"),
+                AuthMode = Workspace.AuthMode,
+                CredentialRef = DeploymentVariables.Expand(Workspace.CredentialRef, lookup, "workspace.credentialRef"),
+                AuthHeaderName = Workspace.AuthHeaderName,
+                Method = Workspace.Method,
+                TimeoutMs = Workspace.TimeoutMs,
+                Signing = Workspace.Signing,
+                RateLimit = Workspace.RateLimit,
+            },
+        };
+
+        foreach (KeyValuePair<string, DeploymentQueue> entry in Queues)
+        {
+            DeploymentQueue q = entry.Value ?? new DeploymentQueue();
+            expanded.Queues[entry.Key] = new DeploymentQueue
+            {
+                Ordering = q.Ordering,
+                MaxAttempts = q.MaxAttempts,
+                DlqEnabled = q.DlqEnabled,
+                DlqAfterAttempts = q.DlqAfterAttempts,
+                RetentionDays = q.RetentionDays,
+                Idempotent = q.Idempotent,
+                Delivery = q.Delivery is null ? null : new QueueDelivery
+                {
+                    Url = DeploymentVariables.Expand(q.Delivery.Url, lookup, $"queues.{entry.Key}.delivery.url"),
+                    Inherit = q.Delivery.Inherit,
+                    AuthMode = q.Delivery.AuthMode,
+                    CredentialRef = DeploymentVariables.Expand(q.Delivery.CredentialRef, lookup, $"queues.{entry.Key}.delivery.credentialRef"),
+                    AuthHeaderName = q.Delivery.AuthHeaderName,
+                    TimeoutMs = q.Delivery.TimeoutMs,
+                    Signing = q.Delivery.Signing,
+                    RateLimit = q.Delivery.RateLimit,
+                },
+            };
+        }
+
+        return expanded;
+    }
+
+    /// <summary>Every environment variable this file references, for a dry run's report.</summary>
+    public IReadOnlyList<string> ReferencedVariables()
+    {
+        var names = new List<string>();
+        names.AddRange(DeploymentVariables.Referenced(Tenant));
+        names.AddRange(DeploymentVariables.Referenced(Workspace?.BaseUrl));
+        names.AddRange(DeploymentVariables.Referenced(Workspace?.CredentialRef));
+
+        foreach (DeploymentQueue q in Queues.Values)
+        {
+            names.AddRange(DeploymentVariables.Referenced(q?.Delivery?.Url));
+            names.AddRange(DeploymentVariables.Referenced(q?.Delivery?.CredentialRef));
+        }
+
+        var seen = new List<string>();
+        foreach (string n in names)
+            if (!seen.Contains(n, StringComparer.Ordinal))
+                seen.Add(n);
+        return seen;
     }
 
     /// <summary>

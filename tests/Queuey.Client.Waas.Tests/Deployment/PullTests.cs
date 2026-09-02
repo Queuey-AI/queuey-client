@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -138,6 +139,41 @@ public class PullTests
         using JsonDocument doc = JsonDocument.Parse(json);
         JsonElement plain = doc.RootElement.GetProperty("queues").GetProperty("plain");
         Assert.Equal(0, plain.EnumerateObject().Count());
+    }
+
+    [Fact]
+    public async Task Check_reports_drift_against_the_live_workspace()
+    {
+        // The CI gate end to end: declare something the workspace does not hold, and the check says so
+        // without writing anything.
+        DeploymentFile declared = DeploymentFile.Parse("""
+        { "tenant": "ten_abc", "queues": { "orders": { "maxAttempts": 99 } } }
+        """);
+
+        var api = new StubHttpMessageHandler(Route);
+        QueueyService service = WaasTestHost.Build(apiStub: api);
+
+        IReadOnlyList<DriftItem> drift = await service.CheckDeploymentAsync(declared);
+
+        DriftItem item = Assert.Single(drift);
+        Assert.Equal("queues.orders.maxAttempts", item.Path);
+        Assert.Equal("99", item.Declared);
+        Assert.Equal("8", item.Actual);
+
+        // Read-only: nothing was written on the way to the answer.
+        Assert.All(api.Requests, r => Assert.Equal(HttpMethod.Get, r.Method));
+    }
+
+    [Fact]
+    public async Task Check_is_silent_when_the_file_matches()
+    {
+        DeploymentFile declared = DeploymentFile.Parse("""
+        { "tenant": "ten_abc", "queues": { "orders": { "maxAttempts": 8, "ordering": "bykey" } } }
+        """);
+
+        QueueyService service = WaasTestHost.Build(apiStub: new StubHttpMessageHandler(Route));
+
+        Assert.Empty(await service.CheckDeploymentAsync(declared));
     }
 
     [Fact]

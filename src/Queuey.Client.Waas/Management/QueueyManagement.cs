@@ -119,6 +119,25 @@ internal sealed class QueueyManagement : IQueueyManagement
         return rows.Select(ToResult).ToArray();
     }
 
+    public async Task<IngressSigningKey> MintIngressKeyAsync(string queuePublicId, string name, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(queuePublicId)) throw new ArgumentException("A queue public id is required.", nameof(queuePublicId));
+        if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("A key name is required.", nameof(name));
+
+        CreateQueueHmacClientWireResponse r = await _controlPlane
+            .MintIngressKeyAsync(queuePublicId, new CreateQueueHmacClientWireRequest { Name = name.Trim() }, cancellationToken)
+            .ConfigureAwait(false);
+
+        return new IngressSigningKey
+        {
+            ClientPublicId = r.ClientPublicId,
+            ClientName = r.ClientName,
+            KeyId = r.KeyId,
+            Secret = r.Secret,
+            QueuePublicId = r.QueuePublicId,
+        };
+    }
+
     private static CredentialResult ToResult(CredentialWireResponse r)
         => new() { PublicId = r.PublicId, Name = r.Name, Type = r.Type, KeyId = r.KeyId };
 

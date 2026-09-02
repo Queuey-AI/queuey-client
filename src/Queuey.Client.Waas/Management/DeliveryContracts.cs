@@ -243,3 +243,36 @@ internal sealed class QueuePolicyResponse
     public int RetentionDays { get; set; }
     public string? Ordering { get; set; }
 }
+
+/// <summary>An ingress signing key minted for a queue. The secret is returned <b>once</b>.</summary>
+public sealed class IngressSigningKey
+{
+    /// <summary>The client this key belongs to.</summary>
+    public string? ClientPublicId { get; init; }
+
+    /// <summary>The client's display name.</summary>
+    public string? ClientName { get; init; }
+
+    /// <summary>Goes in <c>QueueyOptions.SigningKeyId</c>.</summary>
+    public string? KeyId { get; init; }
+
+    /// <summary>Goes in <c>QueueyOptions.SigningSecret</c>. Shown once and never retrievable again.</summary>
+    public string? Secret { get; init; }
+
+    /// <summary>The queue the key signs for.</summary>
+    public string? QueuePublicId { get; init; }
+}
+
+internal sealed class CreateQueueHmacClientWireRequest
+{
+    public string Name { get; set; } = default!;
+}
+
+internal sealed class CreateQueueHmacClientWireResponse
+{
+    public string? ClientPublicId { get; set; }
+    public string? ClientName { get; set; }
+    public string? KeyId { get; set; }
+    public string? Secret { get; set; }
+    public string? QueuePublicId { get; set; }
+}
