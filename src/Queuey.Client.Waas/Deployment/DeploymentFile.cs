@@ -90,7 +90,6 @@ public sealed class DeploymentFile
             {
                 Ordering = q.Ordering,
                 DlqEnabled = q.DlqEnabled,
-                DlqAfterAttempts = q.DlqAfterAttempts,
                 RetentionDays = q.RetentionDays,
                 Idempotent = q.Idempotent,
                 Delivery = q.Delivery is null ? null : new QueueDelivery
@@ -152,7 +151,6 @@ public sealed class DeploymentFile
                 {
                     Ordering = declared.Ordering,
                     DlqEnabled = declared.DlqEnabled,
-                    DlqAfterAttempts = declared.DlqAfterAttempts,
                     RetentionDays = declared.RetentionDays,
                     Idempotent = declared.Idempotent,
                 },
@@ -194,9 +192,6 @@ public sealed class DeploymentQueue
 
     /// <summary>Whether a dead-letter queue collects exhausted events.</summary>
     public bool? DlqEnabled { get; set; }
-
-    /// <summary>Attempts before an event is dead-lettered — the queue's attempt budget.</summary>
-    public int? DlqAfterAttempts { get; set; }
 
     /// <summary>Days events are retained.</summary>
     public int? RetentionDays { get; set; }

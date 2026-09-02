@@ -12,7 +12,7 @@ public class TemplateAndDriftTests
       "tenant": "ten_prod",
       "workspace": { "baseUrl": "https://prod.example.com", "authMode": "ApiKey", "credentialRef": "partner-key" },
       "queues": {
-        "orders":   { "dlqAfterAttempts": 8, "delivery": { "url": "/orders" } },
+        "orders":   { "retentionDays": 30, "delivery": { "url": "/orders" } },
         "billing":  { "delivery": { "url": "https://billing.prod.example.com/in" } },
         "plain":    { }
       }
@@ -41,7 +41,7 @@ public class TemplateAndDriftTests
         Assert.Equal("partner-key", t.Workspace.CredentialRef);
 
         // Behaviour is not environment-specific.
-        Assert.Equal(8, t.Queues["orders"].DlqAfterAttempts);
+        Assert.Equal(30, t.Queues["orders"].RetentionDays);
     }
 
     [Fact]
@@ -119,12 +119,12 @@ public class TemplateAndDriftTests
     public void A_changed_value_is_drift()
     {
         DeploymentFile actual = Pulled();
-        actual.Queues["orders"].DlqAfterAttempts = 3;
+        actual.Queues["orders"].RetentionDays = 3;
 
         DriftItem item = Assert.Single(DeploymentDrift.Compare(Pulled(), actual));
 
-        Assert.Equal("queues.orders.dlqAfterAttempts", item.Path);
-        Assert.Equal("8", item.Declared);
+        Assert.Equal("queues.orders.retentionDays", item.Path);
+        Assert.Equal("30", item.Declared);
         Assert.Equal("3", item.Actual);
     }
 
@@ -145,11 +145,11 @@ public class TemplateAndDriftTests
         // The property that makes the gate usable: a team need not put every field under code. A
         // workspace carrying settings the file is silent about is inheritance working as designed.
         DeploymentFile declared = DeploymentFile.Parse("""
-        { "queues": { "orders": { "dlqAfterAttempts": 8 } } }
+        { "queues": { "orders": { "retentionDays": 30 } } }
         """);
 
         DeploymentFile actual = Pulled();
-        actual.Queues["orders"].RetentionDays = 90;
+        actual.Queues["orders"].Idempotent = true;
         actual.Queues["orders"].Ordering = "fifo";
 
         Assert.Empty(DeploymentDrift.Compare(declared, actual));
@@ -163,7 +163,7 @@ public class TemplateAndDriftTests
         string code = QueueCodeWriter.ForFile(Pulled(), "Acme.Queues");
 
         Assert.Contains("namespace Acme.Queues;", code);
-        Assert.Contains("[QueueyQueue(\"orders\", DlqAfterAttempts = 8)]", code);
+        Assert.Contains("[QueueyQueue(\"orders\", RetentionDays = 30)]", code);
         Assert.Contains("public sealed class Orders { }", code);
         Assert.Contains("[QueueyQueue(\"plain\")]", code);
 

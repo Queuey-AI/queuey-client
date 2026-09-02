@@ -18,18 +18,8 @@ public sealed class QueuePolicy
     /// <summary>Delivery ordering: <c>fifo</c>, <c>bykey</c> or <c>besteffort</c>.</summary>
     public string? Ordering { get; set; }
 
-    /// <summary>Whether a dead-letter queue collects events that exhaust their attempts.</summary>
+    /// <summary>Whether a dead-letter queue collects events the receiver rejected.</summary>
     public bool? DlqEnabled { get; set; }
-
-    /// <summary>
-    /// How many attempts before an event is dead-lettered — the queue's attempt budget.
-    /// </summary>
-    /// <remarks>
-    /// The one knob for "how many tries". Queuey also carries a <c>MaxAttempts</c> on its retry
-    /// policy, but that one only decides when this is unset, so declaring both would have given you
-    /// two settings where one silently wins. This is the one that always does.
-    /// </remarks>
-    public int? DlqAfterAttempts { get; set; }
 
     /// <summary>How many days events are retained.</summary>
     public int? RetentionDays { get; set; }
@@ -39,8 +29,7 @@ public sealed class QueuePolicy
 
     /// <summary>True when nothing is declared — the queue inherits its whole behaviour.</summary>
     public bool IsEmpty =>
-        Ordering is null && DlqEnabled is null
-        && DlqAfterAttempts is null && RetentionDays is null && Idempotent is null;
+        Ordering is null && DlqEnabled is null && RetentionDays is null && Idempotent is null;
 
     /// <summary>The ordering values the backend accepts.</summary>
     internal static readonly string[] OrderingValues = { "fifo", "bykey", "besteffort" };
@@ -50,7 +39,6 @@ public sealed class QueuePolicy
     {
         Ordering = overrides.Ordering ?? Ordering,
         DlqEnabled = overrides.DlqEnabled ?? DlqEnabled,
-        DlqAfterAttempts = overrides.DlqAfterAttempts ?? DlqAfterAttempts,
         RetentionDays = overrides.RetentionDays ?? RetentionDays,
         Idempotent = overrides.Idempotent ?? Idempotent,
     };
@@ -59,7 +47,6 @@ public sealed class QueuePolicy
     {
         Ordering = Ordering,
         DlqEnabled = DlqEnabled,
-        DlqAfterAttempts = DlqAfterAttempts,
         RetentionDays = RetentionDays,
         Idempotent = Idempotent,
     };
@@ -72,8 +59,6 @@ public sealed class QueuePolicy
     {
         if (Ordering != null && Array.IndexOf(OrderingValues, Ordering) < 0)
             return $"Ordering must be one of {string.Join(", ", OrderingValues)}; got '{Ordering}'.";
-        if (DlqAfterAttempts is { } dlq and < 1)
-            return $"DlqAfterAttempts must be at least 1; got {dlq}.";
         if (RetentionDays is { } days and < 0)
             return $"RetentionDays cannot be negative; got {days}.";
         return null;

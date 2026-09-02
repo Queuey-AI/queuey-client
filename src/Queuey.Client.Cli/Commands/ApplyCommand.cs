@@ -159,7 +159,6 @@ internal static class ApplyCommand
         {
             p.Definition.Policy.Ordering,
             p.Definition.Policy.DlqEnabled,
-            p.Definition.Policy.DlqAfterAttempts,
             p.Definition.Policy.RetentionDays,
             p.Definition.Policy.Idempotent,
         },

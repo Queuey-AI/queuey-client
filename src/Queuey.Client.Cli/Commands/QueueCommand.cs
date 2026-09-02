@@ -177,7 +177,6 @@ internal static class QueueCommand
         var parts = new List<string>();
         if (p.Ordering != null) parts.Add($"ordering={p.Ordering}");
         if (p.DlqEnabled is { } d) parts.Add($"dlq={(d ? "on" : "off")}");
-        if (p.DlqAfterAttempts is { } da) parts.Add($"dlqAfter={da}");
         if (p.RetentionDays is { } rd) parts.Add($"retentionDays={rd}");
         if (p.Idempotent is { } i) parts.Add($"idempotent={(i ? "on" : "off")}");
         return string.Join(" ", parts);
@@ -194,7 +193,6 @@ internal static class QueueCommand
         {
             d.Policy.Ordering,
             d.Policy.DlqEnabled,
-            d.Policy.DlqAfterAttempts,
             d.Policy.RetentionDays,
             d.Policy.Idempotent,
         },

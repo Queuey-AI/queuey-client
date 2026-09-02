@@ -246,7 +246,6 @@ internal sealed class QueuePolicyResponse
 {
     public bool Idempotent { get; set; }
     public bool DlqEnabled { get; set; }
-    public int? DlqAfterAttempts { get; set; }
     public int RetentionDays { get; set; }
     public string? Ordering { get; set; }
 }

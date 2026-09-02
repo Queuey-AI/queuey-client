@@ -153,20 +153,25 @@ to your own endpoint; declare a **stream** (above) when integration partners sub
 a queue underneath it, so a full sync applies queues first.
 
 ```csharp
-[QueueyQueue("orders", Ordering = "bykey", DlqAfterAttempts = 8)]
+[QueueyQueue("orders", Ordering = "bykey", RetentionDays = 30)]
 public sealed class OrderQueue { }
 
 builder.Services.AddQueuey(
     o => { /* credentials */ },
     b => b.AddQueue<OrderQueue>());
 
-await queuey.SyncQueuesAsync();     //  or:  queuey queue sync --assembly App.dll
-await queuey.SyncAsync();           //  queues, then streams
+// on deploy — pick one:
+await queuey.SyncQueuesAsync();   // just the queues
+await queuey.SyncAsync();         // queues, then the streams above
+
+// …or from the deploy pipeline:  queuey queue sync --assembly App.dll
 ```
 
 Every policy field you leave off **inherits from the workspace** — declaring a field is how the code
-takes ownership of it. The attribute covers behaviour only: `Ordering`, `DlqEnabled`, `DlqAfterAttempts`,
-`RetentionDays`, `Idempotent`. The destination — endpoint URL, outbound auth,
+takes ownership of it. The attribute covers behaviour only: `Ordering`, `DlqEnabled`, `RetentionDays`, `Idempotent`.
+There is no attempt count, on purpose — Queuey decides retry-versus-DLQ by classifying the failure,
+not by counting: a receiver that rejected the event goes straight to the dead-letter queue, and a
+target that is down is held and probed until it recovers. The destination — endpoint URL, outbound auth,
 signing — is deliberately not declarable here. It differs per environment and carries secrets, so it
 belongs in configuration, not in a type that ships in your assembly.
 
@@ -193,7 +198,7 @@ its path:
     "authHeaderName": "X-Api-Key"
   },
   "queues": {
-    "orders":   { "ordering": "bykey", "dlqAfterAttempts": 8, "delivery": { "url": "/orders" } },
+    "orders":   { "ordering": "bykey", "retentionDays": 30, "delivery": { "url": "/orders" } },
     "invoices": { "retentionDays": 30 }   // no delivery block — inherits the workspace
   }
 }

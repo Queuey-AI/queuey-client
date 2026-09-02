@@ -43,12 +43,6 @@ public sealed class QueueyQueueAttribute : Attribute
     /// <summary>Whether a dead-letter queue collects events that exhaust their attempts. Null inherits.</summary>
     public bool DlqEnabled { get => _dlqEnabled ?? false; set => _dlqEnabled = value; }
 
-    /// <summary>
-    /// How many attempts before an event is dead-lettered — the queue's attempt budget. Null inherits
-    /// the workspace.
-    /// </summary>
-    public int DlqAfterAttempts { get => _dlqAfterAttempts ?? 0; set => _dlqAfterAttempts = value; }
-
     /// <summary>How many days events are retained. Null inherits the workspace.</summary>
     public int RetentionDays { get => _retentionDays ?? 0; set => _retentionDays = value; }
 
@@ -56,7 +50,6 @@ public sealed class QueueyQueueAttribute : Attribute
     public bool Idempotent { get => _idempotent ?? false; set => _idempotent = value; }
 
     private bool? _dlqEnabled;
-    private int? _dlqAfterAttempts;
     private int? _retentionDays;
     private bool? _idempotent;
 
@@ -65,7 +58,6 @@ public sealed class QueueyQueueAttribute : Attribute
     {
         Ordering = Ordering,
         DlqEnabled = _dlqEnabled,
-        DlqAfterAttempts = _dlqAfterAttempts,
         RetentionDays = _retentionDays,
         Idempotent = _idempotent,
     };
