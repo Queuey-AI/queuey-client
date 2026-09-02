@@ -14,7 +14,7 @@ public sealed class DriftItem
         Actual = actual;
     }
 
-    /// <summary>Where the difference is, e.g. <c>queues.orders.maxAttempts</c>.</summary>
+    /// <summary>Where the difference is, e.g. <c>queues.orders.dlqAfterAttempts</c>.</summary>
     public string Path { get; }
 
     /// <summary>What the file says, or <c>null</c> when it declares nothing there.</summary>
