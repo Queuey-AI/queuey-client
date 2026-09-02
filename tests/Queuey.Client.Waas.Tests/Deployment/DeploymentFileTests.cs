@@ -20,7 +20,7 @@ public class DeploymentFileTests
         "authHeaderName": "X-Api-Key"
       },
       "queues": {
-        "orders":   { "ordering": "bykey", "maxAttempts": 8, "delivery": { "url": "/orders" } },
+        "orders":   { "ordering": "bykey", "dlqAfterAttempts": 8, "delivery": { "url": "/orders" } },
         "invoices": { "retentionDays": 30 }
       }
     }
@@ -52,7 +52,7 @@ public class DeploymentFileTests
 
         QueueDefinition orders = plans.Single(p => p.Definition.Name == "orders").Definition;
         Assert.Equal("bykey", orders.Policy.Ordering);
-        Assert.Equal(8, orders.Policy.MaxAttempts);
+        Assert.Equal(8, orders.Policy.DlqAfterAttempts);
 
         // A queue that declares no destination has none — it inherits the workspace, which is the
         // shape the docs lead with.

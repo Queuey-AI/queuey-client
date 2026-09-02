@@ -467,7 +467,6 @@ public sealed class QueueyService : IQueueyService
     private static QueuePolicyPatchRequest ToPatch(QueuePolicy policy) => new()
     {
         Ordering = policy.Ordering,
-        MaxAttempts = policy.MaxAttempts,
         DlqEnabled = policy.DlqEnabled,
         DlqAfterAttempts = policy.DlqAfterAttempts,
         RetentionDays = policy.RetentionDays,

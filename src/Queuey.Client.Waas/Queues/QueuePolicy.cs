@@ -18,13 +18,17 @@ public sealed class QueuePolicy
     /// <summary>Delivery ordering: <c>fifo</c>, <c>bykey</c> or <c>besteffort</c>.</summary>
     public string? Ordering { get; set; }
 
-    /// <summary>How many delivery attempts before the event is parked.</summary>
-    public int? MaxAttempts { get; set; }
-
     /// <summary>Whether a dead-letter queue collects events that exhaust their attempts.</summary>
     public bool? DlqEnabled { get; set; }
 
-    /// <summary>How many attempts before an event is dead-lettered.</summary>
+    /// <summary>
+    /// How many attempts before an event is dead-lettered — the queue's attempt budget.
+    /// </summary>
+    /// <remarks>
+    /// The one knob for "how many tries". Queuey also carries a <c>MaxAttempts</c> on its retry
+    /// policy, but that one only decides when this is unset, so declaring both would have given you
+    /// two settings where one silently wins. This is the one that always does.
+    /// </remarks>
     public int? DlqAfterAttempts { get; set; }
 
     /// <summary>How many days events are retained.</summary>
@@ -35,7 +39,7 @@ public sealed class QueuePolicy
 
     /// <summary>True when nothing is declared — the queue inherits its whole behaviour.</summary>
     public bool IsEmpty =>
-        Ordering is null && MaxAttempts is null && DlqEnabled is null
+        Ordering is null && DlqEnabled is null
         && DlqAfterAttempts is null && RetentionDays is null && Idempotent is null;
 
     /// <summary>The ordering values the backend accepts.</summary>
@@ -45,7 +49,6 @@ public sealed class QueuePolicy
     internal QueuePolicy OverlaidWith(QueuePolicy? overrides) => overrides is null ? Copy() : new QueuePolicy
     {
         Ordering = overrides.Ordering ?? Ordering,
-        MaxAttempts = overrides.MaxAttempts ?? MaxAttempts,
         DlqEnabled = overrides.DlqEnabled ?? DlqEnabled,
         DlqAfterAttempts = overrides.DlqAfterAttempts ?? DlqAfterAttempts,
         RetentionDays = overrides.RetentionDays ?? RetentionDays,
@@ -55,7 +58,6 @@ public sealed class QueuePolicy
     internal QueuePolicy Copy() => new()
     {
         Ordering = Ordering,
-        MaxAttempts = MaxAttempts,
         DlqEnabled = DlqEnabled,
         DlqAfterAttempts = DlqAfterAttempts,
         RetentionDays = RetentionDays,
@@ -70,8 +72,6 @@ public sealed class QueuePolicy
     {
         if (Ordering != null && Array.IndexOf(OrderingValues, Ordering) < 0)
             return $"Ordering must be one of {string.Join(", ", OrderingValues)}; got '{Ordering}'.";
-        if (MaxAttempts is { } attempts and < 1)
-            return $"MaxAttempts must be at least 1; got {attempts}.";
         if (DlqAfterAttempts is { } dlq and < 1)
             return $"DlqAfterAttempts must be at least 1; got {dlq}.";
         if (RetentionDays is { } days and < 0)

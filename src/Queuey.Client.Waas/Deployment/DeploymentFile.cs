@@ -89,7 +89,6 @@ public sealed class DeploymentFile
             expanded.Queues[entry.Key] = new DeploymentQueue
             {
                 Ordering = q.Ordering,
-                MaxAttempts = q.MaxAttempts,
                 DlqEnabled = q.DlqEnabled,
                 DlqAfterAttempts = q.DlqAfterAttempts,
                 RetentionDays = q.RetentionDays,
@@ -152,7 +151,6 @@ public sealed class DeploymentFile
                 Policy =
                 {
                     Ordering = declared.Ordering,
-                    MaxAttempts = declared.MaxAttempts,
                     DlqEnabled = declared.DlqEnabled,
                     DlqAfterAttempts = declared.DlqAfterAttempts,
                     RetentionDays = declared.RetentionDays,
@@ -194,13 +192,10 @@ public sealed class DeploymentQueue
     /// <summary>Delivery ordering: <c>fifo</c>, <c>bykey</c> or <c>besteffort</c>.</summary>
     public string? Ordering { get; set; }
 
-    /// <summary>Delivery attempts before an event is parked.</summary>
-    public int? MaxAttempts { get; set; }
-
     /// <summary>Whether a dead-letter queue collects exhausted events.</summary>
     public bool? DlqEnabled { get; set; }
 
-    /// <summary>Attempts before an event is dead-lettered.</summary>
+    /// <summary>Attempts before an event is dead-lettered — the queue's attempt budget.</summary>
     public int? DlqAfterAttempts { get; set; }
 
     /// <summary>Days events are retained.</summary>

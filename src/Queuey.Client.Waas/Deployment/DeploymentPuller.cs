@@ -91,7 +91,6 @@ internal sealed class DeploymentPuller
             QueuePolicyResponse? baseline = qc.TenantBaseline?.Policy;
 
             declared.Ordering = DifferentOrNull(p.Ordering, baseline?.Ordering);
-            declared.MaxAttempts = DifferentOrNull(p.MaxAttempts, baseline?.MaxAttempts);
             declared.DlqEnabled = DifferentOrNull(p.DlqEnabled, baseline?.DlqEnabled);
             declared.DlqAfterAttempts = DifferentOrNull(p.DlqAfterAttempts, baseline?.DlqAfterAttempts);
             declared.RetentionDays = DifferentOrNull(p.RetentionDays, baseline?.RetentionDays);

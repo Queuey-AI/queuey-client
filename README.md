@@ -153,7 +153,7 @@ to your own endpoint; declare a **stream** (above) when integration partners sub
 a queue underneath it, so a full sync applies queues first.
 
 ```csharp
-[QueueyQueue("orders", Ordering = "bykey", MaxAttempts = 8)]
+[QueueyQueue("orders", Ordering = "bykey", DlqAfterAttempts = 8)]
 public sealed class OrderQueue { }
 
 builder.Services.AddQueuey(
@@ -165,8 +165,8 @@ await queuey.SyncAsync();           //  queues, then streams
 ```
 
 Every policy field you leave off **inherits from the workspace** — declaring a field is how the code
-takes ownership of it. The attribute covers behaviour only: `Ordering`, `MaxAttempts`, `DlqEnabled`,
-`DlqAfterAttempts`, `RetentionDays`, `Idempotent`. The destination — endpoint URL, outbound auth,
+takes ownership of it. The attribute covers behaviour only: `Ordering`, `DlqEnabled`, `DlqAfterAttempts`,
+`RetentionDays`, `Idempotent`. The destination — endpoint URL, outbound auth,
 signing — is deliberately not declarable here. It differs per environment and carries secrets, so it
 belongs in configuration, not in a type that ships in your assembly.
 
@@ -193,7 +193,7 @@ its path:
     "authHeaderName": "X-Api-Key"
   },
   "queues": {
-    "orders":   { "ordering": "bykey", "maxAttempts": 8, "delivery": { "url": "/orders" } },
+    "orders":   { "ordering": "bykey", "dlqAfterAttempts": 8, "delivery": { "url": "/orders" } },
     "invoices": { "retentionDays": 30 }   // no delivery block — inherits the workspace
   }
 }

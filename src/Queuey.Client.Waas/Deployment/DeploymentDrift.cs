@@ -64,7 +64,6 @@ public static class DeploymentDrift
             }
 
             Compare(prefix + ".ordering", want.Ordering, have.Ordering, drift);
-            Compare(prefix + ".maxAttempts", want.MaxAttempts, have.MaxAttempts, drift);
             Compare(prefix + ".dlqEnabled", want.DlqEnabled, have.DlqEnabled, drift);
             Compare(prefix + ".dlqAfterAttempts", want.DlqAfterAttempts, have.DlqAfterAttempts, drift);
             Compare(prefix + ".retentionDays", want.RetentionDays, have.RetentionDays, drift);

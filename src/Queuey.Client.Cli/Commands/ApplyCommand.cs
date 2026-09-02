@@ -158,7 +158,6 @@ internal static class ApplyCommand
         policy = new
         {
             p.Definition.Policy.Ordering,
-            p.Definition.Policy.MaxAttempts,
             p.Definition.Policy.DlqEnabled,
             p.Definition.Policy.DlqAfterAttempts,
             p.Definition.Policy.RetentionDays,

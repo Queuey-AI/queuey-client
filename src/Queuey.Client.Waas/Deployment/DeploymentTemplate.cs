@@ -63,7 +63,6 @@ public static class DeploymentTemplate
             template.Queues[entry.Key] = new DeploymentQueue
             {
                 Ordering = q.Ordering,
-                MaxAttempts = q.MaxAttempts,
                 DlqEnabled = q.DlqEnabled,
                 DlqAfterAttempts = q.DlqAfterAttempts,
                 RetentionDays = q.RetentionDays,
