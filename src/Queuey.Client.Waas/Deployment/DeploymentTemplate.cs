@@ -43,16 +43,26 @@ public static class DeploymentTemplate
             // Dropped on purpose: the workspace is what differs between environments, and a deploy
             // already knows its own from --tenant / QUEUEY_TENANT / queuey.json.
             Tenant = null,
-            Workspace = file.Workspace is null ? null : new WorkspaceDelivery
+            Workspace = file.Workspace is null ? null : new DeploymentWorkspace
             {
-                BaseUrl = string.IsNullOrWhiteSpace(file.Workspace.BaseUrl) ? null : Reference(BaseUrlVariable),
-                AuthMode = file.Workspace.AuthMode,
-                CredentialRef = file.Workspace.CredentialRef,
-                AuthHeaderName = file.Workspace.AuthHeaderName,
-                Method = file.Workspace.Method,
-                TimeoutMs = file.Workspace.TimeoutMs,
-                Signing = file.Workspace.Signing,
-                RateLimit = file.Workspace.RateLimit,
+                // Behaviour and ingress travel untouched — a lane strategy and a "the type is in
+                // the body" rule mean the same thing in every environment.
+                Ordering = file.Workspace.Ordering,
+                DlqEnabled = file.Workspace.DlqEnabled,
+                RetentionDays = file.Workspace.RetentionDays,
+                Idempotent = file.Workspace.Idempotent,
+                Ingress = file.Workspace.Ingress,
+                Delivery = file.Workspace.Delivery is null ? null : new WorkspaceDelivery
+                {
+                    BaseUrl = string.IsNullOrWhiteSpace(file.Workspace.Delivery.BaseUrl) ? null : Reference(BaseUrlVariable),
+                    AuthMode = file.Workspace.Delivery.AuthMode,
+                    CredentialRef = file.Workspace.Delivery.CredentialRef,
+                    AuthHeaderName = file.Workspace.Delivery.AuthHeaderName,
+                    Method = file.Workspace.Delivery.Method,
+                    TimeoutMs = file.Workspace.Delivery.TimeoutMs,
+                    Signing = file.Workspace.Delivery.Signing,
+                    RateLimit = file.Workspace.Delivery.RateLimit,
+                },
             },
         };
 
@@ -66,6 +76,7 @@ public static class DeploymentTemplate
                 DlqEnabled = q.DlqEnabled,
                 RetentionDays = q.RetentionDays,
                 Idempotent = q.Idempotent,
+                Ingress = q.Ingress,
                 Delivery = q.Delivery is null ? null : new QueueDelivery
                 {
                     // A relative path is already portable — leave it. An absolute URL pins a host, so

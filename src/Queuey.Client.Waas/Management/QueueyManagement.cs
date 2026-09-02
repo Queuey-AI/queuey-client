@@ -138,6 +138,41 @@ internal sealed class QueueyManagement : IQueueyManagement
         };
     }
 
+    public Task SetWorkspacePolicyAsync(string tenantPublicId, DeploymentWorkspace policy, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(tenantPublicId)) throw new ArgumentException("A tenant public id is required.", nameof(tenantPublicId));
+        if (policy is null) throw new ArgumentNullException(nameof(policy));
+
+        return _controlPlane.PatchTenantPolicyAsync(tenantPublicId, new PatchTenantPolicyWireRequest
+        {
+            Ordering = policy.Ordering,
+            DlqEnabled = policy.DlqEnabled,
+            RetentionDays = policy.RetentionDays,
+            Idempotent = policy.Idempotent,
+        }, cancellationToken);
+    }
+
+    public Task SetIngressAsync(string publicId, bool isQueue, DeploymentIngress ingress, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(publicId)) throw new ArgumentException("A public id is required.", nameof(publicId));
+        if (ingress is null) throw new ArgumentNullException(nameof(ingress));
+
+        var request = new PatchIngressWireRequest
+        {
+            AuthMode = ingress.AuthMode,
+            EventType = ToWire(ingress.EventType),
+            GroupKey = ToWire(ingress.GroupKey),
+            SuccessStatusCode = ingress.SuccessStatusCode,
+        };
+
+        return isQueue
+            ? _controlPlane.PatchQueueIngressAsync(publicId, request, cancellationToken)
+            : _controlPlane.PatchTenantIngressAsync(publicId, request, cancellationToken);
+    }
+
+    private static ContextSourceWire? ToWire(ContextSource? s)
+        => s is null ? null : new ContextSourceWire { From = s.From, Name = s.Name };
+
     private static CredentialResult ToResult(CredentialWireResponse r)
         => new() { PublicId = r.PublicId, Name = r.Name, Type = r.Type, KeyId = r.KeyId };
 

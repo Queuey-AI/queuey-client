@@ -14,10 +14,14 @@ public class DeploymentFileTests
     {
       "tenant": "ten_abc",
       "workspace": {
-        "baseUrl": "https://hooks.example.com",
-        "authMode": "ApiKey",
-        "credentialRef": "partner-key",
-        "authHeaderName": "X-Api-Key"
+        "ordering": "bykey",
+        "ingress": { "eventType": { "from": "body", "name": "type" } },
+        "delivery": {
+          "baseUrl": "https://hooks.example.com",
+          "authMode": "ApiKey",
+          "credentialRef": "partner-key",
+          "authHeaderName": "X-Api-Key"
+        }
       },
       "queues": {
         "orders":   { "ordering": "bykey", "retentionDays": 30, "delivery": { "url": "/orders" } },
@@ -40,8 +44,8 @@ public class DeploymentFileTests
         DeploymentFile file = DeploymentFile.Parse(Sample);
 
         Assert.Equal("ten_abc", file.Tenant);
-        Assert.Equal("https://hooks.example.com", file.Workspace!.BaseUrl);
-        Assert.Equal("partner-key", file.Workspace.CredentialRef);
+        Assert.Equal("https://hooks.example.com", file.Workspace!.Delivery!.BaseUrl);
+        Assert.Equal("partner-key", file.Workspace.Delivery!.CredentialRef);
         Assert.Equal(new[] { "orders", "invoices" }, file.Queues.Keys.ToArray());
     }
 
@@ -99,9 +103,11 @@ public class DeploymentFileTests
                 new { publicId = "cred_01", name = "partner-key", type = "Secret", keyId = (string?)null },
             });
 
-        return path.EndsWith("/delivery", StringComparison.Ordinal) || path.EndsWith("/policy", StringComparison.Ordinal)
-            ? new HttpResponseMessage(HttpStatusCode.NoContent)
-            : StubHttpMessageHandler.Json(HttpStatusCode.OK, ApplyBody("orders"));
+        return path.EndsWith("/delivery", StringComparison.Ordinal)
+            || path.EndsWith("/policy", StringComparison.Ordinal)
+            || path.EndsWith("/ingress", StringComparison.Ordinal)
+                ? new HttpResponseMessage(HttpStatusCode.NoContent)
+                : StubHttpMessageHandler.Json(HttpStatusCode.OK, ApplyBody("orders"));
     });
 
     [Fact]
@@ -114,15 +120,26 @@ public class DeploymentFileTests
 
         var paths = api.Requests.Select(r => r.RequestUri!.AbsolutePath).ToArray();
 
-        // The file names a credential, so the ids behind those names are resolved first.
-        Assert.EndsWith("/tenants/ten_abc/credentials", paths[0]);
+        // The whole workspace lands before any queue: a queue that means to inherit needs something
+        // to inherit. Within it, INGRESS comes first — "ordering: bykey" is rejected unless a
+        // group-key source already exists, so policy-before-ingress fails on a correct file. That
+        // is not a preference; it is the order the server's validation forces.
+        int ingress = Array.FindIndex(paths, p => p.EndsWith("/tenants/ten_abc/ingress", StringComparison.Ordinal));
+        int policy = Array.FindIndex(paths, p => p.EndsWith("/tenants/ten_abc/policy", StringComparison.Ordinal));
+        int delivery = Array.FindIndex(paths, p => p.EndsWith("/tenants/ten_abc/delivery", StringComparison.Ordinal));
+        int firstQueue = Array.FindIndex(paths, p => p.EndsWith("/queues", StringComparison.Ordinal));
 
-        // A queue that means to inherit needs something to inherit, so the workspace lands next.
-        Assert.EndsWith("/tenants/ten_abc/delivery", paths[1]);
-        Assert.Equal("PATCH", api.Requests[1].Method.Method);
+        Assert.True(ingress >= 0 && policy > ingress && delivery > policy,
+            $"expected workspace ingress → policy → delivery, got: {string.Join(", ", paths)}");
+        Assert.True(delivery < firstQueue, "the workspace must be converged before the first queue");
+        Assert.Equal("PATCH", api.Requests[ingress].Method.Method);
+
+        // The credential lookup is lazy — it happens when a name actually needs resolving, which is
+        // the delivery patch, not before.
+        int credentials = Array.FindIndex(paths, p => p.EndsWith("/credentials", StringComparison.Ordinal));
+        Assert.True(credentials >= 0 && credentials < delivery);
 
         // Then per queue: apply, policy patch (when declared), delivery patch (when declared).
-        Assert.Contains("/queues", paths);
         Assert.Contains("/queues/que_orders/policy", paths);
         Assert.Contains("/queues/que_orders/delivery", paths);
     }

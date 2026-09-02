@@ -37,8 +37,8 @@ public sealed class DeploymentFile
     /// </summary>
     public string? Tenant { get; set; }
 
-    /// <summary>The workspace's default delivery endpoint — what queues inherit their destination from.</summary>
-    public WorkspaceDelivery? Workspace { get; set; }
+    /// <summary>The workspace — the layer every queue inherits from when it says nothing itself.</summary>
+    public DeploymentWorkspace? Workspace { get; set; }
 
     /// <summary>The queues to converge, keyed by queue name.</summary>
     public Dictionary<string, DeploymentQueue> Queues { get; set; } = new(StringComparer.Ordinal);
@@ -70,16 +70,24 @@ public sealed class DeploymentFile
         var expanded = new DeploymentFile
         {
             Tenant = DeploymentVariables.Expand(Tenant, lookup, "tenant"),
-            Workspace = Workspace is null ? null : new WorkspaceDelivery
+            Workspace = Workspace is null ? null : new DeploymentWorkspace
             {
-                BaseUrl = DeploymentVariables.Expand(Workspace.BaseUrl, lookup, "workspace.baseUrl"),
-                AuthMode = Workspace.AuthMode,
-                CredentialRef = DeploymentVariables.Expand(Workspace.CredentialRef, lookup, "workspace.credentialRef"),
-                AuthHeaderName = Workspace.AuthHeaderName,
-                Method = Workspace.Method,
-                TimeoutMs = Workspace.TimeoutMs,
-                Signing = Workspace.Signing,
-                RateLimit = Workspace.RateLimit,
+                Ordering = Workspace.Ordering,
+                DlqEnabled = Workspace.DlqEnabled,
+                RetentionDays = Workspace.RetentionDays,
+                Idempotent = Workspace.Idempotent,
+                Ingress = Workspace.Ingress,
+                Delivery = Workspace.Delivery is null ? null : new WorkspaceDelivery
+                {
+                    BaseUrl = DeploymentVariables.Expand(Workspace.Delivery.BaseUrl, lookup, "workspace.delivery.baseUrl"),
+                    AuthMode = Workspace.Delivery.AuthMode,
+                    CredentialRef = DeploymentVariables.Expand(Workspace.Delivery.CredentialRef, lookup, "workspace.delivery.credentialRef"),
+                    AuthHeaderName = Workspace.Delivery.AuthHeaderName,
+                    Method = Workspace.Delivery.Method,
+                    TimeoutMs = Workspace.Delivery.TimeoutMs,
+                    Signing = Workspace.Delivery.Signing,
+                    RateLimit = Workspace.Delivery.RateLimit,
+                },
             },
         };
 
@@ -114,8 +122,8 @@ public sealed class DeploymentFile
     {
         var names = new List<string>();
         names.AddRange(DeploymentVariables.Referenced(Tenant));
-        names.AddRange(DeploymentVariables.Referenced(Workspace?.BaseUrl));
-        names.AddRange(DeploymentVariables.Referenced(Workspace?.CredentialRef));
+        names.AddRange(DeploymentVariables.Referenced(Workspace?.Delivery?.BaseUrl));
+        names.AddRange(DeploymentVariables.Referenced(Workspace?.Delivery?.CredentialRef));
 
         foreach (DeploymentQueue q in Queues.Values)
         {
@@ -156,7 +164,7 @@ public sealed class DeploymentFile
                 },
             });
 
-            plans.Add(new DeploymentQueuePlan(definition, declared.Delivery));
+            plans.Add(new DeploymentQueuePlan(definition, declared.Delivery, declared.Ingress));
         }
 
         return plans;
@@ -204,15 +212,50 @@ public sealed class DeploymentQueue
     /// A relative <c>url</c> appends to the workspace base, which is the shape to reach for.
     /// </summary>
     public QueueDelivery? Delivery { get; set; }
+
+    /// <summary>
+    /// How this queue reads arriving events, when it differs from the workspace. Omit it and the
+    /// queue inherits — which is what you want unless one producer sends a different shape.
+    /// </summary>
+    public DeploymentIngress? Ingress { get; set; }
+}
+
+/// <summary>
+/// The workspace: the layer every queue inherits from. Behaviour and ingress sit at the top, the
+/// destination in <see cref="Delivery"/> — the same split a queue has, one level up.
+/// </summary>
+public sealed class DeploymentWorkspace
+{
+    /// <summary>Lane strategy for every queue that does not override it: <c>fifo</c>, <c>bykey</c>, <c>besteffort</c>.</summary>
+    public string? Ordering { get; set; }
+
+    /// <summary>Whether a dead-letter queue collects events the receiver rejected.</summary>
+    public bool? DlqEnabled { get; set; }
+
+    /// <summary>How many days events are retained.</summary>
+    public int? RetentionDays { get; set; }
+
+    /// <summary>Whether duplicate publishes are collapsed by idempotency key.</summary>
+    public bool? Idempotent { get; set; }
+
+    /// <summary>Where events are delivered — the base every queue appends its path to.</summary>
+    public WorkspaceDelivery? Delivery { get; set; }
+
+    /// <summary>How arriving events are read: ingress auth, and where the type and key come from.</summary>
+    public DeploymentIngress? Ingress { get; set; }
+
+    internal bool HasPolicy => Ordering is not null || DlqEnabled is not null
+                            || RetentionDays is not null || Idempotent is not null;
 }
 
 /// <summary>One resolved queue from a deployment file: what to apply, and what to point it at.</summary>
 public sealed class DeploymentQueuePlan
 {
-    internal DeploymentQueuePlan(QueueDefinition definition, QueueDelivery? delivery)
+    internal DeploymentQueuePlan(QueueDefinition definition, QueueDelivery? delivery, DeploymentIngress? ingress = null)
     {
         Definition = definition;
         Delivery = delivery is null || delivery.IsEmpty ? null : delivery;
+        Ingress = ingress is null || ingress.IsEmpty ? null : ingress;
     }
 
     /// <summary>The queue to converge (name + behaviour).</summary>
@@ -220,4 +263,7 @@ public sealed class DeploymentQueuePlan
 
     /// <summary>Its destination patch, or <c>null</c> when the queue inherits the workspace.</summary>
     public QueueDelivery? Delivery { get; }
+
+    /// <summary>Its ingress patch, or <c>null</c> when the queue reads events like the workspace does.</summary>
+    public DeploymentIngress? Ingress { get; }
 }

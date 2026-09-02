@@ -32,6 +32,22 @@ public interface IQueueyManagement
     Task SetQueueDeliveryAsync(string queuePublicId, QueueDelivery delivery, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Patches the workspace's behaviour — lane strategy, retention, DLQ, idempotency. Every queue
+    /// that does not override a field inherits it.
+    /// </summary>
+    Task SetWorkspacePolicyAsync(string tenantPublicId, DeploymentWorkspace policy, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Patches how arriving events are read — ingress auth, and where the event type and group key
+    /// come from. Set it on a workspace and every queue inherits; set it on a queue to override.
+    /// </summary>
+    /// <param name="publicId">A <c>ten_…</c> or <c>que_…</c> id, per <paramref name="isQueue"/>.</param>
+    /// <param name="isQueue">Whether <paramref name="publicId"/> names a queue rather than a workspace.</param>
+    /// <param name="ingress">The patch. Null properties are left alone.</param>
+    /// <param name="cancellationToken">Cancellation.</param>
+    Task SetIngressAsync(string publicId, bool isQueue, DeploymentIngress ingress, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Stores a delivery credential under a workspace and returns its label. The secret is encrypted
     /// at rest and never readable again — a <c>credentialRef</c> points at it by name, which is what
     /// keeps a deployment file safe to commit.

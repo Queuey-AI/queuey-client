@@ -42,9 +42,21 @@ internal sealed class DeploymentPuller
         Dictionary<string, string> nameByRef = await LoadCredentialNamesAsync(tenantPublicId, cancellationToken).ConfigureAwait(false);
 
         TenantConfigResponse config = await _controlPlane.GetTenantConfigAsync(tenantPublicId, cancellationToken).ConfigureAwait(false);
+
+        var workspace = new DeploymentWorkspace
+        {
+            // The workspace has nothing above it, so everything it resolves to IS its own — no
+            // baseline to compare against, unlike a queue.
+            Ordering = config.Policy?.Ordering,
+            DlqEnabled = config.Policy?.DlqEnabled,
+            RetentionDays = config.Policy?.RetentionDays,
+            Idempotent = config.Policy?.Idempotent,
+            Ingress = ToIngress(config.Ingress),
+        };
+
         if (config.Delivery is { } wd && !string.IsNullOrWhiteSpace(wd.BaseUrl))
         {
-            file.Workspace = new WorkspaceDelivery
+            workspace.Delivery = new WorkspaceDelivery
             {
                 BaseUrl = wd.BaseUrl,
                 AuthMode = NullIfNone(wd.AuthMode),
@@ -56,6 +68,8 @@ internal sealed class DeploymentPuller
                 RateLimit = ToRateLimit(wd.RateLimit),
             };
         }
+
+        file.Workspace = workspace;
 
         IReadOnlyList<QueueListItem> queues = await _management.ListQueuesAsync(tenantPublicId, cancellationToken).ConfigureAwait(false);
 
@@ -117,8 +131,30 @@ internal sealed class DeploymentPuller
             };
         }
 
+        DeploymentIngress? queueIngress = ToIngress(qc.Ingress);
+        DeploymentIngress? baselineIngress = ToIngress(qc.TenantBaseline?.Ingress);
+        if (queueIngress is not null && !SameIngress(queueIngress, baselineIngress))
+            declared.Ingress = queueIngress;
+
         return declared;
     }
+
+    /// <summary>
+    /// Whether a queue's effective ingress is just the workspace's. The read-back is effective, not
+    /// raw, so without this every queue would write out the workspace's sources as its own — the
+    /// same trap the per-field policy comparison exists to avoid.
+    /// </summary>
+    private static bool SameIngress(DeploymentIngress a, DeploymentIngress? b)
+        => b is not null
+        && string.Equals(a.AuthMode, b.AuthMode, StringComparison.Ordinal)
+        && SameSource(a.EventType, b.EventType)
+        && SameSource(a.GroupKey, b.GroupKey);
+
+    private static bool SameSource(ContextSource? a, ContextSource? b)
+        => a is null
+            ? b is null
+            : b is not null && string.Equals(a.From, b.From, StringComparison.Ordinal)
+                            && string.Equals(a.Name, b.Name, StringComparison.Ordinal);
 
     /// <summary>
     /// The queue's value when it differs from the workspace's, else null. No baseline to compare
@@ -162,6 +198,27 @@ internal sealed class DeploymentPuller
         => string.IsNullOrWhiteSpace(reference) ? null
          : nameByRef.TryGetValue(reference!, out string? name) ? name
          : reference;
+
+    /// <summary>
+    /// The read-back is the EFFECTIVE ingress, so a queue's equals the workspace's unless it
+    /// overrode something — the caller compares to decide whether to write it out.
+    /// </summary>
+    private static DeploymentIngress? ToIngress(IngressResponse? r)
+    {
+        if (r is null) return null;
+
+        var ingress = new DeploymentIngress
+        {
+            AuthMode = NullIfNone(r.AuthMode),
+            EventType = ToSource(r.EventType),
+            GroupKey = ToSource(r.GroupKey),
+        };
+
+        return ingress.IsEmpty ? null : ingress;
+    }
+
+    private static ContextSource? ToSource(ContextSourceWire? w)
+        => w is null || string.IsNullOrWhiteSpace(w.Name) ? null : new ContextSource(w.From, w.Name);
 
     private static DeliverySigning? ToSigning(DeliverySigningResponse? s, Dictionary<string, string> nameByRef)
         => s is null || !s.Enabled ? null : new DeliverySigning

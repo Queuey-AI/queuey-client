@@ -75,22 +75,58 @@ public static class DeploymentDrift
                 Compare(prefix + ".delivery.authMode", wd.AuthMode, hd.AuthMode, drift);
                 Compare(prefix + ".delivery.credentialRef", wd.CredentialRef, hd.CredentialRef, drift);
             }
+
+            CompareIngress(prefix + ".ingress", want.Ingress, have.Ingress, drift);
         }
 
         return drift;
     }
 
-    private static void CompareWorkspace(WorkspaceDelivery? want, WorkspaceDelivery? have, List<DriftItem> drift)
+    private static void CompareWorkspace(DeploymentWorkspace? want, DeploymentWorkspace? have, List<DriftItem> drift)
     {
         if (want is null) return;
-        WorkspaceDelivery actual = have ?? new WorkspaceDelivery();
+        DeploymentWorkspace actual = have ?? new DeploymentWorkspace();
 
-        Compare("workspace.baseUrl", want.BaseUrl, actual.BaseUrl, drift);
-        Compare("workspace.authMode", want.AuthMode, actual.AuthMode, drift);
-        Compare("workspace.credentialRef", want.CredentialRef, actual.CredentialRef, drift);
-        Compare("workspace.authHeaderName", want.AuthHeaderName, actual.AuthHeaderName, drift);
-        Compare("workspace.method", want.Method, actual.Method, drift);
-        Compare("workspace.timeoutMs", want.TimeoutMs, actual.TimeoutMs, drift);
+        Compare("workspace.ordering", want.Ordering, actual.Ordering, drift);
+        Compare("workspace.dlqEnabled", want.DlqEnabled, actual.DlqEnabled, drift);
+        Compare("workspace.retentionDays", want.RetentionDays, actual.RetentionDays, drift);
+        Compare("workspace.idempotent", want.Idempotent, actual.Idempotent, drift);
+
+        CompareIngress("workspace.ingress", want.Ingress, actual.Ingress, drift);
+
+        if (want.Delivery is { } wd)
+        {
+            WorkspaceDelivery hd = actual.Delivery ?? new WorkspaceDelivery();
+            Compare("workspace.delivery.baseUrl", wd.BaseUrl, hd.BaseUrl, drift);
+            Compare("workspace.delivery.authMode", wd.AuthMode, hd.AuthMode, drift);
+            Compare("workspace.delivery.credentialRef", wd.CredentialRef, hd.CredentialRef, drift);
+            Compare("workspace.delivery.authHeaderName", wd.AuthHeaderName, hd.AuthHeaderName, drift);
+            Compare("workspace.delivery.method", wd.Method, hd.Method, drift);
+            Compare("workspace.delivery.timeoutMs", wd.TimeoutMs, hd.TimeoutMs, drift);
+        }
+    }
+
+    /// <summary>Ingress differs per field like everything else — a source is its kind plus its name.</summary>
+    private static void CompareIngress(string prefix, DeploymentIngress? want, DeploymentIngress? have, List<DriftItem> drift)
+    {
+        if (want is null) return;
+        DeploymentIngress actual = have ?? new DeploymentIngress();
+
+        Compare($"{prefix}.authMode", want.AuthMode, actual.AuthMode, drift);
+        Compare($"{prefix}.successStatusCode", want.SuccessStatusCode, actual.SuccessStatusCode, drift);
+        CompareSource($"{prefix}.eventType", want.EventType, actual.EventType, drift);
+        CompareSource($"{prefix}.groupKey", want.GroupKey, actual.GroupKey, drift);
+    }
+
+    private static void CompareSource(string path, ContextSource? want, ContextSource? have, List<DriftItem> drift)
+    {
+        if (want is null) return;
+
+        string declared = $"{want.From}:{want.Name}";
+        string? actual = have is null ? null : $"{have.From}:{have.Name}";
+        if (string.Equals(declared, actual, StringComparison.Ordinal)) return;
+
+        drift.Add(new DriftItem(path, declared, actual));
     }
 
     /// <summary>A field the file does not declare is never drift — see the type's remarks.</summary>

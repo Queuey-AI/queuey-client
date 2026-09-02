@@ -10,7 +10,7 @@ public class TemplateAndDriftTests
     private static DeploymentFile Pulled() => DeploymentFile.Parse("""
     {
       "tenant": "ten_prod",
-      "workspace": { "baseUrl": "https://prod.example.com", "authMode": "ApiKey", "credentialRef": "partner-key" },
+      "workspace": { "ordering": "fifo", "delivery": { "baseUrl": "https://prod.example.com", "authMode": "ApiKey", "credentialRef": "partner-key" } },
       "queues": {
         "orders":   { "retentionDays": 30, "delivery": { "url": "/orders" } },
         "billing":  { "delivery": { "url": "https://billing.prod.example.com/in" } },
@@ -28,7 +28,7 @@ public class TemplateAndDriftTests
 
         // The workspace binding is what differs between environments — a deploy supplies its own.
         Assert.Null(t.Tenant);
-        Assert.Equal("${QUEUEY_BASE_URL}", t.Workspace!.BaseUrl);
+        Assert.Equal("${QUEUEY_BASE_URL}", t.Workspace!.Delivery!.BaseUrl);
 
         // A relative path is already portable. That is the payoff of the thin-queue shape, and
         // substituting it would be busywork.
@@ -38,7 +38,7 @@ public class TemplateAndDriftTests
         Assert.Equal("${QUEUEY_STAGING_BILLING_URL}", t.Queues["billing"].Delivery!.Url);
 
         // Credential names are portable by design — that is why the file carries names, not ids.
-        Assert.Equal("partner-key", t.Workspace.CredentialRef);
+        Assert.Equal("partner-key", t.Workspace.Delivery!.CredentialRef);
 
         // Behaviour is not environment-specific.
         Assert.Equal(30, t.Queues["orders"].RetentionDays);
@@ -69,7 +69,7 @@ public class TemplateAndDriftTests
 
         DeploymentFile expanded = t.Expand(name => env.TryGetValue(name, out string? v) ? v : null);
 
-        Assert.Equal("https://staging.example.com", expanded.Workspace!.BaseUrl);
+        Assert.Equal("https://staging.example.com", expanded.Workspace!.Delivery!.BaseUrl);
         Assert.Equal("https://billing.staging.example.com/in", expanded.Queues["billing"].Delivery!.Url);
     }
 
@@ -90,21 +90,21 @@ public class TemplateAndDriftTests
     public void A_default_is_honoured_when_one_is_given()
     {
         DeploymentFile file = DeploymentFile.Parse("""
-        { "workspace": { "baseUrl": "${HOOK_HOST:-https://fallback.example.com}" }, "queues": {} }
+        { "workspace": { "delivery": { "baseUrl": "${HOOK_HOST:-https://fallback.example.com}" } }, "queues": {} }
         """);
 
-        Assert.Equal("https://fallback.example.com", file.Expand(_ => null).Workspace!.BaseUrl);
+        Assert.Equal("https://fallback.example.com", file.Expand(_ => null).Workspace!.Delivery!.BaseUrl);
     }
 
     [Fact]
     public void Literal_text_around_a_variable_survives()
     {
         DeploymentFile file = DeploymentFile.Parse("""
-        { "workspace": { "baseUrl": "https://${HOST}/hooks" }, "queues": {} }
+        { "workspace": { "delivery": { "baseUrl": "https://${HOST}/hooks" } }, "queues": {} }
         """);
 
         Assert.Equal("https://acme.example.com/hooks",
-            file.Expand(n => n == "HOST" ? "acme.example.com" : null).Workspace!.BaseUrl);
+            file.Expand(n => n == "HOST" ? "acme.example.com" : null).Workspace!.Delivery!.BaseUrl);
     }
 
     // ── Drift ─────────────────────────────────────────────────────────────────

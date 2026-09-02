@@ -85,12 +85,12 @@ public class PullTests
         DeploymentFile file = await Build().PullDeploymentAsync("ten_abc");
 
         Assert.Equal("ten_abc", file.Tenant);
-        Assert.Equal("https://hooks.example.com", file.Workspace!.BaseUrl);
-        Assert.Equal("ApiKey", file.Workspace.AuthMode);
+        Assert.Equal("https://hooks.example.com", file.Workspace!.Delivery!.BaseUrl);
+        Assert.Equal("ApiKey", file.Workspace.Delivery!.AuthMode);
 
         // The name, not cred_01 — ids are minted per workspace, so a file carrying one could only
         // ever apply where it was written.
-        Assert.Equal("partner-key", file.Workspace.CredentialRef);
+        Assert.Equal("partner-key", file.Workspace.Delivery!.CredentialRef);
     }
 
     [Fact]
@@ -199,7 +199,7 @@ public class PullTests
         DeploymentFile reparsed = DeploymentFile.Parse(pulled.ToJson());
         var plans = reparsed.Resolve();
 
-        Assert.Equal("https://hooks.example.com", reparsed.Workspace!.BaseUrl);
+        Assert.Equal("https://hooks.example.com", reparsed.Workspace!.Delivery!.BaseUrl);
         Assert.Equal(new[] { "orders", "plain" }, plans.Select(p => p.Definition.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray());
         Assert.Equal("bykey", plans.Single(p => p.Definition.Name == "orders").Definition.Policy.Ordering);
         Assert.Null(plans.Single(p => p.Definition.Name == "plain").Delivery);

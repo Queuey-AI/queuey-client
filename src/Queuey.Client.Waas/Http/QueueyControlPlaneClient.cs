@@ -289,6 +289,33 @@ internal sealed class QueueyControlPlaneClient
             HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Patches the workspace's behaviour (<c>PATCH /tenants/{ten}/policy</c>). Returns 204.</summary>
+    public Task PatchTenantPolicyAsync(string tenantPublicId, PatchTenantPolicyWireRequest request, CancellationToken cancellationToken)
+        => PatchAsync(request, cancellationToken, "tenants", tenantPublicId, "policy");
+
+    /// <summary>Patches how a workspace reads arriving events (<c>PATCH /tenants/{ten}/ingress</c>). Returns 204.</summary>
+    public Task PatchTenantIngressAsync(string tenantPublicId, PatchIngressWireRequest request, CancellationToken cancellationToken)
+        => PatchAsync(request, cancellationToken, "tenants", tenantPublicId, "ingress");
+
+    /// <summary>Patches how one queue reads arriving events (<c>PATCH /queues/{que}/ingress</c>). Returns 204.</summary>
+    public Task PatchQueueIngressAsync(string queuePublicId, PatchIngressWireRequest request, CancellationToken cancellationToken)
+        => PatchAsync(request, cancellationToken, "queues", queuePublicId, "ingress");
+
+    /// <summary>One PATCH shape for the control plane: JSON body, API key + license header, 204 back.</summary>
+    private async Task PatchAsync(object request, CancellationToken cancellationToken, params string[] segments)
+    {
+        if (request is null) throw new ArgumentNullException(nameof(request));
+
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, segments);
+        byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, request.GetType(), QueueyJson.Options);
+
+        await _connection.SendAsync(
+            new HttpMethod("PATCH"), uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Reads the workspace's delivery + policy config (<c>GET /tenants/{ten}/config</c>).</summary>
     public async Task<TenantConfigResponse> GetTenantConfigAsync(string tenantPublicId, CancellationToken cancellationToken)
     {

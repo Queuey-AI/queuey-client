@@ -186,6 +186,7 @@ internal sealed class TenantConfigResponse
 {
     public TenantDeliveryResponse? Delivery { get; set; }
     public QueuePolicyResponse? Policy { get; set; }
+    public IngressResponse? Ingress { get; set; }
 }
 
 /// <summary>Wire shape of <c>GET /queues/{que}/config</c>: effective values plus per-section inherit flags.</summary>
@@ -201,6 +202,9 @@ internal sealed class QueueConfigResponse
     /// block: a queue overriding one field reports the entire block as owned.
     /// </summary>
     public TenantConfigResponse? TenantBaseline { get; set; }
+
+    /// <summary>The queue's EFFECTIVE ingress — what it resolves to after inheriting the workspace.</summary>
+    public IngressResponse? Ingress { get; set; }
 }
 
 /// <summary>Which sections a queue inherits from the workspace (true) versus overrides (false).</summary>
