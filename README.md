@@ -160,8 +160,11 @@ builder.Services.AddQueuey(
     o => { /* credentials */ },
     b => b.AddQueue<OrderQueue>());
 
-await queuey.SyncQueuesAsync();     //  or:  queuey queue sync --assembly App.dll
-await queuey.SyncAsync();           //  queues, then streams
+// on deploy — pick one:
+await queuey.SyncQueuesAsync();   // just the queues
+await queuey.SyncAsync();         // queues, then the streams above
+
+// …or from the deploy pipeline:  queuey queue sync --assembly App.dll
 ```
 
 Every policy field you leave off **inherits from the workspace** — declaring a field is how the code
