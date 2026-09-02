@@ -310,10 +310,11 @@ public sealed class QueueyService : IQueueyService
 
     /// <inheritdoc />
     public Task<QueueApplyResult> ApplyQueueAsync(QueueDefinition definition, CancellationToken cancellationToken = default)
-        => ApplyQueueAsync(definition, afterApply: null, cancellationToken);
+        => ApplyQueueAsync(definition, beforePolicy: null, afterApply: null, cancellationToken);
 
     private async Task<QueueApplyResult> ApplyQueueAsync(
         QueueDefinition definition,
+        Func<QueueDefinition, string, CancellationToken, Task>? beforePolicy,
         Func<QueueDefinition, string, CancellationToken, Task>? afterApply,
         CancellationToken cancellationToken = default)
     {
@@ -333,6 +334,11 @@ public sealed class QueueyService : IQueueyService
             throw new QueueyException(
                 $"Queuey accepted queue '{definition.Name}' but returned no queue id, so its policy cannot be applied.");
         }
+
+        // Ingress before policy, for the same reason as at workspace level: bykey needs its key
+        // source to exist already.
+        if (beforePolicy is not null)
+            await beforePolicy(definition, queueId, cancellationToken).ConfigureAwait(false);
 
         // Policy is a separate PATCH, and only when something is actually declared — an all-inherit
         // queue must not send a patch that could pin values it meant to keep inheriting.
@@ -420,19 +426,36 @@ public sealed class QueueyService : IQueueyService
         string tenant = file.Tenant ?? (options.DryRun ? _options.TenantPublicId ?? string.Empty : RequireTenant());
         var credentials = new CredentialResolver(Management, tenant);
 
-        // Workspace first: queues inherit their destination from it, so converging it first means a
-        // queue that means to inherit already has something to inherit. A failure here throws before
-        // any queue is touched — same all-or-nothing contract, one level up.
-        if (!options.DryRun && file.Workspace is { } workspace && !workspace.IsEmpty)
+        // Workspace first: queues inherit from it, so converging it first means a queue that means to
+        // inherit already has something to inherit. A failure here throws before any queue is
+        // touched — the same all-or-nothing contract, one level up.
+        if (!options.DryRun && file.Workspace is { } workspace)
         {
-            WorkspaceDelivery resolved = await credentials.ResolveAsync(workspace, cancellationToken).ConfigureAwait(false);
-            await Management.SetWorkspaceDeliveryAsync(tenant, resolved, cancellationToken).ConfigureAwait(false);
+            // Ingress FIRST, and not for tidiness: "ordering: bykey" is rejected unless a group-key
+            // source already exists, so a policy patch that arrives before the ingress one fails
+            // validation on a file that is perfectly correct.
+            if (workspace.Ingress is { } ingress && !ingress.IsEmpty)
+                await Management.SetIngressAsync(tenant, isQueue: false, ingress, cancellationToken).ConfigureAwait(false);
+
+            if (workspace.HasPolicy)
+                await Management.SetWorkspacePolicyAsync(tenant, workspace, cancellationToken).ConfigureAwait(false);
+
+            if (workspace.Delivery is { } delivery && !delivery.IsEmpty)
+            {
+                WorkspaceDelivery resolved = await credentials.ResolveAsync(delivery, cancellationToken).ConfigureAwait(false);
+                await Management.SetWorkspaceDeliveryAsync(tenant, resolved, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         QueueSyncResult result = await SyncQueueDefinitionsAsync(
             plans.Select(p => p.Definition).ToArray(),
             options,
             cancellationToken,
+            beforePolicy: async (definition, queuePublicId, ct) =>
+            {
+                if (byName.TryGetValue(definition.Name, out DeploymentQueuePlan? plan) && plan.Ingress is { } queueIngress)
+                    await Management.SetIngressAsync(queuePublicId, isQueue: true, queueIngress, ct).ConfigureAwait(false);
+            },
             afterApply: async (definition, queuePublicId, ct) =>
             {
                 if (byName.TryGetValue(definition.Name, out DeploymentQueuePlan? plan) && plan.Delivery is { } delivery)
@@ -481,6 +504,7 @@ public sealed class QueueyService : IQueueyService
         IReadOnlyList<QueueDefinition> definitions,
         SyncOptions? options,
         CancellationToken cancellationToken,
+        Func<QueueDefinition, string, CancellationToken, Task>? beforePolicy = null,
         Func<QueueDefinition, string, CancellationToken, Task>? afterApply = null)
     {
         options ??= new SyncOptions();
@@ -515,7 +539,7 @@ public sealed class QueueyService : IQueueyService
 
             try
             {
-                results.Add(await ApplyQueueAsync(def, afterApply, cancellationToken).ConfigureAwait(false));
+                results.Add(await ApplyQueueAsync(def, beforePolicy, afterApply, cancellationToken).ConfigureAwait(false));
                 continue;
             }
             catch (QueueyException ex)

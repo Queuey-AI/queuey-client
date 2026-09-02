@@ -112,8 +112,19 @@ internal static class ApplyCommand
     {
         Console.WriteLine($"Queuey apply (dry-run) — {path}");
 
-        if (file.Workspace is { } w && !string.IsNullOrWhiteSpace(w.BaseUrl))
-            Console.WriteLine($"  workspace\tbaseUrl={w.BaseUrl}{(w.AuthMode is null ? "" : $" auth={w.AuthMode}")}");
+        if (file.Workspace is { } w)
+        {
+            var parts = new List<string>();
+            if (w.Ordering is not null) parts.Add($"ordering={w.Ordering}");
+            if (w.RetentionDays is { } days) parts.Add($"retentionDays={days}");
+            if (w.Ingress?.AuthMode is { } auth) parts.Add($"ingressAuth={auth}");
+            if (w.Ingress?.EventType is { } et) parts.Add($"eventType={et.From}:{et.Name}");
+            if (w.Ingress?.GroupKey is { } gk) parts.Add($"groupKey={gk.From}:{gk.Name}");
+            if (w.Delivery?.BaseUrl is { } url) parts.Add($"baseUrl={url}");
+
+            if (parts.Count > 0)
+                Console.WriteLine($"  workspace\t{string.Join(" ", parts)}");
+        }
 
         foreach (DeploymentQueuePlan p in plans)
         {
@@ -163,6 +174,7 @@ internal static class ApplyCommand
             p.Definition.Policy.Idempotent,
         },
         delivery = p.Delivery is null ? null : new { p.Delivery.Url, p.Delivery.Inherit, p.Delivery.AuthMode, p.Delivery.CredentialRef },
+        ingress = p.Ingress is null ? null : new { p.Ingress.AuthMode, eventType = p.Ingress.EventType?.Name, groupKey = p.Ingress.GroupKey?.Name },
     };
 
     private static object ToJsonResult(QueueSyncResult result, string path, ResolvedConfig config) => new

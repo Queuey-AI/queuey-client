@@ -18,6 +18,13 @@ internal static class CredentialsCommand
 {
     private static readonly HashSet<string> Flags = new(StringComparer.Ordinal) { "json", "help", "h" };
 
+    /// <summary>The credential types Queuey stores. Mirrors the server's <c>CredentialType</c>.</summary>
+    private static readonly string[] CredentialTypes =
+    {
+        "ApiKeyHeader", "BearerToken", "BasicPassword", "HmacSigning",
+        "OAuth2ClientSecret", "OAuth2Certificate",
+    };
+
     public static async Task<int> RunAsync(string[] args)
     {
         string sub = args.Length > 0 ? args[0] : string.Empty;
@@ -80,8 +87,18 @@ internal static class CredentialsCommand
         using ServiceProvider provider = CliHost.BuildProvider(config);
         var service = provider.GetRequiredService<IQueueyService>();
 
+        // ApiKeyHeader by default: it is the type that pairs with `authMode: "ApiKey"`, which is what
+        // a deployment file names most often. Checked here rather than at the server, because an
+        // unknown type came back as a bare 400 with the useful half of the sentence stripped.
+        string type = map.Get("type") ?? "ApiKeyHeader";
+        if (Array.IndexOf(CredentialTypes, type) < 0)
+        {
+            Console.Error.WriteLine($"Unknown credential type '{type}'. Expected one of: {string.Join(", ", CredentialTypes)}.");
+            return ExitCodes.Usage;
+        }
+
         CredentialResult created = await service.Management.CreateCredentialAsync(
-            tenant!, name!, map.Get("type") ?? "Secret", secret,
+            tenant!, name!, type, secret,
             keyId: map.Get("key-id"), username: map.Get("username"));
 
         if (map.Has("json"))

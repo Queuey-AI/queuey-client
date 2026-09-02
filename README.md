@@ -64,6 +64,49 @@ sizing, the one metric worth alerting on, the StorageFaulted runbook). The
 CLI gains `queuey edge status | retry | discard | recover | reset` for
 operating a spool alongside a running host.
 
+### Worked example: publishing from Edge
+
+Edge is for producers where the network is not a given — a factory line, a kiosk, a vehicle. The
+call returns once the event is durably on local disk; everything after that is Queuey's problem.
+
+```csharp
+builder.Services.AddQueueyEdge(o =>
+{
+    o.ApiKey = cfg["Queuey:ApiKey"];        // publish-only, workspace-scoped
+    o.TenantPublicId = cfg["Queuey:Tenant"];
+    // Local durable disk — never a network share (SQLite locking over SMB/NFS is unreliable)
+    // and never container-ephemeral storage unless you accept process-lifetime durability.
+    o.Storage.Path = "/var/lib/myapp/queuey/spool.db";
+});
+
+// One queue name, one event type, one key. Nothing about retries anywhere.
+await _queuey.PublishAsync("temperature", reading, new PublishOptions
+{
+    EventType = "temperature.updated",   // what happened
+    GroupKey  = reading.DeviceId,        // the lane: per device, in order
+    IdempotencyKey = reading.SampleId,   // makes a resend a no-op, not a duplicate
+});
+```
+
+**The queue name is a route, so treat it like one.** It becomes a URL segment
+(`/events/{workspace}/{queue}`), so Queuey holds it to lowercase letters, digits, `.`, `-` and `_`.
+Declare your queues in `queuey.deploy.json` and publish to those names; the SDK normalizes a name it
+derives from a type (`OrderCreated` → `order-created`) but never rewrites one you wrote yourself,
+because the string you publish to has to be the string that exists.
+
+**Edge does not check that the queue exists**, on purpose. A mistyped name is accepted locally and
+parks at transfer as `RequiresAction`, visible in `queuey edge status` — nothing is lost. Checking at
+publish time would mean a network call on the one path that must work offline.
+
+**`EventType` and `GroupKey` are the two fields worth always setting.** The type is what filtering,
+the console and the issue assessors read; the group key is the lane. If your workspace declares
+ingress sources (above), you can leave both off the call and let Queuey read them out of the payload
+instead — useful when the same payload shape is published from several places.
+
+**Idempotency is the cheap insurance.** Edge already deduplicates its own transfers permanently, so
+`IdempotencyKey` is for *your* retries — a request handler that runs twice, a replayed job. Use a key
+derived from the event, not a fresh GUID.
+
 ## Hosts & environments
 
 Queuey runs on **two** hosts — a control-plane **API** host and a publish **ingress** host — and
@@ -212,6 +255,76 @@ queuey apply
 
 A relative `url` appends to the workspace base, so moving hosts is one edit instead of N. An absolute
 URL overrides outright. A queue with no `delivery` block inherits — the shape to reach for.
+
+### Worked example: a workspace, set up once
+
+Most of what a producer needs is decided at the workspace level, and every queue inherits it. This
+is the shape to reach for — one place to change the host, one place to change the lane strategy, and
+queues that own nothing but their own path:
+
+```jsonc
+{
+  "workspace": {
+    // Behaviour every queue inherits unless it says otherwise.
+    "ordering": "bykey",          // lane by the group key below — order per customer, parallel across
+    "retentionDays": 30,
+    "dlqEnabled": true,
+
+    // How Queuey reads events as they arrive. Say it once here and no producer has to send
+    // X-Queuey-Event-Type or X-Queuey-Group-Key on every publish — which matters most for
+    // producers you do not control, like a third party's webhook.
+    "ingress": {
+      "authMode": "ApiKey",                                   // demand a key at the edge
+      "eventType": { "from": "body",  "name": "type" },       // {"type":"order.created", …}
+      "groupKey":  { "from": "body",  "name": "customerId" }  // …and lane on this
+    },
+
+    // Where events go. Queues append their path to this.
+    "delivery": {
+      "baseUrl": "https://hooks.example.com",
+      "authMode": "ApiKey",
+      "credentialRef": "partner-key",     // a name; the secret lives in Queuey
+      "authHeaderName": "X-Api-Key",
+      "timeoutMs": 15000
+    }
+  },
+
+  "queues": {
+    // The common case: a route, nothing else. Delivers to
+    // https://hooks.example.com/orders, laned by customerId, 30-day retention.
+    "orders":   { "delivery": { "url": "/orders" } },
+    "invoices": { "delivery": { "url": "/invoices" } },
+
+    // Overrides are per field. This one is a firehose where order does not matter;
+    // everything else still comes from the workspace.
+    "analytics": { "ordering": "besteffort", "delivery": { "url": "/analytics" } },
+
+    // No delivery block at all: this queue delivers to the workspace base itself.
+    "audit": { }
+  }
+}
+```
+
+```bash
+queuey credentials set --name partner-key --from-env PARTNER_KEY
+queuey apply
+```
+
+**Why `bykey` needs the group key.** Partitioning needs something to partition on. Declare
+`ordering: "bykey"` without a `groupKey` source and Queuey rejects it, because every event would be
+unkeyed and "by key" would quietly behave as unordered. `apply` sends the ingress block before the
+policy for exactly this reason.
+
+**Where the type can come from.** `from` is `header`, `query`, or `body` — the top level of the JSON
+you post. A Stripe-style sender that puts the type in the body needs no header at all; one that sends
+`?event=order.created` uses `query`. Set it per queue instead of per workspace when one producer
+speaks differently from the rest.
+
+**Retention is capped by your plan.** Declaring more days than the plan allows fails the apply with
+`retention_cap_exceeded` rather than being silently clamped — a shorter window is always accepted.
+
+**Turning on `authMode` stops traffic that has no key.** Queuey defaults a new queue to `None` so the
+first webhook works without ceremony. Roll the credential out to publishers first, then declare it.
 
 Already configured things in the console? Pull it instead of retyping it:
 
