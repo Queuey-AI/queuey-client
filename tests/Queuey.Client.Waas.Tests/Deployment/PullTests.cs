@@ -54,18 +54,28 @@ public class PullTests
             return StubHttpMessageHandler.Json(HttpStatusCode.OK, new
             {
                 delivery = new { baseUrl = "/orders", authMode = "None", hasCredential = false, timeoutMs = 30000 },
-                policy = new { idempotent = true, dlqEnabled = true, dlqAfterAttempts = 5, maxAttempts = 8, retentionDays = 30, ordering = "bykey" },
+                // Overrides ordering + maxAttempts; everything else equals the workspace below.
+                policy = new { idempotent = false, dlqEnabled = true, dlqAfterAttempts = 5, maxAttempts = 8, retentionDays = 7, ordering = "bykey" },
                 inherited = new { destination = false, auth = true, signing = true, rateLimit = true, behavior = false },
+                tenantBaseline = new { policy = Baseline },
             });
 
         // Inherits everything — the interesting case.
         return StubHttpMessageHandler.Json(HttpStatusCode.OK, new
         {
             delivery = new { baseUrl = (string?)null, authMode = "ApiKey", hasCredential = true, credentialRef = "cred_01", timeoutMs = 30000 },
-            policy = new { idempotent = false, dlqEnabled = false, dlqAfterAttempts = (int?)null, maxAttempts = 3, retentionDays = 7, ordering = "fifo" },
+            policy = Baseline,
             inherited = new { destination = true, auth = true, signing = true, rateLimit = true, behavior = true },
+            tenantBaseline = new { policy = Baseline },
         });
     }
+
+    /// <summary>The workspace's effective policy — what an inheriting queue resolves to.</summary>
+    private static object Baseline => new
+    {
+        idempotent = false, dlqEnabled = true, dlqAfterAttempts = 5,
+        maxAttempts = 3, retentionDays = 7, ordering = "fifo",
+    };
 
     private static QueueyService Build() =>
         WaasTestHost.Build(apiStub: new StubHttpMessageHandler(Route));
@@ -92,7 +102,14 @@ public class PullTests
         DeploymentQueue orders = file.Queues["orders"];
         Assert.Equal("bykey", orders.Ordering);
         Assert.Equal(8, orders.MaxAttempts);
-        Assert.Equal(30, orders.RetentionDays);
+
+        // Fields that merely EQUAL the workspace are not written out, even though the server reports
+        // the whole policy block as owned. Emitting them would freeze today's defaults as permanent
+        // per-queue overrides on the next apply — the very thing inherit-awareness exists to prevent.
+        Assert.Null(orders.RetentionDays);
+        Assert.Null(orders.DlqEnabled);
+        Assert.Null(orders.DlqAfterAttempts);
+        Assert.Null(orders.Idempotent);
 
         // The raw override, not the resolved absolute — so it round-trips as an append.
         Assert.Equal("/orders", orders.Delivery!.Url);

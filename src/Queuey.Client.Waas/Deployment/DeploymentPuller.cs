@@ -81,16 +81,21 @@ internal sealed class DeploymentPuller
     {
         var declared = new DeploymentQueue();
 
-        // Behaviour: only when the queue actually overrides it. An inheriting queue writes nothing,
-        // so the file keeps saying "the workspace decides".
+        // Behaviour, per field. The server's Inherited.Behavior is a single flag for the WHOLE policy
+        // block, so a queue that overrides one field reports every field as owned — trusting it would
+        // write today's workspace defaults into the file and freeze them as permanent per-queue
+        // overrides on the next apply, which is exactly what inherit-awareness is for. Compare each
+        // field against the workspace baseline the same response carries, and emit only what differs.
         if (qc.Inherited?.Behavior == false && qc.Policy is { } p)
         {
-            declared.Ordering = p.Ordering;
-            declared.MaxAttempts = p.MaxAttempts;
-            declared.DlqEnabled = p.DlqEnabled;
-            declared.DlqAfterAttempts = p.DlqAfterAttempts;
-            declared.RetentionDays = p.RetentionDays;
-            declared.Idempotent = p.Idempotent;
+            QueuePolicyResponse? baseline = qc.TenantBaseline?.Policy;
+
+            declared.Ordering = DifferentOrNull(p.Ordering, baseline?.Ordering);
+            declared.MaxAttempts = DifferentOrNull(p.MaxAttempts, baseline?.MaxAttempts);
+            declared.DlqEnabled = DifferentOrNull(p.DlqEnabled, baseline?.DlqEnabled);
+            declared.DlqAfterAttempts = DifferentOrNull(p.DlqAfterAttempts, baseline?.DlqAfterAttempts);
+            declared.RetentionDays = DifferentOrNull(p.RetentionDays, baseline?.RetentionDays);
+            declared.Idempotent = DifferentOrNull(p.Idempotent, baseline?.Idempotent);
         }
 
         bool ownsDestination = qc.Inherited?.Destination == false;
@@ -116,6 +121,22 @@ internal sealed class DeploymentPuller
 
         return declared;
     }
+
+    /// <summary>
+    /// The queue's value when it differs from the workspace's, else null. No baseline to compare
+    /// against means we cannot tell inherited from owned — emit it, since a file that says too much
+    /// is recoverable and one that silently drops an override is not.
+    /// </summary>
+    private static string? DifferentOrNull(string? queue, string? baseline)
+        => queue is null || (baseline is not null && string.Equals(queue, baseline, StringComparison.Ordinal))
+            ? null
+            : queue;
+
+    private static int? DifferentOrNull(int? queue, int? baseline)
+        => queue is null || (baseline is not null && queue == baseline) ? null : queue;
+
+    private static bool? DifferentOrNull(bool? queue, bool? baseline)
+        => queue is null || (baseline is not null && queue == baseline) ? null : queue;
 
     private async Task<Dictionary<string, string>> LoadCredentialNamesAsync(string tenantPublicId, CancellationToken cancellationToken)
     {
