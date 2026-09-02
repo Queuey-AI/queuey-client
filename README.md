@@ -199,9 +199,22 @@ queuey apply
 A relative `url` appends to the workspace base, so moving hosts is one edit instead of N. An absolute
 URL overrides outright. A queue with no `delivery` block inherits — the shape to reach for.
 
+Already configured things in the console? Pull it instead of retyping it:
+
+```bash
+queuey pull --stdout      # review first
+queuey pull               # writes queuey.deploy.json
+```
+
+Pull is **inherit-aware** — a queue that inherits a section writes nothing for it, so the file says
+what you actually own rather than freezing today's defaults as permanent per-queue overrides — and
+it cannot emit a secret, because Queuey's read surfaces never return one.
+
 **This file carries no secrets and is meant to be committed.** `credentialRef` names a credential
 stored encrypted by `queuey credentials set`, which reads the value from an environment variable
-(never an argument — those land in shell history and CI logs) and can never read it back. Keep it
+(never an argument — those land in shell history and CI logs) and can never read it back. The
+reference is the credential's *name*, resolved per workspace at apply time, so the same file
+converges staging and production. Keep it
 separate from `queuey.json`, which holds your API key and must *not* be committed.
 
 Every omitted field means **leave alone**, everywhere: a file that names only a base URL changes only
