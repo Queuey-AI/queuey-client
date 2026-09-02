@@ -45,7 +45,6 @@ public static class QueueCodeWriter
 
         if (!string.IsNullOrWhiteSpace(q.Ordering)) args.Add($"Ordering = \"{q.Ordering}\"");
         if (q.DlqEnabled is { } d) args.Add($"DlqEnabled = {(d ? "true" : "false")}");
-        if (q.DlqAfterAttempts is { } da) args.Add($"DlqAfterAttempts = {da}");
         if (q.RetentionDays is { } rd) args.Add($"RetentionDays = {rd}");
         if (q.Idempotent is { } i) args.Add($"Idempotent = {(i ? "true" : "false")}");
 

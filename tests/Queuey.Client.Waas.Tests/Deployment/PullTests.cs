@@ -54,8 +54,8 @@ public class PullTests
             return StubHttpMessageHandler.Json(HttpStatusCode.OK, new
             {
                 delivery = new { baseUrl = "/orders", authMode = "None", hasCredential = false, timeoutMs = 30000 },
-                // Overrides ordering + dlqAfterAttempts; everything else equals the workspace below.
-                policy = new { idempotent = false, dlqEnabled = true, dlqAfterAttempts = 8, retentionDays = 7, ordering = "bykey" },
+                // Overrides ordering + retentionDays; everything else equals the workspace below.
+                policy = new { idempotent = false, dlqEnabled = true, retentionDays = 30, ordering = "bykey" },
                 inherited = new { destination = false, auth = true, signing = true, rateLimit = true, behavior = false },
                 tenantBaseline = new { policy = Baseline },
             });
@@ -73,7 +73,7 @@ public class PullTests
     /// <summary>The workspace's effective policy — what an inheriting queue resolves to.</summary>
     private static object Baseline => new
     {
-        idempotent = false, dlqEnabled = true, dlqAfterAttempts = 3, retentionDays = 7, ordering = "fifo",
+        idempotent = false, dlqEnabled = true, retentionDays = 7, ordering = "fifo",
     };
 
     private static QueueyService Build() =>
@@ -100,12 +100,11 @@ public class PullTests
 
         DeploymentQueue orders = file.Queues["orders"];
         Assert.Equal("bykey", orders.Ordering);
-        Assert.Equal(8, orders.DlqAfterAttempts);
+        Assert.Equal(30, orders.RetentionDays);
 
         // Fields that merely EQUAL the workspace are not written out, even though the server reports
         // the whole policy block as owned. Emitting them would freeze today's defaults as permanent
         // per-queue overrides on the next apply — the very thing inherit-awareness exists to prevent.
-        Assert.Null(orders.RetentionDays);
         Assert.Null(orders.DlqEnabled);
         Assert.Null(orders.Idempotent);
 
@@ -122,7 +121,7 @@ public class PullTests
 
         DeploymentQueue plain = file.Queues["plain"];
         Assert.Null(plain.Ordering);
-        Assert.Null(plain.DlqAfterAttempts);
+        Assert.Null(plain.RetentionDays);
         Assert.Null(plain.RetentionDays);
         Assert.Null(plain.Delivery);
     }
@@ -162,7 +161,7 @@ public class PullTests
         // The CI gate end to end: declare something the workspace does not hold, and the check says so
         // without writing anything.
         DeploymentFile declared = DeploymentFile.Parse("""
-        { "tenant": "ten_abc", "queues": { "orders": { "dlqAfterAttempts": 99 } } }
+        { "tenant": "ten_abc", "queues": { "orders": { "retentionDays": 99 } } }
         """);
 
         var api = new StubHttpMessageHandler(Route);
@@ -171,9 +170,9 @@ public class PullTests
         IReadOnlyList<DriftItem> drift = await service.CheckDeploymentAsync(declared);
 
         DriftItem item = Assert.Single(drift);
-        Assert.Equal("queues.orders.dlqAfterAttempts", item.Path);
+        Assert.Equal("queues.orders.retentionDays", item.Path);
         Assert.Equal("99", item.Declared);
-        Assert.Equal("8", item.Actual);
+        Assert.Equal("30", item.Actual);
 
         // Read-only: nothing was written on the way to the answer.
         Assert.All(api.Requests, r => Assert.Equal(HttpMethod.Get, r.Method));
@@ -183,7 +182,7 @@ public class PullTests
     public async Task Check_is_silent_when_the_file_matches()
     {
         DeploymentFile declared = DeploymentFile.Parse("""
-        { "tenant": "ten_abc", "queues": { "orders": { "dlqAfterAttempts": 8, "ordering": "bykey" } } }
+        { "tenant": "ten_abc", "queues": { "orders": { "retentionDays": 30, "ordering": "bykey" } } }
         """);
 
         QueueyService service = WaasTestHost.Build(apiStub: new StubHttpMessageHandler(Route));

@@ -13,12 +13,11 @@ public class QueueDeclarationTests
 
         Assert.Equal("orders", def.Name);
         Assert.Equal("bykey", def.Policy.Ordering);
-        Assert.Equal(8, def.Policy.DlqAfterAttempts);
+        Assert.Equal(30, def.Policy.RetentionDays);
 
         // Everything the attribute never set stays null = inherit from the workspace. This is the
         // whole contract: declaring a field takes ownership of it, leaving it does not.
         Assert.Null(def.Policy.DlqEnabled);
-        Assert.Null(def.Policy.RetentionDays);
         Assert.Null(def.Policy.Idempotent);
     }
 
@@ -36,11 +35,11 @@ public class QueueDeclarationTests
     {
         QueueDefinition def = QueueDefinitionFactory.FromType(typeof(OrderQueue), new QueueOptions
         {
-            Policy = { DlqAfterAttempts = 3, RetentionDays = 14 },
+            Policy = { RetentionDays = 14, Idempotent = true },
         });
 
-        Assert.Equal(3, def.Policy.DlqAfterAttempts);     // inline wins
-        Assert.Equal(14, def.Policy.RetentionDays);       // inline adds
+        Assert.Equal(14, def.Policy.RetentionDays);       // inline wins
+        Assert.True(def.Policy.Idempotent);               // inline adds
         Assert.Equal("bykey", def.Policy.Ordering);       // attribute survives
     }
 
@@ -63,15 +62,6 @@ public class QueueDeclarationTests
             () => QueueDefinitionFactory.FromName("orders", new QueueOptions { Policy = { Ordering = ordering } }));
 
         Assert.Contains("Ordering must be one of", ex.Message);
-    }
-
-    [Fact]
-    public void A_nonsense_attempt_count_fails_locally()
-    {
-        var ex = Assert.Throws<QueueyConfigurationException>(
-            () => QueueDefinitionFactory.FromName("orders", new QueueOptions { Policy = { DlqAfterAttempts = 0 } }));
-
-        Assert.Contains("DlqAfterAttempts must be at least 1", ex.Message);
     }
 
     [Fact]

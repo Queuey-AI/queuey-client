@@ -64,7 +64,6 @@ public static class DeploymentTemplate
             {
                 Ordering = q.Ordering,
                 DlqEnabled = q.DlqEnabled,
-                DlqAfterAttempts = q.DlqAfterAttempts,
                 RetentionDays = q.RetentionDays,
                 Idempotent = q.Idempotent,
                 Delivery = q.Delivery is null ? null : new QueueDelivery

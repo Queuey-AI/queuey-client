@@ -468,7 +468,6 @@ public sealed class QueueyService : IQueueyService
     {
         Ordering = policy.Ordering,
         DlqEnabled = policy.DlqEnabled,
-        DlqAfterAttempts = policy.DlqAfterAttempts,
         RetentionDays = policy.RetentionDays,
         Idempotent = policy.Idempotent,
     };

@@ -92,7 +92,6 @@ internal sealed class DeploymentPuller
 
             declared.Ordering = DifferentOrNull(p.Ordering, baseline?.Ordering);
             declared.DlqEnabled = DifferentOrNull(p.DlqEnabled, baseline?.DlqEnabled);
-            declared.DlqAfterAttempts = DifferentOrNull(p.DlqAfterAttempts, baseline?.DlqAfterAttempts);
             declared.RetentionDays = DifferentOrNull(p.RetentionDays, baseline?.RetentionDays);
             declared.Idempotent = DifferentOrNull(p.Idempotent, baseline?.Idempotent);
         }
