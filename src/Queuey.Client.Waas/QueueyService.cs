@@ -98,11 +98,11 @@ public sealed class QueueyService : IQueueyService
     // ---- sync ----
 
     /// <inheritdoc />
-    public Task<SyncResult> SyncModelsAsync(SyncOptions? options = null, CancellationToken cancellationToken = default)
+    public Task<SyncResult> SyncStreamsAsync(SyncOptions? options = null, CancellationToken cancellationToken = default)
         => SyncDefinitionsAsync(Registry.Streams, options, cancellationToken);
 
     /// <inheritdoc />
-    public Task<SyncResult> SyncModelsAsync(IEnumerable<Type> modelTypes, SyncOptions? options = null, CancellationToken cancellationToken = default)
+    public Task<SyncResult> SyncStreamsAsync(IEnumerable<Type> modelTypes, SyncOptions? options = null, CancellationToken cancellationToken = default)
     {
         if (modelTypes is null) throw new ArgumentNullException(nameof(modelTypes));
         var definitions = modelTypes.Select(t => StreamDefinitionFactory.FromType(t, null)).ToArray();
@@ -114,6 +114,11 @@ public sealed class QueueyService : IQueueyService
     public async Task<StreamApplyResult> ApplyStreamAsync(StreamDefinition definition, CancellationToken cancellationToken = default)
     {
         if (definition is null) throw new ArgumentNullException(nameof(definition));
+
+        // Last gate before the wire: definitions from the factory are already validated, but a
+        // hand-constructed one reaches this method directly. The server rejects a bad name with an
+        // unhelpful error, so fail here with the rule instead.
+        QueueyName.EnsureValid(definition.Name, "stream name");
 
         var request = new StreamApplyRequest
         {
@@ -195,15 +200,26 @@ public sealed class QueueyService : IQueueyService
 
         var selected = (options.Filter is null ? definitions : definitions.Where(options.Filter)).ToList();
 
-        // Fail fast on missing credentials before any network call (dry runs need none).
+        // ── Preflight: everything checkable without the network, before the first write ──
+        // A sync is not a transaction, so the cheapest way to avoid a half-converged workspace is to
+        // fail on the whole plan before any of it is applied. Names and duplicates are already
+        // enforced at registration; re-checking here also covers hand-built definitions and the
+        // by-type overload. Credentials are checked once, not per stream (dry runs need none).
+        foreach (StreamDefinition def in selected)
+            QueueyName.EnsureValid(def.Name, "stream name");
+
         if (!options.DryRun)
             RequireForSync();
 
         var streamResults = new List<StreamApplyResult>();
         var applied = new List<(StreamDefinition Def, string CatalogId)>(); // succeeded streams + their cat_ ids
+        var notAttempted = new List<string>();
+        bool stopped = false;
 
-        foreach (StreamDefinition def in selected)
+        for (int i = 0; i < selected.Count; i++)
         {
+            StreamDefinition def = selected[i];
+
             if (options.DryRun)
             {
                 streamResults.Add(new StreamApplyResult
@@ -217,35 +233,66 @@ public sealed class QueueyService : IQueueyService
                 continue;
             }
 
+            QueueyException? failure = null;
             try
             {
                 StreamApplyResult r = await ApplyStreamAsync(def, cancellationToken).ConfigureAwait(false);
-                streamResults.Add(r);
+
                 if (r.PublicId is { } catId)
+                {
+                    streamResults.Add(r);
                     applied.Add((def, catId));
+                }
+                else
+                {
+                    // A 2xx with no catalog id used to count as success while silently dropping the
+                    // stream from the package phase — a stream that reports "applied" but reaches no
+                    // partner. Treat the missing id as the failure it is.
+                    failure = new QueueyException(
+                        $"Queuey accepted stream '{def.Name}' but returned no catalog id, so it cannot be " +
+                        "assigned to its packages.");
+                }
             }
             catch (QueueyException ex)
             {
-                streamResults.Add(new StreamApplyResult
-                {
-                    ModelType = def.ModelType?.FullName ?? string.Empty,
-                    Name = def.Name,
-                    Succeeded = false,
-                    Error = ex,
-                    Packages = def.Packages,
-                });
+                failure = ex;
+            }
 
-                if (options.StopOnFirstError)
-                    break;
+            if (failure is null)
+                continue;
+
+            streamResults.Add(new StreamApplyResult
+            {
+                ModelType = def.ModelType?.FullName ?? string.Empty,
+                Name = def.Name,
+                Succeeded = false,
+                Error = failure,
+                Packages = def.Packages,
+            });
+
+            if (!options.ContinueOnError)
+            {
+                // Name what we are NOT going to do, so a stopped run can never read as a clean one.
+                for (int rest = i + 1; rest < selected.Count; rest++)
+                    notAttempted.Add(selected[rest].Name);
+
+                stopped = true;
+                break;
             }
         }
 
-        IReadOnlyList<PackageApplyResult> packageResults =
-            await ApplyPackagesAsync(selected, applied, options, cancellationToken).ConfigureAwait(false);
+        // Skip the package phase entirely on a stopped run: assigning packages for a partially applied
+        // set of streams deepens the divergence the stop was meant to contain.
+        IReadOnlyList<PackageApplyResult> packageResults = stopped
+            ? Array.Empty<PackageApplyResult>()
+            : await ApplyPackagesAsync(selected, applied, options, cancellationToken).ConfigureAwait(false);
 
-        var result = new SyncResult(streamResults, packageResults);
-        if (options.StopOnFirstError)
-            result.ThrowIfAnyFailed();
+        var result = new SyncResult(streamResults, packageResults, notAttempted);
+
+        // All-or-nothing in every mode: a run that did not fully converge throws, so partial success can
+        // never be mistaken for success. ContinueOnError only decides how much of the picture is
+        // gathered before that happens.
+        result.ThrowIfAnyFailed();
 
         return result;
     }
@@ -293,14 +340,14 @@ public sealed class QueueyService : IQueueyService
             catch (QueueyException ex)
             {
                 results.Add(new PackageApplyResult { Name = name, Succeeded = false, Error = ex });
-                if (options.StopOnFirstError) break;
+                if (!options.ContinueOnError) break;
                 continue;
             }
 
             if (packageId is null)
             {
                 results.Add(new PackageApplyResult { Name = name, Succeeded = false });
-                if (options.StopOnFirstError) break;
+                if (!options.ContinueOnError) break;
                 continue;
             }
 
@@ -331,7 +378,7 @@ public sealed class QueueyService : IQueueyService
                 Error = assignError,
             });
 
-            if (assignError is not null && options.StopOnFirstError)
+            if (assignError is not null && !options.ContinueOnError)
                 break;
         }
 
@@ -353,15 +400,15 @@ public sealed class QueueyService : IQueueyService
     {
         RequireTenant();
         if (string.IsNullOrWhiteSpace(_options.LicensePublicId))
-            throw new QueueyConfigurationException("LicensePublicId is required for SyncModels. Set QueueyOptions.LicensePublicId.");
+            throw new QueueyConfigurationException("LicensePublicId is required for SyncStreams. Set QueueyOptions.LicensePublicId.");
         if (string.IsNullOrWhiteSpace(_options.ApiKey))
-            throw new QueueyConfigurationException("An API key is required for SyncModels. Set QueueyOptions.ApiKey.");
+            throw new QueueyConfigurationException("An API key is required for SyncStreams. Set QueueyOptions.ApiKey.");
     }
 
     private string RequireTenant()
     {
         if (string.IsNullOrWhiteSpace(_options.TenantPublicId))
-            throw new QueueyConfigurationException("TenantPublicId (the producer tenant) is required for SyncModels. Set QueueyOptions.TenantPublicId.");
+            throw new QueueyConfigurationException("TenantPublicId (the producer tenant) is required for SyncStreams. Set QueueyOptions.TenantPublicId.");
         return _options.TenantPublicId!;
     }
 }

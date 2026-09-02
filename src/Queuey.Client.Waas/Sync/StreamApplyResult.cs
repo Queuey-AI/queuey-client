@@ -1,6 +1,6 @@
 namespace Queuey.Client.Waas;
 
-/// <summary>The outcome of applying one stream during <c>SyncModels</c>.</summary>
+/// <summary>The outcome of applying one stream during <c>SyncStreams</c>.</summary>
 public sealed class StreamApplyResult
 {
     /// <summary>The model type's full name, or empty for a name-only stream.</summary>

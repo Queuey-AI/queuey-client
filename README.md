@@ -93,7 +93,7 @@ dotnet run --project samples/Queuey.Sample.Console
 
 ## Webhooks-as-a-Service: decorate, sync, publish (`Queuey.Client.Waas`)
 
-Producers describe their event streams with an attribute, register the service, `SyncModels()` on
+Producers describe their event streams with an attribute, register the service, `SyncStreams()` on
 deploy, and `PushEvent(...)` on save. Streams reach partners through **packages** — a stream can
 belong to several (e.g. tiers), and each declared package is created and assigned on sync.
 
@@ -109,11 +109,33 @@ builder.Services.AddQueuey(
     b => b.AddStream<OrderCreated>());
 
 // on deploy: create/converge streams + packages + memberships
-await queuey.SyncModelsAsync();          //  or:  queuey sync --assembly App.dll
+await queuey.SyncStreamsAsync();          //  or:  queuey sync --assembly App.dll
 
 // on save: publish
 await queuey.PushEventAsync("order-events", "order.created", order.OrderId, order);
 ```
+
+### Names, and what "synced" guarantees
+
+Stream names follow Queuey's queue-name rules — lowercase, starting with a letter or digit, then
+letters, digits, `.`, `-` or `_`. A name you write is validated as written; leave it off and it is
+derived from the type (`OrderCreated` → `order-created`). The check runs **once, as `AddQueuey`
+builds the registry** — before any host is built and without touching the network — so a bad name is
+a startup error with the corrected name in it, not a server error mid-deploy.
+
+A sync is not a transaction (each stream is its own `PUT`), so it is built to never look like one it
+isn't: it stops at the first failure, throws, and reports the streams it never attempted. Applying is
+idempotent, so a fixed re-run converges. Pass `ContinueOnError` when you want the full damage report
+in one go — it still throws at the end.
+
+```csharp
+// abort startup if the streams can't be converged (dev / single-instance services)
+b => b.AddStream<OrderCreated>().SyncOnStartup();
+```
+
+`SyncOnStartup` is off by default: app instances often hold a publish-only key, and a rolling deploy
+would have every replica applying the same streams at once. A deploy step (`queuey sync --assembly`)
+is the better home for it in production.
 
 ## CLI (`queuey`)
 

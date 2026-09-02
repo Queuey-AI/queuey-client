@@ -296,7 +296,7 @@ internal sealed class QueueyControlPlaneClient
     {
         if (string.IsNullOrWhiteSpace(_options.ApiKey))
             throw new QueueyConfigurationException(
-                "An API key is required for control-plane operations (SyncModels). Set QueueyOptions.ApiKey.");
+                "An API key is required for control-plane operations (SyncStreams). Set QueueyOptions.ApiKey.");
         return _options.ApiKey!;
     }
 
@@ -304,7 +304,7 @@ internal sealed class QueueyControlPlaneClient
     {
         if (string.IsNullOrWhiteSpace(_options.LicensePublicId))
             throw new QueueyConfigurationException(
-                "LicensePublicId is required for control-plane operations (SyncModels). Set QueueyOptions.LicensePublicId.");
+                "LicensePublicId is required for control-plane operations (SyncStreams). Set QueueyOptions.LicensePublicId.");
         return _options.LicensePublicId!;
     }
 }

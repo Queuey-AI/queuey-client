@@ -4,7 +4,7 @@ using System.Collections.Generic;
 namespace Queuey.Client.Waas;
 
 /// <summary>
-/// The resolved, immutable definition of a Queuey stream — the desired state that <c>SyncModels</c>
+/// The resolved, immutable definition of a Queuey stream — the desired state that <c>SyncStreams</c>
 /// applies via <c>PUT /waas/streams</c>. Produced from a <see cref="QueueyModelAttribute"/>, inline
 /// registration options, or convention.
 /// </summary>

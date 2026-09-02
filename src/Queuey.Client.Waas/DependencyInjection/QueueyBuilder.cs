@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 namespace Queuey.Client.Waas;
 
@@ -18,6 +19,19 @@ internal sealed class QueueyBuilder : IQueueyBuilder
     public IQueueyBuilder GenerateSchemas(bool enabled = true)
     {
         _generateSchemas = enabled;
+        return this;
+    }
+
+    public IQueueyBuilder SyncOnStartup(Action<SyncOptions>? configure = null)
+    {
+        var options = new SyncOptions();
+        configure?.Invoke(options);
+
+        Services.AddSingleton(options);
+        Services.AddSingleton<IHostedService>(sp => new QueueyStartupSync(
+            sp.GetRequiredService<IQueueyService>(),
+            sp.GetRequiredService<SyncOptions>()));
+
         return this;
     }
 

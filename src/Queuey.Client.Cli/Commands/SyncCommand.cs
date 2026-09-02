@@ -15,7 +15,7 @@ internal static class SyncCommand
 {
     private static readonly HashSet<string> Flags = new(StringComparer.Ordinal)
     {
-        "dry-run", "stop-on-error", "json", "help", "h",
+        "dry-run", "continue-on-error", "json", "help", "h",
     };
 
     public static async Task<int> RunAsync(string[] args)
@@ -67,14 +67,16 @@ internal static class SyncCommand
         {
             using ServiceProvider provider = CliHost.BuildProvider(config, b => b.AddStreamsFromAssembly(assembly));
             var service = provider.GetRequiredService<IQueueyService>();
-            var options = new SyncOptions { StopOnFirstError = map.Has("stop-on-error"), Filter = filter };
+            var options = new SyncOptions { ContinueOnError = map.Has("continue-on-error"), Filter = filter };
             try
             {
-                result = await service.SyncModelsAsync(options);
+                result = await service.SyncStreamsAsync(options);
             }
             catch (QueueySyncException ex)
             {
-                result = new SyncResult(ex.Results); // --stop-on-error threw; still render what we have
+                // A run that did not fully converge always throws — render the ledger it carries
+                // (including what was never attempted) rather than just the stack trace.
+                result = ex.Result;
             }
         }
 
@@ -100,7 +102,11 @@ internal static class SyncCommand
                 Console.WriteLine($"  ✗ {r.Name}\t{FormatError(r.Error)}");
         }
 
-        Console.WriteLine($"{result.Succeeded} applied, {result.Failed} failed");
+        foreach (string skipped in result.NotAttempted)
+            Console.WriteLine($"  – {skipped}\tnot attempted (stopped at an earlier failure)");
+
+        Console.WriteLine($"{result.Succeeded} applied, {result.Failed} failed, {result.NotAttempted.Count} not attempted"
+                          + (result.NotAttempted.Count > 0 ? " — re-run to converge (applying is idempotent)" : ""));
     }
 
     private static Func<StreamDefinition, bool>? BuildFilter(string? only)
@@ -122,6 +128,7 @@ internal static class SyncCommand
         total = result.Total,
         succeeded = result.Succeeded,
         failed = result.Failed,
+        notAttempted = result.NotAttempted,
         streams = result.Applied.Select(r => new
         {
             r.Name,

@@ -20,7 +20,11 @@ COMMANDS
   whoami         Show the resolved host / environment / tenant / license (masks the key).
 
 SYNC
-  queuey sync --assembly <path.dll> [--dry-run] [--only a,b] [--stop-on-error] [--json]
+  queuey sync --assembly <path.dll> [--dry-run] [--only a,b] [--continue-on-error] [--json]
+                 Stops at the first failure by default and reports what it did not attempt;
+                 --continue-on-error applies the rest first to collect every failure. Either
+                 way a run that did not fully converge exits non-zero. Applying is idempotent,
+                 so a fixed re-run converges.
 
 PUBLISH
   queuey publish <stream> --event <type> [--key <k>]

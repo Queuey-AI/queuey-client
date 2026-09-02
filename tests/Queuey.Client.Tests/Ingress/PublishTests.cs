@@ -165,6 +165,52 @@ public class PublishTests
     }
 
     [Fact]
+    public async Task Not_found_on_an_invalid_queue_name_explains_the_naming_rules()
+    {
+        var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(
+            HttpStatusCode.NotFound,
+            new { error = new { code = "queue_not_found", message = "Queue not found." } }));
+        using var client = new QueueyClient(ApiKeyOptions(), new HttpClient(handler));
+
+        QueueyNotFoundException ex = await Assert.ThrowsAsync<QueueyNotFoundException>(
+            () => client.Ingress.PublishAsync("Order Events", new { x = 1 }));
+
+        Assert.Contains("Queue not found.", ex.Message);      // the server's own message survives
+        Assert.Contains("naming rules", ex.Message);
+        Assert.Contains("Did you mean 'order-events'?", ex.Message);
+        Assert.Equal("queue_not_found", ex.ErrorCode);
+        Assert.Equal(404, ex.StatusCode);
+    }
+
+    [Fact]
+    public async Task Not_found_on_a_valid_queue_name_is_left_alone()
+    {
+        // A legal name that simply doesn't exist yet must not be second-guessed — and a legacy queue
+        // whose name predates the server's validator is never blocked by the SDK on the way out.
+        var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(
+            HttpStatusCode.NotFound,
+            new { error = new { code = "queue_not_found", message = "Queue not found." } }));
+        using var client = new QueueyClient(ApiKeyOptions(), new HttpClient(handler));
+
+        QueueyNotFoundException ex = await Assert.ThrowsAsync<QueueyNotFoundException>(
+            () => client.Ingress.PublishAsync("order-events", new { x = 1 }));
+
+        Assert.Equal("Queue not found.", ex.Message);
+        Assert.DoesNotContain("naming rules", ex.Message);
+    }
+
+    [Fact]
+    public async Task Publish_to_a_legacy_uppercase_name_still_reaches_the_server()
+    {
+        var handler = Ok202();
+        using var client = new QueueyClient(ApiKeyOptions(), new HttpClient(handler));
+
+        await client.Ingress.PublishAsync("Legacy Queue", new { x = 1 });
+
+        Assert.Contains("Legacy%20Queue", handler.LastRequest!.RequestUri!.AbsoluteUri);
+    }
+
+    [Fact]
     public async Task Publish_without_tenant_throws_configuration_exception()
     {
         var options = new QueueyOptions { ApiKey = "qak_k.s", IngressBaseAddress = new Uri("https://ingress.example") };

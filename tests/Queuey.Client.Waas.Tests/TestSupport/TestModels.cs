@@ -35,3 +35,9 @@ public sealed class SchemaModel
     [System.Text.Json.Serialization.JsonIgnore] public string Internal { get; init; } = string.Empty;
     [System.Text.Json.Serialization.JsonPropertyName("renamed")] public string Original { get; init; } = string.Empty;
 }
+
+/// <summary>A type whose name normalizes to a reserved routing segment — convention can't save it.</summary>
+public sealed class Sandbox
+{
+    public string Id { get; init; } = string.Empty;
+}

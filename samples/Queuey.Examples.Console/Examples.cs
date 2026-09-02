@@ -22,7 +22,7 @@ public static class Examples
         foreach (StreamPlan p in queuey.Plan())
             Step($"plan: {p.Name}  packages=[{string.Join(", ", p.Packages)}]  schema={p.HasPayloadSchema}");
 
-        SyncResult r = await queuey.SyncModelsAsync();
+        SyncResult r = await queuey.SyncStreamsAsync();
         foreach (StreamApplyResult s in r.Applied) Step($"stream {s.Name}: {s.PublicId} ({s.Status})");
         foreach (PackageApplyResult pk in r.Packages) Step($"package {pk.Name}: {pk.PublicId} (+{pk.AssignedStreams} stream)");
         Note($"{r.Succeeded} stream(s), {r.Packages.Count} package(s). Re-run — it converges, no duplicates.");
@@ -37,7 +37,7 @@ public static class Examples
             key: "cust_42",
             data: new OrderCreated { OrderId = "ord_1", Total = 4200 });
         Step($"published {r.EventId} → {r.QueuePublicId} (mode={r.Mode}, replayed={r.Replayed})");
-        Note("eventType + key are extracted because SyncModels configured the queue's context headers.");
+        Note("eventType + key are extracted because SyncStreams configured the queue's context headers.");
     }
 
     public static async Task Packages(IQueueyService queuey)
@@ -48,7 +48,7 @@ public static class Examples
         await queuey.UpdatePackageAsync(pkg.PublicId!, description: "Enterprise tier (updated)");
         Step("updated description");
 
-        SyncResult sync = await queuey.SyncModelsAsync();
+        SyncResult sync = await queuey.SyncStreamsAsync();
         string? cat = sync.Applied.FirstOrDefault(s => s.Name == "order-events")?.PublicId;
         if (cat is not null)
         {
