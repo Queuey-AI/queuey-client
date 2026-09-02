@@ -3,7 +3,7 @@
 The official .NET SDK for [Queuey](https://queuey.ai) — a webhooks / event-distribution
 platform. **Decorate, sync, publish.**
 
-> Status: early preview. Phase 1 (ingress publish) is being built first.
+> Status: early preview — the API surface may still change, and nothing is on NuGet yet.
 
 ```csharp
 var queuey = new QueueyClient(new QueueyOptions
@@ -20,6 +20,15 @@ await queuey.Ingress.PublishAsync("orders", order);
 - Multi-targets `netstandard2.0` and `net8.0`; `IHttpClientFactory`-friendly.
 - Public IDs only (`ten_`, `que_`, `cat_`, `pkg_`).
 - HMAC and API-key auth handled invisibly.
+
+**Four packages, four jobs.** Take only the ones you need:
+
+| | For |
+| --- | --- |
+| [`Queuey.Client`](#queueyclient) | Publishing events. Auth and transport, nothing else |
+| [`Queuey.Edge`](#durable-local-publishing-queueyedge) | Publishing from somewhere the network is unreliable |
+| [`Queuey.Client.Waas`](#queues-declare-where-your-events-land) | Declaring queues, streams and delivery in code |
+| [`Queuey.Cli`](#cli-queuey) | Deploys, local webhook debugging, operating an Edge spool |
 
 ## Durable local publishing (`Queuey.Edge`)
 
@@ -267,18 +276,139 @@ dotnet tool install --global --add-source src/Queuey.Client.Cli/bin/Release Queu
 # (once it's on NuGet:  dotnet tool install --global Queuey.Cli)
 ```
 
+All commands share the same configuration resolution and exit codes, so they compose in a pipeline.
+Run `queuey` with no arguments — or `--help` after any command — for the full usage text, which
+carries the per-flag detail this table leaves out.
+
+### Commands
+
+**Declare and converge** — what a deploy runs:
+
 | Command | What it does |
 | --- | --- |
-| `sync` | Apply every `[QueueyModel]` stream found in an assembly |
-| `publish` | Publish an event to a stream |
-| `create-tenant` / `create-queue` | Provision a tenant / queue |
-| `metrics <que_…>` | A queue's traffic snapshot |
-| `issues <ten_…>` | List a tenant's issues |
-| **`listen`** | Receive webhooks locally over a secure push session |
-| **`replay <event-id>`** | Replay one existing event to your listener (read-only) |
-| `whoami` | Resolved host / env / tenant / license (key masked) |
+| `apply` | Converge a workspace from `queuey.deploy.json` — the deploy verb |
+| `apply --dry-run` | Validate the file locally. No credentials, no network, nothing sent |
+| `apply --check` | Report drift and exit non-zero. Read-only — the CI gate |
+| `pull` | Read a workspace back into a deployment file (the inverse of `apply`) |
+| `queue plan` | Preview the `[QueueyQueue]` declarations in an assembly (network-free) |
+| `queue sync` | Apply those declarations |
+| `sync` | Apply every `[QueueyModel]` stream in an assembly (WaaS producers) |
 
-Run `queuey` with no args for full usage.
+**Secrets** — one-off, from an admin credential:
+
+| Command | What it does |
+| --- | --- |
+| `credentials set` | Store a delivery secret under a name a deployment file can refer to |
+| `credentials list` | List stored credentials — names and types, never values |
+| `keys mint` | Mint an ingress signing key so a producer can publish with HMAC |
+
+**Operate and inspect:**
+
+| Command | What it does |
+| --- | --- |
+| `publish` | Publish an event to a queue |
+| `listen` | Receive deliveries on your machine over an outbound session |
+| `replay <evt_…>` | Re-send one existing event to your listener (read-only) |
+| `metrics <que_…>` | A queue's traffic snapshot |
+| `issues <ten_…>` | A workspace's issues |
+| `edge` | Operate an Edge spool: `run`, `publish`, `status`, `drain`, `retry`, `discard`, `recover`, `reset` |
+| `create-tenant` / `create-queue` | Provision imperatively (prefer `apply`) |
+| `whoami` | The resolved host, environment, tenant and license (key masked) |
+
+### Exit codes
+
+A stable contract, so CI can branch on them:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success — and for `--check`, no drift |
+| `1` | The run did not fully converge, or `--check` found drift |
+| `2` | Bad arguments |
+| `3` | Missing or invalid credentials / configuration (including an unset `${VAR}`) |
+| `4` | The target assembly could not be loaded |
+
+### Recipes
+
+**First deploy of a new service**
+
+```bash
+queuey credentials set --name partner-key --from-env PARTNER_KEY
+queuey apply --dry-run            # catch typos with no credentials and no network
+queuey apply
+```
+
+**Adopt a workspace someone configured in the console**
+
+```bash
+queuey pull --stdout                       # look before you write
+queuey pull                                # writes queuey.deploy.json
+queuey pull --emit-code Queues.cs          # …and the [QueueyQueue] declarations
+```
+
+**One file, many environments**
+
+```bash
+queuey pull --as staging --file staging.deploy.json
+# tells you which ${VAR}s it introduced; set them and apply anywhere
+QUEUEY_BASE_URL=https://staging.example.com queuey apply --file staging.deploy.json
+```
+
+**In CI**
+
+```bash
+queuey apply --check || echo "queuey.deploy.json has drifted — review before merge"
+```
+
+### Tips, and the traps worth knowing
+
+**Two config files, and only one of them is committed.** `queuey.json` holds your API key and stays
+out of git (it already is in `.gitignore`). `queuey.deploy.json` holds no secrets by construction —
+auth and signing name a `credentialRef`, never a value — and is meant to be reviewed in pull
+requests. Never merge them.
+
+**A credential reference is a name, not an id.** Queuey stores a `cred_…` id, and those are minted
+per workspace — a file carrying one would only ever apply where it was written. The file uses the
+name you gave `credentials set`, and the deploy resolves it per workspace.
+
+**Omitting a field means "leave it alone" — everywhere.** In the deployment file, in the policy
+patch, in the delivery patch. A file naming only a base URL changes only the base URL. That is what
+lets you put as much or as little under code as you want.
+
+**`--check` only compares what you declared.** A workspace holding settings your file is silent
+about is inheritance working, not drift. The gate stays usable even if you never put a single policy
+field in the file.
+
+**Applying is idempotent, and non-destructive.** Re-running changes nothing, and `apply` never
+touches a queue's run mode, delivery config or flow levers. A deploy cannot silently reopen a queue
+someone stopped.
+
+**An unset `${VAR}` is an error, not an empty string.** Expanding to nothing would give you a base
+URL of `https://` and a deploy that "succeeded" while pointing at nowhere. Use `${VAR:-default}` when
+you actually mean a default.
+
+**A misspelled field is rejected, not ignored.** A declarative file that reports success while
+quietly skipping what you wrote is worse than one that fails.
+
+**Prefer a relative `url` on a queue.** It appends to the workspace base, so moving hosts is one edit
+instead of N — and relative paths travel between environments untouched. An absolute URL pins a host.
+
+**A queue with nowhere to deliver is a warning, not a failure — and it swallows events.** A new
+queue starts in log-only mode: it accepts events and records them without delivering. `apply` says so
+out loud; take it seriously before pointing production at it.
+
+**`ordering: "bykey"` wires up its own partition key.** Partitioning needs a key, and Queuey rejects
+by-key ordering without one. Declaring it means "lane by the key I send", so the deploy configures
+exactly that rather than bouncing you with a policy error.
+
+**A deploy key cannot mint keys.** `keys mint` needs a credential with key-management rights, on
+purpose: a pipeline key that could hand out credentials would turn repo access into account access.
+Mint once from an admin credential and put the result in your secret store.
+
+**`credentials set` reads the secret from the environment, never an argument.** Arguments land in
+shell history and CI logs.
+
+**`pull` won't overwrite.** Use `--stdout` and diff it first — replacing a committed declaration is
+how an intentional, not-yet-applied edit disappears.
 
 ### `queuey listen` — receive webhooks on your machine
 
@@ -340,8 +470,14 @@ Every command resolves settings as **flag → environment variable → `queuey.j
 | License | `--license lic_…` | `QUEUEY_LICENSE` |
 
 The CLI targets production (`https://api.queuey.ai`) by default; pass `--api-base <uri>` to point at a
-locally-running instance. A `queuey.json` can hold `apiBase` / `apiKey` / `tenant` / `license` so you
-don't repeat flags — but **keep it out of git** (it holds your key; it's already in `.gitignore`).
+locally-running instance.
+
+Two files, and the difference matters:
+
+| File | Holds | Commit it? |
+| --- | --- | --- |
+| `queuey.json` | `apiBase` / `apiKey` / `tenant` / `license` — so you don't repeat flags | **No.** It holds your key, and it is already in `.gitignore` |
+| `queuey.deploy.json` | What your workspace and queues should look like | **Yes.** It carries no secrets by construction |
 
 ## License
 
