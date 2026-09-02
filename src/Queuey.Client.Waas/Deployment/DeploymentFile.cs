@@ -92,6 +92,18 @@ public sealed class DeploymentFile
         return plans;
     }
 
+    /// <summary>
+    /// Renders the file as JSON — what <c>queuey pull</c> writes. Null properties are omitted, so the
+    /// output says only what the workspace actually owns and stays diffable against a hand-written file.
+    /// </summary>
+    public string ToJson() => JsonSerializer.Serialize(this, WriteOptions);
+
+    private static readonly JsonSerializerOptions WriteOptions = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+    };
+
     private static readonly JsonSerializerOptions ReadOptions = new(JsonSerializerDefaults.Web)
     {
         ReadCommentHandling = JsonCommentHandling.Skip,

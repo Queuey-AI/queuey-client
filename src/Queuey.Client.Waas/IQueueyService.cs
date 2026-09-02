@@ -85,6 +85,13 @@ public interface IQueueyService
     Task<QueueSyncResult> ApplyDeploymentAsync(DeploymentFile file, SyncOptions? options = null, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Reads a workspace back into a deployment file — the inverse of
+    /// <see cref="ApplyDeploymentAsync"/>. Inherit-aware (a queue that inherits a section writes
+    /// nothing for it) and secret-free by construction, so the result is safe to commit.
+    /// </summary>
+    Task<DeploymentFile> PullDeploymentAsync(string? tenantPublicId = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Applies queues, then streams. Queues go first because a stream is published on top of one, so a
     /// queue failure stops the run before any stream is touched.
     /// </summary>

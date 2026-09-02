@@ -88,45 +88,89 @@ public class DeploymentFileTests
         Assert.Throws<QueueyConfigurationException>(() => file.Resolve());
     }
 
+    /// <summary>Serves the credential listing (the file names one), then queue applies / patches.</summary>
+    private static StubHttpMessageHandler ApplyStub() => new((_, req, _) =>
+    {
+        string path = req.RequestUri!.AbsolutePath;
+
+        if (path.EndsWith("/credentials", StringComparison.Ordinal))
+            return StubHttpMessageHandler.Json(HttpStatusCode.OK, new[]
+            {
+                new { publicId = "cred_01", name = "partner-key", type = "Secret", keyId = (string?)null },
+            });
+
+        return path.EndsWith("/delivery", StringComparison.Ordinal) || path.EndsWith("/policy", StringComparison.Ordinal)
+            ? new HttpResponseMessage(HttpStatusCode.NoContent)
+            : StubHttpMessageHandler.Json(HttpStatusCode.OK, ApplyBody("orders"));
+    });
+
     [Fact]
     public async Task Apply_converges_the_workspace_before_the_queues()
     {
-        var api = new StubHttpMessageHandler((_, req, _) =>
-            req.RequestUri!.AbsolutePath.Contains("/queues/", StringComparison.Ordinal)
-            || req.RequestUri.AbsolutePath.EndsWith("/delivery", StringComparison.Ordinal)
-                ? new HttpResponseMessage(HttpStatusCode.NoContent)
-                : StubHttpMessageHandler.Json(HttpStatusCode.OK, ApplyBody("orders")));
-
+        StubHttpMessageHandler api = ApplyStub();
         QueueyService service = WaasTestHost.Build(apiStub: api);
 
         await service.ApplyDeploymentAsync(DeploymentFile.Parse(Sample));
 
-        // A queue that means to inherit needs something to inherit, so the workspace lands first.
-        Assert.EndsWith("/tenants/ten_abc/delivery", api.Requests[0].RequestUri!.AbsolutePath);
-        Assert.Equal("PATCH", api.Requests[0].Method.Method);
+        var paths = api.Requests.Select(r => r.RequestUri!.AbsolutePath).ToArray();
+
+        // The file names a credential, so the ids behind those names are resolved first.
+        Assert.EndsWith("/tenants/ten_abc/credentials", paths[0]);
+
+        // A queue that means to inherit needs something to inherit, so the workspace lands next.
+        Assert.EndsWith("/tenants/ten_abc/delivery", paths[1]);
+        Assert.Equal("PATCH", api.Requests[1].Method.Method);
 
         // Then per queue: apply, policy patch (when declared), delivery patch (when declared).
-        var paths = api.Requests.Skip(1).Select(r => r.RequestUri!.AbsolutePath).ToArray();
         Assert.Contains("/queues", paths);
         Assert.Contains("/queues/que_orders/policy", paths);
         Assert.Contains("/queues/que_orders/delivery", paths);
     }
 
     [Fact]
-    public async Task The_workspace_patch_carries_only_what_the_file_declared()
+    public async Task A_credential_name_becomes_the_id_the_api_stores()
+    {
+        StubHttpMessageHandler api = ApplyStub();
+        QueueyService service = WaasTestHost.Build(apiStub: api);
+
+        await service.ApplyDeploymentAsync(DeploymentFile.Parse(Sample));
+
+        int workspacePatch = api.Requests.ToList().FindIndex(
+            r => r.RequestUri!.AbsolutePath.EndsWith("/tenants/ten_abc/delivery", StringComparison.Ordinal));
+        using JsonDocument doc = JsonDocument.Parse(api.Bodies[workspacePatch]!);
+
+        Assert.Equal("cred_01", doc.RootElement.GetProperty("credentialRef").GetString());
+    }
+
+    [Fact]
+    public async Task An_unknown_credential_name_fails_with_what_to_do_about_it()
     {
         var api = new StubHttpMessageHandler((_, req, _) =>
-            req.RequestUri!.AbsolutePath.EndsWith("/delivery", StringComparison.Ordinal)
-            || req.RequestUri.AbsolutePath.EndsWith("/policy", StringComparison.Ordinal)
-                ? new HttpResponseMessage(HttpStatusCode.NoContent)
+            req.RequestUri!.AbsolutePath.EndsWith("/credentials", StringComparison.Ordinal)
+                ? StubHttpMessageHandler.Json(HttpStatusCode.OK, Array.Empty<object>())
                 : StubHttpMessageHandler.Json(HttpStatusCode.OK, ApplyBody("orders")));
 
         QueueyService service = WaasTestHost.Build(apiStub: api);
+
+        var ex = await Assert.ThrowsAsync<QueueyConfigurationException>(
+            () => service.ApplyDeploymentAsync(DeploymentFile.Parse(Sample)));
+
+        Assert.Contains("No credential named 'partner-key'", ex.Message);
+        Assert.Contains("queuey credentials set --name partner-key", ex.Message);
+    }
+
+    [Fact]
+    public async Task The_workspace_patch_carries_only_what_the_file_declared()
+    {
+        StubHttpMessageHandler api = ApplyStub();
+        QueueyService service = WaasTestHost.Build(apiStub: api);
         await service.ApplyDeploymentAsync(DeploymentFile.Parse(Sample));
 
-        using JsonDocument doc = JsonDocument.Parse(api.Bodies[0]!);
+        int workspacePatch = api.Requests.ToList().FindIndex(
+            r => r.RequestUri!.AbsolutePath.EndsWith("/tenants/ten_abc/delivery", StringComparison.Ordinal));
+        using JsonDocument doc = JsonDocument.Parse(api.Bodies[workspacePatch]!);
         Assert.Equal("https://hooks.example.com", doc.RootElement.GetProperty("baseUrl").GetString());
-        Assert.Equal("partner-key", doc.RootElement.GetProperty("credentialRef").GetString());
+        Assert.Equal("ApiKey", doc.RootElement.GetProperty("authMode").GetString());
 
         // Fields the file never mentioned are absent, not null — "leave alone", unambiguously.
         Assert.False(doc.RootElement.TryGetProperty("timeoutMs", out _));

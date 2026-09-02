@@ -384,6 +384,11 @@ public sealed class QueueyService : IQueueyService
     }
 
     /// <inheritdoc />
+    public Task<DeploymentFile> PullDeploymentAsync(string? tenantPublicId = null, CancellationToken cancellationToken = default)
+        => new DeploymentPuller(_controlPlane, Management)
+            .PullAsync(tenantPublicId ?? RequireTenant(), cancellationToken);
+
+    /// <inheritdoc />
     public async Task<QueueSyncResult> ApplyDeploymentAsync(
         DeploymentFile file, SyncOptions? options = null, CancellationToken cancellationToken = default)
     {
@@ -393,13 +398,16 @@ public sealed class QueueyService : IQueueyService
         IReadOnlyList<DeploymentQueuePlan> plans = file.Resolve();   // validates names + policy locally
         var byName = plans.ToDictionary(p => p.Definition.Name, StringComparer.Ordinal);
 
+        string tenant = file.Tenant ?? (options.DryRun ? _options.TenantPublicId ?? string.Empty : RequireTenant());
+        var credentials = new CredentialResolver(Management, tenant);
+
         // Workspace first: queues inherit their destination from it, so converging it first means a
         // queue that means to inherit already has something to inherit. A failure here throws before
         // any queue is touched — same all-or-nothing contract, one level up.
         if (!options.DryRun && file.Workspace is { } workspace && !workspace.IsEmpty)
         {
-            string tenant = file.Tenant ?? RequireTenant();
-            await Management.SetWorkspaceDeliveryAsync(tenant, workspace, cancellationToken).ConfigureAwait(false);
+            WorkspaceDelivery resolved = await credentials.ResolveAsync(workspace, cancellationToken).ConfigureAwait(false);
+            await Management.SetWorkspaceDeliveryAsync(tenant, resolved, cancellationToken).ConfigureAwait(false);
         }
 
         QueueSyncResult result = await SyncQueueDefinitionsAsync(
@@ -409,7 +417,10 @@ public sealed class QueueyService : IQueueyService
             afterApply: async (definition, queuePublicId, ct) =>
             {
                 if (byName.TryGetValue(definition.Name, out DeploymentQueuePlan? plan) && plan.Delivery is { } delivery)
-                    await Management.SetQueueDeliveryAsync(queuePublicId, delivery, ct).ConfigureAwait(false);
+                {
+                    QueueDelivery resolved = await credentials.ResolveAsync(delivery, ct).ConfigureAwait(false);
+                    await Management.SetQueueDeliveryAsync(queuePublicId, resolved, ct).ConfigureAwait(false);
+                }
             }).ConfigureAwait(false);
 
         return result;

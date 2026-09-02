@@ -11,6 +11,13 @@ namespace Queuey.Client.Waas;
 /// Secrets never travel here. <see cref="CredentialRef"/> names a credential stored encrypted in the
 /// workspace (see <c>IQueueyManagement.CreateCredentialAsync</c>); the value itself is written once,
 /// out of band, and is never readable again. That is what makes a deployment file safe to commit.
+/// <para>
+/// The reference is the credential's <b>name</b>, not its id. Queuey stores the pointer as a
+/// <c>cred_…</c> public id, but ids are minted per workspace, so a file carrying one could only ever
+/// apply to the environment it was written in. A deploy resolves the name against the workspace's
+/// credentials, which is what lets one file converge staging and production alike. A literal
+/// <c>cred_…</c> is still accepted, for the case where you have the id and not the name.
+/// </para>
 /// </remarks>
 public sealed class WorkspaceDelivery
 {
@@ -85,7 +92,7 @@ public sealed class DeliverySigning
     /// <summary>Whether outbound requests are signed.</summary>
     public bool Enabled { get; set; }
 
-    /// <summary>The name of the stored signing secret. Never the secret itself.</summary>
+    /// <summary>The name of the stored signing secret (or its <c>cred_…</c> id). Never the secret itself.</summary>
     public string? CredentialRef { get; set; }
 
     /// <summary>Which signature template to use.</summary>
@@ -172,4 +179,67 @@ internal sealed class CredentialWireResponse
     public string? Name { get; set; }
     public string? Type { get; set; }
     public string? KeyId { get; set; }
+}
+
+/// <summary>Wire shape of <c>GET /tenants/{ten}/config</c> — the workspace's delivery + policy.</summary>
+internal sealed class TenantConfigResponse
+{
+    public TenantDeliveryResponse? Delivery { get; set; }
+}
+
+/// <summary>Wire shape of <c>GET /queues/{que}/config</c>: effective values plus per-section inherit flags.</summary>
+internal sealed class QueueConfigResponse
+{
+    public TenantDeliveryResponse? Delivery { get; set; }
+    public QueuePolicyResponse? Policy { get; set; }
+    public QueueInheritResponse? Inherited { get; set; }
+}
+
+/// <summary>Which sections a queue inherits from the workspace (true) versus overrides (false).</summary>
+internal sealed class QueueInheritResponse
+{
+    public bool Destination { get; set; }
+    public bool Auth { get; set; }
+    public bool Signing { get; set; }
+    public bool RateLimit { get; set; }
+    public bool Behavior { get; set; }
+}
+
+/// <summary>The flat delivery read-back. Secret VALUES are never present — only refs and flags.</summary>
+internal sealed class TenantDeliveryResponse
+{
+    public string? BaseUrl { get; set; }
+    public string? AuthMode { get; set; }
+    public bool HasCredential { get; set; }
+    public string? CredentialRef { get; set; }
+    public string? Method { get; set; }
+    public int TimeoutMs { get; set; }
+    public string? AuthHeaderName { get; set; }
+    public DeliveryRateLimitResponse? RateLimit { get; set; }
+    public DeliverySigningResponse? Signing { get; set; }
+}
+
+internal sealed class DeliveryRateLimitResponse
+{
+    public int? MaxRequests { get; set; }
+    public int? PerSeconds { get; set; }
+}
+
+internal sealed class DeliverySigningResponse
+{
+    public bool Enabled { get; set; }
+    public bool HasCredential { get; set; }
+    public string? TemplateKey { get; set; }
+    public string? CredentialRef { get; set; }
+}
+
+/// <summary>The flat policy read-back — the six fields a deployment file can declare, plus the rest.</summary>
+internal sealed class QueuePolicyResponse
+{
+    public bool Idempotent { get; set; }
+    public bool DlqEnabled { get; set; }
+    public int? DlqAfterAttempts { get; set; }
+    public int MaxAttempts { get; set; }
+    public int RetentionDays { get; set; }
+    public string? Ordering { get; set; }
 }

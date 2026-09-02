@@ -21,6 +21,7 @@ try
         "sync" => await SyncCommand.RunAsync(rest),
         "queue" => await QueueCommand.RunAsync(rest),
         "apply" => await ApplyCommand.RunAsync(rest),
+        "pull" => await PullCommand.RunAsync(rest),
         "credentials" => await CredentialsCommand.RunAsync(rest),
         "publish" => await PublishCommand.RunAsync(rest),
         "create-tenant" => await CreateTenantCommand.RunAsync(rest),

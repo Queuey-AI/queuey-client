@@ -11,6 +11,7 @@ COMMANDS
   sync           Apply every [QueueyModel] stream found in an assembly (PUT /waas/streams).
   queue          Declare queues from [QueueyQueue] types: queue plan | queue sync.
   apply          Converge Queuey from a declarative deployment file (queuey.deploy.json).
+  pull           Read a workspace back into a deployment file (the inverse of apply).
   credentials    Store delivery secrets a deployment file refers to: credentials set | list.
   publish        Publish an event to a stream.
   create-tenant  Create a tenant under the current license.
@@ -45,6 +46,15 @@ APPLY
                  The file carries NO secrets: auth and signing name a credentialRef, so it is
                  meant to be committed. Keep it separate from queuey.json, which holds your
                  API key and must not be.
+
+PULL
+  queuey pull [--file queuey.deploy.json] [--force] [--stdout]
+                 Reads the workspace's delivery defaults and every queue back into a
+                 deployment file. Inherit-aware — a queue that inherits a section writes
+                 nothing for it, so the file says what is actually owned rather than freezing
+                 today's defaults as permanent overrides. No secrets: credentials appear by
+                 name. Refuses to overwrite an existing file without --force; use --stdout to
+                 diff first.
 
 CREDENTIALS
   queuey credentials set --name <name> --from-env <ENV_VAR> [--type <type>]

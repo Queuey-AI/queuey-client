@@ -289,6 +289,26 @@ internal sealed class QueueyControlPlaneClient
             HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Reads the workspace's delivery + policy config (<c>GET /tenants/{ten}/config</c>).</summary>
+    public async Task<TenantConfigResponse> GetTenantConfigAsync(string tenantPublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "config");
+        return await _connection.SendForJsonAsync<TenantConfigResponse>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Reads one queue's config with its per-section inherit flags (<c>GET /queues/{que}/config</c>).</summary>
+    public async Task<QueueConfigResponse> GetQueueConfigAsync(string queuePublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues", queuePublicId, "config");
+        return await _connection.SendForJsonAsync<QueueConfigResponse>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
     // ── Package lifecycle (update / archive / remove stream) ───────────────────
 
     /// <summary>Updates a package's name/description (<c>PUT …/packages/{pkg}</c>).</summary>
