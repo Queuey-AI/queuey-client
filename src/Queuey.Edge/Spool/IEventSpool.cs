@@ -90,6 +90,16 @@ public interface IEventSpool
     Task<int> SweepAsync(CancellationToken cancellationToken);
 
     /// <summary>
+    /// The operator's "I fixed the cause — try NOW": makes every pending
+    /// (Accepted) row due immediately and resets its backoff ladder.
+    /// Ordering is untouched (rows keep their ids, lanes keep FIFO) — this
+    /// only collapses WAITING, so it can never cause a duplicate or an
+    /// overtake. Returns rows kicked. Quarantined rows are deliberately NOT
+    /// included — they exit only via explicit retry/discard.
+    /// </summary>
+    Task<int> KickAsync(CancellationToken cancellationToken);
+
+    /// <summary>
     /// Returns a quarantined row to the retry schedule (operator action),
     /// or removes it (explicit discard — logged and counted by the caller).
     /// </summary>
@@ -105,10 +115,17 @@ public sealed record SpoolAccept(long SpoolId, string TransferId, DateTimeOffset
 /// <summary>A leased row handed to the transfer loop.</summary>
 public sealed record ClaimedEvent(long SpoolId, EventEnvelope Envelope, int Attempts, TimeSpan LastDelay);
 
-/// <summary>Counters the health surface derives state from.</summary>
+/// <summary>
+/// Counters the health surface derives state from. NextAttemptUtc is the
+/// earliest scheduled attempt among LANE HEADS — a row queued behind a
+/// backing-off head does not count, so "due now" never lies about a lane
+/// that is in fact waiting. Null when nothing is waiting (empty, or every
+/// eligible head is in flight right now).
+/// </summary>
 public sealed record SpoolStats(
     long PendingCount,
     long QuarantinedCount,
     TimeSpan? OldestPendingAge,
     long StorageUsageBytes,
-    DateTimeOffset? LastSettledAtUtc);
+    DateTimeOffset? LastSettledAtUtc,
+    DateTimeOffset? NextAttemptUtc = null);

@@ -270,7 +270,11 @@ public sealed class SqliteEventSpool : IEventSpool
                     (SELECT MIN(accepted_at_utc) FROM spool WHERE state IN ('Accepted', 'Claimed')),
                     (SELECT (page_count - freelist_count) * page_size
                      FROM pragma_page_count(), pragma_freelist_count(), pragma_page_size()),
-                    (SELECT MAX(transferred_utc) FROM spool WHERE state = 'Transferred');
+                    (SELECT MAX(transferred_utc) FROM spool WHERE state = 'Transferred'),
+                    (SELECT MIN(s.next_attempt_utc) FROM spool s
+                     WHERE s.state = 'Accepted'
+                       AND s.id = (SELECT MIN(h.id) FROM spool h
+                                   WHERE h.lane = s.lane AND h.state IN ('Accepted', 'Claimed')));
                 """;
             using var reader = cmd.ExecuteReader();
             reader.Read();
@@ -281,7 +285,8 @@ public sealed class SqliteEventSpool : IEventSpool
                 QuarantinedCount: reader.GetInt64(1),
                 OldestPendingAge: oldest is null ? null : _clock.UtcNow - oldest.Value,
                 StorageUsageBytes: reader.GetInt64(3),
-                LastSettledAtUtc: reader.IsDBNull(4) ? null : Parse(reader.GetString(4)));
+                LastSettledAtUtc: reader.IsDBNull(4) ? null : Parse(reader.GetString(4)),
+                NextAttemptUtc: reader.IsDBNull(5) ? null : Parse(reader.GetString(5)));
         }, cancellationToken);
 
     public Task<int> SweepAsync(CancellationToken cancellationToken)
@@ -319,6 +324,20 @@ public sealed class SqliteEventSpool : IEventSpool
             ShrinkFile(conn);
 
             return touched;
+        }, cancellationToken);
+
+    public Task<int> KickAsync(CancellationToken cancellationToken)
+        => WriteLockedAsync(conn =>
+        {
+            // Collapse waiting only: due-now + ladder reset. States, ids and
+            // lane order are untouched, so FIFO and dedup semantics hold.
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                UPDATE spool SET next_attempt_utc = @now, last_delay_ms = 0
+                WHERE state = 'Accepted' AND next_attempt_utc > @now;
+                """;
+            cmd.Parameters.AddWithValue("@now", Format(_clock.UtcNow));
+            return cmd.ExecuteNonQuery();
         }, cancellationToken);
 
     public Task<bool> RetryQuarantinedAsync(long spoolId, CancellationToken cancellationToken)

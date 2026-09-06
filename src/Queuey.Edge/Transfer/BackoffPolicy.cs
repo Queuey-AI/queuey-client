@@ -45,6 +45,12 @@ internal sealed class BackoffPolicy
             case TransferClass.Throttled:
                 return Decorrelated(lastDelay);
 
+            // A paused queue is an INTENTIONAL operator state, not a fault —
+            // the operator will unpause and expects flow to resume promptly.
+            // Fixed fast probe (default 1 min), no doubling ladder.
+            case TransferClass.RequiresAction when outcome.Reason == TransferReason.QueuePaused:
+                return _options.QueuePausedProbe;
+
             case TransferClass.RequiresAction:
                 if (lastDelay < _options.RequiresActionProbeInitial)
                     return _options.RequiresActionProbeInitial;

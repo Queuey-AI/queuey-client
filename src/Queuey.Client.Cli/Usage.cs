@@ -138,6 +138,7 @@ EDGE
                 [--idempotency-key <k>] [--event-type <t>] [--group-key <k>]
                 [--occurred-at <iso8601>] [--source <s>] [--json]
   queuey edge status  --spool <path> [--json]
+  queuey edge kick    --spool <path>
   queuey edge drain   --spool <path> [--timeout <seconds>]
   queuey edge retry   --spool <path> (--id N | --all)
   queuey edge discard --spool <path> --id N
