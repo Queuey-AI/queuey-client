@@ -13,7 +13,7 @@ Queuey owns the delivery mechanics from there: transfer to Queuey Cloud,
 retries, backoff, reconnect, lost-ACK resolution, idempotent resend, recovery
 across process and machine restarts, and backlog draining. Kill the network,
 kill Queuey, kill your own process — accepted events survive on disk and
-drain, in order, when the world comes back.
+drain, in order per lane, when the world comes back.
 
 Your application never contains delivery code:
 
@@ -208,17 +208,28 @@ queuey edge reset   --spool <path> --accept-data-loss # start clean; the old fil
   WAL-mode SQLite database mid-write produces a corrupt copy.
 - Size `Storage.MaxSpoolBytes` (default 512 MB) from your rate: at
   1 event/minute × 1 KB that is roughly **a year** of offline autonomy.
+  A spool that hit the limit accepts again the moment its backlog has
+  transferred — the limit counts live events, not the file's size.
 
 ## Semantics worth knowing
 
 - **Exactly-once, logically:** at-least-once transfer + a permanent identity
   reservation at Cloud = one logical event, even for a lost-ACK resend weeks
   later.
-- **Ordering:** strict FIFO per lane (`queue`, or `queue`+`GroupKey`); at
-  most one in-flight transfer per lane. A transient failure at the head
-  *delays* its lane (that's FIFO); an event Cloud permanently rejects is
-  **quarantined and steps aside** so one poisoned payload never freezes the
-  stream.
+- **Ordering:** strict FIFO per lane (`queue`, or `queue`+`GroupKey`) up
+  to the point Queuey Cloud receives the event; at most one in-flight
+  transfer per lane, and no ordering across lanes. Delivery order from
+  Cloud to your destination follows the queue's own ordering policy
+  (`ordering: fifo` keeps it; `besteffort` does not). A transient failure
+  at the head *delays* its lane (that's FIFO); an event Cloud permanently
+  rejects is **quarantined and steps aside** so one poisoned payload never
+  freezes the stream — and `queuey edge retry` puts it back at the head of
+  its lane, ahead of anything accepted after it.
+- **Throttling:** none of Edge's own. Transfers run with bounded
+  concurrency across lanes, back off with decorrelated jitter, probe with a
+  single event after a failure, and wait at least Cloud's `Retry-After`
+  (plus a little jitter, so a fleet that went dark together does not knock
+  again in lockstep).
 - **Honest history:** pass `PublishOptions.OccurredAtUtc` and a backlog
   drained on Wednesday still reads as Monday in the Queuey console.
 - **Never silent loss:** events leave the spool only via Cloud custody,

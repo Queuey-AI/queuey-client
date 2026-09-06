@@ -18,13 +18,49 @@ public class StreamDefinitionFactoryTests
     }
 
     [Fact]
-    public void Missing_attribute_falls_back_to_type_name_and_defaults()
+    public void Missing_attribute_falls_back_to_the_normalized_type_name_and_defaults()
     {
         StreamDefinition def = StreamDefinitionFactory.FromType(typeof(InvoiceIssued), null);
 
-        Assert.Equal(nameof(InvoiceIssued), def.Name);
+        // The CLR type name is a C# identifier, not a name anyone chose — so convention normalizes it
+        // to something the server accepts. "InvoiceIssued" verbatim is rejected by the queue-name rules.
+        Assert.Equal("invoice-issued", def.Name);
         Assert.True(def.IsPublic);
         Assert.Empty(def.EventTypes);
+    }
+
+    [Fact]
+    public void Explicit_name_is_validated_not_rewritten()
+    {
+        // Silently lowercasing would leave PushEvent("Order-Events", ...) pointing at nothing.
+        // The attribute and inline paths share one resolver; inline is the one an assembly scan
+        // can't trip over, so the branch is covered here.
+        var ex = Assert.Throws<QueueyConfigurationException>(
+            () => StreamDefinitionFactory.FromType(typeof(OrderCreated), new StreamOptions { Name = "Order-Events" }));
+
+        Assert.Contains("stream name", ex.Message);
+        Assert.Contains("Order-Events", ex.Message);
+        Assert.Contains("Did you mean 'order-events'?", ex.Message);
+    }
+
+    [Fact]
+    public void Name_only_stream_is_validated()
+    {
+        var ex = Assert.Throws<QueueyConfigurationException>(
+            () => StreamDefinitionFactory.FromName("Invoice Events", null));
+
+        Assert.Contains("Did you mean 'invoice-events'?", ex.Message);
+    }
+
+    [Fact]
+    public void Undeducible_type_name_names_the_type_and_says_how_to_fix_it()
+    {
+        var ex = Assert.Throws<QueueyConfigurationException>(
+            () => StreamDefinitionFactory.FromType(typeof(Sandbox), null));
+
+        Assert.Contains("Sandbox", ex.Message);
+        Assert.Contains("reserved", ex.Message);
+        Assert.Contains("[QueueyModel(", ex.Message);
     }
 
     [Fact]

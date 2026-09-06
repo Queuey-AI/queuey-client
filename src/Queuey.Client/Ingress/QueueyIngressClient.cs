@@ -73,7 +73,7 @@ internal sealed class QueueyIngressClient : IQueueyIngress
             options?.EventType, options?.GroupKey, options?.IdempotencyKey, options?.Source,
             cancellationToken);
 
-    private Task<PublishResult> SendAsync(
+    private async Task<PublishResult> SendAsync(
         string queueName,
         byte[] body,
         string contentType,
@@ -104,8 +104,22 @@ internal sealed class QueueyIngressClient : IQueueyIngress
             if (!string.IsNullOrEmpty(resolvedSource)) QueueyHttpHeaders.Set(headers, QueueyHeaders.Source, resolvedSource!);
         }
 
-        return _connection.SendForJsonAsync<PublishResult>(
-            HttpMethod.Post, uri, body, contentType, _authenticator, Configure, cancellationToken);
+        try
+        {
+            return await _connection.SendForJsonAsync<PublishResult>(
+                HttpMethod.Post, uri, body, contentType, _authenticator, Configure, cancellationToken).ConfigureAwait(false);
+        }
+        catch (QueueyNotFoundException ex) when (!QueueyName.IsValid(queueName))
+        {
+            // Publishing deliberately does NOT pre-validate the name: the server keeps routing queues
+            // that predate its own name validator, and the SDK must not refuse a queue Queuey accepts.
+            // But when the route 404s AND the name could never have been created, say so — that is the
+            // typo case, and the bare "not found" sends people hunting in the console.
+            throw new QueueyNotFoundException(
+                $"{ex.Message} The queue name '{queueName}' also breaks Queuey's naming rules, so it is " +
+                $"unlikely to exist: {QueueyName.Hint(queueName)}",
+                ex.ErrorCode);
+        }
     }
 
     private static byte[] Serialize<T>(T payload)

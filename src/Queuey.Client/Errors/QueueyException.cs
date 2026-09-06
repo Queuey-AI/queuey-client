@@ -73,7 +73,7 @@ public sealed class QueueyLoopDetectedException : QueueyException
 
 /// <summary>
 /// Thrown for client-side misconfiguration before any request is made — for example,
-/// invoking a management/partner/SyncModels operation without a
+/// invoking a management/partner/SyncStreams operation without a
 /// <see cref="QueueyOptions.ManagementToken"/>.
 /// </summary>
 public sealed class QueueyConfigurationException : QueueyException

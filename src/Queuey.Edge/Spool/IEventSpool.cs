@@ -62,9 +62,11 @@ public interface IEventSpool
 
     /// <summary>
     /// Records Cloud custody (fresh or replayed — both are success) and
-    /// releases Edge's ownership. The row becomes Transferred and is swept
-    /// after <c>SettledRetention</c>; the ack's cloud event id is kept on
-    /// the row until then purely for correlation/support.
+    /// releases Edge's ownership. The payload is blanked at once (Cloud
+    /// holds it now; the freed space is what lets a full spool accept
+    /// again); the row becomes Transferred and is swept after
+    /// <c>SettledRetention</c>, with the ack's cloud event id kept on it
+    /// until then purely for correlation/support.
     /// </summary>
     Task SettleAsync(long spoolId, CloudAck ack, CancellationToken cancellationToken);
 
@@ -91,9 +93,10 @@ public interface IEventSpool
 
     /// <summary>
     /// Housekeeping: expire stale leases back to ready, delete Transferred
-    /// rows past <c>SettledRetention</c>. Returns rows touched. The ONLY
-    /// deletion here is settled cleanup — accepted-but-untransferred events
-    /// are never deleted by any sweep (rev 4 F4).
+    /// rows past <c>SettledRetention</c>, hand freed pages back to the OS.
+    /// Returns rows touched. The ONLY deletion here is settled cleanup —
+    /// accepted-but-untransferred events are never deleted by any sweep
+    /// (rev 4 F4).
     /// </summary>
     Task<int> SweepAsync(CancellationToken cancellationToken);
 

@@ -108,6 +108,16 @@ internal static class QueueyErrorMapper
                     // Flat shape: error is the code string, message is a sibling.
                     code = error.GetString();
                     message = GetString(root, "message");
+
+                    // …except some endpoints put a human sentence there and no sibling at all.
+                    // Losing it turns a precise server error into a bare "Bad Request", which is
+                    // how a wrong credential type cost an afternoon. A value with spaces is prose,
+                    // not a code.
+                    if (message is null && code is { } only && only.IndexOf(' ') >= 0)
+                    {
+                        message = only;
+                        code = null;
+                    }
                 }
             }
 

@@ -19,6 +19,11 @@ try
     {
         "whoami" => WhoAmICommand.Run(rest),
         "sync" => await SyncCommand.RunAsync(rest),
+        "queue" => await QueueCommand.RunAsync(rest),
+        "apply" => await ApplyCommand.RunAsync(rest),
+        "pull" => await PullCommand.RunAsync(rest),
+        "keys" => await KeysCommand.RunAsync(rest),
+        "credentials" => await CredentialsCommand.RunAsync(rest),
         "publish" => await PublishCommand.RunAsync(rest),
         "create-tenant" => await CreateTenantCommand.RunAsync(rest),
         "create-queue" => await CreateQueueCommand.RunAsync(rest),
