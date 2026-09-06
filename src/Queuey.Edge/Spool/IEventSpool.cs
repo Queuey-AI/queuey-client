@@ -30,6 +30,17 @@ public interface IEventSpool
     string? FaultReason { get; }
 
     /// <summary>
+    /// Small, durable key/value metadata living beside the spool rows
+    /// (<c>edge_meta</c>): the node identity, source watermarks — facts
+    /// that must survive exactly as long as the spool file does and no
+    /// longer. Null when the key is absent.
+    /// </summary>
+    Task<string?> GetMetaAsync(string key, CancellationToken cancellationToken);
+
+    /// <summary>Upserts one metadata value under the same durability level as events.</summary>
+    Task SetMetaAsync(string key, string value, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Durably persists one envelope at the configured
     /// <see cref="SpoolDurability"/> level. Returns only after the commit —
     /// this call IS the <c>PublishAsync</c> success boundary. Throws

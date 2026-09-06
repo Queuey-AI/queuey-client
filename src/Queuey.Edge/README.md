@@ -100,6 +100,40 @@ Edge resumes by itself when the cause clears.
 | `state` | 0 Healthy · 1 Backlogged · 2 RequiresAction · 3 StorageFull · 4 StorageFaulted |
 | `transfer.accepted{replayed}` / `transfer.failed{class,reason}` | throughput and diagnosis |
 
+### Fleet view: let the node check in (opt-in)
+
+```csharp
+o.Health.ReportToCloud = true;   // or: queuey edge run --report-health --node-name barge-07
+o.Health.NodeName = "barge-07";  // defaults to the machine name
+```
+
+The node then POSTs its health snapshot to Queuey Cloud — at startup, on
+every state change, and every 5 minutes otherwise — and appears under
+**Edge nodes** in the console with pending count, oldest age, last failure
+and "last seen". Three things are fixed by design: traffic is **outbound
+only** (Cloud never reaches into a node; the loopback endpoint stays
+loopback), reports are **not events** (not spooled, not retried, never
+billed — a stale report is worthless, the next one supersedes it), and the
+node's identity is a UUID minted once into the spool file, so a reinstall
+on the same disk is the same node and a fresh spool is a new one. A node
+that stops reporting shows as **silent** in the console — Cloud derives
+that from `last seen`; the node itself never escalates.
+
+### Already have a broker on the gateway? Subscribe, don't rewrite (Queuey.Edge.Mqtt)
+
+```bash
+queuey edge run --spool /var/lib/queuey/spool.db --tenant ten_… --api-key qak_… \
+  --mqtt localhost:1883 --mqtt-routes "plant/+/alarms=alarms@1;plant/+/state=machine-state@1"
+```
+
+The separate `Queuey.Edge.Mqtt` package (`services.AddQueueyEdgeMqttSource(…)` in code)
+subscribes at QoS 1 and hands every message to the spool; **the broker is acked only
+after the fsync'd commit**, so a message the broker gave us is never lost between
+broker and Edge, and a full spool pushes back on the broker instead of dropping.
+`@1` makes topic level 1 (the machine) the lane, so per-machine order survives all
+the way to Cloud. Intake only: no transformation, no fan-out, no delivery — that is
+Cloud. At-least-once from broker to spool (MQTT has no message identity to dedupe on).
+
 ## No .NET app? Shell, Python, cron — the IoT path
 
 The spool file is the local contract, and SQLite (WAL) lets multiple

@@ -188,4 +188,6 @@ internal static class EdgeLogEvents
     public static readonly EventId EphemeralPath = new(7310, "queuey.edge.ephemeral_path_warning");
     public static readonly EventId LocalEndpointStarted = new(7311, "queuey.edge.local_endpoint_started");
     public static readonly EventId LocalEndpointError = new(7312, "queuey.edge.local_endpoint_error");
+    public static readonly EventId HealthReportStarted = new(7313, "queuey.edge.health_report_started");
+    public static readonly EventId HealthReportFailed = new(7314, "queuey.edge.health_report_failed");
 }
