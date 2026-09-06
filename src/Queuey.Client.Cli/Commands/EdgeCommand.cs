@@ -205,6 +205,22 @@ internal static class EdgeCommand
 
         var ingressBase = map.Get("ingress-base") ?? Environment.GetEnvironmentVariable("QUEUEY_INGRESS_BASE");
 
+        // Opt-in encryption at rest. Environment only — an option file next to
+        // the spool would keep the key beside the data it protects.
+        byte[]? spoolKey = null;
+        if (Environment.GetEnvironmentVariable("QUEUEY_SPOOL_KEY") is { Length: > 0 } spoolKeyRaw)
+        {
+            try { spoolKey = Convert.FromBase64String(spoolKeyRaw.Trim()); }
+            catch (FormatException) { spoolKey = Array.Empty<byte>(); }
+            if (spoolKey.Length != SpoolPayloadProtection.KeyBytes)
+            {
+                Console.Error.WriteLine(
+                    $"QUEUEY_SPOOL_KEY must be a base64-encoded {SpoolPayloadProtection.KeyBytes}-byte key " +
+                    "(generate one with 'openssl rand -base64 32').");
+                return ExitCodes.Usage;
+            }
+        }
+
         var builder = Microsoft.Extensions.Hosting.Host.CreateApplicationBuilder();
         builder.Logging.SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Warning);
         builder.Logging.AddFilter("Queuey", Microsoft.Extensions.Logging.LogLevel.Information);
@@ -232,6 +248,8 @@ internal static class EdgeCommand
             o.ApiKey = apiKey;
             o.TenantPublicId = tenant;
             o.Storage.Path = spoolPath;
+            if (spoolKey is not null)
+                o.Storage.PayloadKey = spoolKey;
             o.LocalEndpoint.Port = listenPort;
             o.Health.ReportToCloud = reportHealth;
             if (!string.IsNullOrWhiteSpace(nodeName))

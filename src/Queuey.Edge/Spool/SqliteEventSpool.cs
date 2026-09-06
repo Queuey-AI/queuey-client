@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Security.Cryptography;
 using Microsoft.Data.Sqlite;
 
 namespace Queuey.Edge;
@@ -27,6 +28,12 @@ namespace Queuey.Edge;
 /// <c>SettledRetention</c>, explicit operator discard — nothing else. Age
 /// never deletes.</para>
 ///
+/// <para>At rest (2026-08-29): the payload is blanked the moment a row is
+/// settled (the row stays for correlation), freed pages are overwritten
+/// (<c>secure_delete</c>), the file is owner-only on Unix, and payloads can
+/// be AES-GCM encrypted with a customer-held key (<see cref="SpoolPayloadProtection"/>).
+/// The device is the most exposed place a payload ever sits.</para>
+///
 /// <para>Capacity (2026-09-06): the limit is measured against LIVE pages
 /// (<c>page_count - freelist_count</c>), never the file size. SQLite hands
 /// freed pages to new rows before it grows the file, so a spool that hit
@@ -36,7 +43,7 @@ namespace Queuey.Edge;
 /// </summary>
 public sealed class SqliteEventSpool : IEventSpool
 {
-    private const int CurrentSchemaVersion = 1;
+    private const int CurrentSchemaVersion = 2;
     private const string DateFormat = "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'";
 
     private readonly EdgeStorageOptions _options;
@@ -71,7 +78,8 @@ public sealed class SqliteEventSpool : IEventSpool
         {
             return await GuardedAsync(conn =>
             {
-                EnsureCapacityFor(conn, envelope.Payload.LongLength);
+                var (storedPayload, storedEnc) = ProtectForStorage(envelope.Payload);
+                EnsureCapacityFor(conn, storedPayload.LongLength);
 
                 var now = _clock.UtcNow;
                 using var tx = conn.BeginTransaction();
@@ -80,11 +88,11 @@ public sealed class SqliteEventSpool : IEventSpool
                 insert.CommandText = """
                     INSERT INTO spool (
                         envelope_version, transfer_id, queue_name, tenant_public_id, content_type,
-                        payload, event_type, group_key, lane, source, occurred_at_utc,
+                        payload, payload_enc, event_type, group_key, lane, source, occurred_at_utc,
                         enqueued_mono, state, attempts, next_attempt_utc, accepted_at_utc)
                     VALUES (
                         @version, @transferId, @queue, @tenant, @contentType,
-                        @payload, @eventType, @groupKey, @lane, @source, @occurredAt,
+                        @payload, @enc, @eventType, @groupKey, @lane, @source, @occurredAt,
                         @mono, 'Accepted', 0, @now, @now)
                     RETURNING id;
                     """;
@@ -93,7 +101,8 @@ public sealed class SqliteEventSpool : IEventSpool
                 insert.Parameters.AddWithValue("@queue", envelope.Queue);
                 insert.Parameters.AddWithValue("@tenant", envelope.TenantPublicId);
                 insert.Parameters.AddWithValue("@contentType", envelope.ContentType);
-                insert.Parameters.AddWithValue("@payload", envelope.Payload);
+                insert.Parameters.AddWithValue("@payload", storedPayload);
+                insert.Parameters.AddWithValue("@enc", storedEnc);
                 insert.Parameters.AddWithValue("@eventType", (object?)envelope.EventType ?? DBNull.Value);
                 insert.Parameters.AddWithValue("@groupKey", (object?)envelope.GroupKey ?? DBNull.Value);
                 insert.Parameters.AddWithValue("@lane", envelope.Lane);
@@ -149,7 +158,7 @@ public sealed class SqliteEventSpool : IEventSpool
             pick.CommandText = """
                 SELECT s.id, s.envelope_version, s.transfer_id, s.queue_name, s.tenant_public_id,
                        s.content_type, s.payload, s.event_type, s.group_key, s.source,
-                       s.occurred_at_utc, s.attempts, s.last_delay_ms
+                       s.occurred_at_utc, s.attempts, s.last_delay_ms, s.payload_enc
                 FROM spool s
                 WHERE s.state = 'Accepted'
                   AND s.next_attempt_utc <= @now
@@ -162,17 +171,27 @@ public sealed class SqliteEventSpool : IEventSpool
             pick.Parameters.AddWithValue("@maxLanes", maxLanes);
 
             var claims = new List<ClaimedEvent>();
+            var unreadable = new List<(long Id, string Why)>();
             using (var reader = pick.ExecuteReader())
             {
                 while (reader.Read())
                 {
+                    // A row this key cannot open is stepped aside like any other
+                    // quarantine: never sent (the bytes would be wrong), never
+                    // dropped (an operator with the right key can retry it).
+                    if (!TryOpenPayload((byte[])reader.GetValue(6), reader.GetInt64(13), out var payload, out var why))
+                    {
+                        unreadable.Add((reader.GetInt64(0), why));
+                        continue;
+                    }
+
                     var envelope = new EventEnvelope(
                         Version: (int)reader.GetInt64(1),
                         TransferId: reader.GetString(2),
                         Queue: reader.GetString(3),
                         TenantPublicId: reader.GetString(4),
                         ContentType: reader.GetString(5),
-                        Payload: (byte[])reader.GetValue(6),
+                        Payload: payload,
                         OccurredAtUtc: Parse(reader.GetString(10)),
                         EventType: reader.IsDBNull(7) ? null : reader.GetString(7),
                         GroupKey: reader.IsDBNull(8) ? null : reader.GetString(8),
@@ -184,6 +203,21 @@ public sealed class SqliteEventSpool : IEventSpool
                         Attempts: (int)reader.GetInt64(11),
                         LastDelay: TimeSpan.FromMilliseconds(reader.GetInt64(12))));
                 }
+            }
+
+            foreach (var (id, why) in unreadable)
+            {
+                using var park = conn.CreateCommand();
+                park.Transaction = tx;
+                park.CommandText = """
+                    UPDATE spool
+                    SET state = 'Quarantined', claimed_until_utc = NULL, attempts = attempts + 1,
+                        last_class = 'PayloadUnreadable', last_reason = @why
+                    WHERE id = @id;
+                    """;
+                park.Parameters.AddWithValue("@why", why);
+                park.Parameters.AddWithValue("@id", id);
+                park.ExecuteNonQuery();
             }
 
             if (claims.Count > 0)
@@ -450,10 +484,18 @@ public sealed class SqliteEventSpool : IEventSpool
     {
         var conn = new SqliteConnection(_connectionString);
 
+        var directoryCreatedHere = false;
         if (!_bootstrapped)
-            Directory.CreateDirectory(Path.GetDirectoryName(_options.Path)!);
+        {
+            var dir = Path.GetDirectoryName(_options.Path)!;
+            directoryCreatedHere = !Directory.Exists(dir);
+            Directory.CreateDirectory(dir);
+        }
 
         conn.Open();
+
+        if (!_bootstrapped)
+            RestrictFileModes(directoryCreatedHere);
 
         using (var pragmas = conn.CreateCommand())
         {
@@ -465,6 +507,7 @@ public sealed class SqliteEventSpool : IEventSpool
                 PRAGMA synchronous = FULL;
                 PRAGMA busy_timeout = 5000;
                 PRAGMA foreign_keys = ON;
+                PRAGMA secure_delete = ON;
                 """;
             pragmas.ExecuteNonQuery();
         }
@@ -502,6 +545,9 @@ public sealed class SqliteEventSpool : IEventSpool
         {
             case 0:
                 CreateSchema(conn);
+                break;
+            case 1:
+                MigrateV1ToV2(conn);
                 break;
             case CurrentSchemaVersion:
                 break;
@@ -567,6 +613,7 @@ public sealed class SqliteEventSpool : IEventSpool
                 tenant_public_id  TEXT    NOT NULL,
                 content_type      TEXT    NOT NULL,
                 payload           BLOB    NOT NULL,
+                payload_enc       INTEGER NOT NULL DEFAULT 0,
                 event_type        TEXT,
                 group_key         TEXT,
                 lane              TEXT    NOT NULL,
@@ -599,6 +646,102 @@ public sealed class SqliteEventSpool : IEventSpool
         tx.Commit();
     }
 
+    /// <summary>
+    /// v1 → v2: the payload_enc scheme column. Existing rows are plain (0).
+    /// Idempotent on the column: a salvage copy of a v2 spool already carries
+    /// it while its user_version says v1 (recover rebuilds the schema by
+    /// letting bootstrap run), and ALTER ADD on an existing column is an error.
+    /// </summary>
+    private static void MigrateV1ToV2(SqliteConnection conn)
+    {
+        using var tx = conn.BeginTransaction();
+        using (var probe = conn.CreateCommand())
+        {
+            probe.Transaction = tx;
+            probe.CommandText = "SELECT COUNT(*) FROM pragma_table_info('spool') WHERE name = 'payload_enc';";
+            if ((long)probe.ExecuteScalar()! == 0)
+            {
+                using var add = conn.CreateCommand();
+                add.Transaction = tx;
+                add.CommandText = "ALTER TABLE spool ADD COLUMN payload_enc INTEGER NOT NULL DEFAULT 0;";
+                add.ExecuteNonQuery();
+            }
+        }
+        using (var bump = conn.CreateCommand())
+        {
+            bump.Transaction = tx;
+            bump.CommandText = "PRAGMA user_version = 2;";
+            bump.ExecuteNonQuery();
+        }
+        tx.Commit();
+    }
+
+    private (byte[] Stored, long Scheme) ProtectForStorage(byte[] payload)
+        => _options.PayloadKey is { } key
+            ? (SpoolPayloadProtection.Protect(key, payload), SpoolPayloadProtection.SchemeAesGcmV1)
+            : (payload, 0L);
+
+    private bool TryOpenPayload(byte[] stored, long scheme, out byte[] payload, out string why)
+    {
+        payload = stored; why = string.Empty;
+        if (scheme == 0) return true;
+        if (scheme != SpoolPayloadProtection.SchemeAesGcmV1)
+        {
+            why = $"payload scheme {scheme} is unknown to this Queuey.Edge";
+            return false;
+        }
+        if (_options.PayloadKey is not { } key)
+        {
+            why = "payload is encrypted at rest but no spool key is configured (QUEUEY_SPOOL_KEY)";
+            return false;
+        }
+        try { payload = SpoolPayloadProtection.Unprotect(key, stored); return true; }
+        catch (CryptographicException)
+        {
+            why = "payload could not be opened with the configured spool key (rotated key? use the key it was written with)";
+            return false;
+        }
+    }
+
+    // 0600 on the file (the WAL/SHM sidecars inherit it from SQLite), 0700 on
+    // the directory only when this spool created it — never on a directory the
+    // operator pointed at and may share. Best effort by design: a filesystem
+    // that refuses modes must not refuse durability.
+    private void RestrictFileModes(bool directoryCreatedHere)
+    {
+        if (OperatingSystem.IsWindows()) return;
+        try
+        {
+            if (directoryCreatedHere && Path.GetDirectoryName(_options.Path) is { Length: > 0 } dir)
+                File.SetUnixFileMode(dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            if (File.Exists(_options.Path))
+                File.SetUnixFileMode(_options.Path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+
+    /// <summary>Test hook: is <c>secure_delete</c> on for spool connections (1 = on)?</summary>
+    internal long InspectSecureDelete()
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "PRAGMA secure_delete;";
+        return (long)cmd.ExecuteScalar()!;
+    }
+
+    /// <summary>Test hook: the raw stored bytes + scheme + state of one row, as the file holds them.</summary>
+    internal (byte[] Payload, long Scheme, string State) InspectRow(long spoolId)
+    {
+        using var conn = Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT payload, payload_enc, state FROM spool WHERE id = @id;";
+        cmd.Parameters.AddWithValue("@id", spoolId);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) throw new InvalidOperationException($"No spool row {spoolId}.");
+        return ((byte[])reader.GetValue(0), reader.GetInt64(1), reader.GetString(2));
+    }
+///
     private static readonly TimeSpan ShrinkBudget = TimeSpan.FromMilliseconds(250);
     private const int ShrinkBatchPages = 256;
 
