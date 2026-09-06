@@ -36,6 +36,15 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="8.0.10" />
+    <!-- Explicit pin: Microsoft.Data.Sqlite 8.x transitively pulls
+         SQLitePCLRaw ≤ 2.1.11, whose bundled native SQLite (< 3.50.2) has
+         CVE-2025-6965 (GHSA-2m69-gcr7-jv3q, memory corruption in aggregate
+         handling). Edge only ever runs fixed parameterized SQL — payloads
+         are opaque blobs, never parsed as SQL — so practical exposure is
+         low, but the spool is the custody store and "low" is not the bar.
+         2.1.13 bundles a fixed SQLite; drop this pin when Microsoft.Data.Sqlite
+         references it on its own. -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.13" />
     <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="8.0.1" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.2" />
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
