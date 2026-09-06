@@ -11,7 +11,7 @@ namespace Queuey.Client;
 /// <item><b>Ingress host</b> (publish) — <c>https://ingress.queuey.ai</c>. Authenticated with an
 /// <c>X-Api-Key</c> (<see cref="ApiKey"/>) or HMAC signing (<see cref="SigningKeyId"/> +
 /// <see cref="SigningSecret"/>). No license header.</item>
-/// <item><b>API host</b> (control plane: management, WaaS, SyncModels, partner ops) —
+/// <item><b>API host</b> (control plane: management, WaaS, SyncStreams, partner ops) —
 /// <c>https://api.queuey.ai</c>. Authenticated with the same <c>X-Api-Key</c> plus the
 /// <c>X-License-PublicId</c> header (<see cref="LicensePublicId"/>).</item>
 /// </list>

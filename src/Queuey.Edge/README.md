@@ -13,7 +13,7 @@ Queuey owns the delivery mechanics from there: transfer to Queuey Cloud,
 retries, backoff, reconnect, lost-ACK resolution, idempotent resend, recovery
 across process and machine restarts, and backlog draining. Kill the network,
 kill Queuey, kill your own process — accepted events survive on disk and
-drain, in order, when the world comes back.
+drain, in order per lane, when the world comes back.
 
 Your application never contains delivery code:
 
@@ -100,6 +100,40 @@ Edge resumes by itself when the cause clears.
 | `state` | 0 Healthy · 1 Backlogged · 2 RequiresAction · 3 StorageFull · 4 StorageFaulted |
 | `transfer.accepted{replayed}` / `transfer.failed{class,reason}` | throughput and diagnosis |
 
+### Fleet view: let the node check in (opt-in)
+
+```csharp
+o.Health.ReportToCloud = true;   // or: queuey edge run --report-health --node-name barge-07
+o.Health.NodeName = "barge-07";  // defaults to the machine name
+```
+
+The node then POSTs its health snapshot to Queuey Cloud — at startup, on
+every state change, and every 5 minutes otherwise — and appears under
+**Edge nodes** in the console with pending count, oldest age, last failure
+and "last seen". Three things are fixed by design: traffic is **outbound
+only** (Cloud never reaches into a node; the loopback endpoint stays
+loopback), reports are **not events** (not spooled, not retried, never
+billed — a stale report is worthless, the next one supersedes it), and the
+node's identity is a UUID minted once into the spool file, so a reinstall
+on the same disk is the same node and a fresh spool is a new one. A node
+that stops reporting shows as **silent** in the console — Cloud derives
+that from `last seen`; the node itself never escalates.
+
+### Already have a broker on the gateway? Subscribe, don't rewrite (Queuey.Edge.Mqtt)
+
+```bash
+queuey edge run --spool /var/lib/queuey/spool.db --tenant ten_… --api-key qak_… \
+  --mqtt localhost:1883 --mqtt-routes "plant/+/alarms=alarms@1;plant/+/state=machine-state@1"
+```
+
+The separate `Queuey.Edge.Mqtt` package (`services.AddQueueyEdgeMqttSource(…)` in code)
+subscribes at QoS 1 and hands every message to the spool; **the broker is acked only
+after the fsync'd commit**, so a message the broker gave us is never lost between
+broker and Edge, and a full spool pushes back on the broker instead of dropping.
+`@1` makes topic level 1 (the machine) the lane, so per-machine order survives all
+the way to Cloud. Intake only: no transformation, no fan-out, no delivery — that is
+Cloud. At-least-once from broker to spool (MQTT has no message identity to dedupe on).
+
 ## No .NET app? Shell, Python, cron — the IoT path
 
 The spool file is the local contract, and SQLite (WAL) lets multiple
@@ -174,17 +208,28 @@ queuey edge reset   --spool <path> --accept-data-loss # start clean; the old fil
   WAL-mode SQLite database mid-write produces a corrupt copy.
 - Size `Storage.MaxSpoolBytes` (default 512 MB) from your rate: at
   1 event/minute × 1 KB that is roughly **a year** of offline autonomy.
+  A spool that hit the limit accepts again the moment its backlog has
+  transferred — the limit counts live events, not the file's size.
 
 ## Semantics worth knowing
 
 - **Exactly-once, logically:** at-least-once transfer + a permanent identity
   reservation at Cloud = one logical event, even for a lost-ACK resend weeks
   later.
-- **Ordering:** strict FIFO per lane (`queue`, or `queue`+`GroupKey`); at
-  most one in-flight transfer per lane. A transient failure at the head
-  *delays* its lane (that's FIFO); an event Cloud permanently rejects is
-  **quarantined and steps aside** so one poisoned payload never freezes the
-  stream.
+- **Ordering:** strict FIFO per lane (`queue`, or `queue`+`GroupKey`) up
+  to the point Queuey Cloud receives the event; at most one in-flight
+  transfer per lane, and no ordering across lanes. Delivery order from
+  Cloud to your destination follows the queue's own ordering policy
+  (`ordering: fifo` keeps it; `besteffort` does not). A transient failure
+  at the head *delays* its lane (that's FIFO); an event Cloud permanently
+  rejects is **quarantined and steps aside** so one poisoned payload never
+  freezes the stream — and `queuey edge retry` puts it back at the head of
+  its lane, ahead of anything accepted after it.
+- **Throttling:** none of Edge's own. Transfers run with bounded
+  concurrency across lanes, back off with decorrelated jitter, probe with a
+  single event after a failure, and wait at least Cloud's `Retry-After`
+  (plus a little jitter, so a fleet that went dark together does not knock
+  again in lockstep).
 - **Honest history:** pass `PublishOptions.OccurredAtUtc` and a backlog
   drained on Wednesday still reads as Monday in the Queuey console.
 - **Never silent loss:** events leave the spool only via Cloud custody,

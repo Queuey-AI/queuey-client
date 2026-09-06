@@ -9,7 +9,7 @@ Use it as a copy-paste reference for your own producer integration.
 | # | Example | SDK calls |
 |---|---------|-----------|
 | 1 | **Onboarding** | `Management.CreateTenantAsync`, `CreateQueueAsync` |
-| 2 | **Sync models** | `Plan()`, `SyncModelsAsync` → streams + packages (N:N) |
+| 2 | **Sync models** | `Plan()`, `SyncStreamsAsync` → streams + packages (N:N) |
 | 3 | **Publish** | `PushEventAsync(stream, eventType, key, data)` |
 | 4 | **Packages** | `ApplyPackageAsync`, `UpdatePackageAsync`, `AssignStreamToPackageAsync`, `ArchivePackageAsync` |
 | 5 | **Integrations** | `Integrations.InviteAsync` / `GrantPackageAsync` / `ActivateAsync` |
@@ -54,7 +54,7 @@ Against production instead of localhost, add `QUEUEY_API_BASE`/`QUEUEY_INGRESS_B
 
 ## The WaaS model in 30 seconds
 
-- A **stream** is a producer event endpoint. `[QueueyModel("order-events", …)]` + `SyncModels()` creates
+- A **stream** is a producer event endpoint. `[QueueyModel("order-events", …)]` + `SyncStreams()` creates
   it and configures its queue to extract `eventType` + group `key` from the canonical headers.
 - A **package** groups streams and is the unit of partner access. A stream can be in several packages
   (e.g. tiers). Sync creates the declared packages and assigns the stream to each.
@@ -80,7 +80,7 @@ builder.Services.AddQueuey(
            o.LicensePublicId = cfg["Queuey:LicensePublicId"]; },
     b => b.AddStream<OrderCreated>());
 
-// deploy: await queuey.SyncModelsAsync();
+// deploy: await queuey.SyncStreamsAsync();
 // save:   await queuey.PushEventAsync("order-events", "order.created", order.OrderId, order);
 ```
 

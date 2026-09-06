@@ -125,6 +125,42 @@ public class SpoolLifecycleTests
     }
 
     [Fact]
+    public async Task Kick_collapses_backoff_waits_without_touching_order_or_quarantine()
+    {
+        using var fx = new SpoolFixture();
+        var head = await fx.Spool.EnqueueAsync(fx.Envelope(groupKey: "lane"), CancellationToken.None);
+        var next = await fx.Spool.EnqueueAsync(fx.Envelope(groupKey: "lane"), CancellationToken.None);
+        var poisoned = await fx.Spool.EnqueueAsync(fx.Envelope(groupKey: "q"), CancellationToken.None);
+
+        await fx.Spool.ClaimReadyAsync(10, Lease, CancellationToken.None);
+        await fx.Spool.RescheduleAsync(head.SpoolId,
+            new TransferOutcome(TransferClass.RequiresAction, TransferReason.QueuePaused, null),
+            fx.Clock.UtcNow.AddMinutes(5), TimeSpan.FromMinutes(5), CancellationToken.None);
+        await fx.Spool.QuarantineAsync(poisoned.SpoolId,
+            new TransferOutcome(TransferClass.EventRejected, TransferReason.PayloadTooLarge, null),
+            CancellationToken.None);
+
+        // While the head waits out its probe, stats say exactly when the
+        // next attempt is due — the operator's "is it stuck or waiting?".
+        var waiting = await fx.Spool.GetStatsAsync(CancellationToken.None);
+        Assert.Equal(fx.Clock.UtcNow.AddMinutes(5), waiting.NextAttemptUtc);
+
+        // The operator unpauses the queue and kicks: the head is due NOW —
+        // no waiting out the probe — and FIFO still holds (head first).
+        var kicked = await fx.Spool.KickAsync(CancellationToken.None);
+        Assert.Equal(1, kicked);
+        Assert.True((await fx.Spool.GetStatsAsync(CancellationToken.None)).NextAttemptUtc <= fx.Clock.UtcNow);
+
+        var claims = await fx.Spool.ClaimReadyAsync(10, Lease, CancellationToken.None);
+        Assert.Equal(head.SpoolId, Assert.Single(claims).SpoolId);
+        Assert.Equal(TimeSpan.Zero, claims[0].LastDelay);
+        _ = next; // still queued behind its lane head — order untouched
+
+        // Quarantine is a different door: kick never reaches it.
+        Assert.Equal(1, (await fx.Spool.GetStatsAsync(CancellationToken.None)).QuarantinedCount);
+    }
+
+    [Fact]
     public async Task Quarantine_exits_only_via_explicit_retry_or_discard()
     {
         using var fx = new SpoolFixture();

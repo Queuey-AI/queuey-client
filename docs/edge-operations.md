@@ -105,6 +105,12 @@ your event rate:
 (Plus modest per-row overhead. Round down; leave the 4 MB headroom alone —
 it is what lets Edge keep *recording* successes at the limit.)
 
+The limit counts **live** events. A transfer settles by blanking its payload
+on the device, which frees that space for the next accept at once, so a spool
+that filled up during an outage accepts again as soon as its backlog has
+transferred — no retention window to wait out. The file itself shrinks in the
+background (`queuey edge status` reports live bytes, not file size).
+
 ## Storage rules
 
 - **Local durable disk only.** Never a network share (SQLite locking over

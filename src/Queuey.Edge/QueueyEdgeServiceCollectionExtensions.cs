@@ -71,6 +71,17 @@ public static class QueueyEdgeServiceCollectionExtensions
         // hosted service when the port is unset.
         services.AddHostedService<EdgeLocalEndpoint>();
 
+        // Opt-in health reporting to Cloud (Health.ReportToCloud). Outbound
+        // only; a no-op hosted service when disabled.
+        services.TryAddSingleton(sp => new EdgeHealthReporter(
+            new System.Net.Http.HttpClient(),
+            sp.GetRequiredService<QueueyEdgeOptions>(),
+            sp.GetRequiredService<IEventSpool>(),
+            sp.GetRequiredService<IQueueyEdgeHealth>(),
+            sp.GetRequiredService<IEdgeClock>(),
+            sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<EdgeHealthReporter>>()));
+        services.AddHostedService(sp => sp.GetRequiredService<EdgeHealthReporter>());
+
         return services;
     }
 }

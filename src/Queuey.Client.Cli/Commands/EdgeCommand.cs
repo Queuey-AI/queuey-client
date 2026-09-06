@@ -8,6 +8,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Queuey.Edge;
+using Queuey.Edge.Mqtt;
 
 namespace Queuey.Client.Cli;
 
@@ -28,7 +29,7 @@ namespace Queuey.Client.Cli;
 internal static class EdgeCommand
 {
     private static readonly System.Collections.Generic.HashSet<string> Flags =
-        new(StringComparer.Ordinal) { "json", "all", "accept-data-loss", "help", "h" };
+        new(StringComparer.Ordinal) { "json", "all", "accept-data-loss", "report-health", "mqtt-tls", "help", "h" };
 
     public static async Task<int> RunAsync(string[] args)
     {
@@ -62,6 +63,7 @@ internal static class EdgeCommand
             "status" => await StatusAsync(spoolPath!, map.Has("json")),
             "publish" => await PublishAsync(spoolPath!, positional, map),
             "run" => await RunHostAsync(spoolPath!, map),
+            "kick" => await KickAsync(spoolPath!),
             "drain" => await DrainAsync(spoolPath!, map),
             "retry" => await RetryAsync(spoolPath!, map),
             "discard" => await DiscardAsync(spoolPath!, map),
@@ -235,6 +237,12 @@ internal static class EdgeCommand
             listenPort = port;
         }
 
+        // Fleet view: --report-health (or QUEUEY_REPORT_HEALTH=1) makes the
+        // node check in to the console. Outbound only; never billed.
+        var reportHealth = map.Has("report-health")
+            || Environment.GetEnvironmentVariable("QUEUEY_REPORT_HEALTH") is "1" or "true";
+        var nodeName = map.Get("node-name") ?? Environment.GetEnvironmentVariable("QUEUEY_NODE_NAME");
+
         builder.Services.AddQueueyEdge(o =>
         {
             o.ApiKey = apiKey;
@@ -243,15 +251,64 @@ internal static class EdgeCommand
             if (spoolKey is not null)
                 o.Storage.PayloadKey = spoolKey;
             o.LocalEndpoint.Port = listenPort;
+            o.Health.ReportToCloud = reportHealth;
+            if (!string.IsNullOrWhiteSpace(nodeName))
+                o.Health.NodeName = nodeName;
             if (!string.IsNullOrWhiteSpace(ingressBase))
                 o.IngressBaseAddress = new Uri(ingressBase);
             if (map.Get("source") is { Length: > 0 } source)
                 o.Source = source;
         });
 
+        // MQTT intake: --mqtt host[:port] --mqtt-routes "filter=queue[@segment];…"
+        // (or QUEUEY_MQTT / QUEUEY_MQTT_ROUTES). The broker is normally on this
+        // same gateway; every message is fsync'd into the spool before it is acked.
+        var mqtt = map.Get("mqtt") ?? Environment.GetEnvironmentVariable("QUEUEY_MQTT");
+        var mqttRoutes = map.Get("mqtt-routes") ?? Environment.GetEnvironmentVariable("QUEUEY_MQTT_ROUTES");
+        if (!string.IsNullOrWhiteSpace(mqtt) || !string.IsNullOrWhiteSpace(mqttRoutes))
+        {
+            if (string.IsNullOrWhiteSpace(mqtt) || string.IsNullOrWhiteSpace(mqttRoutes))
+            {
+                Console.Error.WriteLine("MQTT intake needs BOTH --mqtt <host[:port]> and --mqtt-routes \"filter=queue[@segment];…\" (or QUEUEY_MQTT / QUEUEY_MQTT_ROUTES).");
+                return ExitCodes.Configuration;
+            }
+            var hostPort = mqtt.Split(':', 2);
+            var mqttUser = map.Get("mqtt-user") ?? Environment.GetEnvironmentVariable("QUEUEY_MQTT_USER");
+            var mqttPass = map.Get("mqtt-password") ?? Environment.GetEnvironmentVariable("QUEUEY_MQTT_PASSWORD");
+            try
+            {
+                var routes = Queuey.Edge.Mqtt.MqttRoute.ParseMany(mqttRoutes);
+                builder.Services.AddQueueyEdgeMqttSource(m =>
+                {
+                    m.Server = hostPort[0];
+                    if (hostPort.Length == 2 && int.TryParse(hostPort[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var mp))
+                        m.Port = mp;
+                    m.UseTls = map.Has("mqtt-tls");
+                    m.Username = mqttUser;
+                    m.Password = mqttPass;
+                    m.Routes.AddRange(routes);
+                });
+            }
+            catch (Queuey.Client.QueueyConfigurationException ex)
+            {
+                Console.Error.WriteLine(ex.Message);
+                return ExitCodes.Configuration;
+            }
+        }
+
         Console.WriteLine($"Queuey Edge daemon. Spool: {spoolPath}");
         Console.WriteLine("Publish from anything on this machine with 'queuey edge publish …'; " +
                           "inspect with 'queuey edge status'. Ctrl-C to stop (accepted events survive restarts).");
+        if (reportHealth)
+        {
+            Console.WriteLine(
+                $"Health reporting: ON — this node appears as '{nodeName ?? Environment.MachineName}' under Edge nodes " +
+                "in the Queuey console (outbound only; reports are not events).");
+        }
+        if (!string.IsNullOrWhiteSpace(mqtt))
+        {
+            Console.WriteLine($"MQTT intake: {mqtt} → {mqttRoutes} (QoS 1; a message is acked only after it is durably in the spool).");
+        }
         if (listenPort is { } lp)
         {
             Console.WriteLine(
@@ -261,6 +318,31 @@ internal static class EdgeCommand
 
         await builder.Build().RunAsync();
         return ExitCodes.Success;
+    }
+
+    // ── kick ────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// "I fixed the cause — try NOW": collapses every pending event's
+    /// backoff wait to zero (unpaused the queue, rotated the key, restored
+    /// the route). Ordering and dedup are untouched; only the waiting goes.
+    /// </summary>
+    private static async Task<int> KickAsync(string spoolPath)
+    {
+        var spool = OpenSpool(spoolPath);
+        try
+        {
+            var kicked = await spool.KickAsync(CancellationToken.None);
+            Console.WriteLine(kicked > 0
+                ? $"Kicked {kicked} pending event(s) — due now; a running Edge host picks them up within its idle poll."
+                : "Nothing waiting on a backoff — pending events (if any) are already due.");
+            return ExitCodes.Success;
+        }
+        catch (QueueyStorageFaultedException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return ExitCodes.RuntimeError;
+        }
     }
 
     // ── drain ───────────────────────────────────────────────────────────
@@ -338,17 +420,20 @@ internal static class EdgeCommand
         {
             var stats = await spool.GetStatsAsync(CancellationToken.None);
             var quarantined = await ListQuarantinedAsync(spoolPath);
+            var nodeId = await spool.GetMetaAsync(EdgeMetaKeys.NodeId, CancellationToken.None);
 
             if (json)
             {
                 Console.WriteLine(JsonSerializer.Serialize(new
                 {
                     spool = spoolPath,
+                    nodeId,
                     pending = stats.PendingCount,
                     quarantined = stats.QuarantinedCount,
                     oldestPendingAgeSeconds = stats.OldestPendingAge?.TotalSeconds,
                     storageBytes = stats.StorageUsageBytes,
                     lastSettledAtUtc = stats.LastSettledAtUtc,
+                    nextAttemptUtc = stats.NextAttemptUtc,
                     quarantinedEvents = quarantined
                 }, CliHost.JsonOut));
                 return ExitCodes.Success;
@@ -356,11 +441,13 @@ internal static class EdgeCommand
 
             Console.WriteLine("Queuey Edge spool");
             Console.WriteLine($"  Spool        : {spoolPath}");
+            Console.WriteLine($"  Node id      : {nodeId ?? "- (health reporting never enabled)"}");
             Console.WriteLine($"  Pending      : {stats.PendingCount}");
             Console.WriteLine($"  Quarantined  : {stats.QuarantinedCount}");
             Console.WriteLine($"  Oldest age   : {(stats.OldestPendingAge is { } age ? Humanize(age) : "-")}");
             Console.WriteLine($"  Storage      : {stats.StorageUsageBytes / 1024} KiB");
             Console.WriteLine($"  Last settled : {stats.LastSettledAtUtc?.ToString("u", CultureInfo.InvariantCulture) ?? "-"}");
+            Console.WriteLine($"  Next attempt : {FormatNextAttempt(stats)}");
 
             if (quarantined.Count > 0)
             {
@@ -592,6 +679,18 @@ internal static class EdgeCommand
             return false;
         }
         return true;
+    }
+
+    /// <summary>
+    /// "due now" when a pending row is ready or in flight; "in Xs" while the
+    /// earliest waiting row sits out its backoff; "-" when nothing is pending.
+    /// </summary>
+    private static string FormatNextAttempt(SpoolStats stats)
+    {
+        if (stats.PendingCount == 0) return "-";
+        if (stats.NextAttemptUtc is not { } next) return "due now";
+        var wait = next - DateTimeOffset.UtcNow;
+        return wait <= TimeSpan.Zero ? "due now" : $"in {Humanize(wait)}";
     }
 
     private static string Humanize(TimeSpan age) => age switch

@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 namespace Queuey.Client.Waas;
 
 /// <summary>
-/// The injected Queuey facade for producers. Two everyday verbs — <see cref="SyncModelsAsync(SyncOptions,CancellationToken)"/>
+/// The injected Queuey facade for producers. Two everyday verbs — <see cref="SyncStreamsAsync(SyncOptions,CancellationToken)"/>
 /// on deploy and <c>PushEventAsync</c> on save — plus the <see cref="Registry"/> and the underlying
 /// <see cref="Client"/> as an escape hatch to the frozen SDK.
 /// </summary>
@@ -36,17 +36,17 @@ public interface IQueueyService
         CancellationToken cancellationToken = default);
 
     /// <summary>Applies every registered stream via <c>PUT /waas/streams</c>. Safe to run on every deploy.</summary>
-    Task<SyncResult> SyncModelsAsync(SyncOptions? options = null, CancellationToken cancellationToken = default);
+    Task<SyncResult> SyncStreamsAsync(SyncOptions? options = null, CancellationToken cancellationToken = default);
 
     /// <summary>Applies the given model types (resolved via <see cref="QueueyModelAttribute"/>/convention), ignoring the registry.</summary>
-    Task<SyncResult> SyncModelsAsync(IEnumerable<Type> modelTypes, SyncOptions? options = null, CancellationToken cancellationToken = default);
+    Task<SyncResult> SyncStreamsAsync(IEnumerable<Type> modelTypes, SyncOptions? options = null, CancellationToken cancellationToken = default);
 
     /// <summary>Applies a single explicit stream definition.</summary>
     Task<StreamApplyResult> ApplyStreamAsync(StreamDefinition definition, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Idempotently creates (or updates) a package by name — <c>PUT /waas/packages</c>. Use this to
-    /// create a package directly (e.g. with a description) outside the model-driven <c>SyncModels</c> flow.
+    /// create a package directly (e.g. with a description) outside the model-driven <c>SyncStreams</c> flow.
     /// </summary>
     Task<PackageApplyResult> ApplyPackageAsync(string name, string? description = null, CancellationToken cancellationToken = default);
 
@@ -62,8 +62,50 @@ public interface IQueueyService
     /// <summary>Removes a stream from a package (idempotent). Its other package memberships are unaffected.</summary>
     Task RemoveStreamFromPackageAsync(string packagePublicId, string catalogEntryPublicId, CancellationToken cancellationToken = default);
 
-    /// <summary>A network-free preview of what <see cref="SyncModelsAsync(SyncOptions,CancellationToken)"/> would apply.</summary>
+    /// <summary>A network-free preview of what <see cref="SyncStreamsAsync(SyncOptions,CancellationToken)"/> would apply.</summary>
     IReadOnlyList<StreamPlan> Plan();
+
+    /// <summary>
+    /// Applies every registered queue via <c>PUT /queues</c>, patching the policy of those that
+    /// declare one. Safe to run on every deploy — applying is idempotent.
+    /// </summary>
+    Task<QueueSyncResult> SyncQueuesAsync(SyncOptions? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>Applies a single explicit queue definition (ensure it exists, then patch its policy).</summary>
+    Task<QueueApplyResult> ApplyQueueAsync(QueueDefinition definition, CancellationToken cancellationToken = default);
+
+    /// <summary>A network-free preview of what <see cref="SyncQueuesAsync"/> would apply.</summary>
+    IReadOnlyList<QueuePlan> PlanQueues();
+
+    /// <summary>
+    /// Converges Queuey from a declarative deployment file: the workspace's delivery defaults first,
+    /// then each queue's behaviour and destination. Workspace before queues, because a queue that
+    /// means to inherit needs something to inherit.
+    /// </summary>
+    Task<QueueSyncResult> ApplyDeploymentAsync(DeploymentFile file, SyncOptions? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reads a workspace back into a deployment file — the inverse of
+    /// <see cref="ApplyDeploymentAsync"/>. Inherit-aware (a queue that inherits a section writes
+    /// nothing for it) and secret-free by construction, so the result is safe to commit.
+    /// </summary>
+    Task<DeploymentFile> PullDeploymentAsync(string? tenantPublicId = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reports what applying <paramref name="file"/> would change — the CI gate. Only what the file
+    /// declares is compared: a workspace holding settings the file says nothing about is inheritance
+    /// working as designed, not drift.
+    /// </summary>
+    Task<IReadOnlyList<DriftItem>> CheckDeploymentAsync(DeploymentFile file, string? tenantPublicId = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Applies queues, then streams. Queues go first because a stream is published on top of one, so a
+    /// queue failure stops the run before any stream is touched.
+    /// </summary>
+    Task<(QueueSyncResult Queues, SyncResult Streams)> SyncAsync(SyncOptions? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>The registered queues (inspectable in tests).</summary>
+    QueueRegistry Queues { get; }
 
     /// <summary>Producer-side integration-partner management (invite, grant packages, activate group keys).</summary>
     IQueueyIntegrations Integrations { get; }

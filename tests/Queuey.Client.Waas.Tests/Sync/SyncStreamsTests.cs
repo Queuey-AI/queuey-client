@@ -9,7 +9,7 @@ using Queuey.Client;
 
 namespace Queuey.Client.Waas.Tests;
 
-public class SyncModelsTests
+public class SyncStreamsTests
 {
     [Fact]
     public async Task Applies_each_stream_via_put_waas_streams_with_headers_and_body()
@@ -20,7 +20,7 @@ public class SyncModelsTests
             StreamDefinitionFactory.FromType(typeof(OrderCreated), null),
         });
 
-        SyncResult result = await service.SyncModelsAsync();
+        SyncResult result = await service.SyncStreamsAsync();
 
         Assert.True(result.AllSucceeded);
         Assert.Equal(1, result.Total);
@@ -52,14 +52,14 @@ public class SyncModelsTests
             StreamDefinitionFactory.FromName("invoice-events", null),
         });
 
-        await service.SyncModelsAsync();
+        await service.SyncStreamsAsync();
 
         using var doc = JsonDocument.Parse(Encoding.UTF8.GetString(api.LastBody!));
         Assert.False(doc.RootElement.TryGetProperty("eventTypes", out _)); // null → omitted (WhenWritingNull)
     }
 
     [Fact]
-    public async Task Failure_in_one_stream_is_isolated_and_others_still_apply()
+    public async Task A_failing_stream_stops_the_run_and_names_what_was_not_attempted()
     {
         // Fail whichever request carries name "bad-stream"; succeed otherwise.
         var api = new StubHttpMessageHandler((_, _, body) =>
@@ -75,19 +75,68 @@ public class SyncModelsTests
         {
             StreamDefinitionFactory.FromName("good-stream", null),
             StreamDefinitionFactory.FromName("bad-stream", null),
+            StreamDefinitionFactory.FromName("later-stream", null),
         });
 
-        SyncResult result = await service.SyncModelsAsync();
+        // Default is all-or-nothing: the run stops at "bad-stream" and throws rather than returning a
+        // half-converged result the caller might read as success.
+        QueueySyncException ex = await Assert.ThrowsAsync<QueueySyncException>(() => service.SyncStreamsAsync());
+        SyncResult result = ex.Streams!;
 
-        Assert.Equal(2, result.Total);
-        Assert.Equal(1, result.Succeeded);
-        Assert.Equal(1, result.Failed);
+        Assert.Equal(3, result.Total);                       // all three were selected
+        Assert.Equal(1, result.Succeeded);                   // good-stream applied
+        Assert.Equal(1, result.Failed);                      // bad-stream failed
+        Assert.Equal(new[] { "later-stream" }, result.NotAttempted.ToArray());
+        Assert.False(result.AllSucceeded);
+
         StreamApplyResult bad = result.Applied.Single(r => r.Name == "bad-stream");
-        Assert.False(bad.Succeeded);
         Assert.IsType<QueueyConflictException>(bad.Error);
 
-        QueueySyncException ex = Assert.Throws<QueueySyncException>(result.ThrowIfAnyFailed);
-        Assert.Equal(2, ex.Results.Count);
+        Assert.Contains("not attempted: later-stream", ex.Message);
+        Assert.Contains("idempotent", ex.Message);
+    }
+
+    [Fact]
+    public async Task ContinueOnError_applies_the_rest_and_still_throws()
+    {
+        var api = new StubHttpMessageHandler((_, _, body) =>
+        {
+            string json = Encoding.UTF8.GetString(body!);
+            return json.Contains("bad-stream", StringComparison.Ordinal)
+                ? StubHttpMessageHandler.Json(HttpStatusCode.Conflict, new { error = new { code = "queue_paused", message = "paused" } })
+                : StubHttpMessageHandler.Json(HttpStatusCode.OK, WaasTestHost.DefaultApplyBody());
+        });
+
+        QueueyService service = WaasTestHost.Build(apiStub: api, streams: new[]
+        {
+            StreamDefinitionFactory.FromName("good-stream", null),
+            StreamDefinitionFactory.FromName("bad-stream", null),
+            StreamDefinitionFactory.FromName("later-stream", null),
+        });
+
+        QueueySyncException ex = await Assert.ThrowsAsync<QueueySyncException>(
+            () => service.SyncStreamsAsync(new SyncOptions { ContinueOnError = true }));
+
+        Assert.Equal(2, ex.Streams!.Succeeded);        // good-stream and later-stream both applied
+        Assert.Equal(1, ex.Streams!.Failed);
+        Assert.Empty(ex.Streams!.NotAttempted);        // nothing was skipped — the whole picture was gathered
+    }
+
+    [Fact]
+    public async Task An_apply_that_returns_no_catalog_id_counts_as_a_failure()
+    {
+        // A 2xx with no publicId used to be recorded as success while the stream silently dropped out
+        // of the package phase — "applied" but reaching no partner.
+        var api = new StubHttpMessageHandler(_ =>
+            StubHttpMessageHandler.Json(HttpStatusCode.OK, new { key = "order-events", status = "Published" }));
+
+        QueueyService service = WaasTestHost.Build(apiStub: api,
+            streams: new[] { StreamDefinitionFactory.FromType(typeof(OrderCreated), null) });
+
+        QueueySyncException ex = await Assert.ThrowsAsync<QueueySyncException>(() => service.SyncStreamsAsync());
+
+        Assert.Equal(0, ex.Streams!.Succeeded);
+        Assert.Contains("returned no catalog id", ex.Streams!.Applied.Single().Error!.Message);
     }
 
     [Fact]
@@ -98,7 +147,7 @@ public class SyncModelsTests
             streams: new[] { StreamDefinitionFactory.FromType(typeof(OrderCreated), null) },
             configure: o => o.LicensePublicId = null);
 
-        await Assert.ThrowsAsync<QueueyConfigurationException>(() => service.SyncModelsAsync());
+        await Assert.ThrowsAsync<QueueyConfigurationException>(() => service.SyncStreamsAsync());
         Assert.Empty(api.Requests);
     }
 
@@ -110,7 +159,7 @@ public class SyncModelsTests
             streams: new[] { StreamDefinitionFactory.FromType(typeof(OrderCreated), null) },
             configure: o => o.LicensePublicId = null); // license is the sync credential; dry-run must not require it
 
-        SyncResult result = await service.SyncModelsAsync(new SyncOptions { DryRun = true });
+        SyncResult result = await service.SyncStreamsAsync(new SyncOptions { DryRun = true });
 
         Assert.True(result.AllSucceeded);
         Assert.True(result.Applied.Single().DryRun);
@@ -118,13 +167,13 @@ public class SyncModelsTests
     }
 
     [Fact]
-    public async Task SyncModels_by_type_rejects_duplicate_stream_names()
+    public async Task SyncStreams_by_type_rejects_duplicate_stream_names()
     {
         var api = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(HttpStatusCode.OK, WaasTestHost.DefaultApplyBody()));
         QueueyService service = WaasTestHost.Build(apiStub: api);
 
         await Assert.ThrowsAsync<QueueyConfigurationException>(
-            () => service.SyncModelsAsync(new[] { typeof(OrderCreated), typeof(OrderCreated) })); // same name twice
+            () => service.SyncStreamsAsync(new[] { typeof(OrderCreated), typeof(OrderCreated) })); // same name twice
         Assert.Empty(api.Requests);
     }
 

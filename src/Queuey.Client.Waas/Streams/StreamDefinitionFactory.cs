@@ -16,7 +16,7 @@ internal static class StreamDefinitionFactory
 
         var attr = (QueueyModelAttribute?)Attribute.GetCustomAttribute(type, typeof(QueueyModelAttribute), inherit: false);
 
-        string name = FirstNonBlank(overrides?.Name, attr?.Name) ?? type.Name;
+        string name = ResolveName(type, FirstNonBlank(overrides?.Name, attr?.Name));
 
         // Precedence: explicit pre-rendered schema > (inline > attribute > builder-default) generation.
         bool generate = overrides?.GenerateSchema ?? (attr?.GenerateSchema == true ? true : generateSchemasDefault);
@@ -26,7 +26,7 @@ internal static class StreamDefinitionFactory
         return new StreamDefinition
         {
             ModelType = type,
-            Name = name.Trim(),
+            Name = name,
             Description = overrides?.Description ?? attr?.Description,
             EventTypes = ResolveEventTypes(overrides, attr?.EventTypes),
             IsPublic = overrides?.IsPublic ?? attr?.IsPublic ?? true,
@@ -40,16 +40,47 @@ internal static class StreamDefinitionFactory
         if (string.IsNullOrWhiteSpace(name))
             throw new ArgumentException("A stream name is required.", nameof(name));
 
+        string resolved = (FirstNonBlank(overrides?.Name) ?? name).Trim();
+        QueueyName.EnsureValid(resolved, "stream name");
+
         return new StreamDefinition
         {
             ModelType = null,
-            Name = (FirstNonBlank(overrides?.Name) ?? name).Trim(),
+            Name = resolved,
             Description = overrides?.Description,
             EventTypes = ResolveEventTypes(overrides, null),
             IsPublic = overrides?.IsPublic ?? true,
             Packages = ResolvePackages(overrides, null),
             PayloadSchema = overrides?.PayloadSchema,
         };
+    }
+
+    /// <summary>
+    /// Resolves the stream name and holds it to Queuey's naming contract. A name the caller wrote —
+    /// on the attribute or inline — is validated, never rewritten: silently lowercasing it would
+    /// leave <c>PushEvent("Order-Events", …)</c> publishing to a stream that no longer exists under
+    /// that name. Only the convention fallback is normalized, because there the CLR type name is a
+    /// C# identifier, not a name anyone chose (<c>OrderCreated</c> → <c>order-created</c>).
+    /// </summary>
+    private static string ResolveName(Type type, string? declared)
+    {
+        if (declared != null)
+        {
+            string explicitName = declared.Trim();
+            QueueyName.EnsureValid(explicitName, "stream name");
+            return explicitName;
+        }
+
+        string derived = QueueyName.Normalize(type.Name);
+        if (QueueyName.Validate(derived) is { } reason)
+        {
+            throw new QueueyConfigurationException(
+                $"Could not derive a valid Queuey stream name from type '{type.Name}'" +
+                (derived.Length == 0 ? "" : $" (got '{derived}')") + $": {reason} " +
+                $"Name it explicitly with [QueueyModel(\"…\")] or AddStream<{type.Name}>(o => o.Name = \"…\").");
+        }
+
+        return derived;
     }
 
     private static IReadOnlyList<string> ResolveEventTypes(StreamOptions? overrides, string[]? attributeEventTypes)

@@ -9,6 +9,11 @@ USAGE
 
 COMMANDS
   sync           Apply every [QueueyModel] stream found in an assembly (PUT /waas/streams).
+  queue          Declare queues from [QueueyQueue] types: queue plan | queue sync.
+  apply          Converge Queuey from a declarative deployment file (queuey.deploy.json).
+  pull           Read a workspace back into a deployment file (the inverse of apply).
+  credentials    Store delivery secrets a deployment file refers to: credentials set | list.
+  keys           Mint an ingress signing key for a queue: keys mint.
   publish        Publish an event to a stream.
   create-tenant  Create a tenant under the current license.
   create-queue   Create a queue under a tenant.
@@ -20,7 +25,65 @@ COMMANDS
   whoami         Show the resolved host / environment / tenant / license (masks the key).
 
 SYNC
-  queuey sync --assembly <path.dll> [--dry-run] [--only a,b] [--stop-on-error] [--json]
+  queuey sync --assembly <path.dll> [--dry-run] [--only a,b] [--continue-on-error] [--json]
+                 Stops at the first failure by default and reports what it did not attempt;
+                 --continue-on-error applies the rest first to collect every failure. Either
+                 way a run that did not fully converge exits non-zero. Applying is idempotent,
+                 so a fixed re-run converges.
+
+QUEUE
+  queuey queue plan --assembly <path.dll> [--only a,b] [--json]
+                 Network-free preview of the [QueueyQueue] declarations — no credentials needed.
+  queuey queue sync --assembly <path.dll> [--only a,b] [--continue-on-error] [--json]
+                 Ensures each queue exists and patches the policy of those that declare one.
+                 A queue with no delivery target is reported as a warning, not a failure: it
+                 accepts events and logs them without delivering until an endpoint is set.
+
+APPLY
+  queuey apply [--file queuey.deploy.json] [--dry-run] [--check] [--continue-on-error] [--json]
+                 Converges the workspace's delivery defaults, then each declared queue's
+                 behaviour and destination. Idempotent; exits non-zero unless it fully
+                 converged. --dry-run validates the file locally and sends nothing.
+                 The file carries NO secrets: auth and signing name a credentialRef, so it is
+                 meant to be committed. Keep it separate from queuey.json, which holds your
+                 API key and must not be.
+                 --check writes nothing and exits non-zero when the file and the workspace
+                 have diverged — the CI gate. Only what the file declares is compared, so a
+                 workspace holding settings the file is silent about is not drift.
+                 ${VAR} in a value is expanded from the environment; an unset one is an
+                 error, never an empty string. Use ${VAR:-default} when a default is meant.
+
+PULL
+  queuey pull [--file queuey.deploy.json] [--force] [--stdout]
+              [--as <environment>] [--emit-code <path.cs>] [--namespace <ns>]
+                 Reads the workspace's delivery defaults and every queue back into a
+                 deployment file. Inherit-aware — a queue that inherits a section writes
+                 nothing for it, so the file says what is actually owned rather than freezing
+                 today's defaults as permanent overrides. No secrets: credentials appear by
+                 name. Refuses to overwrite an existing file without --force; use --stdout to
+                 diff first.
+                 --as <env> rewrites the values that do not travel between workspaces (the
+                 workspace binding, the base URL, absolute queue URLs) into ${VAR} references,
+                 so one file converges every environment. Paths and credential names travel
+                 as they are.
+                 --emit-code writes [QueueyQueue] declarations for the pulled queues —
+                 behaviour only; destinations stay in the deployment file.
+
+KEYS
+  queuey keys mint --queue <que_...> [--name <label>] [--json]
+                 Mints an ingress signing key so producers can publish with HMAC instead of
+                 an API key. The secret is shown ONCE. Needs a credential with key-management
+                 rights — a deploy key deliberately has none, since a key that can mint keys
+                 turns pipeline access into account access.
+
+CREDENTIALS
+  queuey credentials set --name <name> --from-env <ENV_VAR> [--type <type>]
+                [--key-id <id>] [--username <u>] [--json]
+                 Stores a delivery secret under the workspace and names it, so a deployment
+                 file can refer to it as credentialRef. The value is read from the
+                 environment — never an argument, which would land in shell history and CI
+                 logs — is encrypted at rest, and is never readable again.
+  queuey credentials list [--json]
 
 PUBLISH
   queuey publish <stream> --event <type> [--key <k>]
@@ -62,7 +125,8 @@ REPLAY
 
 EDGE
   queuey edge run     --spool <path> --tenant <ten_...> --api-key <qak_...>
-                [--listen <port>] [--ingress-base <uri>] [--source <s>]
+                [--listen <port>] [--report-health] [--node-name <name>] [--ingress-base <uri>] [--source <s>]
+                [--mqtt <host[:port]> --mqtt-routes ""filter=queue[@segment];…"" [--mqtt-user <u> --mqtt-password <p>] [--mqtt-tls]]
                  Hosts the Edge transfer loop as a standalone daemon (systemd-friendly) — the
                  complete Edge for machines with no .NET app of their own: run this, and anything
                  on the box publishes durably with 'queuey edge publish'. --listen additionally
@@ -70,11 +134,18 @@ EDGE
                  (POST http://localhost:<port>/events/{tenant}/{queue}) — any language's plain
                  HTTP one-liner becomes durable by swapping the base URL; 202 = committed to the
                  local spool. Ctrl-C/SIGTERM to stop; accepted events survive restarts.
+                 --report-health (or QUEUEY_REPORT_HEALTH=1) makes the node check in to the
+                 console under Edge nodes (outbound only; reports are not events, never billed);
+                 --node-name (QUEUEY_NODE_NAME) is the label shown there, default: machine name.
+                 --mqtt subscribes to a (usually local) broker and spools every message durably
+                 BEFORE acking it (QoS 1); a route's @segment makes that topic level the lane
+                 (FIFO per machine). Env: QUEUEY_MQTT, QUEUEY_MQTT_ROUTES, QUEUEY_MQTT_USER/PASSWORD.
   queuey edge publish <queue> --spool <path> --tenant <ten_...>
                 (--data '<json>' | --file <path>) [--content-type <ct>]
                 [--idempotency-key <k>] [--event-type <t>] [--group-key <k>]
                 [--occurred-at <iso8601>] [--source <s>] [--json]
   queuey edge status  --spool <path> [--json]
+  queuey edge kick    --spool <path>
   queuey edge drain   --spool <path> [--timeout <seconds>]
   queuey edge retry   --spool <path> (--id N | --all)
   queuey edge discard --spool <path> --id N

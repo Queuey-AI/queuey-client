@@ -125,15 +125,42 @@ public class ClassifierAndBackoffTests
     }
 
     [Fact]
-    public void Retry_after_is_honoured_exactly()
+    public void Retry_after_is_a_floor_with_bounded_jitter_on_top()
     {
-        var policy = new BackoffPolicy(TransferOptions());
+        // Cloud's burst guard is per licence: every node of a fleet that
+        // reconnects together gets the same hint. The hint is never cut
+        // short (that would be ignoring it) — but nodes must not all knock
+        // again on the same second.
+        var policy = new BackoffPolicy(TransferOptions(), new Random(7));
         var throttled = new TransferOutcome(TransferClass.Throttled, TransferReason.RateLimited, null)
         {
             RetryAfter = TimeSpan.FromSeconds(42)
         };
 
-        Assert.Equal(TimeSpan.FromSeconds(42), policy.NextDelay(throttled, TimeSpan.FromSeconds(1)));
+        var seen = new HashSet<TimeSpan>();
+        for (var i = 0; i < 100; i++)
+        {
+            var delay = policy.NextDelay(throttled, TimeSpan.FromSeconds(1));
+            Assert.InRange(delay, TimeSpan.FromSeconds(42), TimeSpan.FromSeconds(42 * (1 + BackoffPolicy.RetryAfterJitterFraction)));
+            seen.Add(delay);
+        }
+        Assert.True(seen.Count > 1, "the jitter must actually spread the fleet");
+    }
+
+    [Fact]
+    public void A_paused_queue_probes_fast_and_flat()
+    {
+        // Pausing is an INTENTIONAL operator state — the operator who
+        // unpauses expects flow to resume within about a minute, not after
+        // a 5-minute-doubling auth-failure ladder. (Learned live: the first
+        // LINQPad run against a paused dev queue sat "stuck" for exactly
+        // this reason.)
+        var policy = new BackoffPolicy(TransferOptions());
+        var paused = new TransferOutcome(TransferClass.RequiresAction, TransferReason.QueuePaused, null);
+
+        Assert.Equal(TimeSpan.FromMinutes(1), policy.NextDelay(paused, TimeSpan.Zero));
+        // Flat, not a ladder — however long it has been paused.
+        Assert.Equal(TimeSpan.FromMinutes(1), policy.NextDelay(paused, TimeSpan.FromMinutes(30)));
     }
 
     [Fact]

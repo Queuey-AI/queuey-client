@@ -33,6 +33,13 @@ namespace Queuey.Edge;
 /// (<c>secure_delete</c>), the file is owner-only on Unix, and payloads can
 /// be AES-GCM encrypted with a customer-held key (<see cref="SpoolPayloadProtection"/>).
 /// The device is the most exposed place a payload ever sits.</para>
+///
+/// <para>Capacity (2026-09-06): the limit is measured against LIVE pages
+/// (<c>page_count - freelist_count</c>), never the file size. SQLite hands
+/// freed pages to new rows before it grows the file, so a spool that hit
+/// <c>MaxSpoolBytes</c> accepts again the moment its backlog settles —
+/// settling blanks the payload, which is what frees the pages. Shrinking the
+/// file back is the sweep's background job and never gates an accept.</para>
 /// </summary>
 public sealed class SqliteEventSpool : IEventSpool
 {
@@ -230,6 +237,10 @@ public sealed class SqliteEventSpool : IEventSpool
     public Task SettleAsync(long spoolId, CloudAck ack, CancellationToken cancellationToken)
         => WriteLockedAsync<object?>(conn =>
         {
+            // Cloud holds custody now: the payload leaves the device at once
+            // (its pages return to the freelist, which is what lets a full
+            // spool accept again), while the row stays for correlation
+            // until SettledRetention sweeps it.
             using var cmd = conn.CreateCommand();
             cmd.CommandText = """
                 UPDATE spool
@@ -291,8 +302,13 @@ public sealed class SqliteEventSpool : IEventSpool
                     (SELECT COUNT(*) FROM spool WHERE state IN ('Accepted', 'Claimed')),
                     (SELECT COUNT(*) FROM spool WHERE state = 'Quarantined'),
                     (SELECT MIN(accepted_at_utc) FROM spool WHERE state IN ('Accepted', 'Claimed')),
-                    (SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()),
-                    (SELECT MAX(transferred_utc) FROM spool WHERE state = 'Transferred');
+                    (SELECT (page_count - freelist_count) * page_size
+                     FROM pragma_page_count(), pragma_freelist_count(), pragma_page_size()),
+                    (SELECT MAX(transferred_utc) FROM spool WHERE state = 'Transferred'),
+                    (SELECT MIN(s.next_attempt_utc) FROM spool s
+                     WHERE s.state = 'Accepted'
+                       AND s.id = (SELECT MIN(h.id) FROM spool h
+                                   WHERE h.lane = s.lane AND h.state IN ('Accepted', 'Claimed')));
                 """;
             using var reader = cmd.ExecuteReader();
             reader.Read();
@@ -303,7 +319,8 @@ public sealed class SqliteEventSpool : IEventSpool
                 QuarantinedCount: reader.GetInt64(1),
                 OldestPendingAge: oldest is null ? null : _clock.UtcNow - oldest.Value,
                 StorageUsageBytes: reader.GetInt64(3),
-                LastSettledAtUtc: reader.IsDBNull(4) ? null : Parse(reader.GetString(4)));
+                LastSettledAtUtc: reader.IsDBNull(4) ? null : Parse(reader.GetString(4)),
+                NextAttemptUtc: reader.IsDBNull(5) ? null : Parse(reader.GetString(5)));
         }, cancellationToken);
 
     public Task<int> SweepAsync(CancellationToken cancellationToken)
@@ -334,13 +351,27 @@ public sealed class SqliteEventSpool : IEventSpool
                 touched += delete.ExecuteNonQuery();
             }
 
-            using (var vacuum = conn.CreateCommand())
-            {
-                vacuum.CommandText = "PRAGMA incremental_vacuum(128);";
-                vacuum.ExecuteNonQuery();
-            }
+            // 3. Give freed pages back to the OS. Bounded by TIME, not by a
+            //    page count: a 512 MB spool that just drained must not take
+            //    hours of 128-page nibbles to shrink, but the sweep holds the
+            //    write gate, so it yields well before an accept would notice.
+            ShrinkFile(conn);
 
             return touched;
+        }, cancellationToken);
+
+    public Task<int> KickAsync(CancellationToken cancellationToken)
+        => WriteLockedAsync(conn =>
+        {
+            // Collapse waiting only: due-now + ladder reset. States, ids and
+            // lane order are untouched, so FIFO and dedup semantics hold.
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = """
+                UPDATE spool SET next_attempt_utc = @now, last_delay_ms = 0
+                WHERE state = 'Accepted' AND next_attempt_utc > @now;
+                """;
+            cmd.Parameters.AddWithValue("@now", Format(_clock.UtcNow));
+            return cmd.ExecuteNonQuery();
         }, cancellationToken);
 
     public Task<bool> RetryQuarantinedAsync(long spoolId, CancellationToken cancellationToken)
@@ -386,6 +417,26 @@ public sealed class SqliteEventSpool : IEventSpool
         var level = (long)sync.ExecuteScalar()!;
         return (mode, level);
     }
+
+    public Task<string?> GetMetaAsync(string key, CancellationToken cancellationToken)
+        => GuardedAsync(conn =>
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT v FROM edge_meta WHERE k = $k;";
+            cmd.Parameters.AddWithValue("$k", key);
+            return cmd.ExecuteScalar() as string;
+        }, cancellationToken);
+
+    public Task SetMetaAsync(string key, string value, CancellationToken cancellationToken)
+        => WriteLockedAsync(conn =>
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "INSERT INTO edge_meta (k, v) VALUES ($k, $v) ON CONFLICT(k) DO UPDATE SET v = excluded.v;";
+            cmd.Parameters.AddWithValue("$k", key);
+            cmd.Parameters.AddWithValue("$v", value);
+            cmd.ExecuteNonQuery();
+            return true;
+        }, cancellationToken);
 
     // ── plumbing ────────────────────────────────────────────────────────
 
@@ -512,6 +563,40 @@ public sealed class SqliteEventSpool : IEventSpool
                 // Forward-only migrations land here as future versions ship.
                 break;
         }
+
+        EnsureIncrementalVacuum(conn);
+    }
+
+    /// <summary>
+    /// <c>auto_vacuum</c> is baked into the file header the moment the file
+    /// gets its first page — and <c>Open</c> sets <c>journal_mode = WAL</c>
+    /// before the schema exists, so a pragma inside <see cref="CreateSchema"/>
+    /// was silently ignored: every v1 spool was written with
+    /// <c>auto_vacuum = NONE</c>, where <c>incremental_vacuum</c> is a no-op
+    /// and the file never shrinks (found 2026-09-06). Switching an existing
+    /// file needs a one-time <c>VACUUM</c>. Best effort: a spool that cannot
+    /// afford the rebuild right now (disk nearly full) still works — freed
+    /// pages are reused either way — it just keeps its size until the next
+    /// start.
+    /// </summary>
+    private static void EnsureIncrementalVacuum(SqliteConnection conn)
+    {
+        using var mode = conn.CreateCommand();
+        mode.CommandText = "PRAGMA auto_vacuum;";
+        if ((long)mode.ExecuteScalar()! == 2)
+            return;
+
+        try
+        {
+            using var convert = conn.CreateCommand();
+            convert.CommandText = "PRAGMA auto_vacuum = INCREMENTAL; VACUUM;";
+            convert.ExecuteNonQuery();
+        }
+        catch (SqliteException ex) when (!IsCorruption(ex))
+        {
+            // Not fatal — see remarks. Corruption still propagates to the
+            // caller's fault handling.
+        }
     }
 
     private static void CreateSchema(SqliteConnection conn)
@@ -520,8 +605,6 @@ public sealed class SqliteEventSpool : IEventSpool
         using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = $"""
-            PRAGMA auto_vacuum = INCREMENTAL;
-
             CREATE TABLE IF NOT EXISTS spool (
                 id                INTEGER PRIMARY KEY AUTOINCREMENT,
                 envelope_version  INTEGER NOT NULL,
@@ -658,11 +741,37 @@ public sealed class SqliteEventSpool : IEventSpool
         if (!reader.Read()) throw new InvalidOperationException($"No spool row {spoolId}.");
         return ((byte[])reader.GetValue(0), reader.GetInt64(1), reader.GetString(2));
     }
+///
+    private static readonly TimeSpan ShrinkBudget = TimeSpan.FromMilliseconds(250);
+    private const int ShrinkBatchPages = 256;
+
+    private static void ShrinkFile(SqliteConnection conn)
+    {
+        var deadline = Environment.TickCount64 + (long)ShrinkBudget.TotalMilliseconds;
+        while (Environment.TickCount64 < deadline)
+        {
+            using var free = conn.CreateCommand();
+            free.CommandText = "SELECT freelist_count FROM pragma_freelist_count();";
+            if ((long)free.ExecuteScalar()! == 0)
+                return;
+
+            using var vacuum = conn.CreateCommand();
+            vacuum.CommandText = $"PRAGMA incremental_vacuum({ShrinkBatchPages});";
+            vacuum.ExecuteNonQuery();
+        }
+    }
 
     private void EnsureCapacityFor(SqliteConnection conn, long incomingPayloadBytes)
     {
+        // LIVE bytes, not file size: pages on the freelist (settled payloads,
+        // swept rows) are reused by the next insert before the file grows,
+        // so counting them as occupied would keep refusing accepts after the
+        // backlog has already drained — exactly the recovery the limit must
+        // not block.
         using var size = conn.CreateCommand();
-        size.CommandText = "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size();";
+        size.CommandText =
+            "SELECT (page_count - freelist_count) * page_size " +
+            "FROM pragma_page_count(), pragma_freelist_count(), pragma_page_size();";
         var currentBytes = (long)size.ExecuteScalar()!;
 
         // Headroom stays reserved for BOOKKEEPING (settling transfers): a

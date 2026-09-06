@@ -5,7 +5,7 @@ using System.Linq;
 namespace Queuey.Client.Waas;
 
 /// <summary>
-/// The registered streams — the single source of truth for both <c>SyncModels</c> and typed publish.
+/// The registered streams — the single source of truth for both <c>SyncStreams</c> and typed publish.
 /// Built once at startup; inspectable in a unit test. Duplicate names or model types fail loudly.
 /// </summary>
 public sealed class StreamRegistry

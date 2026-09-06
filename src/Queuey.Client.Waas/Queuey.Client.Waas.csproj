@@ -30,6 +30,8 @@
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
     <!-- AddQueuey DI extension over IHttpClientFactory (transitively brings DI abstractions). -->
     <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.1" />
+    <!-- SyncOnStartup registers an IHostedService so a failed sync aborts host startup. -->
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="8.0.1" />
   </ItemGroup>
 
   <!-- System.Text.Json is in-box for net8.0; only netstandard2.0 needs the package. -->

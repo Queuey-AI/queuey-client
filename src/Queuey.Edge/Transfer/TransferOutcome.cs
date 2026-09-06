@@ -20,7 +20,7 @@ public enum TransferClass
     /// <summary>Timeout, DNS, refused, reset, 500/502/503/504/408 → retain, jittered backoff.</summary>
     Transient = 1,
 
-    /// <summary>429, or 503 with Retry-After → retain, honour Retry-After exactly.</summary>
+    /// <summary>429, or 503 with Retry-After → retain, wait at least Retry-After (plus a little jitter).</summary>
     Throttled = 2,
 
     /// <summary>401/403/404/402/409-paused/TLS → retain, slow probe, never hot-loop.</summary>

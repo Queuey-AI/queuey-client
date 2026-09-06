@@ -40,7 +40,8 @@ public sealed record EdgeHealth(
     DateTimeOffset? LastSuccessfulCloudContact,
     TransferFailure? LastTransferFailure,
     long QuarantinedCount,
-    bool StorageDurabilityWarning);
+    bool StorageDurabilityWarning,
+    DateTimeOffset? NextTransferAttemptUtc = null);
 
 /// <summary>The most recent transfer failure, kept for diagnosis (what happened, not just what Edge did).</summary>
 public sealed record TransferFailure(

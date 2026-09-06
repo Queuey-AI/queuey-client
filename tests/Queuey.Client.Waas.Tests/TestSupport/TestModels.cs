@@ -35,3 +35,23 @@ public sealed class SchemaModel
     [System.Text.Json.Serialization.JsonIgnore] public string Internal { get; init; } = string.Empty;
     [System.Text.Json.Serialization.JsonPropertyName("renamed")] public string Original { get; init; } = string.Empty;
 }
+
+/// <summary>A type whose name normalizes to a reserved routing segment — convention can't save it.</summary>
+public sealed class Sandbox
+{
+    public string Id { get; init; } = string.Empty;
+}
+
+/// <summary>A queue declared with an explicit name and a partial policy — the rest inherits.</summary>
+[QueueyQueue("orders", Ordering = "bykey", RetentionDays = 30)]
+public sealed class OrderQueue
+{
+    public string OrderId { get; init; } = string.Empty;
+}
+
+/// <summary>A queue with no attribute values at all — name by convention, behaviour fully inherited.</summary>
+[QueueyQueue]
+public sealed class ShipmentUpdates
+{
+    public string ShipmentId { get; init; } = string.Empty;
+}
