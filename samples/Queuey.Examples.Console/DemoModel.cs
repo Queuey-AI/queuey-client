@@ -5,7 +5,7 @@ namespace Queuey.Examples;
 
 /// <summary>
 /// A producer event model. <see cref="QueueyModelAttribute"/> declares the stream name, the event
-/// types it advertises, and the packages it's published in. On <c>SyncModels</c> the stream and its
+/// types it advertises, and the packages it's published in. On <c>SyncStreams</c> the stream and its
 /// packages are created (idempotently) and the stream assigned to each package.
 /// </summary>
 [QueueyModel("order-events",

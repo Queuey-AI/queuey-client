@@ -43,7 +43,8 @@ internal static class WaasTestHost
         HttpMessageHandler? apiStub = null,
         HttpMessageHandler? ingressStub = null,
         IEnumerable<StreamDefinition>? streams = null,
-        Action<QueueyOptions>? configure = null)
+        Action<QueueyOptions>? configure = null,
+        IEnumerable<QueueDefinition>? queues = null)
     {
         QueueyOptions options = Options(configure);
 
@@ -54,6 +55,6 @@ internal static class WaasTestHost
         var controlPlane = new QueueyControlPlaneClient(new HttpClient(api), options);
         var registry = new StreamRegistry(streams ?? Array.Empty<StreamDefinition>());
 
-        return new QueueyService(client, controlPlane, registry, options);
+        return new QueueyService(client, controlPlane, registry, options, new QueueRegistry(queues ?? Array.Empty<QueueDefinition>()));
     }
 }

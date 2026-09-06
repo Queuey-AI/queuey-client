@@ -27,6 +27,11 @@ public interface IQueueyPublisher
     /// <para><b>What success does not mean.</b> The event has usually not reached Queuey Cloud
     /// yet, and it does not survive destruction of this machine's storage. Delivery from Queuey
     /// Cloud to your destination is operated and observable in the Queuey console.</para>
+    /// <para><b>Ordering.</b> Events reach Queuey Cloud in strict accept order within a lane
+    /// (the queue, or the queue plus <see cref="PublishOptions.GroupKey"/>), with at most one
+    /// transfer in flight per lane. There is no ordering across lanes. Whether that order is
+    /// kept through to your destination is the queue's ordering policy, not this method's
+    /// promise.</para>
     /// <para><b>Failures.</b> This method throws only for conditions that exist before Queuey
     /// takes responsibility: missing configuration
     /// (<see cref="QueueyConfigurationException"/>), a payload Queuey cannot accept

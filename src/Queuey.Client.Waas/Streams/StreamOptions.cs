@@ -8,7 +8,10 @@ namespace Queuey.Client.Waas;
 /// </summary>
 public sealed class StreamOptions
 {
-    /// <summary>Overrides the stream name (else attribute name, else the CLR type name).</summary>
+    /// <summary>
+    /// Overrides the stream name (else attribute name, else the CLR type name normalized to
+    /// Queuey's naming rules). A name set here is validated, never rewritten.
+    /// </summary>
     public string? Name { get; set; }
 
     /// <summary>Overrides the catalog description.</summary>

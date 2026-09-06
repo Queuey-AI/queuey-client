@@ -17,7 +17,7 @@ public class PackageSyncTests
     }
 
     [Fact]
-    public async Task SyncModels_applies_stream_then_upserts_packages_then_assigns_stream_to_each()
+    public async Task SyncStreams_applies_stream_then_upserts_packages_then_assigns_stream_to_each()
     {
         var api = new StubHttpMessageHandler((_, req, _) =>
         {
@@ -34,7 +34,7 @@ public class PackageSyncTests
             StreamDefinitionFactory.FromType(typeof(TieredOrder), null),
         });
 
-        SyncResult result = await service.SyncModelsAsync();
+        SyncResult result = await service.SyncStreamsAsync();
 
         Assert.True(result.AllSucceeded);
         Assert.Equal(1, result.Total);                       // one stream
@@ -64,7 +64,7 @@ public class PackageSyncTests
             StreamDefinitionFactory.FromType(typeof(TieredOrder), null),
         });
 
-        SyncResult result = await service.SyncModelsAsync(new SyncOptions { DryRun = true });
+        SyncResult result = await service.SyncStreamsAsync(new SyncOptions { DryRun = true });
 
         Assert.True(result.AllSucceeded);
         Assert.Equal(2, result.Packages.Count);
@@ -115,7 +115,8 @@ public class PackageSyncTests
             StreamDefinitionFactory.FromType(typeof(TieredOrder), null),
         });
 
-        SyncResult result = await service.SyncModelsAsync();
+        QueueySyncException ex = await Assert.ThrowsAsync<QueueySyncException>(() => service.SyncStreamsAsync());
+        SyncResult result = ex.Streams!;
 
         Assert.False(result.AllSucceeded);              // a package failed
         Assert.Equal(1, result.Succeeded);              // the stream itself applied

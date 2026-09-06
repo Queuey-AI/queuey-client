@@ -57,7 +57,7 @@ internal sealed class EdgeHealthService : IQueueyEdgeHealth, IHostedService, IDi
             () => Stats()?.OldestPendingAge?.TotalSeconds ?? 0d, unit: "s",
             description: "Age of the oldest pending event. The one signal worth alerting on.");
         _meter.CreateObservableGauge("queuey.edge.spool.bytes",
-            () => Stats()?.StorageUsageBytes ?? 0, unit: "By", description: "Spool file size on disk.");
+            () => Stats()?.StorageUsageBytes ?? 0, unit: "By", description: "Live bytes in the spool (file size minus freed pages) — what the storage limit is measured against.");
         _meter.CreateObservableGauge("queuey.edge.spool.quarantined",
             () => Stats()?.QuarantinedCount ?? 0, description: "Events parked outside the retry path, awaiting operator retry/discard.");
         _meter.CreateObservableGauge("queuey.edge.cloud.last_contact_seconds",
@@ -142,8 +142,11 @@ internal sealed class EdgeHealthService : IQueueyEdgeHealth, IHostedService, IDi
             // acceptable in a metrics callback that fires per scrape.
             _cachedStats = _spool.GetStatsAsync(CancellationToken.None).GetAwaiter().GetResult();
         }
-        catch (QueueyStorageFaultedException)
+        catch (Exception)
         {
+            // Faulted spool, unreadable file, vanished directory: a metrics
+            // callback must never throw into the listener. Null derives
+            // StorageFaulted in the snapshot, which is the honest reading.
             _cachedStats = null;
         }
         _cachedAtMono = nowMono;

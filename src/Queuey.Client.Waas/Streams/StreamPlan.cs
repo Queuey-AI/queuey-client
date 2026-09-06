@@ -4,7 +4,7 @@ using System.Collections.Generic;
 namespace Queuey.Client.Waas;
 
 /// <summary>
-/// A network-free preview of what <c>SyncModels</c> would apply for one stream (used by
+/// A network-free preview of what <c>SyncStreams</c> would apply for one stream (used by
 /// <c>--dry-run</c> and tests). Mirrors a <see cref="StreamDefinition"/> without touching the API.
 /// </summary>
 public sealed class StreamPlan

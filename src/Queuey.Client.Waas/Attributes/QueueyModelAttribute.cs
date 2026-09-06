@@ -4,13 +4,14 @@ namespace Queuey.Client.Waas;
 
 /// <summary>
 /// Marks a class or struct as a Queuey <b>stream</b> (a producer integration endpoint). When the type is
-/// registered (<c>AddStream&lt;T&gt;()</c>) and <c>SyncModels</c> runs, the SDK applies a stream by this
+/// registered (<c>AddStream&lt;T&gt;()</c>) and <c>SyncStreams</c> runs, the SDK applies a stream by this
 /// definition via <c>PUT /waas/streams</c>: it ensures a backing queue named <see cref="Name"/> exists,
 /// is public/discoverable per <see cref="IsPublic"/>, and extracts the canonical context headers so that
 /// <c>PushEvent</c> to the same stream carries <c>eventType</c>/<c>key</c>.
 /// </summary>
 /// <remarks>
-/// Every value is optional. When omitted, <see cref="Name"/> falls back to the CLR type name and
+/// Every value is optional. When omitted, <see cref="Name"/> falls back to the CLR type name
+/// normalized to Queuey's naming rules (<c>OrderCreated</c> → <c>order-created</c>), and
 /// <see cref="IsPublic"/> defaults to <c>true</c> (mirroring the backend). Inline registration options
 /// (<c>AddStream&lt;T&gt;(cfg =&gt; …)</c>) take precedence over this attribute.
 /// </remarks>
@@ -21,8 +22,11 @@ public sealed class QueueyModelAttribute : Attribute
     public QueueyModelAttribute(string? name = null) => Name = name;
 
     /// <summary>
-    /// Stream name — becomes the queue display name and the catalog key. Null/empty falls back to the
-    /// CLR type name. This is the string you pass to <c>PushEvent</c>.
+    /// Stream name — becomes the queue display name and the catalog key. This is the string you pass
+    /// to <c>PushEvent</c>, so it must satisfy <see cref="QueueyName"/>: lowercase, starting with a
+    /// letter or digit, then letters, digits, <c>.</c>, <c>-</c> or <c>_</c>. A value set here is
+    /// validated as written (an invalid one throws at registration, suggesting the normalized form);
+    /// null/empty falls back to the CLR type name normalized (<c>OrderCreated</c> → <c>order-created</c>).
     /// </summary>
     public string? Name { get; set; }
 

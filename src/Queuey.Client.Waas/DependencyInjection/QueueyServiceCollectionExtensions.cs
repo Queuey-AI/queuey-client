@@ -26,7 +26,9 @@ public static class QueueyServiceCollectionExtensions
         var builder = new QueueyBuilder(services);
         build?.Invoke(builder);
         StreamRegistry registry = builder.BuildRegistry(); // fails loudly on duplicate names/types
+        QueueRegistry queues = builder.BuildQueueRegistry();
         services.AddSingleton(registry);
+        services.AddSingleton(queues);
 
         services.AddSingleton<IQueueyService>(sp =>
         {
@@ -35,7 +37,7 @@ public static class QueueyServiceCollectionExtensions
             var factory = sp.GetRequiredService<IHttpClientFactory>();
             HttpClient http = factory.CreateClient(QueueyClientDefaults.HttpClientName);
             var controlPlane = new QueueyControlPlaneClient(http, options);
-            return new QueueyService(client, controlPlane, registry, options);
+            return new QueueyService(client, controlPlane, registry, options, queues);
         });
 
         return services;
