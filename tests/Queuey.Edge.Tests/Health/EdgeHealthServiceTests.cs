@@ -37,6 +37,44 @@ public class EdgeHealthServiceTests
     }
 
     [Fact]
+    public async Task Storage_full_clears_the_moment_the_backlog_settles()
+    {
+        using var fx = new HealthFixture(o =>
+        {
+            o.MaxSpoolBytes = 96 * 1024;
+            o.HeadroomBytes = 32 * 1024;
+        });
+
+        var accepted = new List<SpoolAccept>();
+        QueueySpoolFullException? full = null;
+        for (var i = 0; i < 200 && full is null; i++)
+        {
+            try
+            {
+                accepted.Add(await fx.Spool.Spool.EnqueueAsync(fx.Spool.Envelope(payloadBytes: 4096), CancellationToken.None));
+            }
+            catch (QueueySpoolFullException ex)
+            {
+                full = ex;
+            }
+        }
+        Assert.NotNull(full);
+        fx.InvalidateCache();
+        Assert.Equal(EdgeState.StorageFull, fx.Health.Snapshot().State);
+
+        foreach (var accept in accepted)
+        {
+            await fx.Spool.Spool.SettleAsync(accept.SpoolId,
+                new CloudAck("evt_x", false, fx.Spool.Clock.UtcNow), CancellationToken.None);
+        }
+        fx.State.RecordSuccess(fx.Spool.Clock.UtcNow, replayed: false);
+
+        // No sweep, no retention window — Cloud custody alone clears the state.
+        fx.InvalidateCache();
+        Assert.Equal(EdgeState.Healthy, fx.Health.Snapshot().State);
+    }
+
+    [Fact]
     public async Task Requires_action_shows_what_happened_not_just_that_something_did()
     {
         using var fx = new HealthFixture();
@@ -139,11 +177,13 @@ public class EdgeHealthServiceTests
         public EdgeRuntimeState State { get; } = new();
         public EdgeHealthService Health { get; }
 
-        public HealthFixture()
+        public HealthFixture(Action<EdgeStorageOptions>? configure = null)
         {
-            Spool = new SpoolFixture();
+            Spool = new SpoolFixture(configure);
             var options = new QueueyEdgeOptions { ApiKey = "qak_id.secret", TenantPublicId = "ten_test" };
             options.Storage.Path = Spool.Options.Path;
+            options.Storage.MaxSpoolBytes = Spool.Options.MaxSpoolBytes;
+            options.Storage.HeadroomBytes = Spool.Options.HeadroomBytes;
             Health = new EdgeHealthService(
                 Spool.Spool, State, options, Spool.Clock, NullLogger<EdgeHealthService>.Instance);
         }

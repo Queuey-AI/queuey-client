@@ -125,15 +125,26 @@ public class ClassifierAndBackoffTests
     }
 
     [Fact]
-    public void Retry_after_is_honoured_exactly()
+    public void Retry_after_is_a_floor_with_bounded_jitter_on_top()
     {
-        var policy = new BackoffPolicy(TransferOptions());
+        // Cloud's burst guard is per licence: every node of a fleet that
+        // reconnects together gets the same hint. The hint is never cut
+        // short (that would be ignoring it) — but nodes must not all knock
+        // again on the same second.
+        var policy = new BackoffPolicy(TransferOptions(), new Random(7));
         var throttled = new TransferOutcome(TransferClass.Throttled, TransferReason.RateLimited, null)
         {
             RetryAfter = TimeSpan.FromSeconds(42)
         };
 
-        Assert.Equal(TimeSpan.FromSeconds(42), policy.NextDelay(throttled, TimeSpan.FromSeconds(1)));
+        var seen = new HashSet<TimeSpan>();
+        for (var i = 0; i < 100; i++)
+        {
+            var delay = policy.NextDelay(throttled, TimeSpan.FromSeconds(1));
+            Assert.InRange(delay, TimeSpan.FromSeconds(42), TimeSpan.FromSeconds(42 * (1 + BackoffPolicy.RetryAfterJitterFraction)));
+            seen.Add(delay);
+        }
+        Assert.True(seen.Count > 1, "the jitter must actually spread the fleet");
     }
 
     [Fact]
