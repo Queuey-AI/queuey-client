@@ -108,7 +108,8 @@ o.Health.NodeName = "barge-07";  // defaults to the machine name
 ```
 
 The node then POSTs its health snapshot to Queuey Cloud — at startup, on
-every state change, and every 5 minutes otherwise — and appears under
+every state change, and every 5 minutes otherwise; a refused report backs
+off and honours Cloud's `Retry-After` — and appears under
 **Edge nodes** in the console with pending count, oldest age, last failure
 and "last seen". Three things are fixed by design: traffic is **outbound
 only** (Cloud never reaches into a node; the loopback endpoint stays
