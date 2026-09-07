@@ -103,6 +103,25 @@ public class EdgeHealthReporterTests
     }
 
     [Fact]
+    public async Task A_retry_after_date_is_honoured_like_the_transfer_path_does()
+    {
+        using var fx = new SpoolFixture();
+        var (throttled, _) = Reporter(fx, _ =>
+        {
+            var r = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+            r.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(fx.Clock.UtcNow.AddSeconds(30));
+            return r;
+        });
+        var report = EdgeHealthReport.From(Healthy(), "n", "v", "p", fx.Clock.UtcNow, TimeSpan.FromMinutes(5));
+
+        var outcome = await throttled.SendAsync("node", report, CancellationToken.None);
+
+        Assert.False(outcome.Sent);
+        Assert.NotNull(outcome.RetryAfter);
+        Assert.InRange(outcome.RetryAfter!.Value.TotalSeconds, 25, 30);
+    }
+
+    [Fact]
     public async Task Disabled_by_default_sends_nothing()
     {
         using var fx = new SpoolFixture();

@@ -27,7 +27,8 @@ namespace Queuey.Edge;
 /// </list>
 /// Cadence: a report at startup, one whenever <see cref="EdgeState"/>
 /// changes, and one every <see cref="EdgeHealthReportOptions.ReportInterval"/>
-/// otherwise.
+/// otherwise — except after a refused report, when the next attempt waits
+/// out a backoff or Cloud's Retry-After (see <see cref="EdgeReportCadence"/>).
 /// </summary>
 internal sealed class EdgeHealthReporter : BackgroundService
 {
@@ -174,8 +175,10 @@ internal sealed class EdgeHealthReporter : BackgroundService
                 return new SendOutcome(true, null);
 
             // Cloud's check-in guard answers 429 with Retry-After (delta
-            // seconds); the cadence treats it as the floor for the next try.
-            var retryAfter = response.Headers.RetryAfter?.Delta;
+            // seconds; a date form is honoured too, like the transfer path);
+            // the cadence treats it as the floor for the next try.
+            var header = response.Headers.RetryAfter;
+            var retryAfter = header?.Delta ?? (header?.Date is { } date ? date - _clock.UtcNow : null);
             _logger.LogDebug(EdgeLogEvents.HealthReportFailed,
                 "Health report rejected by Cloud with HTTP {Status}; the next report supersedes it.",
                 (int)response.StatusCode);

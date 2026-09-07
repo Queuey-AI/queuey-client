@@ -45,11 +45,12 @@ public sealed class EdgeReportCadenceTests
 
         t += Tick;
         c.Attempted(EdgeState.Backlogged, t, sent: false, retryAfter: null);
-        Assert.False(c.IsDue(EdgeState.Backlogged, t + Tick));
+        Assert.False(c.IsDue(EdgeState.Backlogged, t + 2 * Tick - TimeSpan.FromSeconds(1)));
         Assert.True(c.IsDue(EdgeState.Backlogged, t + 2 * Tick), "second retry after two ticks");
 
         t += 2 * Tick;
         c.Attempted(EdgeState.Backlogged, t, sent: false, retryAfter: null);
+        Assert.False(c.IsDue(EdgeState.Backlogged, t + 4 * Tick - TimeSpan.FromSeconds(1)));
         Assert.True(c.IsDue(EdgeState.Backlogged, t + 4 * Tick), "then four");
 
         // Keep failing: the hold never exceeds the interval.
@@ -81,6 +82,35 @@ public sealed class EdgeReportCadenceTests
         t += Tick;
         c.Attempted(EdgeState.Healthy, t, sent: false, retryAfter: null);
         Assert.True(c.IsDue(EdgeState.Healthy, t + Tick));
+    }
+
+    [Fact]
+    public void A_new_state_change_during_a_hold_waits_for_the_hold()
+    {
+        var c = new EdgeReportCadence(Interval, Tick);
+        c.Attempted(EdgeState.Healthy, T0, sent: true, retryAfter: null);
+
+        var t = T0 + Tick;
+        c.Attempted(EdgeState.Backlogged, t, sent: false, retryAfter: TimeSpan.FromSeconds(45));
+
+        // The spool faults while Cloud asked us to wait: still wait. A fresh
+        // state that bypassed the hold would let a flapping node bypass it
+        // every tick.
+        Assert.False(c.IsDue(EdgeState.StorageFaulted, t + TimeSpan.FromSeconds(30)));
+        Assert.True(c.IsDue(EdgeState.StorageFaulted, t + TimeSpan.FromSeconds(45)));
+    }
+
+    [Fact]
+    public void An_interval_under_the_tick_still_backs_off_by_at_least_a_tick()
+    {
+        var c = new EdgeReportCadence(TimeSpan.FromSeconds(1), Tick);
+        c.Attempted(EdgeState.Healthy, T0, sent: false, retryAfter: null);
+        Assert.False(c.IsDue(EdgeState.Healthy, T0 + TimeSpan.FromSeconds(9)));
+        Assert.True(c.IsDue(EdgeState.Healthy, T0 + Tick));
+
+        c.Attempted(EdgeState.Healthy, T0 + Tick, sent: false, retryAfter: null);
+        Assert.False(c.IsDue(EdgeState.Healthy, T0 + Tick + TimeSpan.FromSeconds(9)), "the cap is the tick, never less");
+        Assert.True(c.IsDue(EdgeState.Healthy, T0 + 2 * Tick));
     }
 
     [Fact]

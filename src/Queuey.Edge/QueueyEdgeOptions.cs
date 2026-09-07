@@ -192,6 +192,12 @@ public sealed class EdgeHealthReportOptions
     /// </summary>
     public string? NodeName { get; set; }
 
-    /// <summary>Steady-state cadence. A state change reports immediately regardless.</summary>
+    /// <summary>
+    /// Steady-state cadence. A state change reports at the next 10 s tick —
+    /// unless the previous report was refused, in which case the node waits
+    /// out its backoff (doubling from 10 s up to this interval) or Cloud's
+    /// Retry-After (capped at one hour), whichever is longer. Values under
+    /// 10 s are treated as 10 s.
+    /// </summary>
     public TimeSpan ReportInterval { get; set; } = TimeSpan.FromMinutes(5);
 }

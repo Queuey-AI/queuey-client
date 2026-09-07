@@ -15,6 +15,10 @@ namespace Queuey.Edge;
 /// </summary>
 internal sealed class EdgeReportCadence
 {
+    // Longer than Cloud's own silence threshold (three intervals, never
+    // under 15 min). If Cloud says "wait an hour" and then calls the node
+    // silent, that is Cloud's inconsistency to fix, not a reason to ignore
+    // its word; anything beyond an hour is treated as a typo.
     private static readonly TimeSpan MaxRetryAfter = TimeSpan.FromHours(1);
 
     private readonly TimeSpan _interval;
@@ -27,12 +31,22 @@ internal sealed class EdgeReportCadence
 
     public EdgeReportCadence(TimeSpan interval, TimeSpan tick)
     {
-        _interval = interval;
+        // An interval under the tick would make the backoff cap invisible
+        // to the loop and bring back the every-tick retry; the tick is the
+        // floor for both.
+        _interval = interval < tick ? tick : interval;
         _tick = tick;
         _backoff = tick;
     }
 
-    /// <summary>True when a report for <paramref name="state"/> should go out now.</summary>
+    /// <summary>
+    /// True when a report for <paramref name="state"/> should go out now.
+    /// A hold applies to ANY state, including one newer than the refused
+    /// report: letting a fresh state bypass the hold would let a flapping
+    /// node bypass it every time, which is exactly the flood this class
+    /// exists to stop. The report that finally goes out is built from a
+    /// fresh snapshot, so nothing is lost by waiting.
+    /// </summary>
     public bool IsDue(EdgeState state, DateTimeOffset now)
     {
         if (_holdUntil is { } until && now < until)
