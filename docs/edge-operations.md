@@ -180,6 +180,13 @@ Everything a node knows about itself reaches Cloud only while it can talk,
 so the local metric above still matters for a machine you cannot reach at
 all. *Forget* in the tab removes a node you took out of service.
 
+A report is one small request every five minutes plus one on each state
+change, never billed and never an event. Cloud caps a node at one report
+per ten seconds and a license at a fleet's worth; beyond that it answers
+429 with `Retry-After`, and the node waits as told, backing off from ten
+seconds up to its report interval. A refused report is loss-free — the next
+one carries the newer truth.
+
 ## StorageFaulted runbook
 
 Symptoms: `EdgeState.StorageFaulted`, publishes throw
