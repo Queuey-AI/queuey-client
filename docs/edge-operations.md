@@ -162,6 +162,15 @@ that long — network, Queuey Cloud, credentials, or a paused queue; the
 by itself when the cause clears; the alert exists because *no one else can
 page you about a machine only you can see*.
 
+If the node reports to Cloud (`--report-health` / `Health.ReportToCloud`),
+Cloud can page you about one thing: silence. Three missed reports (never
+under 15 minutes) mark the node Silent in the console's Edge nodes tab and
+send one alert to the license's notification destinations, with one more
+when the node is back. Everything else a node knows about itself — backlog,
+oldest pending age, last failure — still reaches Cloud only while the node
+can talk, so the local metric above remains the one to alert on for a
+stalled node that is online.
+
 ## StorageFaulted runbook
 
 Symptoms: `EdgeState.StorageFaulted`, publishes throw

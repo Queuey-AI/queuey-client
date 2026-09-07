@@ -234,6 +234,14 @@ queuey edge reset   --spool <path> --accept-data-loss # start clean; the old fil
   drained on Wednesday still reads as Monday in the Queuey console.
 - **Never silent loss:** events leave the spool only via Cloud custody,
   explicit operator discard, or an explicitly configured lossy policy.
+- **The fleet, from Cloud:** with `Health.ReportToCloud` (CLI
+  `--report-health`) the node checks in at startup, on every state change
+  and every 5 minutes. The console's Edge nodes tab shows each node's own
+  last word, marks a node **Silent** after three missed reports (never
+  under 15 minutes), and Queuey alerts your notification destinations
+  once when a node goes silent and once when it is back. A node cannot
+  report without a network, so "silent" is about the machine or its
+  link; its accepted events wait on disk meanwhile.
 
 ## Requirements
 
