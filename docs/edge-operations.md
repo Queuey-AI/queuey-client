@@ -166,11 +166,12 @@ If the node reports to Cloud (`--report-health` / `Health.ReportToCloud`),
 Cloud can page you about two things:
 
 - **Silence**, for nodes you tick as *Expected* in the console's Edge nodes
-  tab: three missed reports (never under 15 minutes; set a longer threshold
-  per node for a link that deserves patience) mark the node Silent and send
-  one alert to the license's notification destinations, with one more when
-  the node is back. A link that flaps earns one pair per threshold, and
-  several nodes changing in the same minute arrive as one message.
+  tab: three missed reports (never under 15 minutes) mark the node Silent
+  and send one alert to the license's notification destinations, with one
+  more when the node is back. *Alert after* on the node, or on many nodes
+  at once, makes Cloud wait longer — up to 24 hours without a report — for
+  a link that deserves patience. A link that flaps earns one pair per
+  wait, and several nodes changing in the same minute arrive as one message.
 - **What the node says about itself**, for every node that reports: cannot
   transfer (a paused queue, a bad key, an unknown route, billing, TLS), local
   store full or faulted, or a backlog whose oldest event is over 15 minutes
