@@ -52,7 +52,7 @@ public class EdgeHealthReporterTests
         var ok = await reporter.SendAsync(nodeId, EdgeHealthReport.From(
             health, "barge-07", "1.2.3", "linux-arm64", fx.Clock.UtcNow, TimeSpan.FromMinutes(5)), CancellationToken.None);
 
-        Assert.True(ok);
+        Assert.True(ok.Sent);
         var request = Assert.Single(handler.Requests);
         Assert.Equal($"/edge/ten_test/nodes/{nodeId}/health", request.Uri.AbsolutePath);
         Assert.Equal("qak_id.secret", request.Headers["X-Api-Key"]);
@@ -80,8 +80,26 @@ public class EdgeHealthReporterTests
         var (exploding, _) = Reporter(fx, _ => throw new HttpRequestException("boom"));
         var report = EdgeHealthReport.From(Healthy(), "n", "v", "p", fx.Clock.UtcNow, TimeSpan.FromMinutes(5));
 
-        Assert.False(await rejecting.SendAsync("node", report, CancellationToken.None));
-        Assert.False(await exploding.SendAsync("node", report, CancellationToken.None));
+        Assert.False((await rejecting.SendAsync("node", report, CancellationToken.None)).Sent);
+        Assert.False((await exploding.SendAsync("node", report, CancellationToken.None)).Sent);
+    }
+
+    [Fact]
+    public async Task A_429_carries_cloud_s_retry_after_into_the_outcome()
+    {
+        using var fx = new SpoolFixture();
+        var (throttled, _) = Reporter(fx, _ =>
+        {
+            var r = new HttpResponseMessage(HttpStatusCode.TooManyRequests);
+            r.Headers.RetryAfter = new System.Net.Http.Headers.RetryConditionHeaderValue(TimeSpan.FromSeconds(7));
+            return r;
+        });
+        var report = EdgeHealthReport.From(Healthy(), "n", "v", "p", fx.Clock.UtcNow, TimeSpan.FromMinutes(5));
+
+        var outcome = await throttled.SendAsync("node", report, CancellationToken.None);
+
+        Assert.False(outcome.Sent);
+        Assert.Equal(TimeSpan.FromSeconds(7), outcome.RetryAfter);
     }
 
     [Fact]

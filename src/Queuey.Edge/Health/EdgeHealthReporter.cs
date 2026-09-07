@@ -114,8 +114,7 @@ internal sealed class EdgeHealthReporter : BackgroundService
             "Outbound only; reports are not events and are never billed.",
             nodeName, nodeId, _options.Health.ReportInterval);
 
-        EdgeState? lastReportedState = null;
-        DateTimeOffset? lastReportedAt = null;
+        var cadence = new EdgeReportCadence(_options.Health.ReportInterval, StateCheckInterval);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -130,20 +129,12 @@ internal sealed class EdgeHealthReporter : BackgroundService
             if (snapshot is not null)
             {
                 var now = _clock.UtcNow;
-                var due = lastReportedAt is null
-                    || snapshot.State != lastReportedState
-                    || now - lastReportedAt.Value >= _options.Health.ReportInterval;
-
-                if (due)
+                if (cadence.IsDue(snapshot.State, now))
                 {
-                    var sent = await SendAsync(nodeId, EdgeHealthReport.From(
+                    var outcome = await SendAsync(nodeId, EdgeHealthReport.From(
                         snapshot, nodeName, EdgeVersion, RuntimeInformation.RuntimeIdentifier,
                         now, _options.Health.ReportInterval), stoppingToken).ConfigureAwait(false);
-                    // Even a failed send counts as "attempted" for cadence:
-                    // hammering an unreachable Cloud every 10 s helps nobody,
-                    // and the NEXT interval (or state change) tries again.
-                    lastReportedAt = now;
-                    if (sent) lastReportedState = snapshot.State;
+                    cadence.Attempted(snapshot.State, now, outcome.Sent, outcome.RetryAfter);
                 }
             }
 
@@ -155,8 +146,11 @@ internal sealed class EdgeHealthReporter : BackgroundService
         }
     }
 
-    /// <summary>One send. Never throws; true when Cloud acknowledged with a 2xx.</summary>
-    internal async Task<bool> SendAsync(string nodeId, EdgeHealthReport report, CancellationToken cancellationToken)
+    /// <summary>Outcome of one send: whether Cloud took it, and how long Cloud asked us to wait if not.</summary>
+    internal readonly record struct SendOutcome(bool Sent, TimeSpan? RetryAfter);
+
+    /// <summary>One send. Never throws; <c>Sent</c> when Cloud acknowledged with a 2xx.</summary>
+    internal async Task<SendOutcome> SendAsync(string nodeId, EdgeHealthReport report, CancellationToken cancellationToken)
     {
         try
         {
@@ -177,22 +171,25 @@ internal sealed class EdgeHealthReporter : BackgroundService
                 .ConfigureAwait(false);
 
             if (response.IsSuccessStatusCode)
-                return true;
+                return new SendOutcome(true, null);
 
+            // Cloud's check-in guard answers 429 with Retry-After (delta
+            // seconds); the cadence treats it as the floor for the next try.
+            var retryAfter = response.Headers.RetryAfter?.Delta;
             _logger.LogDebug(EdgeLogEvents.HealthReportFailed,
                 "Health report rejected by Cloud with HTTP {Status}; the next report supersedes it.",
                 (int)response.StatusCode);
-            return false;
+            return new SendOutcome(false, retryAfter);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            return false;
+            return new SendOutcome(false, null);
         }
         catch (Exception ex)
         {
             _logger.LogDebug(EdgeLogEvents.HealthReportFailed, ex,
                 "Health report could not be sent; the next report supersedes it.");
-            return false;
+            return new SendOutcome(false, null);
         }
     }
 }
