@@ -163,13 +163,22 @@ by itself when the cause clears; the alert exists because *no one else can
 page you about a machine only you can see*.
 
 If the node reports to Cloud (`--report-health` / `Health.ReportToCloud`),
-Cloud can page you about one thing: silence. Three missed reports (never
-under 15 minutes) mark the node Silent in the console's Edge nodes tab and
-send one alert to the license's notification destinations, with one more
-when the node is back. Everything else a node knows about itself — backlog,
-oldest pending age, last failure — still reaches Cloud only while the node
-can talk, so the local metric above remains the one to alert on for a
-stalled node that is online.
+Cloud can page you about two things:
+
+- **Silence**, for nodes you tick as *Expected* in the console's Edge nodes
+  tab: three missed reports (never under 15 minutes; set a longer threshold
+  per node for a link that deserves patience) mark the node Silent and send
+  one alert to the license's notification destinations, with one more when
+  the node is back. A link that flaps earns one pair per threshold, and
+  several nodes changing in the same minute arrive as one message.
+- **What the node says about itself**, for every node that reports: cannot
+  transfer (a paused queue, a bad key, an unknown route, billing, TLS), local
+  store full or faulted, or a backlog whose oldest event is over 15 minutes
+  old while the node is online. One alert when it starts, one when it clears.
+
+Everything a node knows about itself reaches Cloud only while it can talk,
+so the local metric above still matters for a machine you cannot reach at
+all. *Forget* in the tab removes a node you took out of service.
 
 ## StorageFaulted runbook
 
