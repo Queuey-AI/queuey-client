@@ -162,6 +162,32 @@ that long — network, Queuey Cloud, credentials, or a paused queue; the
 by itself when the cause clears; the alert exists because *no one else can
 page you about a machine only you can see*.
 
+If the node reports to Cloud (`--report-health` / `Health.ReportToCloud`),
+Cloud can page you about two things:
+
+- **Silence**, for nodes you tick as *Expected* in the console's Edge nodes
+  tab: three missed reports (never under 15 minutes) mark the node Silent
+  and send one alert to the license's notification destinations, with one
+  more when the node is back. *Alert after* on the node, or on many nodes
+  at once, makes Cloud wait longer — up to 24 hours without a report — for
+  a link that deserves patience. A link that flaps earns one pair per
+  wait, and several nodes changing in the same minute arrive as one message.
+- **What the node says about itself**, for every node that reports: cannot
+  transfer (a paused queue, a bad key, an unknown route, billing, TLS), local
+  store full or faulted, or a backlog whose oldest event is over 15 minutes
+  old while the node is online. One alert when it starts, one when it clears.
+
+Everything a node knows about itself reaches Cloud only while it can talk,
+so the local metric above still matters for a machine you cannot reach at
+all. *Forget* in the tab removes a node you took out of service.
+
+A report is one small request every five minutes plus one on each state
+change, never billed and never an event. Cloud caps a node at one report
+per ten seconds and a license at a fleet's worth; beyond that it answers
+429 with `Retry-After`, and the node waits as told, backing off from ten
+seconds up to its report interval. A refused report is loss-free — the next
+one carries the newer truth.
+
 ## StorageFaulted runbook
 
 Symptoms: `EdgeState.StorageFaulted`, publishes throw
