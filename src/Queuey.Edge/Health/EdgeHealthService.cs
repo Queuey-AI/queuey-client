@@ -103,7 +103,8 @@ internal sealed class EdgeHealthService : IQueueyEdgeHealth, IHostedService, IDi
             LastTransferFailure: _state.LastTransferFailure,
             QuarantinedCount: stats?.QuarantinedCount ?? 0,
             StorageDurabilityWarning: _ephemeralPath,
-            NextTransferAttemptUtc: stats?.NextAttemptUtc);
+            NextTransferAttemptUtc: stats?.NextAttemptUtc,
+            HealthReportRejection: _state.HealthReportRejection);
     }
 
     public Task StartAsync(CancellationToken cancellationToken)

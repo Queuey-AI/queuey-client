@@ -62,7 +62,8 @@ internal sealed class EdgeHealthReporter : BackgroundService
         IEventSpool spool,
         IQueueyEdgeHealth health,
         IEdgeClock clock,
-        ILogger<EdgeHealthReporter> logger)
+        ILogger<EdgeHealthReporter> logger,
+        EdgeRuntimeState? state = null)
     {
         _http = http;
         _options = options;
@@ -70,8 +71,12 @@ internal sealed class EdgeHealthReporter : BackgroundService
         _health = health;
         _clock = clock;
         _logger = logger;
+        _state = state ?? new EdgeRuntimeState();
         _ingressBase = options.ResolveIngressBaseAddress();
     }
+
+    private readonly EdgeRuntimeState _state;
+    private int? _lastWarnedStatus;
 
     /// <summary>The node's stable identity (minted on first use). Exposed for the CLI's status readout.</summary>
     public async Task<string> GetNodeIdAsync(CancellationToken cancellationToken)
@@ -172,7 +177,24 @@ internal sealed class EdgeHealthReporter : BackgroundService
                 .ConfigureAwait(false);
 
             if (response.IsSuccessStatusCode)
+            {
+                _state.RecordHealthReport(null, _clock.UtcNow);
+                _lastWarnedStatus = null;
                 return new SendOutcome(true, null);
+            }
+
+            // A refused report is the one failure the node cannot see in its
+            // own numbers: events flow, yet the fleet never shows it. Say so
+            // where the operator looks — once per status, not per tick.
+            var status = (int)response.StatusCode;
+            _state.RecordHealthReport(status, _clock.UtcNow);
+            if (_lastWarnedStatus != status)
+            {
+                _lastWarnedStatus = status;
+                _logger.LogWarning(EdgeLogEvents.HealthReportFailed,
+                    "Queuey Cloud refused this node's health report with HTTP {Status}. {Advice} The node keeps working; it just does not appear in the fleet until this is fixed.",
+                    status, new HealthReportRejection(status, _clock.UtcNow).Advice);
+            }
 
             // Cloud's check-in guard answers 429 with Retry-After (delta
             // seconds; a date form is honoured too, like the transfer path);

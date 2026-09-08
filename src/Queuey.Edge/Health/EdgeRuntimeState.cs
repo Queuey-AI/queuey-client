@@ -49,6 +49,19 @@ internal sealed class EdgeRuntimeState
 
     public TransferFailure? LastTransferFailure => _lastFailure;
 
+    private volatile HealthReportRejection? _healthReportRejection;
+
+    /// <summary>
+    /// Cloud's last refusal of a health report, or null while reports are
+    /// accepted (or none has been sent). A node that publishes fine but
+    /// never appears in the fleet is almost always this: a queue-scoped key
+    /// cannot check in, Edge needs a workspace-scoped one.
+    /// </summary>
+    public HealthReportRejection? HealthReportRejection => _healthReportRejection;
+
+    public void RecordHealthReport(int? rejectedStatus, DateTimeOffset atUtc)
+        => _healthReportRejection = rejectedStatus is { } s ? new HealthReportRejection(s, atUtc) : null;
+
     public void RecordSuccess(DateTimeOffset atUtc, bool replayed)
     {
         Interlocked.Exchange(ref _lastContactTicks, atUtc.UtcTicks);

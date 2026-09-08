@@ -151,6 +151,28 @@ public class EdgeHealthReporterTests
         Assert.Equal("Healthy", JsonDocument.Parse(request.Body).RootElement.GetProperty("state").GetString());
     }
 
+    [Fact]
+    public async Task A_refused_report_is_visible_as_a_rejection_with_advice_and_a_success_clears_it()
+    {
+        using var fx = new SpoolFixture();
+        var state = new EdgeRuntimeState();
+        var status = HttpStatusCode.Forbidden;
+        var handler = new ScriptedHandler(_ => new HttpResponseMessage(status));
+        var reporter = new EdgeHealthReporter(new HttpClient(handler), Options(), fx.Spool,
+            new StaticHealth(Healthy()), fx.Clock, NullLogger<EdgeHealthReporter>.Instance, state);
+        var report = EdgeHealthReport.From(Healthy(), "n", "v", "p", fx.Clock.UtcNow, TimeSpan.FromMinutes(5));
+
+        await reporter.SendAsync("node", report, CancellationToken.None);
+        var rejection = state.HealthReportRejection;
+        Assert.NotNull(rejection);
+        Assert.Equal(403, rejection!.StatusCode);
+        Assert.Contains("workspace-scoped", rejection.Advice);
+
+        status = HttpStatusCode.NoContent;
+        await reporter.SendAsync("node", report, CancellationToken.None);
+        Assert.Null(state.HealthReportRejection);
+    }
+
     // ── support ──────────────────────────────────────────────────────
 
     private static EdgeHealth Healthy() => new(EdgeState.Healthy, 0, null, 0, null, null, 0, false);
