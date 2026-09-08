@@ -48,6 +48,21 @@ public sealed class QueueyEdgeOptions
 
     public EdgeHealthReportOptions Health { get; } = new();
 
+    /// <summary>
+    /// The HTTP handler under every connection Edge opens to Cloud (event
+    /// transfer and health reports). Null means the runtime default. Set it
+    /// for a corporate proxy, client certificates, or a test double — a
+    /// <see cref="System.Net.Http.DelegatingHandler"/> that refuses
+    /// connections is how a demo cuts one node's network. Called once per
+    /// client Edge creates; each call must return a fresh handler.
+    /// </summary>
+    public Func<System.Net.Http.HttpMessageHandler>? HttpMessageHandlerFactory { get; set; }
+
+    internal System.Net.Http.HttpClient CreateHttpClient()
+        => HttpMessageHandlerFactory is { } factory
+            ? new System.Net.Http.HttpClient(factory() ?? throw new QueueyConfigurationException("HttpMessageHandlerFactory returned null."))
+            : new System.Net.Http.HttpClient();
+
     /// <summary>The effective ingress base address (override or environment default).</summary>
     public Uri ResolveIngressBaseAddress()
         => new QueueyOptions { Environment = Environment, IngressBaseAddress = IngressBaseAddress }

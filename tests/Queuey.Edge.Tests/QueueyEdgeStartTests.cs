@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -77,6 +79,70 @@ public sealed class QueueyEdgeStartTests
         {
             dir.Delete(recursive: true);
         }
+    }
+
+    [Fact]
+    public async Task The_handler_hook_sits_under_both_transfer_and_health_reports_and_can_cut_the_network()
+    {
+        var dir = Directory.CreateTempSubdirectory("queuey-edge-handler-");
+        try
+        {
+            var seen = new List<string>();
+            var cut = false;
+            await using var edge = await QueueyEdge.StartAsync(o =>
+            {
+                o.ApiKey = "qak_id.secret";
+                o.TenantPublicId = "ten_test";
+                o.IngressBaseAddress = new Uri("https://ingress.test/");
+                o.Storage.Path = Path.Combine(dir.FullName, "spool.db");
+                o.Health.ReportToCloud = true;
+                o.Health.NodeName = "cut-me";
+                o.HttpMessageHandlerFactory = () => new ScriptedHandler(req =>
+                {
+                    lock (seen) seen.Add(req.RequestUri!.AbsolutePath);
+                    // What a real outage looks like to HttpClient: a socket error under the request exception.
+                    if (cut) throw new System.Net.Http.HttpRequestException("network down",
+                        new System.Net.Sockets.SocketException((int)System.Net.Sockets.SocketError.HostUnreachable));
+                    return new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.Accepted)
+                    {
+                        Content = new System.Net.Http.StringContent("{\"eventId\":\"evt_1\"}", System.Text.Encoding.UTF8, "application/json")
+                    };
+                });
+            });
+
+            await edge.PublishAsync("orders", new { seq = 1 });
+            var deadline = DateTime.UtcNow.AddSeconds(5);
+            while (DateTime.UtcNow < deadline && !(seen.Any(p => p.Contains("/events/")) && seen.Any(p => p.EndsWith("/health"))))
+                await Task.Delay(50);
+
+            Assert.Contains(seen, p => p.Contains("/events/ten_test/orders"));
+            Assert.Contains(seen, p => p.EndsWith("/health"));
+
+            cut = true;
+            await edge.PublishAsync("orders", new { seq = 2 });
+            // The health snapshot caches spool stats for a second; poll past it.
+            var h = edge.Health;
+            var until = DateTime.UtcNow.AddSeconds(4);
+            while (DateTime.UtcNow < until && h.PendingCount == 0)
+            {
+                await Task.Delay(100);
+                h = edge.Health;
+            }
+            Assert.True(h.PendingCount >= 1, $"with the network cut the event stays in the spool — state={h.State} pending={h.PendingCount} fail={h.LastTransferFailure?.Reason}");
+            Assert.NotEqual(EdgeState.Healthy, h.State);
+        }
+        finally
+        {
+            dir.Delete(recursive: true);
+        }
+    }
+
+    private sealed class ScriptedHandler : System.Net.Http.HttpMessageHandler
+    {
+        private readonly Func<System.Net.Http.HttpRequestMessage, System.Net.Http.HttpResponseMessage> _script;
+        public ScriptedHandler(Func<System.Net.Http.HttpRequestMessage, System.Net.Http.HttpResponseMessage> script) => _script = script;
+        protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromResult(_script(request));
     }
 
     [Fact]

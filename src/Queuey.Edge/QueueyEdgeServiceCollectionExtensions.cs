@@ -54,7 +54,7 @@ public static class QueueyEdgeServiceCollectionExtensions
         services.TryAddSingleton(sp => new BackoffPolicy(
             sp.GetRequiredService<QueueyEdgeOptions>().Transfer));
         services.TryAddSingleton<ITransferChannel>(sp => new HttpTransferChannel(
-            new System.Net.Http.HttpClient(),
+            sp.GetRequiredService<QueueyEdgeOptions>().CreateHttpClient(),
             sp.GetRequiredService<QueueyEdgeOptions>(),
             sp.GetRequiredService<ITransferOutcomeClassifier>(),
             sp.GetRequiredService<IEdgeClock>()));
@@ -74,7 +74,7 @@ public static class QueueyEdgeServiceCollectionExtensions
         // Opt-in health reporting to Cloud (Health.ReportToCloud). Outbound
         // only; a no-op hosted service when disabled.
         services.TryAddSingleton(sp => new EdgeHealthReporter(
-            new System.Net.Http.HttpClient(),
+            sp.GetRequiredService<QueueyEdgeOptions>().CreateHttpClient(),
             sp.GetRequiredService<QueueyEdgeOptions>(),
             sp.GetRequiredService<IEventSpool>(),
             sp.GetRequiredService<IQueueyEdgeHealth>(),
