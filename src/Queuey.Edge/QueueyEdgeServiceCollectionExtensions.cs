@@ -79,7 +79,8 @@ public static class QueueyEdgeServiceCollectionExtensions
             sp.GetRequiredService<IEventSpool>(),
             sp.GetRequiredService<IQueueyEdgeHealth>(),
             sp.GetRequiredService<IEdgeClock>(),
-            sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<EdgeHealthReporter>>()));
+            sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<EdgeHealthReporter>>(),
+            sp.GetRequiredService<EdgeRuntimeState>()));
         services.AddHostedService(sp => sp.GetRequiredService<EdgeHealthReporter>());
 
         return services;
