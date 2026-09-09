@@ -10,8 +10,16 @@ name: Release
 # The version comes from the tag (overrides Directory.Build.props), so a
 # release is exactly one `git tag && git push --tags`.
 #
-# Required secret: NUGET_API_KEY (nuget.org API key with push rights for the
-# Queuey.* packages).
+# NuGet.org is reached through Trusted Publishing (OIDC): the job asks GitHub
+# for a short-lived token, exchanges it at nuget.org for an API key that lives
+# one hour, and pushes with that. No long-lived key is stored in this repo.
+#
+# The exchange only succeeds while a matching trusted publishing policy exists
+# on nuget.org: owner Queuey-AI, repository queuey-client, workflow release.yml,
+# no environment, scoped to the glob `Queuey.*`.
+#
+# Required variable: NUGET_USER (the nuget.org account name that registered the
+# policy — a profile name, never an email address).
 
 on:
   push:
@@ -24,6 +32,9 @@ permissions:
 jobs:
   nuget:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write # let GitHub mint the OIDC token nuget.org trades for a key
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -41,10 +52,18 @@ jobs:
       - name: Pack
         run: dotnet pack Queuey.Client.sln --configuration Release -o artifacts -p:Version=$VERSION
 
+      # The key expires an hour after it is issued, so it is fetched here —
+      # after the slow test and pack steps — rather than at the top of the job.
+      - name: NuGet login (OIDC exchange)
+        id: nuget_login
+        uses: NuGet/login@v1
+        with:
+          user: ${{ vars.NUGET_USER }}
+
       - name: Push to NuGet
         run: >
           dotnet nuget push "artifacts/*.nupkg"
-          --api-key "${{ secrets.NUGET_API_KEY }}"
+          --api-key "${{ steps.nuget_login.outputs.NUGET_API_KEY }}"
           --source https://api.nuget.org/v3/index.json
           --skip-duplicate
 
