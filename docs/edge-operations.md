@@ -19,8 +19,8 @@ dotnet publish src/Queuey.Client.Cli -c Release -r linux-arm64 \
 scp bin/Release/net8.0/linux-arm64/publish/queuey device:/opt/queuey/queuey
 ```
 
-(Once the packages are on NuGet, `dotnet tool install -g Queuey.Cli` on
-devices that have the SDK.)
+(On devices that have the SDK, `dotnet tool install -g Queuey.Cli --prerelease`
+works instead; `--prerelease` is required while every version is a preview.)
 
 **3. Run it under systemd** so the daemon survives reboots and restarts
 itself — which is what makes "connection refused = daemon down" a

@@ -5,7 +5,7 @@ and debugging half of the SDK. Everything the client libraries do from inside
 your app, this does from a pipeline or a terminal.
 
 ```bash
-dotnet tool install -g Queuey.Cli
+dotnet tool install -g Queuey.Cli --prerelease
 queuey whoami
 ```
 
