@@ -1,0 +1,13 @@
+[Unit]
+Description=Sensor gateway
+After=network-online.target
+
+[Service]
+ExecStart=/opt/sensor-gateway/SensorGateway
+WorkingDirectory=/var/lib/sensor-gateway
+StateDirectory=sensor-gateway
+Restart=always
+User=gateway
+
+[Install]
+WantedBy=multi-user.target

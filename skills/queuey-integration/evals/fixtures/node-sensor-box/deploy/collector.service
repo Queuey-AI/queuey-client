@@ -1,0 +1,12 @@
+[Unit]
+Description=Plant collector
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/node /opt/plant-collector/src/collector.js
+WorkingDirectory=/var/lib/plant-collector
+Restart=always
+User=collector
+
+[Install]
+WantedBy=multi-user.target

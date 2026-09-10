@@ -1,0 +1,41 @@
+{
+  "skill_name": "queuey-integration",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "This is our orders API. We want to notify partner systems when an order is created, and we've decided to use Queuey for the webhook delivery. Assess how this service should publish to Queuey and propose the change. Don't write anything yet.",
+      "expected_output": "Direction: sending. Recommendation: direct with the .NET SDK (or direct HTTP), NOT Edge. Evidence cited: Azure Container Apps bicep with minReplicas 0 and no volume mounts (ephemeral disk), cloud-hosted (reliable network), no existing outbox or bus. Names the queue declaration in queuey.deploy.json and the env var for the API key. Does not create files or run commands.",
+      "files": ["fixtures/aca-stateless-api"]
+    },
+    {
+      "id": 2,
+      "prompt": "We run this sensor gateway on Raspberry Pis at customer sites over LTE, and readings get lost when the link drops. We want to send readings to Queuey instead of the partner URL. What should we do here?",
+      "expected_output": "Direction: sending. Recommendation: Queuey Edge in-process (net8.0 worker, systemd on a Pi with /var/lib state, LTE = unreliable network). Points out the hand-rolled in-memory retry loop is not durable. Names the spool path under /var/lib, a publish-only workspace-scoped key, GroupKey per device. Does not recommend direct HTTP or an outbox.",
+      "files": ["fixtures/pi-gateway-worker"]
+    },
+    {
+      "id": 3,
+      "prompt": "Our billing service needs to push invoice.issued events to Queuey so customers can subscribe to them. Figure out the right way to wire that in.",
+      "expected_output": "Direction: sending. Recommendation: publish directly (SDK or HTTP) from the existing MassTransit consumer / EF outbox drainer; explicitly keep MassTransit and the outbox; explicitly do NOT add Queuey.Edge even though the host is an on-prem VM with a durable disk, because the outbox already provides the durable accept. Cites the MassTransit and AddEntityFrameworkOutbox references.",
+      "files": ["fixtures/onprem-masstransit"]
+    },
+    {
+      "id": 4,
+      "prompt": "this collector runs on an ubuntu industrial pc in the plant and the wifi there is garbage. we want the readings to end up in queuey without losing any. we're a node shop, no dotnet here. what's the plan",
+      "expected_output": "Direction: sending. Recommendation: Queuey Edge as a daemon with --listen loopback ingress (self-contained linux-x64 binary, no .NET runtime needed), Node posts to http://localhost:7311/events/... with the same wire shape. Cites the systemd unit and local disk as durable, Wi-Fi as unreliable. Warns that connection refused means no custody. Does not propose rewriting in .NET or an outbox.",
+      "files": ["fixtures/node-sensor-box"]
+    },
+    {
+      "id": 5,
+      "prompt": "A supplier is going to send us shipment updates through Queuey. Set us up for that.",
+      "expected_output": "Direction: receiving. Recommendation: the receive outcome — verify X-Queuey-Signature/Timestamp/Nonce over the raw body, idempotent handling by X-Queuey-Event-Id, fast 2xx, queuey listen --forward-to for local dev. Points out the existing handler parses JSON before verification and has no signature check. Does NOT propose Edge, an SDK publish path, or an outbox.",
+      "files": ["fixtures/receiver-only"]
+    },
+    {
+      "id": 6,
+      "prompt": "We keep losing signup notifications to our CRM partner because egress from the cluster is flaky. We want to move partner notifications to Queuey. Recommend how this service should publish.",
+      "expected_output": "Direction: sending. Recommendation: outbox in the existing Postgres database written in the same transaction as the signup, drained by a worker publishing over direct HTTP with the outbox row id as idempotency key. Explicitly says Queuey Edge is NOT appropriate because the Kubernetes deployment has no persistent volume (ephemeral disk) and states plainly that Queuey does not ship a store for this case. Notes tenacity retry is in-memory only.",
+      "files": ["fixtures/k8s-ephemeral-flaky-egress"]
+    }
+  ]
+}

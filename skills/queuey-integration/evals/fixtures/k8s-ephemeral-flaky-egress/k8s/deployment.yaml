@@ -1,0 +1,15 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: signup-service
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+        - name: app
+          image: registry.internal/signup-service:0.9.0
+          env:
+            - name: DATABASE_URL
+              valueFrom: { secretKeyRef: { name: signup-db, key: url } }
+          # no volumeMounts: container filesystem is ephemeral

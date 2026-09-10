@@ -1,0 +1,11 @@
+{
+  "name": "plant-collector",
+  "version": "1.4.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node src/collector.js" },
+  "dependencies": {
+    "node-opcua-client": "^2.130.0",
+    "undici": "^6.19.0"
+  }
+}
