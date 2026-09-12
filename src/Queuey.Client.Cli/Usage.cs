@@ -26,7 +26,7 @@ COMMANDS
   whoami         Show the resolved host / environment / tenant / license (masks the key).
 
 ADVISE
-  queuey advise [<path>] [--json]
+  queuey advise [<path>] [--queue <name>] [--write-files [--force]] [--apply] [--json]
                  Reads the repository (default: the current directory) and recommends how to
                  publish from it — and, when it finds an endpoint that takes webhooks, how to
                  receive safely. Every conclusion names the file it came from, so you can
@@ -37,7 +37,20 @@ ADVISE
                  disk survive a restart, because without that a spool is impossible no matter
                  how unreliable the network is. The network itself is not in the repository,
                  so it is asked rather than guessed.
-                 READ-ONLY: it changes no file and no workspace, and needs no credentials.
+                 With NO flags it changes nothing and needs no credentials — it prints the
+                 advice and the files it WOULD write. That is the default on purpose: an agent
+                 runs a command before it reads this text.
+                 --write-files writes them: queuey.deploy.json (the committable one) and a
+                 .gitignore line for queuey.json (the one holding the API key, which must not
+                 be committed). An existing deployment file is kept unless --force.
+                 --apply converges the workspace down the same path `queuey apply` takes, and
+                 needs credentials. It creates the queue; the API key itself is always minted
+                 in the console, because a key that can mint keys turns repo access into
+                 account access.
+                 The two flags are separate on purpose: a file lands in git diff and is undone
+                 with git, while a workspace change is invisible from the repo and is undone in
+                 the console. Adding the package stays a step you run (dotnet add package) —
+                 editing your project file is a bigger liberty than this command takes.
 
 SYNC
   queuey sync --assembly <path.dll> [--dry-run] [--only a,b] [--continue-on-error] [--json]

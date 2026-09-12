@@ -234,3 +234,108 @@ public sealed class AdviseTests : IDisposable
         Assert.Single(facts.Durability, e => e.What == "MassTransit");
     }
 }
+
+/// <summary>
+/// What --write-files would put in the repository. The plan is computed apart
+/// from the writing so the safe command can show exactly what the writing one
+/// would do; these pin that it stays a small, honest scaffold.
+/// </summary>
+public sealed class ScaffoldPlanTests : IDisposable
+{
+    private readonly string _root = Path.Combine(Path.GetTempPath(), "queuey-scaffold-" + Guid.NewGuid().ToString("N")[..8]);
+
+    public ScaffoldPlanTests() => Directory.CreateDirectory(_root);
+
+    public void Dispose()
+    {
+        try { Directory.Delete(_root, recursive: true); } catch (IOException) { }
+    }
+
+    private void File_(string name, string content) => System.IO.File.WriteAllText(Path.Combine(_root, name), content);
+
+    [Fact]
+    public void It_plans_a_deployment_file_and_a_gitignore_line_and_nothing_else()
+    {
+        var plan = ScaffoldPlan.For(_root, "orders");
+
+        Assert.Equal(new[] { "queuey.deploy.json", ".gitignore" }, plan.Select(p => p.Path).ToArray());
+    }
+
+    [Fact]
+    public void The_deployment_file_names_the_queue_and_carries_no_secrets()
+    {
+        var deploy = ScaffoldPlan.For(_root, "orders").Single(p => p.Path == "queuey.deploy.json");
+
+        Assert.Contains("\"orders\"", deploy.Content, StringComparison.Ordinal);
+        Assert.DoesNotContain("apiKey", deploy.Content, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("qak_", deploy.Content, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret", deploy.Content, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void The_file_we_generate_is_one_apply_can_actually_read()
+    {
+        // The test that matters most here. A scaffold apply cannot parse is
+        // worse than none: it looks like progress and fails at the deploy.
+        // An earlier draft carried a "$schema" line and did exactly that.
+        var deploy = ScaffoldPlan.For(_root, "orders").Single(p => p.Path == "queuey.deploy.json");
+
+        var parsed = Queuey.Client.Waas.DeploymentFile.Parse(deploy.Content);
+
+        Assert.True(parsed.Queues.ContainsKey("orders"));
+        parsed.Expand().Resolve();   // throws if the policy does not hold together
+    }
+
+    [Fact]
+    public void An_existing_deployment_file_is_reported_as_existing_so_it_is_not_clobbered()
+    {
+        File_("queuey.deploy.json", "{ \"queues\": { \"mine\": {} } }");
+
+        var deploy = ScaffoldPlan.For(_root, "orders").Single(p => p.Path == "queuey.deploy.json");
+
+        Assert.True(deploy.Exists);
+        Assert.Contains("left alone", deploy.Action, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void The_gitignore_keeps_what_is_there_and_adds_the_config_file()
+    {
+        File_(".gitignore", "bin/\nobj/\n");
+
+        var ignore = ScaffoldPlan.For(_root, "orders").Single(p => p.Path == ".gitignore");
+
+        Assert.Contains("bin/", ignore.Content, StringComparison.Ordinal);
+        Assert.Contains("obj/", ignore.Content, StringComparison.Ordinal);
+        Assert.Contains("queuey.json", ignore.Content, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_config_file_that_is_already_ignored_is_left_alone_entirely()
+    {
+        File_(".gitignore", "bin/\nqueuey.json\n");
+
+        var plan = ScaffoldPlan.For(_root, "orders");
+
+        Assert.DoesNotContain(plan, p => p.Path == ".gitignore");
+    }
+
+    [Fact]
+    public void The_queue_name_defaults_to_the_repository_rather_than_something_generic()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "Order Service");
+        Directory.CreateDirectory(root);
+        try
+        {
+            // "events" in every workspace helps nobody find anything later.
+            Assert.Equal("order-service", ScaffoldPlan.DefaultQueueName(root));
+        }
+        finally { Directory.Delete(root); }
+    }
+
+    [Fact]
+    public void An_explicit_queue_name_is_slugged_into_something_Queuey_accepts()
+    {
+        Assert.Equal("customer-events", ScaffoldPlan.DefaultQueueName(_root, "Customer Events"));
+        Assert.Equal("orders.v2", ScaffoldPlan.DefaultQueueName(_root, "orders.v2"));
+    }
+}
