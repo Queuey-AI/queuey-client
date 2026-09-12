@@ -20,13 +20,13 @@ public class MqttSourceTests
     public async Task Message_is_routed_laned_and_acked_after_accept()
     {
         var port = FreePort();
-        using var server = await StartBrokerAsync(port);
+        using var broker = await StartBrokerAsync(port);
         var publisher = new RecordingPublisher();
         var options = Options(port, new MqttRoute { TopicFilter = "plant/+/alarms", Queue = "alarms", GroupKeySegment = 1 });
         var source = new MqttSource(options, publisher, NullLogger<MqttSource>.Instance);
 
         await source.StartAsync(CancellationToken.None);
-        await WaitUntil(() => source.Counters.Received >= 0 && server.GetClientsAsync().Result.Count > 0);
+        await broker.WaitForSubscriptionsAsync(1);
 
         await PublishAsync(port, "plant/press-2/alarms", """{"code":"E42"}""");
         await WaitUntil(() => publisher.Calls.Count == 1);
@@ -46,14 +46,14 @@ public class MqttSourceTests
     public async Task Refused_message_is_not_acknowledged_and_returns_on_reconnect()
     {
         var port = FreePort();
-        using var server = await StartBrokerAsync(port);
+        using var broker = await StartBrokerAsync(port);
         var publisher = new RecordingPublisher { Refuse = true };
         var options = Options(port, new MqttRoute { TopicFilter = "plant/#", Queue = "alarms" });
         options.ClientId = "queuey-edge-test-refuse";
 
         var source = new MqttSource(options, publisher, NullLogger<MqttSource>.Instance);
         await source.StartAsync(CancellationToken.None);
-        await WaitUntil(() => server.GetClientsAsync().Result.Count > 0);
+        await broker.WaitForSubscriptionsAsync(1);
 
         await PublishAsync(port, "plant/x/alarms", "{}");
         await WaitUntil(() => source.Counters.Refused >= 1);
@@ -65,6 +65,7 @@ public class MqttSourceTests
         publisher.Refuse = false;
         var again = new MqttSource(options, publisher, NullLogger<MqttSource>.Instance);
         await again.StartAsync(CancellationToken.None);
+        await broker.WaitForSubscriptionsAsync(2);
         await WaitUntil(() => publisher.Calls.Any(c => c.Accepted), TimeSpan.FromSeconds(10));
         await again.StopAsync(CancellationToken.None);
 
@@ -80,12 +81,47 @@ public class MqttSourceTests
         return o;
     }
 
-    private static async Task<MqttServer> StartBrokerAsync(int port)
+    private static async Task<TestBroker> StartBrokerAsync(int port)
     {
         var options = new MqttServerOptionsBuilder().WithDefaultEndpoint().WithDefaultEndpointPort(port).WithPersistentSessions().Build();
         var server = new MqttServerFactory().CreateMqttServer(options);
+        var broker = new TestBroker(server);
         await server.StartAsync();
-        return server;
+        return broker;
+    }
+
+    /// <summary>
+    /// The in-process broker plus the one signal these tests actually need:
+    /// a SUBSCRIPTION being registered.
+    ///
+    /// Waiting for a connected client is not enough. <see cref="MqttSource"/>
+    /// connects and then subscribes, so a publish that lands in between
+    /// reaches a broker with nothing subscribed to the topic, and the message
+    /// is dropped with no retry — QoS 1 guarantees delivery to subscribers,
+    /// not to a subscriber that has not arrived yet. Isolated, that window is
+    /// microseconds; under a full parallel test run it is wide enough to hit,
+    /// which is what made these tests fail roughly one run in three.
+    /// </summary>
+    private sealed class TestBroker : IDisposable
+    {
+        private int _subscriptions;
+
+        public TestBroker(MqttServer server)
+        {
+            Server = server;
+            server.ClientSubscribedTopicAsync += _ =>
+            {
+                Interlocked.Increment(ref _subscriptions);
+                return Task.CompletedTask;
+            };
+        }
+
+        public MqttServer Server { get; }
+
+        public Task WaitForSubscriptionsAsync(int atLeast, TimeSpan? timeout = null)
+            => WaitUntil(() => Volatile.Read(ref _subscriptions) >= atLeast, timeout);
+
+        public void Dispose() => Server.Dispose();
     }
 
     private static async Task PublishAsync(int port, string topic, string json)
