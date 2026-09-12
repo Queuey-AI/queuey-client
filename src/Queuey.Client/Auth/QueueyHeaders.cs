@@ -36,6 +36,9 @@ public static class QueueyHeaders
     /// <summary>Event-type context header (extracted only by context-configured queues).</summary>
     public const string EventType = "X-Queuey-Event-Type";
 
+    /// <summary>The Queuey event id on a delivered webhook — the value a receiver should be idempotent on.</summary>
+    public const string EventId = "X-Queuey-Event-Id";
+
     /// <summary>Producer idempotency key (24h dedup by default).</summary>
     public const string IdempotencyKey = "Idempotency-Key";
 

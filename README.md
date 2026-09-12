@@ -25,7 +25,7 @@ await queuey.Ingress.PublishAsync("orders", order);
 
 | | For |
 | --- | --- |
-| [`Queuey.Client`](#queueyclient) | Publishing events. Auth and transport, nothing else |
+| [`Queuey.Client`](#queueyclient) | Publishing events, and verifying the ones Queuey delivers back |
 | [`Queuey.Edge`](#durable-local-publishing-queueyedge) | Publishing from somewhere the network is unreliable |
 | [`Queuey.Client.Waas`](#queues-declare-where-your-events-land) | Declaring queues, streams and delivery in code |
 | [`Queuey.Cli`](#cli-queuey) | Deploys, local webhook debugging, operating an Edge spool |
@@ -225,6 +225,65 @@ queuey queue plan --assembly App.dll     # network-free, no credentials needed
 A queue that has nowhere to deliver yet is reported as a **warning, not a failure**: the state you
 declared did land, the workspace just isn't wired up. Such a queue starts in log-only mode, so it
 accepts events and records them without delivering — worth knowing before you point production at it.
+
+## Receiving deliveries: verify before you trust
+
+Queuey signs every delivery it makes. Verifying that signature is what separates
+"my endpoint is public" from "my endpoint accepts events from Queuey", so do it
+before you look at the body.
+
+```csharp
+var verifier = new QueueyDeliveryVerifier(signingSecret);
+
+app.MapPost("/webhooks/queuey", async (HttpRequest request) =>
+{
+    // Read the RAW bytes, before anything deserializes them.
+    using var buffer = new MemoryStream();
+    await request.Body.CopyToAsync(buffer);
+    var body = buffer.ToArray();
+
+    var result = verifier.Verify(
+        request.Method,
+        new Uri($"https://{request.Host}{request.Path}{request.QueryString}"),
+        name => request.Headers[name],
+        body);
+
+    if (!result.IsValid)
+    {
+        logger.LogWarning("Rejected a delivery: {Reason}", result.Failure);
+        return Results.Unauthorized();
+    }
+
+    // result.EventId is the value to be idempotent on — a redelivery after a
+    // timeout carries the same id, and processing it twice is the failure mode
+    // retries create.
+    await Handle(body, result.EventId);
+    return Results.Ok();
+});
+```
+
+**Give it the raw bytes.** The signature covers a hash of exactly the bytes
+Queuey sent. A body that has been deserialized and re-serialized is a different
+byte sequence even when it is the same JSON, so a typed parameter like
+`[FromBody] OrderEvent` breaks verification. Read the stream first, or take the
+body as `byte[]` or `string`.
+
+**What the signature covers:** the method, the path, the query string, the body,
+and the signing headers Queuey generates. It does not cover your other request
+headers, so never treat an unsigned header as vouched for.
+
+The verifier also rejects a delivery whose timestamp sits more than five minutes
+from your clock, which is what stops a captured request from being replayed
+tomorrow. Closing the remaining window means remembering nonces; pass
+`NonceAlreadySeen` in the options if you have somewhere to keep them.
+
+Rotating keys, or accepting more than one signer? `QueueyDeliveryVerifier.ReadKeyId`
+reads the claimed key id before verification, so you can pick the right secret.
+It is a lookup hint and nothing more until `Verify` passes.
+
+While you build, `queuey listen --forward-to http://localhost:5000/webhooks/queuey`
+delivers real events to your machine over an outbound session, with no inbound
+port open and no tunnel.
 
 ## Delivery as code (`queuey.deploy.json`)
 
