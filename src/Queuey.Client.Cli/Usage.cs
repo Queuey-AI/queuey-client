@@ -8,6 +8,7 @@ USAGE
   queuey <command> [options]
 
 COMMANDS
+  advise         Read this repository and say how Queuey fits: Client, Edge, or neither. Reads only.
   sync           Apply every [QueueyModel] stream found in an assembly (PUT /waas/streams).
   queue          Declare queues from [QueueyQueue] types: queue plan | queue sync.
   apply          Converge Queuey from a declarative deployment file (queuey.deploy.json).
@@ -23,6 +24,20 @@ COMMANDS
   replay         Replay one existing event to your connected listener (read-only DLQ debugging).
   edge           Operate a Queuey Edge spool: status | retry | discard | recover | reset.
   whoami         Show the resolved host / environment / tenant / license (masks the key).
+
+ADVISE
+  queuey advise [<path>] [--json]
+                 Reads the repository (default: the current directory) and recommends how to
+                 publish from it — and, when it finds an endpoint that takes webhooks, how to
+                 receive safely. Every conclusion names the file it came from, so you can
+                 disagree with it.
+                 It decides in three steps. Does this send, receive or both. Then, for sending:
+                 is there ALREADY durability here (an outbox, a bus, a job queue) — if so,
+                 publish from that consumer rather than rebuilding it. Otherwise, does local
+                 disk survive a restart, because without that a spool is impossible no matter
+                 how unreliable the network is. The network itself is not in the repository,
+                 so it is asked rather than guessed.
+                 READ-ONLY: it changes no file and no workspace, and needs no credentials.
 
 SYNC
   queuey sync --assembly <path.dll> [--dry-run] [--only a,b] [--continue-on-error] [--json]

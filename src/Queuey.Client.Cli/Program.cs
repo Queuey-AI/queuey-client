@@ -17,6 +17,7 @@ try
 {
     return command switch
     {
+        "advise" => AdviseCommand.Run(rest),
         "whoami" => WhoAmICommand.Run(rest),
         "sync" => await SyncCommand.RunAsync(rest),
         "queue" => await QueueCommand.RunAsync(rest),
