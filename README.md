@@ -388,10 +388,13 @@ it once as a global .NET tool and call `queuey`:
 # from source (this repo)
 dotnet run --project src/Queuey.Client.Cli -- <command> [options]
 
-# …or install as a global tool (invoked as `queuey`)
+# …or install it from NuGet as a global tool (invoked as `queuey`)
+# --prerelease is required while every version is a preview
+dotnet tool install --global Queuey.Cli --prerelease
+
+# …or from this repo
 dotnet pack src/Queuey.Client.Cli -c Release
 dotnet tool install --global --add-source src/Queuey.Client.Cli/bin/Release Queuey.Cli
-# (once it's on NuGet:  dotnet tool install --global Queuey.Cli)
 ```
 
 All commands share the same configuration resolution and exit codes, so they compose in a pipeline.

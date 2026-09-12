@@ -12,7 +12,7 @@
     <ToolCommandName>queuey</ToolCommandName>
     <PackageId>Queuey.Cli</PackageId>
     <Title>Queuey.Cli</Title>
-    <Description>Command-line tool for Queuey — sync [QueueyModel] streams (queuey sync) and publish events (queuey publish). Install: dotnet tool install -g Queuey.Cli.</Description>
+    <Description>Command-line tool for Queuey — sync [QueueyModel] streams (queuey sync) and publish events (queuey publish). Install: dotnet tool install -g Queuey.Cli --prerelease.</Description>
     <PackageTags>queuey;cli;webhooks;waas;dotnet-tool</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/Queuey-AI/queuey-client</PackageProjectUrl>
