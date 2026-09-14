@@ -255,5 +255,5 @@ queuey edge reset   --spool <path> --accept-data-loss # start clean; the old fil
 - A Queuey queue and a **publish-only, tenant-scoped** API key (console →
   Developer → API keys). Keys on edge machines should never carry more.
 
-MIT licensed. Docs: [queuey.ai docs](https://app.queuey.ai/docs) · issues:
+MIT licensed. Docs: [queuey.ai docs](https://queuey.ai/docs) · issues:
 [github.com/Queuey-AI/queuey-client](https://github.com/Queuey-AI/queuey-client).
