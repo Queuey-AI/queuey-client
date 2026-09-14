@@ -71,7 +71,7 @@ internal static class AdviseCommand
                     questions = advice.Questions,
                     receivingSteps = advice.ReceivingSteps,
                     rule = Recommendation.DoNotRebuild,
-                    docs = "https://app.queuey.ai/llms-full.txt",
+                    docs = "https://queuey.ai/llms-full.txt",
                     queue = queueName,
                     files = scaffold.Select(f => new { path = f.Path, action = f.Action, exists = f.Exists }),
                 },
@@ -251,8 +251,8 @@ internal static class AdviseCommand
         Console.WriteLine($"Rule: {Recommendation.DoNotRebuild}");
         Console.WriteLine();
         Console.WriteLine(willWrite || willApply
-            ? "The whole documentation, as text: https://app.queuey.ai/llms-full.txt"
-            : "Nothing was changed. The whole documentation, as text: https://app.queuey.ai/llms-full.txt");
+            ? "The whole documentation, as text: https://queuey.ai/llms-full.txt"
+            : "Nothing was changed. The whole documentation, as text: https://queuey.ai/llms-full.txt");
 
         if (willWrite || willApply) Console.WriteLine();
     }
