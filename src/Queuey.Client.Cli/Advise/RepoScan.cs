@@ -33,11 +33,22 @@ public sealed record RepoFacts
     /// <summary>Queuey is already here in some form.</summary>
     public IReadOnlyList<Evidence> QueueyAlready { get; init; } = Array.Empty<Evidence>();
 
+    /// <summary>
+    /// Where code runs on a server: edge and serverless functions, route
+    /// handlers, an HTTP server. The only places an ingress key can live.
+    /// </summary>
+    public IReadOnlyList<Evidence> ServerSide { get; init; } = Array.Empty<Evidence>();
+
+    /// <summary>A browser bundle is built here, and everything compiled into one is public.</summary>
+    public IReadOnlyList<Evidence> BrowserApp { get; init; } = Array.Empty<Evidence>();
+
     public bool IsDotNet => Ecosystems.Contains("dotnet");
     public bool HasDurability => Durability.Count > 0;
     public bool HasDurableDisk => DurableDisk.Count > 0;
     public bool IsEphemeral => EphemeralHosting.Count > 0 && DurableDisk.Count == 0;
     public bool Receives => Receiving.Count > 0;
+    public bool HasServerSide => ServerSide.Count > 0;
+    public bool IsBrowserApp => BrowserApp.Count > 0;
 }
 
 /// <summary>
@@ -80,6 +91,30 @@ public static class RepoScan
         ("\"rq\"", "RQ"),
     };
 
+    /// <summary>
+    /// Dependencies that mean a browser bundle is built here. Next.js is on the
+    /// list even though it also runs on a server: its NEXT_PUBLIC_ variables are
+    /// compiled into the bundle, which is exactly the mistake worth warning about.
+    /// </summary>
+    private static readonly (string Token, string Name)[] BrowserBundlers =
+    {
+        ("\"vite\"", "Vite"),
+        ("\"react-scripts\"", "Create React App"),
+        ("\"next\"", "Next.js"),
+        ("\"nuxt\"", "Nuxt"),
+        ("\"@sveltejs/kit\"", "SvelteKit"),
+    };
+
+    /// <summary>Dependencies that mean an HTTP server runs this code.</summary>
+    private static readonly (string Token, string Name)[] HttpServers =
+    {
+        ("\"express\"", "Express"),
+        ("\"fastify\"", "Fastify"),
+        ("\"hono\"", "Hono"),
+        ("\"koa\"", "Koa"),
+        ("\"@nestjs/core\"", "NestJS"),
+    };
+
     private static readonly string[] ProjectFiles =
     {
         "*.csproj", "package.json", "pyproject.toml", "requirements.txt", "go.mod",
@@ -98,6 +133,8 @@ public static class RepoScan
         var ephemeral = new List<Evidence>();
         var receiving = new List<Evidence>();
         var queueyAlready = new List<Evidence>();
+        var serverSide = new List<Evidence>();
+        var browserApp = new List<Evidence>();
 
         foreach (var file in files)
         {
@@ -111,6 +148,7 @@ public static class RepoScan
             DetectDurability(name, text, relative, durability, IsManifest(name));
             DetectHosting(name, text, relative, durableDisk, ephemeral);
             DetectReceiving(text, relative, receiving);
+            DetectWhereCodeRuns(name, text, relative, serverSide, browserApp);
         }
 
         return new RepoFacts
@@ -121,8 +159,63 @@ public static class RepoScan
             EphemeralHosting = Dedupe(ephemeral),
             Receiving = Dedupe(receiving),
             QueueyAlready = Dedupe(queueyAlready),
+            ServerSide = Dedupe(serverSide),
+            BrowserApp = Dedupe(browserApp),
         };
     }
+
+    /// <summary>
+    /// Where a publish call can go in a JavaScript repository. The question is
+    /// not academic: the call carries the ingress key, and a key in a browser
+    /// bundle is readable by anyone who loads the page. So the advice has to
+    /// name the server-side place — and say plainly when there is none.
+    ///
+    /// Function directories are recognised by where they sit, because their
+    /// route is the directory, not a string in the code.
+    /// </summary>
+    private static void DetectWhereCodeRuns(
+        string name, string text, string relative, List<Evidence> serverSide, List<Evidence> browserApp)
+    {
+        if (name.Equals("package.json", StringComparison.OrdinalIgnoreCase))
+        {
+            foreach (var (token, display) in BrowserBundlers)
+            {
+                if (text.Contains(token, StringComparison.Ordinal))
+                    browserApp.Add(new Evidence(display, relative));
+            }
+
+            foreach (var (token, display) in HttpServers)
+            {
+                if (text.Contains(token, StringComparison.Ordinal))
+                    serverSide.Add(new Evidence(display, relative));
+            }
+
+            return;
+        }
+
+        if (relative.StartsWith("supabase/functions/", StringComparison.Ordinal))
+            serverSide.Add(new Evidence("Supabase Edge Functions", "supabase/functions/"));
+        else if (relative.StartsWith("netlify/functions/", StringComparison.Ordinal))
+            serverSide.Add(new Evidence("Netlify Functions", "netlify/functions/"));
+        else if (relative.StartsWith("functions/", StringComparison.Ordinal))
+            serverSide.Add(new Evidence("serverless functions", "functions/"));
+        else if (relative.StartsWith("api/", StringComparison.Ordinal))
+            serverSide.Add(new Evidence("API functions", "api/"));
+        else if (NextRouteHandler.IsMatch(relative))
+            serverSide.Add(new Evidence("Next.js route handlers", relative));
+        else if (NextApiRoute.IsMatch(relative))
+            serverSide.Add(new Evidence("Next.js API routes", relative));
+    }
+
+    /// <summary>A Next.js App Router handler: <c>app/**/route.ts</c>, optionally under <c>src/</c>.</summary>
+    private static readonly System.Text.RegularExpressions.Regex NextRouteHandler = new(
+        @"^(src/)?app/(.+/)?route\.(ts|js)$",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>A Next.js Pages Router API route: <c>pages/api/**</c>, optionally under <c>src/</c>.</summary>
+    private static readonly System.Text.RegularExpressions.Regex NextApiRoute = new(
+        @"^(src/)?pages/api/",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
 
     private static void DetectEcosystem(string name, ISet<string> ecosystems)
     {
@@ -233,9 +326,15 @@ public static class RepoScan
         @"(class|record|interface|struct)\s+\w*Outbox|DbSet<\s*\w*Outbox|ToTable\(\s*""outbox|CREATE\s+TABLE\s+\W?outbox",
         System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
 
-    /// <summary>A quoted route that serves webhooks.</summary>
+    /// <summary>
+    /// A quoted route that serves webhooks. The literal has to END as a route
+    /// does — at its closing quote, a query or a template placeholder — because
+    /// a file name is a quoted path too: a site whose article image is called
+    /// "/…-before-webhook.webp" does not take webhooks. That repository was the
+    /// one the first version of this pattern got wrong.
+    /// </summary>
     private static readonly System.Text.RegularExpressions.Regex WebhookRoute = new(
-        @"[""'`]/[\w/-]*webhook",
+        @"[""'`]/[\w/:{}$.-]*webhook[\w/:{}$-]*[""'`?]",
         System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
 
     private static IReadOnlyList<Evidence> Dedupe(List<Evidence> found) =>

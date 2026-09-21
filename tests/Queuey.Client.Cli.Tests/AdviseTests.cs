@@ -123,8 +123,8 @@ public sealed class AdviseTests : IDisposable
     [Fact]
     public void A_receiver_gets_the_recipe_rather_than_a_choice()
     {
-        File_("package.json", "{ \"name\": \"receiver\" }");
-        File_("src/server.js", "app.post('/webhooks/queuey', (req, res) => res.sendStatus(200));");
+        File_("Receiver.csproj", "<Project Sdk=\"Microsoft.NET.Sdk.Web\"></Project>");
+        File_("Program.cs", "app.MapPost(\"/webhooks/queuey\", (HttpRequest r) => Results.Ok());");
 
         var advice = Advise();
 
@@ -133,6 +133,145 @@ public sealed class AdviseTests : IDisposable
         Assert.Contains(advice.ReceivingSteps, s => s.Contains("QueueyDeliveryVerifier", StringComparison.Ordinal));
         Assert.Contains(advice.ReceivingSteps, s => s.Contains("X-Queuey-Event-Id", StringComparison.Ordinal));
         Assert.Contains(advice.ReceivingSteps, s => s.Contains("queuey listen", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_receiver_outside_dotnet_is_given_a_check_it_can_run_not_a_class_it_cannot_install()
+    {
+        // Naming QueueyDeliveryVerifier to a Node project sends the agent off to
+        // write the HMAC by hand — the very thing the recipe is there to stop.
+        File_("package.json", "{ \"name\": \"receiver\" }");
+        File_("src/server.js", "app.post('/webhooks/queuey', (req, res) => res.sendStatus(200));");
+
+        var advice = Advise();
+
+        Assert.True(advice.Receives);
+        Assert.DoesNotContain(advice.ReceivingSteps, s => s.Contains("QueueyDeliveryVerifier", StringComparison.Ordinal));
+        Assert.Contains(advice.ReceivingSteps, s => s.Contains("constant time", StringComparison.Ordinal));
+        Assert.Contains(advice.ReceivingSteps, s => s.Contains("RAW body", StringComparison.Ordinal));
+        Assert.Contains(advice.ReceivingSteps, s => s.Contains("https://queuey.ai/docs/how-to/verify-deliveries", StringComparison.Ordinal));
+        Assert.Contains(advice.ReceivingSteps, s => s.Contains("X-Queuey-Event-Id", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_file_named_for_webhooks_is_not_an_endpoint_that_takes_them()
+    {
+        // The shape of queuey.ai itself: an article whose image is called
+        // "...-before-webhook.webp". A quoted path is not always a route.
+        File_("package.json", "{ \"name\": \"site\", \"devDependencies\": { \"vite\": \"^5\" } }");
+        File_("src/data/articles.ts", "export const a = { thumbnail: \"/article-iot-reliability-gap-before-webhook.webp\" };");
+
+        Assert.False(Advise().Receives);
+    }
+
+    [Theory]
+    [InlineData("app.post('/webhooks/queuey', handler)")]
+    [InlineData("router.post(\"/api/stripe-webhook\", handler)")]
+    [InlineData("app.post(`/webhooks/${provider}`, handler)")]
+    [InlineData("app.post('/webhooks/:provider', handler)")]
+    [InlineData("app.use(\"/webhook\", router)")]
+    public void A_route_that_takes_webhooks_is_still_found(string line)
+    {
+        File_("package.json", "{ \"name\": \"receiver\" }");
+        File_("src/server.ts", line);
+
+        Assert.True(Advise().Receives);
+    }
+
+    // ── publishing without .NET ───────────────────────────────────────
+
+    [Fact]
+    public void A_repository_without_dotnet_gets_the_ingress_call_itself_rather_than_a_hint_to_find_one()
+    {
+        File_("package.json", "{ \"name\": \"shop\", \"dependencies\": { \"express\": \"^4\" } }");
+        File_("src/server.ts", "app.get('/orders', list);");
+
+        var advice = Advise();
+
+        Assert.Equal(SendPath.PlainHttp, advice.Send);
+        Assert.Contains(advice.NextSteps, s => s.Contains("https://ingress.queuey.ai/events/{tenantPublicId}/{queueName}", StringComparison.Ordinal));
+        Assert.Contains(advice.NextSteps, s => s.Contains("X-Api-Key", StringComparison.Ordinal));
+        Assert.Contains(advice.NextSteps, s => s.Contains("fetch(url", StringComparison.Ordinal));
+        Assert.Contains(advice.NextSteps, s => s.Contains("Express (package.json)", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_vite_app_with_supabase_functions_is_told_to_publish_from_the_functions_and_not_the_browser()
+    {
+        // The repository the agent-setup prompt dead-ended on (2026-09-20):
+        // React and Vite, Supabase Deno edge functions, no .NET anywhere.
+        File_("package.json", "{ \"name\": \"app\", \"devDependencies\": { \"vite\": \"^5\", \"typescript\": \"^5\" } }");
+        File_("src/main.ts", "import { createRoot } from 'react-dom/client';");
+        File_("supabase/functions/create-order/index.ts", "Deno.serve(async (req) => new Response('ok'));");
+
+        var advice = Advise();
+
+        Assert.Equal(SendPath.PlainHttp, advice.Send);
+        Assert.Contains(advice.NextSteps, s => s.Contains("Supabase Edge Functions (supabase/functions/)", StringComparison.Ordinal));
+        Assert.Contains(advice.NextSteps, s => s.Contains("VITE_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_browser_app_with_nowhere_server_side_is_told_not_to_publish_from_the_app()
+    {
+        File_("package.json", "{ \"name\": \"spa\", \"devDependencies\": { \"vite\": \"^5\" } }");
+        File_("src/main.ts", "import { createRoot } from 'react-dom/client';");
+
+        var advice = Advise();
+
+        Assert.Contains(advice.NextSteps, s => s.Contains("found no server-side code", StringComparison.Ordinal)
+                                            && s.Contains("bundle", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_nextjs_route_handler_is_where_the_call_goes()
+    {
+        File_("package.json", "{ \"name\": \"web\", \"dependencies\": { \"next\": \"15.0.0\" } }");
+        File_("app/api/orders/route.ts", "export async function POST(req: Request) { return Response.json({}); }");
+
+        var advice = Advise();
+
+        Assert.Contains(advice.NextSteps, s => s.Contains("Next.js route handlers (app/api/orders/route.ts)", StringComparison.Ordinal));
+        Assert.Contains(advice.NextSteps, s => s.Contains("NEXT_PUBLIC_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_python_service_is_given_the_call_in_python()
+    {
+        File_("pyproject.toml", "[project]\nname = \"ingest\"");
+        File_("app/main.py", "import requests");
+
+        var advice = Advise();
+
+        Assert.Contains(advice.NextSteps, s => s.Contains("requests.post(url", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("package.json", "{ \"name\": \"web\" }")]
+    [InlineData("pyproject.toml", "[project]\nname = \"ingest\"")]
+    [InlineData("go.mod", "module example.com/ingest")]
+    public void No_repository_without_dotnet_is_told_to_add_a_dotnet_package(string manifest, string content)
+    {
+        File_(manifest, content);
+        File_("src/server.ts", "app.post('/webhooks/queuey', handler);");
+
+        var advice = Advise();
+
+        var everything = advice.NextSteps.Concat(advice.ReceivingSteps).ToArray();
+        Assert.DoesNotContain(everything, s => s.Contains("dotnet add package", StringComparison.Ordinal));
+        Assert.DoesNotContain(everything, s => s.StartsWith("Add Queuey.", StringComparison.Ordinal));
+        Assert.DoesNotContain(everything, s => s.Contains("QueueyDeliveryVerifier", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void The_edge_daemon_step_says_where_the_binary_for_a_machine_without_dotnet_is()
+    {
+        File_("package.json", "{ \"name\": \"collector\" }");
+        File_("Dockerfile", "FROM node:20\nVOLUME /data");
+
+        var advice = Advise();
+
+        Assert.Contains(advice.NextSteps, s => s.Contains("https://github.com/Queuey-AI/queuey-client/releases/latest", StringComparison.Ordinal));
     }
 
     // ── the rules that hold everywhere ────────────────────────────────

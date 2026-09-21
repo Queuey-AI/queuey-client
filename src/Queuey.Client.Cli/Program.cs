@@ -13,6 +13,12 @@ if (command is "" or "-h" or "--help" or "help")
     return command.Length == 0 ? ExitCodes.Usage : ExitCodes.Success;
 }
 
+if (command is "--version" or "version")
+{
+    Console.WriteLine($"queuey {CliVersion.Current}");
+    return ExitCodes.Success;
+}
+
 try
 {
     return command switch

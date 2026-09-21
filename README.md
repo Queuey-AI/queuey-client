@@ -451,6 +451,10 @@ dotnet run --project src/Queuey.Client.Cli -- <command> [options]
 # --prerelease is required while every version is a preview
 dotnet tool install --global Queuey.Cli --prerelease
 
+# …or, with no .NET at all, take the self-contained binary for your platform
+# (osx-arm64, osx-x64, linux-x64, linux-arm64, win-x64) from the latest release
+curl -fsSL https://github.com/Queuey-AI/queuey-client/releases/latest/download/queuey-osx-arm64.tar.gz | tar -xz
+
 # …or from this repo
 dotnet pack src/Queuey.Client.Cli -c Release
 dotnet tool install --global --add-source src/Queuey.Client.Cli/bin/Release Queuey.Cli
