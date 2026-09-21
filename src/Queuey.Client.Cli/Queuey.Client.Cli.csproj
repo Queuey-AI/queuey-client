@@ -6,14 +6,20 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RollForward>LatestMajor</RollForward>
+    <!-- The self-contained Linux binaries would otherwise need the system's
+         libicu at startup, and a minimal image (Debian slim, a Pi OS Lite
+         install, most containers) has none: the runtime stops before main.
+         Every parse and format in the tool already names InvariantCulture,
+         so invariant mode changes no output — it only removes the dependency. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
 
     <IsPackable>true</IsPackable>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>queuey</ToolCommandName>
     <PackageId>Queuey.Cli</PackageId>
     <Title>Queuey.Cli</Title>
-    <Description>Command-line tool for Queuey — sync [QueueyModel] streams (queuey sync) and publish events (queuey publish). Install: dotnet tool install -g Queuey.Cli --prerelease.</Description>
-    <PackageTags>queuey;cli;webhooks;waas;dotnet-tool</PackageTags>
+    <Description>The queuey command-line tool. Start with queuey advise: it reads a repository and says how Queuey belongs in it — Queuey.Client, Queuey.Edge or plain HTTP — and changes nothing unless asked. It also converges queues and deployments from a committed file (apply, pull, queue sync), syncs [QueueyModel] streams, publishes events, receives webhooks on your laptop (listen) and operates an Edge spool. Install: dotnet tool install -g Queuey.Cli --prerelease. No .NET? Every release also ships a self-contained binary per platform: https://github.com/Queuey-AI/queuey-client/releases</Description>
+    <PackageTags>queuey;cli;webhooks;waas;edge;advise;dotnet-tool</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/Queuey-AI/queuey-client</PackageProjectUrl>
     <RepositoryUrl>https://github.com/Queuey-AI/queuey-client</RepositoryUrl>

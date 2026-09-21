@@ -6,9 +6,10 @@ internal static class Usage
 
 USAGE
   queuey <command> [options]
+  queuey --version
 
 COMMANDS
-  advise         Read this repository and say how Queuey fits: Client, Edge, or neither. Reads only.
+  advise         Read this repository and say how Queuey fits: Client, Edge or plain HTTP. Reads only.
   sync           Apply every [QueueyModel] stream found in an assembly (PUT /waas/streams).
   queue          Declare queues from [QueueyQueue] types: queue plan | queue sync.
   apply          Converge Queuey from a declarative deployment file (queuey.deploy.json).
@@ -49,8 +50,10 @@ ADVISE
                  account access.
                  The two flags are separate on purpose: a file lands in git diff and is undone
                  with git, while a workspace change is invisible from the repo and is undone in
-                 the console. Adding the package stays a step you run (dotnet add package) —
-                 editing your project file is a bigger liberty than this command takes.
+                 the console. In a .NET project, adding the package stays a step you run
+                 (dotnet add package) — editing your project file is a bigger liberty than this
+                 command takes. Anywhere else there is no package: the advice is one HTTP call,
+                 and where in the repository to make it.
 
 SYNC
   queuey sync --assembly <path.dll> [--dry-run] [--only a,b] [--continue-on-error] [--json]

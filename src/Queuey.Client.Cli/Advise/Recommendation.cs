@@ -74,6 +74,12 @@ public static class Recommendation
         "Do not hand-write a local queue, retry loop, backoff or offline buffer. That is what Queuey.Edge " +
         "is, already built and maintained — reach for it instead, unless you have been asked for your own.";
 
+    /// <summary>The production ingress route, in the shape every docs page and the quickstart use.</summary>
+    public const string IngressRoute = "https://ingress.queuey.ai/events/{tenantPublicId}/{queueName}";
+
+    /// <summary>Where the self-contained CLI binaries are, for a machine with no .NET.</summary>
+    public const string ReleasesUrl = "https://github.com/Queuey-AI/queuey-client/releases/latest";
+
     public static Advice For(RepoFacts facts)
     {
         if (facts is null) throw new ArgumentNullException(nameof(facts));
@@ -91,7 +97,7 @@ public static class Recommendation
             Reasons = Reasons(facts, send).ToArray(),
             NextSteps = NextSteps(facts, send).ToArray(),
             Questions = Questions(facts, send).ToArray(),
-            ReceivingSteps = receives ? ReceivingRecipe().ToArray() : Array.Empty<string>(),
+            ReceivingSteps = receives ? ReceivingRecipe(facts).ToArray() : Array.Empty<string>(),
         };
     }
 
@@ -190,7 +196,8 @@ public static class Recommendation
                 break;
 
             case SendPath.EdgeDaemon:
-                yield return "Install the queuey CLI on the machine: dotnet tool install -g Queuey.Cli --prerelease, or the standalone binary from the releases page.";
+                yield return "Install the queuey CLI on the machine: dotnet tool install -g Queuey.Cli --prerelease, " +
+                             $"or — with no .NET — the self-contained binary for its platform from {ReleasesUrl}.";
                 yield return "Run: queuey edge run --spool /var/lib/queuey/spool.db --listen 7300 --report-health";
                 yield return "Publish from your code to http://localhost:7300/events/{tenant}/{queue} — same wire shape as the cloud ingress, and a 202 means it is committed locally.";
                 break;
@@ -202,7 +209,15 @@ public static class Recommendation
                 break;
 
             case SendPath.PlainHttp:
-                yield return "POST the event to the ingress with your HTTP client of choice; a 202 means Queuey has it durably.";
+                // The whole integration is one request, so say which one. "Use
+                // your HTTP client of choice" was correct and left an agent to
+                // guess the route and the header name.
+                yield return $"POST each event to {IngressRoute} with two headers, X-Api-Key and " +
+                             "Content-Type: application/json. A 202 means Queuey has it durably. There is no package " +
+                             "to add for this; the quickstart has the call: https://queuey.ai/docs/quickstart";
+                yield return CallFor(facts);
+                foreach (var step in WhereToPublishFrom(facts))
+                    yield return step;
                 if (facts.IsEphemeral)
                     yield return "If the network here is unreliable, write to the database you already have and publish from a worker that reads it — that is your durability, since local disk is not.";
                 break;
@@ -228,9 +243,68 @@ public static class Recommendation
             yield return "Confirm the consumer runs after the commit, not inside the request — that is what makes it durable.";
     }
 
-    private static IEnumerable<string> ReceivingRecipe()
+    /// <summary>The publish call in the language the repository is written in. None of them needs a Queuey package.</summary>
+    private static string CallFor(RepoFacts facts)
     {
-        yield return "Verify the signature over the RAW body, before anything deserializes it. Queuey.Client ships QueueyDeliveryVerifier; do not write the HMAC by hand.";
+        if (facts.Ecosystems.Contains("node"))
+            return "In JavaScript or TypeScript, fetch is all it takes: await fetch(url, { method: \"POST\", " +
+                   "headers: { \"X-Api-Key\": key, \"Content-Type\": \"application/json\" }, body: JSON.stringify(event) }), " +
+                   "then check for status 202.";
+
+        if (facts.Ecosystems.Contains("python"))
+            return "In Python: requests.post(url, json=event, headers={\"X-Api-Key\": key}), then check for status 202.";
+
+        if (facts.Ecosystems.Contains("go"))
+            return "In Go: an http.NewRequest POST with the two headers from net/http, then check for status 202.";
+
+        return "To try it from a shell: curl -X POST \"$url\" -H \"X-Api-Key: $key\" " +
+               "-H \"Content-Type: application/json\" -d '{\"orderId\":\"10042\"}'";
+    }
+
+    /// <summary>
+    /// Where the call goes, which in a JavaScript repository is the part that
+    /// decides whether the key stays secret. A bundler compiles anything the
+    /// browser code touches into a file every visitor downloads.
+    /// </summary>
+    private static IEnumerable<string> WhereToPublishFrom(RepoFacts facts)
+    {
+        if (facts.HasServerSide)
+        {
+            yield return $"Publish from server-side code, which here is {Join(facts.ServerSide)}. " +
+                         "Read the key from a server-side secret such as QUEUEY_API_KEY.";
+        }
+        else if (facts.IsBrowserApp)
+        {
+            yield return $"This builds a browser app ({Join(facts.BrowserApp)}) and I found no server-side code. " +
+                         "Do not publish from the app itself: the key would ship in the bundle, readable by anyone who " +
+                         "loads the page. Publish from a backend, an edge function or a serverless function instead.";
+        }
+
+        if (facts.IsBrowserApp)
+            yield return "Never put the key in a variable the bundler exposes to the browser — VITE_*, NEXT_PUBLIC_*, " +
+                         "REACT_APP_* are compiled into the bundle.";
+    }
+
+    /// <summary>
+    /// The receiving recipe, in a form the repository can follow. The SDK's
+    /// verifier is the right answer in .NET and an impossible one anywhere
+    /// else — naming a class the project cannot install sends the agent off to
+    /// write the HMAC by hand, which is the thing the recipe exists to prevent.
+    /// </summary>
+    private static IEnumerable<string> ReceivingRecipe(RepoFacts facts)
+    {
+        if (facts.IsDotNet)
+        {
+            yield return "Verify the signature over the RAW body, before anything deserializes it. Queuey.Client ships QueueyDeliveryVerifier; do not write the HMAC by hand.";
+        }
+        else
+        {
+            yield return "Authenticate every delivery before you act on it. The simplest way: give the queue's delivery " +
+                         "target an API key header and compare it in constant time. Or verify Queuey's signature over the " +
+                         "RAW body, before anything parses it, exactly as https://queuey.ai/docs/how-to/verify-deliveries " +
+                         "shows — the SDK is .NET-only, so copy the documented check rather than improvising one.";
+        }
+
         yield return "Be idempotent on the event id (X-Queuey-Event-Id). A redelivery after a timeout carries the same id.";
         yield return "While developing, run: queuey listen --forward-to http://localhost:<port>/<path> — real deliveries, no inbound port open.";
     }

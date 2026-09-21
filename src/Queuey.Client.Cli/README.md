@@ -6,7 +6,17 @@ your app, this does from a pipeline or a terminal.
 
 ```bash
 dotnet tool install -g Queuey.Cli --prerelease
-queuey whoami
+queuey advise          # reads the repository and says how Queuey belongs in it; changes nothing
+```
+
+No .NET on the machine? Every release also ships the tool as one self-contained
+file per platform — `osx-arm64`, `osx-x64`, `linux-x64`, `linux-arm64` and
+`win-x64` — on the [releases page](https://github.com/Queuey-AI/queuey-client/releases/latest).
+It needs no runtime:
+
+```bash
+curl -fsSL https://github.com/Queuey-AI/queuey-client/releases/latest/download/queuey-linux-x64.tar.gz | tar -xz
+./queuey --version
 ```
 
 ## What it is for

@@ -4,8 +4,13 @@ name: Release
 # (1) packs every packable project in the solution and pushes to NuGet.org,
 # (2) publishes SELF-CONTAINED single-file `queuey` CLI binaries per
 #     architecture and attaches them to a GitHub Release — the install path
-#     for Linux IoT devices and gateways that have no .NET runtime at all
-#     (`dotnet tool install` requires the SDK; a Pi usually doesn't have it).
+#     for any machine with no .NET runtime at all: a Pi or a gateway, and just
+#     as often a JavaScript developer's laptop running the agent-setup prompt
+#     (`dotnet tool install` requires the SDK; neither usually has it).
+#     Each binary is attached twice: versioned (queuey-0.1.0-preview.8-osx-arm64.tar.gz)
+#     and under a stable name (queuey-osx-arm64.tar.gz), so that
+#     releases/latest/download/queuey-<rid>.tar.gz is one URL the docs can hand
+#     out that never goes stale.
 #
 # The version comes from the tag (overrides Directory.Build.props), so a
 # release is exactly one `git tag && git push --tags`.
@@ -71,7 +76,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        rid: [linux-x64, linux-arm64, osx-arm64, win-x64]
+        rid: [linux-x64, linux-arm64, osx-arm64, osx-x64, win-x64]
     steps:
       - uses: actions/checkout@v4
 
@@ -97,9 +102,11 @@ jobs:
           if [[ "${{ matrix.rid }}" == win-* ]]; then
             mv Queuey.Client.Cli.exe queuey.exe
             zip -q "../../queuey-$VERSION-${{ matrix.rid }}.zip" queuey.exe
+            cp "../../queuey-$VERSION-${{ matrix.rid }}.zip" "../../queuey-${{ matrix.rid }}.zip"
           else
             mv Queuey.Client.Cli queuey
             tar -czf "../../queuey-$VERSION-${{ matrix.rid }}.tar.gz" queuey
+            cp "../../queuey-$VERSION-${{ matrix.rid }}.tar.gz" "../../queuey-${{ matrix.rid }}.tar.gz"
           fi
 
       - name: Attach to GitHub Release
@@ -109,4 +116,4 @@ jobs:
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" --generate-notes 2>/dev/null || true
           gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            queuey-$VERSION-${{ matrix.rid }}.* --clobber
+            queuey-$VERSION-${{ matrix.rid }}.* queuey-${{ matrix.rid }}.* --clobber

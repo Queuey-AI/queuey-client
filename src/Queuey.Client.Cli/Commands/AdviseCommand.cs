@@ -183,7 +183,7 @@ internal static class AdviseCommand
         catch (QueueyConfigurationException ex)
         {
             Console.Error.WriteLine($"--apply needs credentials: {ex.Message}");
-            Console.Error.WriteLine("Mint an API key in the console under Developer → API keys, then set QUEUEY_API_KEY and QUEUEY_TENANT.");
+            Console.Error.WriteLine("Mint an API key in the console (the license menu → Manage license → API keys), then set QUEUEY_API_KEY and QUEUEY_TENANT.");
             Console.Error.WriteLine("Everything above this line still holds — the advice and any files written needed no credentials.");
             return ExitCodes.Configuration;
         }

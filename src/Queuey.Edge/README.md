@@ -252,8 +252,9 @@ queuey edge reset   --spool <path> --accept-data-loss # start clean; the old fil
 ## Requirements
 
 - .NET 8.0+
-- A Queuey queue and a **publish-only, tenant-scoped** API key (console →
-  Developer → API keys). Keys on edge machines should never carry more.
+- A Queuey queue and a **publish-only, tenant-scoped** API key (console → the
+  license menu → Manage license → API keys). Keys on edge machines should never
+  carry more.
 
 MIT licensed. Docs: [queuey.ai docs](https://queuey.ai/docs) · issues:
 [github.com/Queuey-AI/queuey-client](https://github.com/Queuey-AI/queuey-client).
