@@ -202,6 +202,11 @@ internal static class ApplyCommand
                 Console.WriteLine($"  ✗ {r.Name}\t{r.PublicId}\tcreated, {r.Mode ?? "mode unknown"} — {FormatError(r.Error)}");
             else
                 Console.WriteLine($"  ✗ {r.Name}\t{FormatError(r.Error)}");
+
+            // Serverens forslag står under feilen den hører til. Før 2026-09-24 viste bare --plan og
+            // feil som stoppet hele kommandoen det; en vanlig apply mistet det.
+            if (!r.Succeeded && r.Error?.SuggestedAction is { } action)
+                Console.WriteLine($"      → {action}");
         }
 
         foreach (string skipped in result.NotAttempted)
@@ -251,6 +256,13 @@ internal static class ApplyCommand
         failed = result.Failed,
         notAttempted = result.NotAttempted,
         warnings = result.Warnings,
-        queues = result.Applied.Select(r => new { r.Name, r.Succeeded, r.PublicId, r.Created, r.PolicyApplied, r.Mode, error = r.Error?.Message, errorCode = r.Error?.ErrorCode }),
+        queues = result.Applied.Select(r => new
+        {
+            r.Name, r.Succeeded, r.PublicId, r.Created, r.PolicyApplied, r.Mode,
+            error = r.Error?.Message,
+            errorCode = r.Error?.ErrorCode,
+            action = r.Error?.SuggestedAction,
+            status = r.Error?.StatusCode,
+        }),
     };
 }

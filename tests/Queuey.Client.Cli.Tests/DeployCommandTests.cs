@@ -171,6 +171,35 @@ public sealed class DeployCommandTests : IDisposable
     }
 
     [Fact]
+    public async Task Apply_shows_the_servers_suggested_action_under_a_failed_queue()
+    {
+        // Review 2026-09-24: bare feil som stoppet hele kommandoen, viste forslaget; en kø som feilet i
+        // en vanlig apply, mistet det — både i teksten og i JSON.
+        var api = new RecordingHandler(req => req.Key switch
+        {
+            "GET /tenants/ten_abc/queues" => RecordingHandler.Json(HttpStatusCode.OK, new[] { new { publicId = "que_orders", displayName = "orders", mode = "Deliver", hasDeliveryTarget = true } }),
+            "PUT /queues" => RecordingHandler.Json(HttpStatusCode.OK, new { publicId = "que_orders", displayName = "orders", created = false, hasDeliveryTarget = true }),
+            "PATCH /queues/que_orders/policy" => RecordingHandler.Error(HttpStatusCode.BadRequest, "retention_cap_exceeded",
+                "Your plan keeps events for at most 7 days.", "Declare 7 or fewer, or upgrade the plan."),
+            _ => throw new InvalidOperationException(req.Key),
+        });
+        string path = DeployFile("""{ "tenant": "ten_abc", "queues": { "orders": { "retentionDays": 3650 } } }""");
+
+        CliRun human = await CliHarness.RunAsync(() => ApplyCommand.RunAsync(CliHarness.With("--file", path)), api);
+
+        Assert.Equal(ExitCodes.RuntimeError, human.Exit);
+        Assert.Contains("✗ orders\t400 retention_cap_exceeded Your plan keeps events for at most 7 days.\n      → Declare 7 or fewer, or upgrade the plan.",
+            human.Stdout.Replace("\r\n", "\n"));
+
+        CliRun json = await CliHarness.RunAsync(() => ApplyCommand.RunAsync(CliHarness.With("--file", path, "--json")), api);
+
+        JsonElement orders = JsonDocument.Parse(json.Stdout).RootElement.GetProperty("queues")[0];
+        Assert.Equal("Declare 7 or fewer, or upgrade the plan.", orders.GetProperty("action").GetString());
+        Assert.Equal("retention_cap_exceeded", orders.GetProperty("errorCode").GetString());
+        Assert.Equal(400, orders.GetProperty("status").GetInt32());
+    }
+
+    [Fact]
     public void The_tenant_verify_uses_is_the_one_the_file_names()
     {
         // Samme workspace som apply skrev til; bare tenant ekspanderes, så en annen ${VAR} som
