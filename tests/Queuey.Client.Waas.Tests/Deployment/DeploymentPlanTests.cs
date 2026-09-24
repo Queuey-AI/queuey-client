@@ -53,13 +53,13 @@ public class DeploymentPlanTests
     // ── proben ───────────────────────────────────────────────────────────────
 
     [Theory]
-    [InlineData("an existing queue", "Nothing was changed either")]
-    [InlineData("a new queue", "queue 'orders' may now exist, in logOnly")]
-    [InlineData("the workspace only", "the workspace's policy in the file may have been applied")]
-    public async Task A_server_that_does_not_plan_is_found_out_on_the_first_dry_run_and_nothing_else_is_sent(string file, string says)
+    [InlineData("an existing queue", "/queues")]
+    [InlineData("a new queue", "/tenants/ten_abc/policy")]
+    [InlineData("the workspace only", "/tenants/ten_abc/policy")]
+    public async Task A_server_that_does_not_plan_is_found_out_by_a_call_that_changes_nothing(string file, string probePath)
     {
-        // Proben er en skriving planen sender uansett. Helst apply av en kø som finnes: på en server uten
-        // dry-run er det en lesing. Finnes ingen, sier feilen hva den ene skrivingen kan ha endret.
+        // Proben endrer ingenting på noen server (review 2026-09-24): apply av en kø som finnes, som er en
+        // lesing, ellers en tom policy-patch. Planens første skriving ville opprettet en kø på en gammel server.
         var server = new Server();
         if (file == "an existing queue")
             server.Queues.Add(OrdersRow);
@@ -72,12 +72,30 @@ public class DeploymentPlanTests
             : """{ "tenant": "ten_abc", "workspace": { "retentionDays": 30 }, "queues": { "orders": { "maxAttempts": 5 } } }"""));
 
         Assert.Equal("dry_run_unsupported", ex.ErrorCode);
-        Assert.Contains(says, ex.Message);
+        Assert.Contains("Nothing was changed either", ex.Message);
         Assert.Contains("--check", ex.SuggestedAction);
 
         HttpRequestMessage probe = Assert.Single(server.Writes);
         Assert.Equal("?dryRun=true", probe.RequestUri!.Query);
-        Assert.Equal(file == "the workspace only" ? "/tenants/ten_abc/policy" : "/queues", probe.RequestUri.AbsolutePath);
+        Assert.Equal(probePath, probe.RequestUri.AbsolutePath);
+        if (probePath != "/queues")
+            Assert.Equal("{}", System.Text.Encoding.UTF8.GetString(server.Stub.Bodies[server.Stub.Requests.IndexOf(probe)]!));
+    }
+
+    [Fact]
+    public async Task Without_tenant_write_and_without_an_existing_queue_the_plan_stops_having_changed_nothing()
+    {
+        var server = new Server();
+        server.Routes["PATCH /tenants/ten_abc/policy"] = _ => StubHttpMessageHandler.Json(HttpStatusCode.Forbidden,
+            new { error = new { code = "forbidden", message = "Missing permission tenant.write." } });
+
+        var ex = await Assert.ThrowsAsync<QueueyException>(() => PlanAsync(server, """
+        { "tenant": "ten_abc", "queues": { "orders": { "maxAttempts": 5 } } }
+        """));
+
+        Assert.Equal("dry_run_probe_failed", ex.ErrorCode);
+        Assert.Contains("tenant.write", ex.SuggestedAction);
+        Assert.Single(server.Writes);
     }
 
     [Fact]

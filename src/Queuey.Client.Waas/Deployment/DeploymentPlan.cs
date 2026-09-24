@@ -199,26 +199,26 @@ internal sealed class DeploymentPlanner
             new[] { "queues" }, ChangesNothing: exists);
 
     /// <summary>
-    /// What the probe sends: a write the plan sends anyway, so the probe needs no permission and no
-    /// stored state beyond what the plan itself needs. First choice is PUT /queues for a declared queue
-    /// that exists — a read on every server, so one that ignores dryRun changes nothing. Then PUT
-    /// /queues for the first declared queue, and last, for a file without queues, its first workspace
-    /// write.
+    /// What the probe sends: a call that changes nothing on any server, also one that ignores dryRun.
+    /// First choice is PUT /queues for a declared queue that exists, which is a read everywhere and needs
+    /// only what apply needs. Otherwise an empty policy patch on the workspace, which needs tenant.write.
     /// </summary>
     private static PlannedWrite? ChooseProbe(
         List<PlannedWrite> workspaceWrites, IReadOnlyList<DeploymentQueuePlan> plans,
         Dictionary<string, QueueListItem> existing, string tenant)
     {
-        // Før 2026-09-24 var proben en tom policy-patch på workspacet. Den krevde tenant.write også for en
-        // fil som bare rører køer, og et lagret workspace som besto dagens validering.
+        // Proben må ikke kunne skrive noe (review 2026-09-24). Planens første skriving ville opprettet en
+        // kø eller skrevet workspacet på en server fra før dry-run, og planen er sikkerhetsnettet mot
+        // nettopp det. Den tomme patchen krever tenant.write, men bare når fila ikke har en kø som finnes;
+        // uten tenant.write stopper planen da uten å ha endret noe.
         if (plans.FirstOrDefault(p => existing.ContainsKey(p.Definition.Name)) is { } known)
             return QueuePut(known.Definition.Name, tenant, exists: true);
 
-        if (plans.Count > 0)
-            return QueuePut(plans[0].Definition.Name, tenant, exists: false);
-
-        return workspaceWrites.FirstOrDefault();
+        return new PlannedWrite("workspace", EmptyPolicyCheck, Patch, new PatchTenantPolicyWireRequest(),
+            new[] { "tenants", tenant, "policy" }, ChangesNothing: true);
     }
+
+    private const string EmptyPolicyCheck = "empty policy patch";
 
     /// <summary>
     /// Sends the probe and proves the server plans: its answer has to say <c>dryRun: true</c>. When it
@@ -234,9 +234,7 @@ internal sealed class DeploymentPlanner
         {
             throw new QueueyException(
                 "This Queuey API does not answer dry runs yet, so nothing was planned and nothing else was sent. " +
-                (probe.ChangesNothing
-                    ? $"Nothing was changed either: the check was the dry run of {probe.Key}, which changes nothing even when a server carries it out."
-                    : $"The check was the plan's first write, {probe.Key}, and a server without dry runs carries it out: {Consequence(probe)}."),
+                $"Nothing was changed either: the check was the dry run of {probe.Key}, which changes nothing even when a server carries it out.",
                 errorCode: "dry_run_unsupported")
             {
                 SuggestedAction = "Use `queuey apply --check` to compare the file with the workspace, and `queuey apply --dry-run` to validate it locally.",
@@ -251,14 +249,14 @@ internal sealed class DeploymentPlanner
                 $"it was refused ({Describe(ex)}). Nothing else was sent and nothing was changed.",
                 ex.StatusCode, "dry_run_probe_failed", ex)
             {
-                SuggestedAction = ex.SuggestedAction ?? "Fix what the refusal names, often the key's permissions, and plan again.",
+                SuggestedAction = ex.SuggestedAction ?? (probe.Aspect == EmptyPolicyCheck
+                    ? "No queue in the file exists yet, so the check is an empty policy patch on the workspace, which needs tenant.write. " +
+                      "Plan with a key that has it (Build), or once a declared queue exists."
+                    : "Fix what the refusal names, often the key's permissions, and plan again."),
             };
         }
     }
 
-    private static string Consequence(PlannedWrite probe) => probe.Aspect == "queue"
-        ? $"queue '{probe.Target.Substring("queues.".Length)}' may now exist, in logOnly and with nothing else set"
-        : $"the workspace's {probe.Aspect} in the file may have been applied";
 
     private static string Describe(QueueyException ex)
         => $"{string.Join(" ", new[] { ex.StatusCode?.ToString(), ex.ErrorCode }.Where(p => !string.IsNullOrWhiteSpace(p)))}: {ex.Message}".TrimStart(':', ' ');
