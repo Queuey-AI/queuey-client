@@ -106,8 +106,9 @@ PLAN
                  refusal Queuey would give — retention caps, queue limits, bad values — with
                  what to do about it. Writes nothing; exits non-zero if anything would be
                  refused. Needs the key apply needs. A queue that does not exist yet shows as
-                 one that would be created. A Queuey API without dry runs is found out before
-                 anything else is sent, and planning stops there.
+                 one that would be created. The first dry run also proves that Queuey answers
+                 dry runs; against an API that does not, planning stops there and says what
+                 that one call may have changed — nothing, when a declared queue exists.
                  A verb and not an apply flag on purpose: a CLI too old to know it answers
                  ""Unknown command"" instead of running the apply you meant to plan.
 

@@ -135,30 +135,18 @@ internal sealed class DeploymentPlanner
         _management = management;
     }
 
+    /// <summary>One write the plan sends: where it goes, what it carries, and whether it changes anything as a real write.</summary>
+    private sealed record PlannedWrite(string Target, string Aspect, HttpMethod Method, object Body, string[] Segments, bool ChangesNothing = false)
+    {
+        public string Key => $"{Target} · {Aspect}";
+    }
+
     public async Task<DeploymentPlan> PlanAsync(
         DeploymentFile file, IReadOnlyList<DeploymentQueuePlan> plans, string tenant, CancellationToken ct)
     {
-        await EnsureServerPlansAsync(tenant, ct).ConfigureAwait(false);
-
-        var steps = new List<DeploymentPlanStep>();
-        var credentials = new CredentialResolver(_management, tenant);
-
-        if (file.Workspace is { } workspace)
-        {
-            if (workspace.Ingress is { } ingress && !ingress.IsEmpty)
-                steps.Add(await StepAsync("workspace", "ingress", QueueyManagement.WireOf(ingress), ct, "tenants", tenant, "ingress").ConfigureAwait(false));
-
-            if (workspace.HasPolicy)
-                steps.Add(await StepAsync("workspace", "policy", QueueyManagement.WireOf(workspace), ct, "tenants", tenant, "policy").ConfigureAwait(false));
-
-            if (workspace.Delivery is { } delivery && !delivery.IsEmpty)
-                steps.Add(await GuardAsync("workspace", "delivery", async () =>
-                {
-                    WorkspaceDelivery resolved = await credentials.ResolveAsync(delivery, ct).ConfigureAwait(false);
-                    return await StepAsync("workspace", "delivery", QueueyManagement.WireOf(resolved), ct, "tenants", tenant, "delivery").ConfigureAwait(false);
-                }).ConfigureAwait(false));
-        }
-
+        // Lesingene først, før noe sendes: køene slik de er, og hvert credential-navn fila bruker. Et navn
+        // som mangler, feiler planen her, før første skriving, slik det feiler apply (review 2026-09-24).
+        // Før ble det et avslag på ett steg, oppdaget midt i planen.
         var existing = new Dictionary<string, QueueListItem>(StringComparer.Ordinal);
         foreach (QueueListItem row in await _management.ListQueuesAsync(tenant, ct).ConfigureAwait(false))
         {
@@ -166,15 +154,125 @@ internal sealed class DeploymentPlanner
                 existing[name] = row;
         }
 
+        ResolvedDeliveries deliveries = await new CredentialResolver(_management, tenant)
+            .ResolveAllAsync(file.Workspace?.Delivery, plans, ct).ConfigureAwait(false);
+
+        List<PlannedWrite> workspaceWrites = WorkspaceWrites(file.Workspace, deliveries, tenant);
+
+        // Beviset på at serveren planlegger, før noe annet sendes. Svaret gjelder også som svaret på
+        // den skrivingen, så den sendes ikke to ganger.
+        var answered = new Dictionary<string, DryRunAnswer>(StringComparer.Ordinal);
+        if (ChooseProbe(workspaceWrites, plans, existing, tenant) is { } probe)
+            answered[probe.Key] = await ProbeAsync(probe, ct).ConfigureAwait(false);
+
+        var steps = new List<DeploymentPlanStep>();
+        foreach (PlannedWrite write in workspaceWrites)
+            steps.Add(await StepAsync(write, answered, ct).ConfigureAwait(false));
+
         foreach (DeploymentQueuePlan plan in plans)
-            steps.AddRange(await PlanQueueAsync(plan, tenant, credentials, existing, ct).ConfigureAwait(false));
+            steps.AddRange(await PlanQueueAsync(plan, tenant, deliveries, existing, answered, ct).ConfigureAwait(false));
 
         return new DeploymentPlan { Tenant = tenant, Steps = steps };
     }
 
+    /// <summary>The workspace's writes, in the order apply sends them: ingress, policy, delivery.</summary>
+    private static List<PlannedWrite> WorkspaceWrites(DeploymentWorkspace? workspace, ResolvedDeliveries deliveries, string tenant)
+    {
+        var writes = new List<PlannedWrite>();
+        if (workspace is null)
+            return writes;
+
+        if (workspace.Ingress is { IsEmpty: false } ingress)
+            writes.Add(new PlannedWrite("workspace", "ingress", Patch, QueueyManagement.WireOf(ingress), new[] { "tenants", tenant, "ingress" }));
+
+        if (workspace.HasPolicy)
+            writes.Add(new PlannedWrite("workspace", "policy", Patch, QueueyManagement.WireOf(workspace), new[] { "tenants", tenant, "policy" }));
+
+        if (workspace.Delivery is { IsEmpty: false } && deliveries.Workspace is { } delivery)
+            writes.Add(new PlannedWrite("workspace", "delivery", Patch, QueueyManagement.WireOf(delivery), new[] { "tenants", tenant, "delivery" }));
+
+        return writes;
+    }
+
+    private static PlannedWrite QueuePut(string name, string tenant, bool exists)
+        => new($"queues.{name}", "queue", HttpMethod.Put, new QueueApplyRequest { TenantPublicId = tenant, DisplayName = name },
+            new[] { "queues" }, ChangesNothing: exists);
+
+    /// <summary>
+    /// What the probe sends: a write the plan sends anyway, so the probe needs no permission and no
+    /// stored state beyond what the plan itself needs. First choice is PUT /queues for a declared queue
+    /// that exists — a read on every server, so one that ignores dryRun changes nothing. Then PUT
+    /// /queues for the first declared queue, and last, for a file without queues, its first workspace
+    /// write.
+    /// </summary>
+    private static PlannedWrite? ChooseProbe(
+        List<PlannedWrite> workspaceWrites, IReadOnlyList<DeploymentQueuePlan> plans,
+        Dictionary<string, QueueListItem> existing, string tenant)
+    {
+        // Før 2026-09-24 var proben en tom policy-patch på workspacet. Den krevde tenant.write også for en
+        // fil som bare rører køer, og et lagret workspace som besto dagens validering.
+        if (plans.FirstOrDefault(p => existing.ContainsKey(p.Definition.Name)) is { } known)
+            return QueuePut(known.Definition.Name, tenant, exists: true);
+
+        if (plans.Count > 0)
+            return QueuePut(plans[0].Definition.Name, tenant, exists: false);
+
+        return workspaceWrites.FirstOrDefault();
+    }
+
+    /// <summary>
+    /// Sends the probe and proves the server plans: its answer has to say <c>dryRun: true</c>. When it
+    /// does not, or the probe is refused, planning stops here and says what that means.
+    /// </summary>
+    private async Task<DryRunAnswer> ProbeAsync(PlannedWrite probe, CancellationToken ct)
+    {
+        try
+        {
+            return await SendAsync(probe, ct).ConfigureAwait(false);
+        }
+        catch (DryRunIgnoredException)
+        {
+            throw new QueueyException(
+                "This Queuey API does not answer dry runs yet, so nothing was planned and nothing else was sent. " +
+                (probe.ChangesNothing
+                    ? $"Nothing was changed either: the check was the dry run of {probe.Key}, which changes nothing even when a server carries it out."
+                    : $"The check was the plan's first write, {probe.Key}, and a server without dry runs carries it out: {Consequence(probe)}."),
+                errorCode: "dry_run_unsupported")
+            {
+                SuggestedAction = "Use `queuey apply --check` to compare the file with the workspace, and `queuey apply --dry-run` to validate it locally.",
+            };
+        }
+        catch (QueueyException ex)
+        {
+            // Avvist: da er det ikke bevist at serveren planlegger, så ingenting mer sendes. En avvist
+            // skriving endrer ingenting, på en gammel server som på en ny.
+            throw new QueueyException(
+                $"Planning stopped at its first dry run, {probe.Key}, which also checks that Queuey answers dry runs: " +
+                $"it was refused ({Describe(ex)}). Nothing else was sent and nothing was changed.",
+                ex.StatusCode, "dry_run_probe_failed", ex)
+            {
+                SuggestedAction = ex.SuggestedAction ?? "Fix what the refusal names, often the key's permissions, and plan again.",
+            };
+        }
+    }
+
+    private static string Consequence(PlannedWrite probe) => probe.Aspect == "queue"
+        ? $"queue '{probe.Target.Substring("queues.".Length)}' may now exist, in logOnly and with nothing else set"
+        : $"the workspace's {probe.Aspect} in the file may have been applied";
+
+    private static string Describe(QueueyException ex)
+        => $"{string.Join(" ", new[] { ex.StatusCode?.ToString(), ex.ErrorCode }.Where(p => !string.IsNullOrWhiteSpace(p)))}: {ex.Message}".TrimStart(':', ' ');
+
+    private async Task<DryRunAnswer> SendAsync(PlannedWrite write, CancellationToken ct) => write.Aspect == "queue"
+        ? await _controlPlane.DryRunAsync<ApplyQueuePlanResponse>(write.Target, write.Aspect, write.Method, write.Body, ct, write.Segments).ConfigureAwait(false)
+        : await _controlPlane.DryRunAsync<ConfigPlanResponse>(write.Target, write.Aspect, write.Method, write.Body, ct, write.Segments).ConfigureAwait(false);
+
+    private async Task<DryRunAnswer> AnswerAsync(PlannedWrite write, Dictionary<string, DryRunAnswer> answered, CancellationToken ct)
+        => answered.TryGetValue(write.Key, out DryRunAnswer? known) ? known : await SendAsync(write, ct).ConfigureAwait(false);
+
     private async Task<IEnumerable<DeploymentPlanStep>> PlanQueueAsync(
-        DeploymentQueuePlan plan, string tenant, CredentialResolver credentials,
-        Dictionary<string, QueueListItem> existing, CancellationToken ct)
+        DeploymentQueuePlan plan, string tenant, ResolvedDeliveries deliveries,
+        Dictionary<string, QueueListItem> existing, Dictionary<string, DryRunAnswer> answered, CancellationToken ct)
     {
         string name = plan.Definition.Name;
         string target = $"queues.{name}";
@@ -183,8 +281,7 @@ internal sealed class DeploymentPlanner
         ApplyQueuePlanResponse applied;
         try
         {
-            applied = await _controlPlane.DryRunAsync<ApplyQueuePlanResponse>(
-                target, "queue", HttpMethod.Put, new QueueApplyRequest { TenantPublicId = tenant, DisplayName = name }, ct, "queues").ConfigureAwait(false);
+            applied = (ApplyQueuePlanResponse)await AnswerAsync(QueuePut(name, tenant, existing.ContainsKey(name)), answered, ct).ConfigureAwait(false);
         }
         catch (QueueyException ex) when (ex is not DryRunIgnoredException)
         {
@@ -221,17 +318,13 @@ internal sealed class DeploymentPlanner
         }
 
         if (plan.Ingress is { } ingress)
-            steps.Add(await StepAsync(target, "ingress", QueueyManagement.WireOf(ingress), ct, "queues", queueId, "ingress").ConfigureAwait(false));
+            steps.Add(await StepAsync(new PlannedWrite(target, "ingress", Patch, QueueyManagement.WireOf(ingress), new[] { "queues", queueId, "ingress" }), answered, ct).ConfigureAwait(false));
 
         if (!plan.Definition.Policy.IsEmpty)
-            steps.Add(await StepAsync(target, "policy", QueueyService.ToPatch(plan.Definition.Policy), ct, "queues", queueId, "policy").ConfigureAwait(false));
+            steps.Add(await StepAsync(new PlannedWrite(target, "policy", Patch, QueueyService.ToPatch(plan.Definition.Policy), new[] { "queues", queueId, "policy" }), answered, ct).ConfigureAwait(false));
 
-        if (plan.Delivery is { } delivery)
-            steps.Add(await GuardAsync(target, "delivery", async () =>
-            {
-                QueueDelivery resolved = await credentials.ResolveAsync(delivery, ct).ConfigureAwait(false);
-                return await StepAsync(target, "delivery", QueueyManagement.WireOf(resolved), ct, "queues", queueId, "delivery").ConfigureAwait(false);
-            }).ConfigureAwait(false));
+        if (deliveries.Queues.TryGetValue(name, out QueueDelivery? delivery))
+            steps.Add(await StepAsync(new PlannedWrite(target, "delivery", Patch, QueueyManagement.WireOf(delivery), new[] { "queues", queueId, "delivery" }), answered, ct).ConfigureAwait(false));
 
         // Modus som apply ville satt den: bare en deklarert modus endres på en kø som finnes, og
         // den gamle Paused-modusen røres aldri.
@@ -248,47 +341,21 @@ internal sealed class DeploymentPlanner
             else if (declared == DeploymentQueueMode.Deliver && !(IsAbsoluteUrl(plan.Delivery?.Url) || (row?.HasDeliveryTarget ?? false)))
                 steps.Add(new DeploymentPlanStep { Target = target, Aspect = "mode", Error = DeliverWithoutDestination(name) });
             else if (declared != current)
-                steps.Add(await StepAsync(target, "mode", new QueueModeChangeRequest { Mode = declared.ToWire() }, ct, "queues", queueId, "mode-change").ConfigureAwait(false));
+                steps.Add(await StepAsync(new PlannedWrite(target, "mode", Patch, new QueueModeChangeRequest { Mode = declared.ToWire() }, new[] { "queues", queueId, "mode-change" }), answered, ct).ConfigureAwait(false));
         }
 
         return steps;
     }
 
-    /// <summary>
-    /// Proves the server answers dry runs before anything else is sent. A server from before them
-    /// ignores <c>?dryRun=true</c> and performs the write, so the probe is one that changes nothing
-    /// either way: an empty workspace policy patch.
-    /// </summary>
-    private async Task EnsureServerPlansAsync(string tenant, CancellationToken ct)
+    private async Task<DeploymentPlanStep> StepAsync(PlannedWrite write, Dictionary<string, DryRunAnswer> answered, CancellationToken ct)
     {
         try
         {
-            await _controlPlane.DryRunAsync<ConfigPlanResponse>(
-                "workspace", "policy", Patch, new PatchTenantPolicyWireRequest(), ct, "tenants", tenant, "policy").ConfigureAwait(false);
-        }
-        catch (DryRunIgnoredException)
-        {
-            // 204 uten kropp, eller et svar uten dryRun: serveren utførte (den tomme) patchen i stedet for å planlegge.
-            throw new QueueyException(
-                "This Queuey API does not answer dry runs yet, so nothing was planned. Nothing was changed either: " +
-                "the check was an empty policy patch, which changes nothing.",
-                errorCode: "dry_run_unsupported")
-            {
-                SuggestedAction = "Use `queuey apply --check` to compare the file with the workspace, and `queuey apply --dry-run` to validate it locally.",
-            };
-        }
-    }
-
-    private async Task<DeploymentPlanStep> StepAsync(
-        string target, string aspect, object request, CancellationToken ct, params string[] segments)
-    {
-        try
-        {
-            ConfigPlanResponse plan = await _controlPlane.DryRunAsync<ConfigPlanResponse>(target, aspect, Patch, request, ct, segments).ConfigureAwait(false);
+            var plan = (ConfigPlanResponse)await AnswerAsync(write, answered, ct).ConfigureAwait(false);
             return new DeploymentPlanStep
             {
-                Target = target,
-                Aspect = aspect,
+                Target = write.Target,
+                Aspect = write.Aspect,
                 Changes = (plan.Changes ?? new List<ConfigChangeResponse>())
                     .Select(c => new PlannedChange { Path = c.Path ?? string.Empty, From = Text(c.From), To = Text(c.To) })
                     .ToList(),
@@ -297,20 +364,7 @@ internal sealed class DeploymentPlanner
         }
         catch (QueueyException ex) when (ex is not DryRunIgnoredException)
         {
-            return new DeploymentPlanStep { Target = target, Aspect = aspect, Error = ex };
-        }
-    }
-
-    private static async Task<DeploymentPlanStep> GuardAsync(string target, string aspect, Func<Task<DeploymentPlanStep>> step)
-    {
-        try
-        {
-            return await step().ConfigureAwait(false);
-        }
-        catch (QueueyException ex) when (ex is not DryRunIgnoredException)
-        {
-            // Et credential-navn som ikke finnes, er et avslag på lik linje med serverens.
-            return new DeploymentPlanStep { Target = target, Aspect = aspect, Error = ex };
+            return new DeploymentPlanStep { Target = write.Target, Aspect = write.Aspect, Error = ex };
         }
     }
 

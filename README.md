@@ -316,7 +316,9 @@ queuey apply
 `queuey plan` sends every write `apply` would make as a server-side dry run (`?dryRun=true`), so the
 answer comes from Queuey: each value that would change, and each refusal — a retention cap, a queue
 limit, a bad value — with what to do about it. Nothing is written, and it exits non-zero if anything
-would be refused. A queue that does not exist yet shows as one that would be created. It is a verb of
+would be refused. A queue that does not exist yet shows as one that would be created. The first dry
+run also proves that Queuey answers dry runs; against an API that does not, the plan stops there and
+says what that one call may have changed — nothing, when a declared queue already exists. It is a verb of
 its own rather than an `apply` flag, so a CLI too old to know it answers "Unknown command" instead of
 running the apply you meant to plan. For the same reason every command rejects an option it does not
 take — a typo like `--paln` fails with exit 2 and the options that command accepts.

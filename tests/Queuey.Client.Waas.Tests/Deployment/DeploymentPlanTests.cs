@@ -10,9 +10,10 @@ using Queuey.Client;
 namespace Queuey.Client.Waas.Tests;
 
 /// <summary>
-/// <c>queuey apply --plan</c> (2026-09-23): hver skriving apply ville sendt, sendes som dry-run, og
-/// svaret er det Queuey ville godtatt og endret. En server fra før dry-run ignorerer parameteren og
-/// skriver, så planen beviser først at serveren planlegger, med en probe som ikke endrer noe.
+/// <c>queuey plan</c> (2026-09-23): hver skriving apply ville sendt, sendes som dry-run, og svaret er
+/// det Queuey ville godtatt og endret. En server fra før dry-run ignorerer parameteren og skriver, så
+/// planen beviser først at serveren planlegger. Proben er en skriving planen sender uansett, helst én
+/// som ikke endrer noe selv som ekte skriving (review 2026-09-24).
 /// </summary>
 public class DeploymentPlanTests
 {
@@ -47,35 +48,107 @@ public class DeploymentPlanTests
     private static Task<DeploymentPlan> PlanAsync(Server server, string json)
         => WaasTestHost.Build(apiStub: server.Stub).PlanDeploymentAsync(DeploymentFile.Parse(json));
 
+    private static readonly object OrdersRow = new { publicId = "que_orders", displayName = "orders", mode = "Deliver", hasDeliveryTarget = true };
+
+    // ── proben ───────────────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("an existing queue", "Nothing was changed either")]
+    [InlineData("a new queue", "queue 'orders' may now exist, in logOnly")]
+    [InlineData("the workspace only", "the workspace's policy in the file may have been applied")]
+    public async Task A_server_that_does_not_plan_is_found_out_on_the_first_dry_run_and_nothing_else_is_sent(string file, string says)
+    {
+        // Proben er en skriving planen sender uansett. Helst apply av en kø som finnes: på en server uten
+        // dry-run er det en lesing. Finnes ingen, sier feilen hva den ene skrivingen kan ha endret.
+        var server = new Server();
+        if (file == "an existing queue")
+            server.Queues.Add(OrdersRow);
+        server.Routes["PUT /queues"] = _ =>   // en gammel server: et vanlig apply-svar, uten dryRun
+            StubHttpMessageHandler.Json(HttpStatusCode.OK, new { publicId = "que_orders", displayName = "orders", created = file == "a new queue", hasDeliveryTarget = true });
+        server.Routes["PATCH /tenants/ten_abc/policy"] = _ => new HttpResponseMessage(HttpStatusCode.NoContent);
+
+        var ex = await Assert.ThrowsAsync<QueueyException>(() => PlanAsync(server, file == "the workspace only"
+            ? """{ "tenant": "ten_abc", "workspace": { "retentionDays": 30 }, "queues": {} }"""
+            : """{ "tenant": "ten_abc", "workspace": { "retentionDays": 30 }, "queues": { "orders": { "maxAttempts": 5 } } }"""));
+
+        Assert.Equal("dry_run_unsupported", ex.ErrorCode);
+        Assert.Contains(says, ex.Message);
+        Assert.Contains("--check", ex.SuggestedAction);
+
+        HttpRequestMessage probe = Assert.Single(server.Writes);
+        Assert.Equal("?dryRun=true", probe.RequestUri!.Query);
+        Assert.Equal(file == "the workspace only" ? "/tenants/ten_abc/policy" : "/queues", probe.RequestUri.AbsolutePath);
+    }
+
     [Fact]
-    public async Task A_server_that_does_not_plan_is_found_out_before_anything_else_is_sent()
+    public async Task The_probe_needs_no_permission_or_stored_state_the_plan_does_not()
+    {
+        // Før var proben en tom policy-patch på workspacet: den krevde tenant.write og et lagret workspace
+        // som besto valideringen, også for en fil som bare rører køer. Her ville den blitt avvist.
+        var server = new Server();
+        server.Queues.Add(OrdersRow);
+        server.Routes["PATCH /tenants/ten_abc/policy"] = _ => StubHttpMessageHandler.Json(HttpStatusCode.Forbidden,
+            new { error = new { code = "forbidden", message = "Missing permission tenant.write." } });
+        server.Routes["PATCH /queues/que_orders/policy"] = _ =>
+            StubHttpMessageHandler.Json(HttpStatusCode.OK, Plan("queue que_orders", ("policy.maxAttempts", 8, 5)));
+
+        DeploymentPlan plan = await PlanAsync(server, """{ "tenant": "ten_abc", "queues": { "orders": { "maxAttempts": 5 } } }""");
+
+        Assert.True(plan.WouldSucceed);
+        Assert.DoesNotContain(server.Stub.Requests, r => r.RequestUri!.AbsolutePath == "/tenants/ten_abc/policy");
+
+        // Proben var køens apply, og svaret på den gjelder også for køens steg: sendt én gang.
+        Assert.Equal("/queues", server.Writes.First().RequestUri!.AbsolutePath);
+        Assert.Single(server.Writes, r => r.RequestUri!.AbsolutePath == "/queues");
+    }
+
+    [Fact]
+    public async Task A_refused_probe_says_it_was_the_first_dry_run_and_sends_nothing_else()
     {
         var server = new Server();
-        server.Routes["PATCH /tenants/ten_abc/policy"] = _ => new HttpResponseMessage(HttpStatusCode.NoContent);
+        server.Queues.Add(OrdersRow);
+        server.Routes["PUT /queues"] = _ => StubHttpMessageHandler.Json(HttpStatusCode.Forbidden,
+            new { error = new { code = "forbidden", message = "Missing permission queue.write.", action = "Use a key made with the Build profile." } });
 
         var ex = await Assert.ThrowsAsync<QueueyException>(() => PlanAsync(server, """
         { "tenant": "ten_abc", "workspace": { "retentionDays": 30 }, "queues": { "orders": { "maxAttempts": 5 } } }
         """));
 
-        Assert.Equal("dry_run_unsupported", ex.ErrorCode);
-        Assert.Contains("Nothing was changed", ex.Message);
-        Assert.Contains("--check", ex.SuggestedAction);
-
-        // Bare proben ble sendt, og den var en tom patch.
-        HttpRequestMessage probe = Assert.Single(server.Stub.Requests);
-        Assert.Equal("?dryRun=true", probe.RequestUri!.Query);
-        Assert.Equal("{}", System.Text.Encoding.UTF8.GetString(server.Stub.Bodies[0]!));
+        Assert.Equal("dry_run_probe_failed", ex.ErrorCode);
+        Assert.Equal(403, ex.StatusCode);
+        Assert.Contains("first dry run, queues.orders · queue", ex.Message);
+        Assert.Contains("403 forbidden: Missing permission queue.write.", ex.Message);
+        Assert.Contains("Nothing else was sent and nothing was changed", ex.Message);
+        Assert.Equal("Use a key made with the Build profile.", ex.SuggestedAction);
+        Assert.IsType<QueueyForbiddenException>(ex.InnerException);
+        Assert.Single(server.Writes);
     }
+
+    [Fact]
+    public async Task A_missing_credential_name_fails_the_plan_before_anything_is_sent()
+    {
+        // Samme regel som apply (review 2026-09-24): alle navn slås opp før første skriving.
+        var server = new Server();
+        server.Queues.Add(OrdersRow);
+        server.Routes["GET /tenants/ten_abc/credentials"] = _ => StubHttpMessageHandler.Json(HttpStatusCode.OK, Array.Empty<object>());
+
+        var ex = await Assert.ThrowsAsync<QueueyConfigurationException>(() => PlanAsync(server, """
+        { "tenant": "ten_abc", "queues": { "orders": { "delivery": { "url": "/orders", "credentialRef": "orders-key" } } } }
+        """));
+
+        Assert.Contains("No credential named 'orders-key'", ex.Message);
+        Assert.Empty(server.Writes);
+    }
+
+    // ── stegene ──────────────────────────────────────────────────────────────
 
     [Fact]
     public async Task Every_write_goes_as_a_dry_run_and_the_changes_come_back()
     {
         var server = new Server();
         server.Queues.Add(new { publicId = "que_orders", displayName = "orders", mode = "Deliver", hasDeliveryTarget = true });
-        int policyCalls = 0;
-        server.Routes["PATCH /tenants/ten_abc/policy"] = _ => ++policyCalls == 1
-            ? StubHttpMessageHandler.Json(HttpStatusCode.OK, Plan("workspace ten_abc"))   // proben
-            : StubHttpMessageHandler.Json(HttpStatusCode.OK, Plan("workspace ten_abc", ("policy.retentionDays", 7, 30)));
+        server.Routes["PATCH /tenants/ten_abc/policy"] = _ =>
+            StubHttpMessageHandler.Json(HttpStatusCode.OK, Plan("workspace ten_abc", ("policy.retentionDays", 7, 30)));
         server.Routes["PUT /queues"] = req => System.Text.Encoding.UTF8.GetString(req.Content!.ReadAsByteArrayAsync().Result).Contains("\"orders\"")
             ? StubHttpMessageHandler.Json(HttpStatusCode.OK, new { dryRun = true, publicId = "que_orders", displayName = "orders", created = false, hasDeliveryTarget = true })
             : StubHttpMessageHandler.Json(HttpStatusCode.OK, new { dryRun = true, publicId = (string?)null, displayName = "invoices", created = true, hasDeliveryTarget = false });
