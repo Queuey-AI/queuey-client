@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Net.Http;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Queuey.Client.Waas;
@@ -20,10 +21,16 @@ internal static class CliHost
     public static ResolvedConfig Resolve(ArgMap args)
         => CliConfig.Resolve(args, Environment.GetEnvironmentVariable, ReadConfigJson(args));
 
+    // Testsøm: CLI-testene kjører kommandoene i prosessen. Står en handler her, går hvert kall dit i
+    // stedet for ut på nettet, så en test ser nøyaktig hva en kommando ville sendt. Alltid null ellers.
+    internal static HttpMessageHandler? TestHandler { get; set; }
+
     public static ServiceProvider BuildProvider(ResolvedConfig config, Action<IQueueyBuilder>? build = null)
     {
         var services = new ServiceCollection();
         services.AddQueuey(config.Apply, build);
+        if (TestHandler is { } handler)
+            services.ConfigureHttpClientDefaults(http => http.ConfigurePrimaryHttpMessageHandler(() => handler));
         return services.BuildServiceProvider();
     }
 

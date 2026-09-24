@@ -400,7 +400,8 @@ it cannot emit a secret, because Queuey's read surfaces never return one.
 stored encrypted by `queuey credentials set`, which reads the value from an environment variable
 (never an argument — those land in shell history and CI logs) and can never read it back. The
 reference is the credential's *name*, resolved per workspace at apply time, so the same file
-converges staging and production. Keep it
+converges staging and production. Every name is resolved before the first write, so one that is
+missing fails the apply with nothing changed. Keep it
 separate from `queuey.json`, which holds your API key and must *not* be committed.
 
 Every omitted field means **leave alone**, everywhere: a file that names only a base URL changes only

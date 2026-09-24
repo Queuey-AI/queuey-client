@@ -30,6 +30,73 @@ internal sealed class CredentialResolver
     }
 
     /// <summary>
+    /// Resolves every credential name a deployment names — the workspace's delivery and each
+    /// queue's, signing included — before anything is written. Every missing name is reported at
+    /// once, and nothing has been sent when it is.
+    /// </summary>
+    public async Task<ResolvedDeliveries> ResolveAllAsync(
+        WorkspaceDelivery? workspace, IEnumerable<DeploymentQueuePlan> plans, CancellationToken cancellationToken)
+    {
+        // Før 2026-09-24 ble en køs credential-navn slått opp først etter at køen var opprettet. Et navn
+        // som manglet, feilet køen der og lot den ligge i logOnly, og neste apply beholdt modusen og ga
+        // exit 0. Derfor slås alle navn opp her, før første skriving.
+        var references = new List<(string Name, string Where)>();
+        Collect(workspace?.CredentialRef, "workspace.delivery.credentialRef");
+        Collect(workspace?.Signing?.CredentialRef, "workspace.delivery.signing.credentialRef");
+        foreach (DeploymentQueuePlan plan in plans)
+        {
+            Collect(plan.Delivery?.CredentialRef, $"queues.{plan.Definition.Name}.delivery.credentialRef");
+            Collect(plan.Delivery?.Signing?.CredentialRef, $"queues.{plan.Definition.Name}.delivery.signing.credentialRef");
+        }
+
+        if (references.Count > 0)
+        {
+            Dictionary<string, string> byName = await LoadAsync(cancellationToken).ConfigureAwait(false);
+            var missing = references.Where(r => !byName.ContainsKey(r.Name)).ToList();
+            if (missing.Count > 0)
+                throw Missing(missing, byName);
+        }
+
+        var queues = new Dictionary<string, QueueDelivery>(StringComparer.Ordinal);
+        foreach (DeploymentQueuePlan plan in plans)
+        {
+            if (plan.Delivery is { } delivery)
+                queues[plan.Definition.Name] = await ResolveAsync(delivery, cancellationToken).ConfigureAwait(false);
+        }
+
+        return new ResolvedDeliveries(
+            workspace is null ? null : await ResolveAsync(workspace, cancellationToken).ConfigureAwait(false),
+            queues);
+
+        void Collect(string? reference, string where)
+        {
+            if (string.IsNullOrWhiteSpace(reference)) return;
+            string name = reference!.Trim();
+            if (!name.StartsWith(IdPrefix, StringComparison.Ordinal))
+                references.Add((name, where));
+        }
+    }
+
+    private QueueyConfigurationException Missing(List<(string Name, string Where)> missing, Dictionary<string, string> byName)
+    {
+        var names = missing.Select(m => m.Name).Distinct(StringComparer.Ordinal).ToList();
+
+        return new QueueyConfigurationException(
+            (names.Count == 1
+                ? $"No credential named '{names[0]}' in workspace {_tenantPublicId}"
+                : $"No credentials named {string.Join(", ", names.Select(n => $"'{n}'"))} in workspace {_tenantPublicId}")
+            + $" ({string.Join("; ", missing.Select(m => m.Where))}). Nothing was changed. "
+            + (names.Count == 1
+                ? $"Store it first: queuey credentials set --name {names[0]} --from-env <ENV_VAR>. "
+                : "Store each first: queuey credentials set --name <name> --from-env <ENV_VAR>. ")
+            + Available(byName));
+    }
+
+    private static string Available(Dictionary<string, string> byName) => byName.Count == 0
+        ? "This workspace has no credentials yet."
+        : $"Available: {string.Join(", ", byName.Keys.OrderBy(k => k, StringComparer.Ordinal))}.";
+
+    /// <summary>
     /// Resolves one reference. Null/blank passes through (blank means "keep the stored secret"), and
     /// so does a literal <c>cred_…</c> id. Anything else is looked up by name.
     /// </summary>
@@ -49,9 +116,7 @@ internal sealed class CredentialResolver
         throw new QueueyConfigurationException(
             $"No credential named '{name}' in workspace {_tenantPublicId}. " +
             $"Store it first: queuey credentials set --name {name} --from-env <ENV_VAR>. " +
-            (byName.Count == 0
-                ? "This workspace has no credentials yet."
-                : $"Available: {string.Join(", ", byName.Keys.OrderBy(k => k, StringComparer.Ordinal))}."));
+            Available(byName));
     }
 
     /// <summary>Resolves both halves of a workspace delivery patch, returning a copy safe to send.</summary>
@@ -108,4 +173,20 @@ internal sealed class CredentialResolver
 
         return _byName = byName;
     }
+}
+
+/// <summary>The deliveries of a deployment with every credential name turned into the id the API stores.</summary>
+internal sealed class ResolvedDeliveries
+{
+    public ResolvedDeliveries(WorkspaceDelivery? workspace, IReadOnlyDictionary<string, QueueDelivery> queues)
+    {
+        Workspace = workspace;
+        Queues = queues;
+    }
+
+    /// <summary>The workspace's delivery patch, or null when the file declares none.</summary>
+    public WorkspaceDelivery? Workspace { get; }
+
+    /// <summary>Each queue's delivery patch, by queue name — only the queues that declare one.</summary>
+    public IReadOnlyDictionary<string, QueueDelivery> Queues { get; }
 }

@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text.Json;
 using Queuey.Client.Cli;
 using Queuey.Client.Waas;
@@ -100,6 +101,35 @@ public sealed class DeployCommandTests : IDisposable
         var (badTimeout, badTimeoutOut) = await Run(() => VerifyCommand.RunAsync(new[] { "orders", "--data", "{}", "--timeout", "0" }));
         Assert.Equal(ExitCodes.Usage, badTimeout);
         Assert.Contains("--timeout takes whole seconds", badTimeoutOut);
+    }
+
+    [Fact]
+    public async Task Apply_reports_a_queue_it_created_before_failing_as_created_with_the_mode_it_got()
+    {
+        // Review 2026-09-24: feilresultatet mistet at køen var opprettet, så ingen så at den lå i logOnly.
+        var api = new RecordingHandler(req => req.Key switch
+        {
+            "GET /tenants/ten_abc/queues" => RecordingHandler.Json(HttpStatusCode.OK, Array.Empty<object>()),
+            "PUT /queues" => RecordingHandler.Json(HttpStatusCode.OK, new { publicId = "que_orders", displayName = "orders", created = true, hasDeliveryTarget = true }),
+            "PATCH /queues/que_orders/policy" => RecordingHandler.Error(HttpStatusCode.BadRequest, "retention_cap_exceeded", "Your plan keeps events for at most 7 days."),
+            _ => throw new InvalidOperationException(req.Key),
+        });
+        string path = DeployFile("""{ "queues": { "orders": { "retentionDays": 3650 } } }""");
+
+        CliRun human = await CliHarness.RunAsync(() => ApplyCommand.RunAsync(CliHarness.With("--file", path, "--tenant", "ten_abc")), api);
+
+        Assert.Equal(ExitCodes.RuntimeError, human.Exit);
+        Assert.Contains("✗ orders\tque_orders\tcreated, logOnly — 400 retention_cap_exceeded", human.Stdout);
+        Assert.Contains("will not start delivering by itself", human.Stdout);
+        Assert.Contains("0 applied (1 created), 1 failed", human.Stdout);
+
+        CliRun json = await CliHarness.RunAsync(() => ApplyCommand.RunAsync(CliHarness.With("--file", path, "--tenant", "ten_abc", "--json")), api);
+
+        JsonElement orders = JsonDocument.Parse(json.Stdout).RootElement.GetProperty("queues")[0];
+        Assert.True(orders.GetProperty("created").GetBoolean());
+        Assert.Equal("que_orders", orders.GetProperty("publicId").GetString());
+        Assert.Equal("logOnly", orders.GetProperty("mode").GetString());
+        Assert.False(orders.GetProperty("succeeded").GetBoolean());
     }
 
     [Fact]

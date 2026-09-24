@@ -174,6 +174,9 @@ internal static class ApplyCommand
             if (r.Succeeded)
                 Console.WriteLine($"  ✓ {r.Name}\t{r.PublicId}\t{(r.Created ? "created" : "exists")}{(r.PolicyApplied ? ", policy" : "")}"
                                   + (r.Mode is { } mode ? $", {mode}" : ""));
+            else if (r.Created)
+                // Opprettet før feilen: køen finnes, og modusen den fikk, er det som avgjør om den leverer.
+                Console.WriteLine($"  ✗ {r.Name}\t{r.PublicId}\tcreated, {r.Mode ?? "mode unknown"} — {FormatError(r.Error)}");
             else
                 Console.WriteLine($"  ✗ {r.Name}\t{FormatError(r.Error)}");
         }

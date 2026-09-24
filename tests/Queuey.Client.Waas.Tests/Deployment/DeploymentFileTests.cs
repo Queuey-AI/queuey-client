@@ -156,10 +156,10 @@ public class DeploymentFileTests
         Assert.True(delivery < firstQueue, "the workspace must be converged before the first queue");
         Assert.Equal("PATCH", api.Requests[ingress].Method.Method);
 
-        // The credential lookup is lazy — it happens when a name actually needs resolving, which is
-        // the delivery patch, not before.
+        // Credential-navnene slås opp før første skriving, så et navn som mangler, feiler før noe er
+        // endret (2026-09-24). Før ble de slått opp først når en patch trengte dem.
         int credentials = Array.FindIndex(paths, p => p.EndsWith("/credentials", StringComparison.Ordinal));
-        Assert.True(credentials >= 0 && credentials < delivery);
+        Assert.True(credentials > listing && credentials < ingress, string.Join(", ", paths));
 
         // Then per queue: apply, policy patch (when declared), delivery patch (when declared).
         Assert.Contains("/queues/que_orders/policy", paths);
@@ -197,6 +197,7 @@ public class DeploymentFileTests
 
         Assert.Contains("No credential named 'partner-key'", ex.Message);
         Assert.Contains("queuey credentials set --name partner-key", ex.Message);
+        Assert.All(api.Requests, r => Assert.Equal(HttpMethod.Get, r.Method));
     }
 
     [Fact]
