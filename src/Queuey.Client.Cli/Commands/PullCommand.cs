@@ -14,14 +14,14 @@ namespace Queuey.Client.Cli;
 /// </summary>
 internal static class PullCommand
 {
-    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal)
-    {
-        "force", "stdout", "json", "help", "h",
-    };
+    internal static readonly CommandOptions Options = new(
+        "pull",
+        flags: new[] { "force", "stdout", "json" },
+        values: new[] { "file", "as", "emit-code", "namespace" });
 
     public static async Task<int> RunAsync(string[] args)
     {
-        ArgMap map = ArgMap.Parse(args, Flags);
+        if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
 
         ResolvedConfig config = CliHost.Resolve(map);
@@ -57,9 +57,8 @@ internal static class PullCommand
         {
             // Overwriting a committed declaration is how you lose an intentional edit that has not
             // been applied yet — that belongs behind an explicit flag, or under a diff.
-            Console.Error.WriteLine($"'{path}' already exists. Re-run with --force to overwrite, "
-                                    + "or --stdout to review the pull first (diff it before you replace anything).");
-            return ExitCodes.Usage;
+            return CliErrors.Usage(map, "file_exists", $"'{path}' already exists.",
+                "Re-run with --force to overwrite, or --stdout to review the pull first (diff it before you replace anything).");
         }
 
         File.WriteAllText(path, json + Environment.NewLine);

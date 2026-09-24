@@ -5,11 +5,11 @@ namespace Queuey.Client.Cli;
 
 internal static class WhoAmICommand
 {
-    private static readonly System.Collections.Generic.HashSet<string> Flags = new(StringComparer.Ordinal) { "json", "help", "h" };
+    internal static readonly CommandOptions Options = new("whoami", flags: new[] { "json" });
 
     public static int Run(string[] args)
     {
-        ArgMap map = ArgMap.Parse(args, Flags);
+        if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
 
         ResolvedConfig config = CliHost.Resolve(map);

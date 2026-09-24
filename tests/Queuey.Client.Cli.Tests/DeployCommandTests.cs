@@ -38,12 +38,12 @@ public sealed class DeployCommandTests : IDisposable
     [Fact]
     public async Task Schema_prints_the_json_schema_without_credentials()
     {
-        var (exit, output) = await Run(() => Task.FromResult(SchemaCommand.Run(Array.Empty<string>())));
+        CliRun run = await CliHarness.RunAsync(() => Task.FromResult(SchemaCommand.Run(Array.Empty<string>())));
 
-        Assert.Equal(ExitCodes.Success, exit);
-        using JsonDocument doc = JsonDocument.Parse(output);
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        using JsonDocument doc = JsonDocument.Parse(run.Stdout);
         Assert.Equal(DeploymentFile.SchemaUrl, doc.RootElement.GetProperty("$id").GetString());
-        Assert.Contains("logOnly", output);
+        Assert.Contains("logOnly", run.Stdout);
     }
 
     [Fact]
@@ -56,11 +56,11 @@ public sealed class DeployCommandTests : IDisposable
             "audit": {} } }
         """);
 
-        var (exit, output) = await Run(() => ApplyCommand.RunAsync(new[] { "--file", path, "--dry-run" }));
+        CliRun run = await CliHarness.RunAsync(() => ApplyCommand.RunAsync(new[] { "--file", path, "--dry-run" }));
 
-        Assert.Equal(ExitCodes.Success, exit);
-        Assert.Contains("orders\tmode=deliver inherits the workspace maxAttempts=5 backoff.jitter=full filter=(all: type eq order.created)", output);
-        Assert.Contains("audit\tmode=(deliver when it has a destination, if new)", output);
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.Contains("orders\tmode=deliver inherits the workspace maxAttempts=5 backoff.jitter=full filter=(all: type eq order.created)", run.Stdout);
+        Assert.Contains("audit\tmode=(deliver when it has a destination, if new)", run.Stdout);
     }
 
     [Fact]
@@ -68,10 +68,10 @@ public sealed class DeployCommandTests : IDisposable
     {
         string path = DeployFile("""{ "queues": { "orders": { "mode": "logOnly", "filter": { "match": "any", "conditions": [] } } } }""");
 
-        var (exit, output) = await Run(() => ApplyCommand.RunAsync(new[] { "--file", path, "--dry-run", "--json" }));
+        CliRun run = await CliHarness.RunAsync(() => ApplyCommand.RunAsync(new[] { "--file", path, "--dry-run", "--json" }));
 
-        Assert.Equal(ExitCodes.Success, exit);
-        JsonElement plan = JsonDocument.Parse(output).RootElement[0];
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        JsonElement plan = JsonDocument.Parse(run.Stdout).RootElement[0];
         Assert.Equal("logOnly", plan.GetProperty("mode").GetString());
         Assert.Equal("any", plan.GetProperty("policy").GetProperty("filter").GetProperty("match").GetString());
     }
@@ -89,44 +89,56 @@ public sealed class DeployCommandTests : IDisposable
     [Fact]
     public async Task Verify_needs_a_queue_and_the_data_to_send()
     {
-        var (noQueue, noQueueOut) = await Run(() => VerifyCommand.RunAsync(Array.Empty<string>()));
-        Assert.Equal(ExitCodes.Usage, noQueue);
-        Assert.Contains("verify requires <queue>", noQueueOut);
+        CliRun noQueue = await CliHarness.RunAsync(() => VerifyCommand.RunAsync(Array.Empty<string>()));
+        Assert.Equal(ExitCodes.Usage, noQueue.Exit);
+        Assert.Contains("verify requires <queue>", noQueue.Stderr);
 
         // Ingen standard-payload: eventen går til den ekte mottakeren.
-        var (noData, noDataOut) = await Run(() => VerifyCommand.RunAsync(new[] { "orders" }));
-        Assert.Equal(ExitCodes.Usage, noData);
-        Assert.Contains("treats as harmless", noDataOut);
+        CliRun noData = await CliHarness.RunAsync(() => VerifyCommand.RunAsync(new[] { "orders" }));
+        Assert.Equal(ExitCodes.Usage, noData.Exit);
+        Assert.Contains("treats as harmless", noData.Stderr);
 
-        var (badTimeout, badTimeoutOut) = await Run(() => VerifyCommand.RunAsync(new[] { "orders", "--data", "{}", "--timeout", "0" }));
-        Assert.Equal(ExitCodes.Usage, badTimeout);
-        Assert.Contains("--timeout takes whole seconds", badTimeoutOut);
+        CliRun badTimeout = await CliHarness.RunAsync(() => VerifyCommand.RunAsync(new[] { "orders", "--data", "{}", "--timeout", "0" }));
+        Assert.Equal(ExitCodes.Usage, badTimeout.Exit);
+        Assert.Contains("--timeout takes whole seconds", badTimeout.Stderr);
     }
+
+    /// <summary>En server som nekter å liste køene, med en foreslått handling.</summary>
+    private static RecordingHandler Refusing() => new(req => req.Key switch
+    {
+        "GET /tenants/ten_abc/queues" => RecordingHandler.Error(HttpStatusCode.Forbidden, "missing_permission",
+            "This key cannot read the workspace's queues.", "Use a key made with the Build profile."),
+        _ => throw new InvalidOperationException(req.Key),
+    });
 
     [Fact]
     public async Task With_json_an_error_is_json_on_stdout_with_its_action()
     {
-        // Gap 5 fra gap-analysen: feil ble skrevet som prosa på stderr også med --json.
-        var (exit, output) = await Run(() => Task.FromResult(CliErrors.Write(
-            new[] { "orders", "--json" }, "filter_required", "Name what to replay.", "Send \"all\": true.", 400,
-            ExitCodes.RuntimeError, "Queuey error")));
+        // Gap 5 fra gap-analysen: feil ble skrevet som prosa på stderr også med --json. Hele veien, fra
+        // kommandolinjen til exit-koden, og stderr er tom — en agent som leser stdout, får bare JSON.
+        string path = DeployFile("""{ "tenant": "ten_abc", "queues": { "orders": {} } }""");
 
-        Assert.Equal(ExitCodes.RuntimeError, exit);
-        JsonElement error = JsonDocument.Parse(output).RootElement.GetProperty("error");
-        Assert.Equal("filter_required", error.GetProperty("code").GetString());
-        Assert.Equal("Send \"all\": true.", error.GetProperty("action").GetString());
-        Assert.Equal(400, error.GetProperty("status").GetInt32());
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path, "--json")), Refusing());
+
+        Assert.Equal(ExitCodes.RuntimeError, run.Exit);
+        Assert.Equal(string.Empty, run.Stderr);
+        JsonElement error = JsonDocument.Parse(run.Stdout).RootElement.GetProperty("error");
+        Assert.Equal("missing_permission", error.GetProperty("code").GetString());
+        Assert.Equal("Use a key made with the Build profile.", error.GetProperty("action").GetString());
+        Assert.Equal(403, error.GetProperty("status").GetInt32());
     }
 
     [Fact]
-    public async Task Without_json_the_action_follows_the_message()
+    public async Task Without_json_the_action_follows_the_message_on_stderr()
     {
-        var (_, output) = await Run(() => Task.FromResult(CliErrors.Write(
-            new[] { "orders" }, "filter_required", "Name what to replay.", "Send \"all\": true.", 400,
-            ExitCodes.RuntimeError, "Queuey error")));
+        string path = DeployFile("""{ "tenant": "ten_abc", "queues": { "orders": {} } }""");
 
-        Assert.Contains("Queuey error: Name what to replay.", output);
-        Assert.Contains("→ Send \"all\": true.", output);
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path)), Refusing());
+
+        Assert.Equal(ExitCodes.RuntimeError, run.Exit);
+        Assert.Equal(string.Empty, run.Stdout);
+        Assert.Contains("Queuey error: This key cannot read the workspace's queues.", run.Stderr);
+        Assert.Contains("→ Use a key made with the Build profile.", run.Stderr);
     }
 
     [Fact]
@@ -168,24 +180,5 @@ public sealed class DeployCommandTests : IDisposable
         """);
 
         Assert.Equal("ten_file", file.ResolveTenant(name => name == "QUEUEY_TENANT_FOR_TEST" ? "ten_file" : null));
-    }
-
-    private static async Task<(int Exit, string Output)> Run(Func<Task<int>> command)
-    {
-        var stdout = new StringWriter();
-        var stderr = new StringWriter();
-        TextWriter originalOut = Console.Out, originalErr = Console.Error;
-        Console.SetOut(stdout);
-        Console.SetError(stderr);
-        try
-        {
-            int exit = await command();
-            return (exit, stdout.ToString() + stderr.ToString());
-        }
-        finally
-        {
-            Console.SetOut(originalOut);
-            Console.SetError(originalErr);
-        }
     }
 }

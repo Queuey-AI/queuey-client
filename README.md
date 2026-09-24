@@ -309,14 +309,17 @@ its path:
 ```bash
 queuey credentials set --name partner-key --from-env PARTNER_KEY
 queuey apply --dry-run     # validates locally, sends nothing
-queuey apply --plan        # asks Queuey what would change and what it would refuse
+queuey plan                # asks Queuey what would change and what it would refuse
 queuey apply
 ```
 
-`--plan` sends every write `apply` would make as a server-side dry run (`?dryRun=true`), so the answer
-comes from Queuey: each value that would change, and each refusal — a retention cap, a queue limit, a
-bad value — with what to do about it. Nothing is written, and it exits non-zero if anything would be
-refused. A queue that does not exist yet shows as one that would be created.
+`queuey plan` sends every write `apply` would make as a server-side dry run (`?dryRun=true`), so the
+answer comes from Queuey: each value that would change, and each refusal — a retention cap, a queue
+limit, a bad value — with what to do about it. Nothing is written, and it exits non-zero if anything
+would be refused. A queue that does not exist yet shows as one that would be created. It is a verb of
+its own rather than an `apply` flag, so a CLI too old to know it answers "Unknown command" instead of
+running the apply you meant to plan. For the same reason every command rejects an option it does not
+take — a typo like `--paln` fails with exit 2 and the options that command accepts.
 
 A relative `url` appends to the workspace base, so moving hosts is one edit instead of N. An absolute
 URL overrides outright. A queue with no `delivery` block inherits — the shape to reach for.
@@ -549,7 +552,7 @@ carries the per-flag detail this table leaves out.
 | --- | --- |
 | `apply` | Converge a workspace from `queuey.deploy.json` — the deploy verb |
 | `apply --dry-run` | Validate the file locally. No credentials, no network, nothing sent |
-| `apply --plan` | Ask Queuey what apply would change and refuse, as dry runs. Writes nothing |
+| `plan` | Ask Queuey what apply would change and refuse, as dry runs. Writes nothing |
 | `apply --check` | Report drift and exit non-zero. Read-only — the CI gate |
 | `verify <queue>` | Publish one event and follow it: delivered, or why not and what to change |
 | `schema` | Print the deployment file's JSON Schema. No credentials, no network |
@@ -587,7 +590,7 @@ A stable contract, so CI can branch on them:
 | --- | --- |
 | `0` | Success — and for `--check`, no drift |
 | `1` | The run did not fully converge, or `--check` found drift |
-| `2` | Bad arguments |
+| `2` | Bad arguments — among them an option the command does not take |
 | `3` | Missing or invalid credentials / configuration (including an unset `${VAR}`) |
 | `4` | The target assembly could not be loaded |
 
@@ -598,7 +601,7 @@ A stable contract, so CI can branch on them:
 ```bash
 queuey credentials set --name partner-key --from-env PARTNER_KEY
 queuey apply --dry-run            # catch typos with no credentials and no network
-queuey apply --plan               # what would change, and would Queuey accept it?
+queuey plan                       # what would change, and would Queuey accept it?
 queuey apply
 queuey verify orders --data '{"type":"order.created","test":true}'   # did it arrive?
 ```

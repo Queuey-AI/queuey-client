@@ -5,7 +5,8 @@ namespace Queuey.Client.Cli;
 
 /// <summary>
 /// The workspace a deployment command acts on — one rule for <c>apply</c> (with <c>--check</c> and
-/// <c>--dry-run</c>) and <c>verify</c>, so a verification reaches the workspace the apply wrote to.
+/// <c>--dry-run</c>), <c>plan</c> and <c>verify</c>, so a plan and a verification reach the workspace
+/// the apply writes to.
 /// </summary>
 /// <remarks>
 /// The deployment file's <c>tenant</c> when it names one, otherwise the configured tenant: the flag,

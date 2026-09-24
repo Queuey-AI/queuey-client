@@ -13,6 +13,7 @@ COMMANDS
   sync           Apply every [QueueyModel] stream found in an assembly (PUT /waas/streams).
   queue          Declare queues from [QueueyQueue] types: queue plan | queue sync.
   apply          Converge Queuey from a declarative deployment file (queuey.deploy.json).
+  plan           Ask Queuey what apply would change and refuse, as dry runs. Writes nothing.
   verify         Publish one event to a queue and follow it: delivered, or why not and what to change.
   schema         Print the JSON Schema for queuey.deploy.json. Reads nothing, needs no credentials.
   pull           Read a workspace back into a deployment file (the inverse of apply).
@@ -73,19 +74,14 @@ QUEUE
                  accepts events and logs them without delivering until an endpoint is set.
 
 APPLY
-  queuey apply [--file queuey.deploy.json] [--dry-run] [--plan] [--check] [--continue-on-error] [--json]
+  queuey apply [--file queuey.deploy.json] [--dry-run] [--check] [--continue-on-error] [--json]
                  Converges the workspace's delivery defaults, then each declared queue's
                  behaviour and destination. Idempotent; exits non-zero unless it fully
-                 converged. --dry-run validates the file locally and sends nothing.
+                 converged. --dry-run validates the file locally and sends nothing. To ask
+                 Queuey what it would change first, run `queuey plan`.
                  The file carries NO secrets: auth and signing name a credentialRef, so it is
                  meant to be committed. Keep it separate from queuey.json, which holds your
                  API key and must not be.
-                 --plan asks Queuey itself: every write apply would send goes as a dry run
-                 (?dryRun=true), so it shows each value that would change and every refusal
-                 Queuey would give — retention caps, queue limits, bad values — with what to
-                 do about it. Writes nothing; exits non-zero if anything would be refused.
-                 Needs the key apply needs. A queue that does not exist yet shows as one
-                 that would be created.
                  --check writes nothing and exits non-zero when the file and the workspace
                  have diverged — the CI gate. Only what the file declares is compared, so a
                  workspace holding settings the file is silent about is not drift.
@@ -100,7 +96,20 @@ APPLY
                  values it accepts.
                  The workspace is the file's ""tenant"" when it names one, else --tenant /
                  QUEUEY_TENANT / queuey.json. When --tenant or QUEUEY_TENANT names another
-                 workspace than the file, apply fails and names both. verify uses the same rule.
+                 workspace than the file, apply fails and names both. plan and verify use the
+                 same rule.
+
+PLAN
+  queuey plan [--file queuey.deploy.json] [--json]
+                 Asks Queuey itself what apply would do: every write apply would send goes as
+                 a dry run (?dryRun=true), so it shows each value that would change and every
+                 refusal Queuey would give — retention caps, queue limits, bad values — with
+                 what to do about it. Writes nothing; exits non-zero if anything would be
+                 refused. Needs the key apply needs. A queue that does not exist yet shows as
+                 one that would be created. A Queuey API without dry runs is found out before
+                 anything else is sent, and planning stops there.
+                 A verb and not an apply flag on purpose: a CLI too old to know it answers
+                 ""Unknown command"" instead of running the apply you meant to plan.
 
 VERIFY
   queuey verify <queue> (--data <json> | --file <path> | --stdin)
@@ -241,6 +250,7 @@ WHOAMI
   queuey whoami [--json]
 
 GLOBAL OPTIONS (all commands)
+  An option a command does not take fails it (exit 2) and lists the ones it does.
   --api-base <uri>                Control-plane (API) host (default: https://api.queuey.ai).
                                   Set it to point at a locally-running instance, e.g. for testing.
   --ingress-base <uri>            Ingress (publish) host (default: https://ingress.queuey.ai).

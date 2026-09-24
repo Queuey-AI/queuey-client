@@ -16,7 +16,10 @@ namespace Queuey.Client.Cli;
 /// </summary>
 internal static class CredentialsCommand
 {
-    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal) { "json", "help", "h" };
+    internal static readonly CommandOptions SetOptions = new(
+        "credentials set", flags: new[] { "json" }, values: new[] { "name", "from-env", "type", "key-id", "username" });
+
+    internal static readonly CommandOptions ListOptions = new("credentials list", flags: new[] { "json" });
 
     /// <summary>The credential types Queuey stores. Mirrors the server's <c>CredentialType</c>.</summary>
     private static readonly string[] CredentialTypes =
@@ -35,54 +38,41 @@ internal static class CredentialsCommand
             "set" => await SetAsync(rest),
             "list" => await ListAsync(rest),
             "" or "-h" or "--help" or "help" => Help(),
-            _ => Unknown(sub),
+            _ => Unknown(sub, rest),
         };
     }
 
     private static int Help() { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
 
-    private static int Unknown(string sub)
-    {
-        Console.Error.WriteLine($"Unknown credentials subcommand '{sub}'. Expected 'set' or 'list'.");
-        return ExitCodes.Usage;
-    }
+    private static int Unknown(string sub, string[] rest)
+        => CliErrors.Write(CliErrors.WantsJson(rest), "unknown_subcommand",
+            $"Unknown credentials subcommand '{sub}'. Expected 'set' or 'list'.", action: null, status: null, ExitCodes.Usage);
 
     private static async Task<int> SetAsync(string[] args)
     {
-        ArgMap map = ArgMap.Parse(args, Flags);
+        if (!SetOptions.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) return Help();
 
         string? name = map.Get("name");
         if (string.IsNullOrWhiteSpace(name))
-        {
-            Console.Error.WriteLine("credentials set requires --name <name>.");
-            return ExitCodes.Usage;
-        }
+            return CliErrors.Usage(map, "missing_argument", "credentials set requires --name <name>.");
 
         // The secret comes from an environment variable, never an argument: a command line lands in
         // shell history and in CI logs, and a delivery secret in either is a leak.
         string? fromEnv = map.Get("from-env");
         if (string.IsNullOrWhiteSpace(fromEnv))
-        {
-            Console.Error.WriteLine("credentials set requires --from-env <ENV_VAR> — the secret is read from the environment, "
-                                    + "never passed as an argument (arguments land in shell history and CI logs).");
-            return ExitCodes.Usage;
-        }
+            return CliErrors.Usage(map, "missing_argument",
+                "credentials set requires --from-env <ENV_VAR> — the secret is read from the environment, "
+                + "never passed as an argument (arguments land in shell history and CI logs).");
 
         string? secret = Environment.GetEnvironmentVariable(fromEnv!);
         if (string.IsNullOrEmpty(secret))
-        {
-            Console.Error.WriteLine($"Environment variable '{fromEnv}' is not set or is empty.");
-            return ExitCodes.Configuration;
-        }
+            return CliErrors.Configuration(map, "config_error", $"Environment variable '{fromEnv}' is not set or is empty.");
 
         ResolvedConfig config = CliHost.Resolve(map);
         string? tenant = config.TenantPublicId;
         if (string.IsNullOrWhiteSpace(tenant))
-        {
-            Console.Error.WriteLine("A tenant is required. Set --tenant, QUEUEY_TENANT, or tenant in queuey.json.");
-            return ExitCodes.Configuration;
-        }
+            return CliErrors.Configuration(map, "config_error", "A tenant is required. Set --tenant, QUEUEY_TENANT, or tenant in queuey.json.");
 
         using ServiceProvider provider = CliHost.BuildProvider(config);
         var service = provider.GetRequiredService<IQueueyService>();
@@ -92,10 +82,7 @@ internal static class CredentialsCommand
         // unknown type came back as a bare 400 with the useful half of the sentence stripped.
         string type = map.Get("type") ?? "ApiKeyHeader";
         if (Array.IndexOf(CredentialTypes, type) < 0)
-        {
-            Console.Error.WriteLine($"Unknown credential type '{type}'. Expected one of: {string.Join(", ", CredentialTypes)}.");
-            return ExitCodes.Usage;
-        }
+            return CliErrors.Usage(map, "invalid_value", $"Unknown credential type '{type}'. Expected one of: {string.Join(", ", CredentialTypes)}.");
 
         CredentialResult created = await service.Management.CreateCredentialAsync(
             tenant!, name!, type, secret,
@@ -112,16 +99,13 @@ internal static class CredentialsCommand
 
     private static async Task<int> ListAsync(string[] args)
     {
-        ArgMap map = ArgMap.Parse(args, Flags);
+        if (!ListOptions.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) return Help();
 
         ResolvedConfig config = CliHost.Resolve(map);
         string? tenant = config.TenantPublicId;
         if (string.IsNullOrWhiteSpace(tenant))
-        {
-            Console.Error.WriteLine("A tenant is required. Set --tenant, QUEUEY_TENANT, or tenant in queuey.json.");
-            return ExitCodes.Configuration;
-        }
+            return CliErrors.Configuration(map, "config_error", "A tenant is required. Set --tenant, QUEUEY_TENANT, or tenant in queuey.json.");
 
         using ServiceProvider provider = CliHost.BuildProvider(config);
         var service = provider.GetRequiredService<IQueueyService>();

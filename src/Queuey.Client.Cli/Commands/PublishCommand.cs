@@ -12,27 +12,25 @@ namespace Queuey.Client.Cli;
 
 internal static class PublishCommand
 {
-    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal) { "stdin", "json", "help", "h" };
+    internal static readonly CommandOptions Options = new(
+        "publish",
+        flags: new[] { "stdin", "json" },
+        values: new[] { "event", "key", "data", "file", "idempotency-key", "stream" },
+        positionals: 1);
 
     public static async Task<int> RunAsync(string[] args)
     {
-        ArgMap map = ArgMap.Parse(args, Flags);
+        if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
 
         string? stream = map.FirstPositional ?? map.Get("stream");
         string? eventType = map.Get("event");
         if (string.IsNullOrWhiteSpace(stream) || string.IsNullOrWhiteSpace(eventType))
-        {
-            Console.Error.WriteLine("publish requires <stream> and --event <type>.");
-            return ExitCodes.Usage;
-        }
+            return CliErrors.Usage(map, "missing_argument", "publish requires <stream> and --event <type>.");
 
-        byte[]? body = ReadBody(map, out string? bodyError);
+        byte[]? body = ReadBody(map, out string? bodyCode, out string? bodyError);
         if (bodyError != null)
-        {
-            Console.Error.WriteLine(bodyError);
-            return ExitCodes.Usage;
-        }
+            return CliErrors.Usage(map, bodyCode!, bodyError);
 
         ResolvedConfig config = CliHost.Resolve(map);
         using ServiceProvider provider = CliHost.BuildProvider(config);
@@ -58,9 +56,9 @@ internal static class PublishCommand
         return ExitCodes.Success;
     }
 
-    private static byte[]? ReadBody(ArgMap map, out string? error)
+    private static byte[]? ReadBody(ArgMap map, out string? code, out string? error)
     {
-        error = null;
+        code = error = null;
 
         if (map.Has("stdin"))
             return Encoding.UTF8.GetBytes(Console.In.ReadToEnd());
@@ -68,7 +66,7 @@ internal static class PublishCommand
         string? file = map.Get("file");
         if (!string.IsNullOrWhiteSpace(file))
         {
-            if (!File.Exists(file)) { error = $"File not found: {file}"; return null; }
+            if (!File.Exists(file)) { code = "missing_file"; error = $"File not found: {file}"; return null; }
             return File.ReadAllBytes(file);
         }
 
@@ -76,6 +74,7 @@ internal static class PublishCommand
         if (data != null)
             return Encoding.UTF8.GetBytes(data);
 
+        code = "missing_body";
         error = "publish requires a body: --data <json>, --file <path>, or --stdin.";
         return null;
     }

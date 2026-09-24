@@ -16,24 +16,23 @@ namespace Queuey.Client.Cli;
 /// </summary>
 internal static class ApplyCommand
 {
-    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal)
-    {
-        "dry-run", "check", "plan", "continue-on-error", "json", "help", "h",
-    };
+    // --plan ble et eget verb (2026-09-24): et verb en eldre CLI ikke kjenner, feiler i alle versjoner,
+    // mens `apply --plan` i en CLI fra før flagget var en ekte apply. Ordet får et hint i stedet.
+    internal static readonly CommandOptions Options = new(
+        "apply",
+        flags: new[] { "dry-run", "check", "continue-on-error", "json" },
+        values: new[] { "file" },
+        hints: new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["plan"] = "`apply --plan` is now `queuey plan`: it asks Queuey what apply would change, and writes nothing.",
+        });
 
     public static async Task<int> RunAsync(string[] args)
     {
-        ArgMap map = ArgMap.Parse(args, Flags);
+        if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
 
-        string path = map.Get("file") ?? DeploymentFile.DefaultFileName;
-        if (!File.Exists(path))
-        {
-            Console.Error.WriteLine($"No deployment file at '{path}'. Create one, or pass --file <path>.");
-            return ExitCodes.Usage;
-        }
-
-        DeploymentFile file = DeploymentFile.Parse(File.ReadAllText(path));
+        if (!TryReadDeploymentFile(map, out string path, out DeploymentFile file, out failure)) return failure;
         bool dryRun = map.Has("dry-run");
 
         if (dryRun)
@@ -63,9 +62,6 @@ internal static class ApplyCommand
         if (map.Has("check"))
             return await CheckAsync(service, file, path, map);
 
-        if (map.Has("plan"))
-            return await PlanAsync(service, file, path, config, map);
-
         QueueSyncResult result;
         try
         {
@@ -84,6 +80,26 @@ internal static class ApplyCommand
             WriteHuman(result, path, config, tenant);
 
         return result.AllSucceeded ? ExitCodes.Success : ExitCodes.RuntimeError;
+    }
+
+    /// <summary>
+    /// The deployment file named by <c>--file</c>, or <c>queuey.deploy.json</c> here. A missing file is
+    /// a usage error, written the way the caller asked for errors.
+    /// </summary>
+    internal static bool TryReadDeploymentFile(ArgMap map, out string path, out DeploymentFile file, out int failure)
+    {
+        path = map.Get("file") ?? DeploymentFile.DefaultFileName;
+        file = null!;
+        failure = ExitCodes.Success;
+
+        if (!File.Exists(path))
+        {
+            failure = CliErrors.Usage(map, "missing_file", $"No deployment file at '{path}'.", "Create one, or pass --file <path>.");
+            return false;
+        }
+
+        file = DeploymentFile.Parse(File.ReadAllText(path));
+        return true;
     }
 
     /// <summary>
@@ -116,61 +132,6 @@ internal static class ApplyCommand
         }
 
         return drift.Count == 0 ? ExitCodes.Success : ExitCodes.RuntimeError;
-    }
-
-    /// <summary>
-    /// The server-side plan: every write apply would send, sent as a dry run, so the answer is what
-    /// Queuey would accept and change — not only what the file says locally. Exits non-zero when
-    /// any write would be refused.
-    /// </summary>
-    private static async Task<int> PlanAsync(IQueueyService service, DeploymentFile file, string path, ResolvedConfig config, ArgMap map)
-    {
-        DeploymentPlan plan = await service.PlanDeploymentAsync(file);
-
-        if (map.Has("json"))
-        {
-            Console.WriteLine(JsonSerializer.Serialize(new
-            {
-                file = path,
-                tenant = plan.Tenant,
-                wouldSucceed = plan.WouldSucceed,
-                changeCount = plan.ChangeCount,
-                steps = plan.Steps.Select(s => new
-                {
-                    target = s.Target,
-                    aspect = s.Aspect,
-                    creates = s.Creates,
-                    changes = s.Changes.Select(c => new { path = c.Path, from = c.From, to = c.To }),
-                    notes = s.Notes,
-                    error = s.Error is null ? null : new { code = s.Error.ErrorCode, message = s.Error.Message, action = s.Error.SuggestedAction, status = s.Error.StatusCode },
-                }),
-            }, CliHost.JsonOut));
-            return plan.WouldSucceed ? ExitCodes.Success : ExitCodes.RuntimeError;
-        }
-
-        Console.WriteLine($"Queuey apply --plan — {path} → {config.ResolvedApiBase()}  (tenant {plan.Tenant})");
-        foreach (DeploymentPlanStep step in plan.Steps)
-        {
-            bool quiet = step.Error is null && !step.Creates && step.Changes.Count == 0 && step.Notes.Count == 0;
-            Console.WriteLine($"  {step.Target} · {step.Aspect}{(quiet ? "  (no change)" : "")}");
-            if (step.Creates)
-                Console.WriteLine("      + would be created");
-            foreach (PlannedChange change in step.Changes)
-                Console.WriteLine($"      ~ {change}");
-            foreach (string note in step.Notes)
-                Console.WriteLine($"      · {note}");
-            if (step.Error is { } error)
-            {
-                Console.WriteLine($"      ✗ {error.ErrorCode ?? "refused"}: {error.Message}");
-                if (error.SuggestedAction is { } action)
-                    Console.WriteLine($"        → {action}");
-            }
-        }
-
-        int refusals = plan.Steps.Count(s => s.Error is not null);
-        Console.WriteLine($"{plan.ChangeCount} change(s), {refusals} refusal(s). Nothing was changed."
-                          + (refusals > 0 ? " Fix the refusals, then plan again." : ""));
-        return plan.WouldSucceed ? ExitCodes.Success : ExitCodes.RuntimeError;
     }
 
     private static void WritePlan(string path, DeploymentFile file, IReadOnlyList<DeploymentQueuePlan> plans)
