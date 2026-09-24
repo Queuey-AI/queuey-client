@@ -62,8 +62,6 @@ internal sealed class DeploymentPuller
             MaxAttempts = config.Policy?.MaxAttempts,
             DlqAfterAttempts = config.Policy?.DlqAfterAttempts,
             Backoff = config.Policy?.Backoff?.ToModel(),
-            RetryOnNetworkErrors = config.Policy?.RetryOnNetworkErrors,
-            RetryOnTimeouts = config.Policy?.RetryOnTimeouts,
             Ingress = ToIngress(config.Ingress, effective),
         };
 
@@ -135,8 +133,6 @@ internal sealed class DeploymentPuller
             queue.MaxAttempts = p.MaxAttempts;
             queue.DlqAfterAttempts = p.DlqAfterAttempts;
             queue.Backoff = p.Backoff?.ToModel();
-            queue.RetryOnNetworkErrors = p.RetryOnNetworkErrors;
-            queue.RetryOnTimeouts = p.RetryOnTimeouts;
             queue.Filter = p.Filter?.ToModel();
         }
 
@@ -163,8 +159,6 @@ internal sealed class DeploymentPuller
             declared.Idempotent = DifferentOrNull(p.Idempotent, baseline?.Idempotent);
             declared.MaxAttempts = DifferentOrNull(p.MaxAttempts, baseline?.MaxAttempts);
             declared.DlqAfterAttempts = DifferentOrNull(p.DlqAfterAttempts, baseline?.DlqAfterAttempts);
-            declared.RetryOnNetworkErrors = DifferentOrNull(p.RetryOnNetworkErrors, baseline?.RetryOnNetworkErrors);
-            declared.RetryOnTimeouts = DifferentOrNull(p.RetryOnTimeouts, baseline?.RetryOnTimeouts);
 
             // Backoff and filter are small objects: written whole when they differ, left out when equal.
             if (p.Backoff is { } backoff && !SameBackoff(backoff, baseline?.Backoff))

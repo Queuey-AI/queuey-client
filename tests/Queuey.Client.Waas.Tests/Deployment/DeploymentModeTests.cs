@@ -215,7 +215,6 @@ public class DeploymentModeTests
         { "queues": { "orders": {
             "maxAttempts": 8, "dlqAfterAttempts": 6,
             "backoff": { "baseDelayMs": 500, "maxDelayMs": 60000, "jitter": "full" },
-            "retryOnNetworkErrors": true, "retryOnTimeouts": false,
             "filter": { "match": "any", "conditions": [
               { "field": "type", "op": "eq", "value": "order.created" },
               { "field": "priority", "op": "exists" } ] } } } }
@@ -226,8 +225,6 @@ public class DeploymentModeTests
         Assert.Equal(6, policy.GetProperty("dlqAfterAttempts").GetInt32());
         Assert.Equal(500, policy.GetProperty("backoff").GetProperty("baseDelayMs").GetInt32());
         Assert.Equal("full", policy.GetProperty("backoff").GetProperty("jitter").GetString());
-        Assert.True(policy.GetProperty("retryOnNetworkErrors").GetBoolean());
-        Assert.False(policy.GetProperty("retryOnTimeouts").GetBoolean());
 
         JsonElement filter = policy.GetProperty("filter");
         Assert.Equal("any", filter.GetProperty("match").GetString());

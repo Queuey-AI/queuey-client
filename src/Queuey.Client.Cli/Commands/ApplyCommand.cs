@@ -120,7 +120,7 @@ internal static class ApplyCommand
             var parts = new List<string>();
             if (w.Ordering is not null) parts.Add($"ordering={w.Ordering}");
             if (w.RetentionDays is { } days) parts.Add($"retentionDays={days}");
-            parts.AddRange(Retry(w.MaxAttempts, w.DlqAfterAttempts, w.Backoff, w.RetryOnNetworkErrors, w.RetryOnTimeouts));
+            parts.AddRange(Retry(w.MaxAttempts, w.DlqAfterAttempts, w.Backoff));
             if (w.Ingress?.AuthMode is { } auth) parts.Add($"ingressAuth={auth}");
             if (w.Ingress?.EventType is { } et) parts.Add($"eventType={et.From}:{et.Name}");
             if (w.Ingress?.GroupKey is { } gk) parts.Add($"groupKey={gk.From}:{gk.Name}");
@@ -144,7 +144,7 @@ internal static class ApplyCommand
             };
             QueuePolicy policy = p.Definition.Policy;
             if (policy.Ordering is not null) parts.Add($"ordering={policy.Ordering}");
-            parts.AddRange(Retry(policy.MaxAttempts, policy.DlqAfterAttempts, policy.Backoff, policy.RetryOnNetworkErrors, policy.RetryOnTimeouts));
+            parts.AddRange(Retry(policy.MaxAttempts, policy.DlqAfterAttempts, policy.Backoff));
             if (policy.Filter is { } filter) parts.Add($"filter=({filter})");
 
             Console.WriteLine($"  • {p.Definition.Name}\t{string.Join(" ", parts)}");
@@ -153,7 +153,7 @@ internal static class ApplyCommand
         Console.WriteLine($"{plans.Count} queue(s) declared. Nothing was sent.");
     }
 
-    private static IEnumerable<string> Retry(int? maxAttempts, int? dlqAfterAttempts, RetryBackoff? backoff, bool? onNetwork, bool? onTimeouts)
+    private static IEnumerable<string> Retry(int? maxAttempts, int? dlqAfterAttempts, RetryBackoff? backoff)
     {
         if (maxAttempts is { } max) yield return $"maxAttempts={max}";
         if (dlqAfterAttempts is { } dlq) yield return $"dlqAfterAttempts={dlq}";
@@ -163,8 +163,6 @@ internal static class ApplyCommand
             if (b.MaxDelayMs is { } maxMs) yield return $"backoff.maxDelayMs={maxMs}";
             if (b.Jitter is { } jitter) yield return $"backoff.jitter={jitter}";
         }
-        if (onNetwork is { } n) yield return $"retryOnNetworkErrors={(n ? "true" : "false")}";
-        if (onTimeouts is { } t) yield return $"retryOnTimeouts={(t ? "true" : "false")}";
     }
 
     private static void WriteHuman(QueueSyncResult result, string path, ResolvedConfig config, string? tenant)
@@ -208,8 +206,6 @@ internal static class ApplyCommand
             p.Definition.Policy.MaxAttempts,
             p.Definition.Policy.DlqAfterAttempts,
             backoff = p.Definition.Policy.Backoff is { } b ? new { b.BaseDelayMs, b.MaxDelayMs, b.Jitter } : null,
-            p.Definition.Policy.RetryOnNetworkErrors,
-            p.Definition.Policy.RetryOnTimeouts,
             filter = p.Definition.Policy.Filter is { } f
                 ? new { match = f.Match ?? "all", conditions = f.Conditions.Select(c => new { c.Field, c.Op, c.Value }) }
                 : null,

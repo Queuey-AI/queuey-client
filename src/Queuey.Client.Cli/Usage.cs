@@ -89,9 +89,9 @@ APPLY
                  delivery.url or workspace.delivery.baseUrl) and logs events until it has one.
                  Declare ""mode"": ""deliver"" or ""logOnly"" to own it; an existing queue keeps its
                  mode otherwise. Pausing is an operator's lever: a deploy never resumes a queue.
-                 Retry (maxAttempts, dlqAfterAttempts, backoff, retryOnNetworkErrors,
-                 retryOnTimeouts) and a delivery filter are declared per workspace or queue;
-                 `queuey schema` lists every field and the values it accepts.
+                 Retry (maxAttempts, dlqAfterAttempts, backoff) and a delivery filter are
+                 declared per workspace or queue; `queuey schema` lists every field and the
+                 values it accepts.
 
 VERIFY
   queuey verify <queue> (--data <json> | --file <path> | --stdin)

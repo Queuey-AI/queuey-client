@@ -91,8 +91,6 @@ internal sealed class PatchTenantPolicyWireRequest
     public int? MaxAttempts { get; set; }
     public int? DlqAfterAttempts { get; set; }
     public RetryBackoffWire? Backoff { get; set; }
-    public bool? RetryOnNetworkErrors { get; set; }
-    public bool? RetryOnTimeouts { get; set; }
 }
 
 internal sealed class IngressResponse

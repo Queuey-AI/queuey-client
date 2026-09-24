@@ -152,8 +152,6 @@ internal sealed class QueueyManagement : IQueueyManagement
             MaxAttempts = policy.MaxAttempts,
             DlqAfterAttempts = policy.DlqAfterAttempts,
             Backoff = RetryBackoffWire.From(policy.Backoff),
-            RetryOnNetworkErrors = policy.RetryOnNetworkErrors,
-            RetryOnTimeouts = policy.RetryOnTimeouts,
         }, cancellationToken);
     }
 

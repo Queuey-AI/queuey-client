@@ -75,6 +75,20 @@ public class DeploymentFileTests
         Assert.Contains("maxAttemps", ex.Message);
     }
 
+    [Theory]
+    [InlineData("""{ "queues": { "orders": { "retryOnTimeouts": false } } }""", "retryOnTimeouts")]
+    [InlineData("""{ "queues": { "orders": { "retryOnNetworkErrors": true } } }""", "retryOnNetworkErrors")]
+    [InlineData("""{ "workspace": { "retryOnTimeouts": false }, "queues": {} }""", "retryOnTimeouts")]
+    [InlineData("""{ "workspace": { "retryOnNetworkErrors": true }, "queues": {} }""", "retryOnNetworkErrors")]
+    public void The_retry_flags_that_never_took_effect_are_unknown_fields(string json, string field)
+    {
+        // Serveren lagret dem, men workeren leste dem aldri (review 2026-09-24), og de ble aldri
+        // sluppet. En fil som har dem, lover noe som ikke skjer — den avvises som alle ukjente felt.
+        var ex = Assert.Throws<QueueyConfigurationException>(() => DeploymentFile.Parse(json));
+
+        Assert.Contains(field, ex.Message);
+    }
+
     [Fact]
     public void An_invalid_queue_name_fails_when_the_file_is_resolved()
     {

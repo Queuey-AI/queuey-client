@@ -680,8 +680,6 @@ public sealed class QueueyService : IQueueyService
         MaxAttempts = policy.MaxAttempts,
         DlqAfterAttempts = policy.DlqAfterAttempts,
         Backoff = RetryBackoffWire.From(policy.Backoff),
-        RetryOnNetworkErrors = policy.RetryOnNetworkErrors,
-        RetryOnTimeouts = policy.RetryOnTimeouts,
         Filter = DeliveryFilterWire.From(policy.Filter),
     };
 

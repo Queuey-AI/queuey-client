@@ -19,7 +19,6 @@ public class EffectiveCheckTests
         idempotent = false, dlqEnabled = true, retentionDays = 7, ordering, maxAttempts,
         dlqAfterAttempts = 6,
         backoff = new { baseDelayMs = 1000, maxDelayMs = 60000, jitter = "full" },
-        retryOnNetworkErrors = true, retryOnTimeouts = true,
         filter,
     };
 
@@ -55,7 +54,7 @@ public class EffectiveCheckTests
         IReadOnlyList<DriftItem> drift = await Check(Workspace(), """
         { "tenant": "ten_abc", "queues": { "orders": {
             "ordering": "fifo", "maxAttempts": 8, "dlqAfterAttempts": 6,
-            "backoff": { "baseDelayMs": 1000, "jitter": "full" }, "retryOnTimeouts": true } } }
+            "backoff": { "baseDelayMs": 1000, "jitter": "full" } } } }
         """);
 
         Assert.Empty(drift);

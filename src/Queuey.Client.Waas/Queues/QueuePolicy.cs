@@ -38,12 +38,6 @@ public sealed class QueuePolicy
     /// <summary>How long to wait between attempts.</summary>
     public RetryBackoff? Backoff { get; set; }
 
-    /// <summary>Whether a network error (no response at all) is retried.</summary>
-    public bool? RetryOnNetworkErrors { get; set; }
-
-    /// <summary>Whether a timeout is retried.</summary>
-    public bool? RetryOnTimeouts { get; set; }
-
     /// <summary>
     /// Which events this queue delivers. Events that do not match are kept as <c>Filtered</c> and
     /// never delivered. An empty condition list delivers everything, which is how a filter is removed.
@@ -54,7 +48,7 @@ public sealed class QueuePolicy
     public bool IsEmpty =>
         Ordering is null && DlqEnabled is null && RetentionDays is null && Idempotent is null
         && MaxAttempts is null && DlqAfterAttempts is null && (Backoff is null || Backoff.IsEmpty)
-        && RetryOnNetworkErrors is null && RetryOnTimeouts is null && Filter is null;
+        && Filter is null;
 
     /// <summary>The ordering values the backend accepts.</summary>
     internal static readonly string[] OrderingValues = { "fifo", "bykey", "besteffort" };
@@ -69,8 +63,6 @@ public sealed class QueuePolicy
         MaxAttempts = overrides.MaxAttempts ?? MaxAttempts,
         DlqAfterAttempts = overrides.DlqAfterAttempts ?? DlqAfterAttempts,
         Backoff = overrides.Backoff ?? Backoff,
-        RetryOnNetworkErrors = overrides.RetryOnNetworkErrors ?? RetryOnNetworkErrors,
-        RetryOnTimeouts = overrides.RetryOnTimeouts ?? RetryOnTimeouts,
         Filter = overrides.Filter ?? Filter,
     };
 
@@ -83,8 +75,6 @@ public sealed class QueuePolicy
         MaxAttempts = MaxAttempts,
         DlqAfterAttempts = DlqAfterAttempts,
         Backoff = Backoff,
-        RetryOnNetworkErrors = RetryOnNetworkErrors,
-        RetryOnTimeouts = RetryOnTimeouts,
         Filter = Filter,
     };
 

@@ -231,7 +231,7 @@ public class PullDesiredStateTests
     private static object Baseline => new
     {
         idempotent = false, dlqEnabled = true, retentionDays = 7, ordering = "fifo", maxAttempts = 8, dlqAfterAttempts = (int?)null,
-        backoff = new { baseDelayMs = 1000, maxDelayMs = 60000, jitter = "full" }, retryOnNetworkErrors = true, retryOnTimeouts = true,
+        backoff = new { baseDelayMs = 1000, maxDelayMs = 60000, jitter = "full" },
     };
 
     private static Task<DeploymentFile> Pull(StubHttpMessageHandler api) => WaasTestHost.Build(apiStub: api).PullDeploymentAsync("ten_abc");
@@ -254,23 +254,27 @@ public class PullDesiredStateTests
         object policy = new
         {
             idempotent = false, dlqEnabled = true, retentionDays = 7, ordering = "fifo", maxAttempts = 3, dlqAfterAttempts = 2,
-            backoff = new { baseDelayMs = 1000, maxDelayMs = 60000, jitter = "full" }, retryOnNetworkErrors = false, retryOnTimeouts = true,
+            backoff = new { baseDelayMs = 1000, maxDelayMs = 60000, jitter = "full" },
             filter = new { match = "any", conditions = new[] { new { field = "type", op = "eq", value = "order.created" } } },
+            // En server fra før Queuey#345 lagret disse, men workeren leste dem aldri. Pull skriver dem
+            // ikke: en fil med dem avvises som ukjent felt.
+            retryOnNetworkErrors = false, retryOnTimeouts = true,
         };
 
-        DeploymentQueue orders = (await Pull(Api("Deliver", true, policy))).Queues["orders"];
+        DeploymentFile pulled = await Pull(Api("Deliver", true, policy));
+        DeploymentQueue orders = pulled.Queues["orders"];
 
         Assert.Equal(3, orders.MaxAttempts);
         Assert.Equal(2, orders.DlqAfterAttempts);
-        Assert.False(orders.RetryOnNetworkErrors);
         Assert.Equal("any: type eq order.created", orders.Filter!.ToString());
 
         // Likt workspacet: utelatt, så det fortsetter å arve.
         Assert.Null(orders.Backoff);
-        Assert.Null(orders.RetryOnTimeouts);
 
         // Og det pull skriver, godtar apply.
-        Assert.Single(DeploymentFile.Parse((await Pull(Api("Deliver", true, policy))).ToJson()).Resolve());
+        string json = pulled.ToJson();
+        Assert.DoesNotContain("retryOn", json, StringComparison.Ordinal);
+        Assert.Single(DeploymentFile.Parse(json).Resolve());
     }
 
     [Theory]

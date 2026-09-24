@@ -420,7 +420,6 @@ success while quietly skipping what you wrote is worse than one that fails.
     "orders": {
       "delivery": { "url": "/orders" },
       "dlqAfterAttempts": 5,                            // …and this one gives up to the DLQ sooner
-      "retryOnTimeouts": false,
       "filter": { "match": "any", "conditions": [
         { "field": "type", "op": "eq", "value": "order.created" },
         { "field": "priority", "op": "exists" } ] }
