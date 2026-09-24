@@ -25,14 +25,23 @@ internal static class CliHarness
 
     public static string[] With(params string[] args) => args.Concat(Connection).ToArray();
 
-    public static async Task<CliRun> RunAsync(Func<Task<int>> command, RecordingHandler? api = null)
+    /// <param name="command">The command to run.</param>
+    /// <param name="api">The test server. Without one, any request fails the test.</param>
+    /// <param name="env">
+    /// The environment the command sees — empty unless given, so a QUEUEY_TENANT in the shell that runs
+    /// the tests cannot change what they test.
+    /// </param>
+    public static async Task<CliRun> RunAsync(
+        Func<Task<int>> command, RecordingHandler? api = null, IReadOnlyDictionary<string, string>? env = null)
     {
         var stdout = new StringWriter();
         var stderr = new StringWriter();
         TextWriter originalOut = Console.Out, originalErr = Console.Error;
+        Func<string, string?> originalEnv = CliHost.Env;
         Console.SetOut(stdout);
         Console.SetError(stderr);
         CliHost.TestHandler = api ?? new RecordingHandler(_ => throw new InvalidOperationException("This test sends nothing."));
+        CliHost.Env = name => env is not null && env.TryGetValue(name, out string? value) ? value : null;
         try
         {
             int exit = await command();
@@ -41,6 +50,7 @@ internal static class CliHarness
         finally
         {
             CliHost.TestHandler = null;
+            CliHost.Env = originalEnv;
             Console.SetOut(originalOut);
             Console.SetError(originalErr);
         }

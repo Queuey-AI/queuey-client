@@ -92,6 +92,9 @@ APPLY
                  Retry (maxAttempts, dlqAfterAttempts, backoff) and a delivery filter are
                  declared per workspace or queue; `queuey schema` lists every field and the
                  values it accepts.
+                 The workspace is the file's ""tenant"" when it names one, else --tenant /
+                 QUEUEY_TENANT / queuey.json. When --tenant or QUEUEY_TENANT names another
+                 workspace than the file, apply fails and names both. verify uses the same rule.
 
 VERIFY
   queuey verify <queue> (--data <json> | --file <path> | --stdin)
@@ -104,9 +107,11 @@ VERIFY
                  credential the receiver rejected, or the earlier event holding an ordered
                  queue. A failure is reported on its first attempt, not after every retry.
                  The event is real and reaches the receiver like any other: send data it
-                 treats as harmless. The workspace is the one apply wrote to: --tenant, else
-                 the deployment file's tenant, else your config. Needs a key that may publish
-                 and read events; a deploy key can.
+                 treats as harmless. The workspace follows apply's rule: the deployment file's
+                 ""tenant"" (--deployment, default ./queuey.deploy.json) when it names one, else
+                 --tenant / QUEUEY_TENANT / queuey.json; when --tenant or QUEUEY_TENANT names
+                 another workspace than the file, verify fails and names both. The output names
+                 the workspace. Needs a key that may publish and read events; a deploy key can.
 
 SCHEMA
   queuey schema

@@ -63,6 +63,9 @@ public sealed class VerifyDeliveryOptions
 /// </summary>
 public sealed class DeliveryVerification
 {
+    /// <summary>The workspace (<c>ten_…</c>) the event was published to.</summary>
+    public string? Tenant { get; init; }
+
     /// <summary>The queue name that was published to.</summary>
     public string Queue { get; init; } = default!;
 
@@ -213,7 +216,7 @@ internal static class DeliveryVerifier
             }
 
             if (last is not null && IsSettled(last))
-                return Judge(queueName, published, last, null, options.Timeout);
+                return Judge(queueName, published, last, null, options.Timeout, tenant: tenantPublicId);
 
             if (clock.Elapsed + options.PollInterval > options.Timeout)
                 break;
@@ -255,7 +258,7 @@ internal static class DeliveryVerifier
             }
         }
 
-        return Judge(queueName, published, last, row, options.Timeout, blocker);
+        return Judge(queueName, published, last, row, options.Timeout, blocker, tenantPublicId);
     }
 
     /// <summary>
@@ -272,7 +275,7 @@ internal static class DeliveryVerifier
 
     internal static DeliveryVerification Judge(
         string queue, PublishResult published, EventDetailsResponse? e, QueueListItem? queueRow, TimeSpan timeout,
-        EventDetailsResponse? blocker = null)
+        EventDetailsResponse? blocker = null, string? tenant = null)
     {
         EventAttemptResponse? attempt = e?.Attempts?.OrderByDescending(a => a.AttemptNumber).FirstOrDefault();
         string? status = e?.StatusName;
@@ -280,6 +283,7 @@ internal static class DeliveryVerifier
 
         DeliveryVerification Result(DeliveryVerdict verdict, string summary, string? action) => new()
         {
+            Tenant = tenant,
             Queue = queue,
             QueuePublicId = published.QueuePublicId,
             EventId = published.EventId,

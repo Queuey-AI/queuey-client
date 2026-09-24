@@ -453,7 +453,7 @@ queuey verify orders --data '{"type":"order.created","test":true}'
 ```
 
 ```text
-✓ Delivered — orders (que_…), event evt_…
+✓ Delivered — orders (que_…) in ten_…, event evt_…
   Delivered to https://hooks.example.com/orders: 200 in 38 ms.
 ```
 
@@ -463,8 +463,11 @@ the credential the receiver rejected, or the earlier event that holds an ordered
 reported on its first attempt rather than after every retry.
 
 The event is real: the receiver gets it like any other, so send data it treats as harmless. `verify`
-uses the workspace `apply` wrote to — `--tenant`, else the deployment file's `tenant`, else your
-config — and needs a key that may publish and read events. A deploy key can.
+and `apply` pick the workspace by the same rule: the deployment file's `tenant` when it names one,
+otherwise `--tenant`, `QUEUEY_TENANT` or `queuey.json`. When `--tenant` or `QUEUEY_TENANT` names
+another workspace than the file, both commands fail and name the two, rather than guessing which
+one you meant. The output names the workspace. `verify` needs a key that may publish and read
+events. A deploy key can.
 
 ### The schema
 
@@ -714,7 +717,9 @@ queuey replay evt_… --api-key qak_… --queue que_…
 
 ### Configuration
 
-Every command resolves settings as **flag → environment variable → `queuey.json` → default**:
+Every command resolves settings as **flag → environment variable → `queuey.json` → default**. The
+one exception is the workspace of `apply` and `verify`: a deployment file that names a `tenant`
+decides it, and a `--tenant` or `QUEUEY_TENANT` that names another one fails the command.
 
 | Setting | Flag | Env var |
 | --- | --- | --- |

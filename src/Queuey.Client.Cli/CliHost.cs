@@ -19,7 +19,18 @@ internal static class CliHost
     };
 
     public static ResolvedConfig Resolve(ArgMap args)
-        => CliConfig.Resolve(args, Environment.GetEnvironmentVariable, ReadConfigJson(args));
+        => CliConfig.Resolve(args, Env, ReadConfigJson(args));
+
+    /// <summary>
+    /// <see cref="Resolve"/> for a command that acts on a deployment file's workspace: pointed at the
+    /// file's tenant, and refused when <c>--tenant</c> or <c>QUEUEY_TENANT</c> names another one.
+    /// </summary>
+    public static ResolvedConfig ResolveForDeployment(ArgMap args, string? fileTenant, string filePath)
+        => DeploymentTenant.Resolve(Resolve(args), args, Env, fileTenant, filePath);
+
+    // Miljøet konfigurasjonen leses fra. En søm av samme grunn som TestHandler: en test skal ikke måtte
+    // endre prosessens miljø for å styre QUEUEY_TENANT.
+    internal static Func<string, string?> Env { get; set; } = Environment.GetEnvironmentVariable;
 
     // Testsøm: CLI-testene kjører kommandoene i prosessen. Står en handler her, går hvert kall dit i
     // stedet for ut på nettet, så en test ser nøyaktig hva en kommando ville sendt. Alltid null ellers.

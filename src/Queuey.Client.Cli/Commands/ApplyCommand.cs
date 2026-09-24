@@ -38,6 +38,9 @@ internal static class ApplyCommand
 
         if (dryRun)
         {
+            // Samme regel for tenant som apply, så en dry-run feiler der applyen ville feilet.
+            DeploymentTenant.EnsureNoConflict(map, CliHost.Env, file.ResolveTenant(), path);
+
             // Network-free: resolving validates names and policy, which is the failure worth catching
             // before a deploy window rather than during one.
             // Expanding first means an unset ${VAR} fails here, in the dry run, rather than during
@@ -51,7 +54,9 @@ internal static class ApplyCommand
 
         }
 
-        ResolvedConfig config = CliHost.Resolve(map);
+        // Workspacet fila navngir, ellers det konfigurerte — og feil når --tenant eller QUEUEY_TENANT sier
+        // noe annet enn fila. Samme regel som verify, så de treffer samme workspace.
+        ResolvedConfig config = CliHost.ResolveForDeployment(map, file.ResolveTenant(), path);
         using ServiceProvider provider = CliHost.BuildProvider(config);
         var service = provider.GetRequiredService<IQueueyService>();
 
@@ -68,8 +73,7 @@ internal static class ApplyCommand
             result = ex.Queues!;
         }
 
-        // The workspace the queues went to: the file's own tenant when it names one.
-        string? tenant = file.ResolveTenant() ?? config.TenantPublicId;
+        string? tenant = config.TenantPublicId;
 
         if (map.Has("json"))
             Console.WriteLine(JsonSerializer.Serialize(ToJsonResult(result, path, config, tenant), CliHost.JsonOut));
