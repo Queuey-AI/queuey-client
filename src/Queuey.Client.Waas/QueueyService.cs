@@ -306,25 +306,50 @@ public sealed class QueueyService : IQueueyService
 
     /// <inheritdoc />
     public Task<QueueSyncResult> SyncQueuesAsync(SyncOptions? options = null, CancellationToken cancellationToken = default)
-        => SyncQueueDefinitionsAsync(Queues.Queues, options, cancellationToken);
+        => SyncQueueDefinitionsAsync(Queues.Queues, options, tenantPublicId: null, hooks: null, cancellationToken);
 
     /// <inheritdoc />
     public Task<QueueApplyResult> ApplyQueueAsync(QueueDefinition definition, CancellationToken cancellationToken = default)
-        => ApplyQueueAsync(definition, beforePolicy: null, afterApply: null, cancellationToken);
+        => ApplyQueueAsync(definition, RequireTenant(), hooks: null, cancellationToken);
+
+    /// <summary>What the deployment path hangs on one queue's apply.</summary>
+    private sealed class QueueApplyHooks
+    {
+        /// <summary>After the queue exists, before its policy — ingress, which <c>bykey</c> needs first.</summary>
+        public Func<QueueDefinition, string, CancellationToken, Task>? BeforePolicy { get; init; }
+
+        /// <summary>After the policy — destination, then mode. Returns the queue's warnings and mode.</summary>
+        public Func<QueueDefinition, string, QueueApplyResponse, CancellationToken, Task<QueueApplyOutcome>>? AfterApply { get; init; }
+    }
+
+    private sealed class QueueApplyOutcome
+    {
+        public QueueApplyOutcome(IReadOnlyList<string> warnings, string? mode)
+        {
+            Warnings = warnings;
+            Mode = mode;
+        }
+
+        public IReadOnlyList<string> Warnings { get; }
+        public string? Mode { get; }
+    }
 
     private async Task<QueueApplyResult> ApplyQueueAsync(
         QueueDefinition definition,
-        Func<QueueDefinition, string, CancellationToken, Task>? beforePolicy,
-        Func<QueueDefinition, string, CancellationToken, Task>? afterApply,
+        string tenantPublicId,
+        QueueApplyHooks? hooks,
         CancellationToken cancellationToken = default)
     {
         if (definition is null) throw new ArgumentNullException(nameof(definition));
         QueueyName.EnsureValid(definition.Name, "queue name");
 
+        // The tenant is passed in, never re-read from the options here: a deployment file that names
+        // its workspace must put its queues in that workspace too. Before 2026-09-23 the workspace
+        // went to the file's tenant and the queues to the configured one.
         QueueApplyResponse response = await _controlPlane.ApplyQueueAsync(
             new QueueApplyRequest
             {
-                TenantPublicId = RequireTenant(),
+                TenantPublicId = tenantPublicId,
                 DisplayName = definition.Name,
             },
             cancellationToken).ConfigureAwait(false);
@@ -337,8 +362,8 @@ public sealed class QueueyService : IQueueyService
 
         // Ingress before policy, for the same reason as at workspace level: bykey needs its key
         // source to exist already.
-        if (beforePolicy is not null)
-            await beforePolicy(definition, queueId, cancellationToken).ConfigureAwait(false);
+        if (hooks?.BeforePolicy is not null)
+            await hooks.BeforePolicy(definition, queueId, cancellationToken).ConfigureAwait(false);
 
         // Policy is a separate PATCH, and only when something is actually declared — an all-inherit
         // queue must not send a patch that could pin values it meant to keep inheriting.
@@ -349,11 +374,12 @@ public sealed class QueueyService : IQueueyService
             policyApplied = true;
         }
 
-        // Delivery, when the deployment file gave this queue one. Inside the same try/apply as the
-        // rest, so a destination that fails to land fails the queue rather than leaving it "applied"
-        // while pointing nowhere.
-        if (afterApply is not null)
-            await afterApply(definition, queueId, cancellationToken).ConfigureAwait(false);
+        // Destination and mode, inside the same apply as the rest: a destination that fails to land,
+        // or a mode that cannot be set, fails the queue rather than leaving it "applied" while it
+        // delivers nowhere.
+        QueueApplyOutcome outcome = hooks?.AfterApply is not null
+            ? await hooks.AfterApply(definition, queueId, response, cancellationToken).ConfigureAwait(false)
+            : await ConvergeCreatedQueueModeAsync(definition, queueId, response, cancellationToken).ConfigureAwait(false);
 
         return new QueueApplyResult
         {
@@ -363,11 +389,131 @@ public sealed class QueueyService : IQueueyService
             PublicId = queueId,
             Created = response.Created,
             PolicyApplied = policyApplied,
-            // A queue that just got its own destination is ready regardless of what the apply said —
-            // the readiness answer predates the patch we just sent.
-            Warnings = afterApply is null ? ReadinessWarnings(definition, response) : Array.Empty<string>(),
+            Mode = outcome.Mode,
+            Warnings = outcome.Warnings,
         };
     }
+
+    /// <summary>
+    /// The mode step for a queue declared in code, which carries no destination and no mode: a queue
+    /// this sync created delivers when it already has somewhere to deliver — the workspace's base
+    /// URL. Before 2026-09-23 it stayed in LogOnly and consumed every event to Logged without a word,
+    /// because the readiness warning only spoke up when there was no destination at all. A queue
+    /// that already existed keeps the mode it has.
+    /// </summary>
+    private async Task<QueueApplyOutcome> ConvergeCreatedQueueModeAsync(
+        QueueDefinition definition, string queueId, QueueApplyResponse response, CancellationToken cancellationToken)
+    {
+        if (response.Created && response.HasDeliveryTarget)
+        {
+            await _controlPlane.SetQueueModeAsync(queueId, DeploymentQueueMode.Deliver.ToWire(), cancellationToken).ConfigureAwait(false);
+            return new QueueApplyOutcome(Array.Empty<string>(), DeploymentQueueMode.Deliver.ToFileText());
+        }
+
+        return new QueueApplyOutcome(
+            ReadinessWarnings(definition, response),
+            response.Created ? DeploymentQueueMode.LogOnly.ToFileText() : null);
+    }
+
+    /// <summary>
+    /// The mode step of a deployment, last because it depends on everything before it: the queue's
+    /// destination decides whether it can deliver at all.
+    /// <list type="bullet">
+    /// <item>A declared mode is converged — and <c>deliver</c> with nowhere to deliver fails the queue.</item>
+    /// <item>An undeclared mode is left alone on a queue that exists, and a queue this file created
+    /// delivers when it has a destination.</item>
+    /// <item>The old <c>Paused</c> mode is never changed: changing it also resumes the queue.</item>
+    /// </list>
+    /// Pausing itself (delivery held, ingress closed) is an operator's lever and never touched.
+    /// </summary>
+    private async Task<QueueApplyOutcome> ConvergeModeAsync(
+        string name,
+        string queueId,
+        string tenantPublicId,
+        DeploymentQueuePlan? plan,
+        QueueApplyResponse response,
+        QueueListItem? existing,
+        CancellationToken cancellationToken)
+    {
+        var warnings = new List<string>();
+
+        bool hasDestination = await HasDestinationAsync(queueId, tenantPublicId, plan, response, cancellationToken).ConfigureAwait(false);
+
+        string? current = response.Created ? "LogOnly" : existing?.Mode;
+        DeploymentQueueMode? mode = DeploymentQueueModes.FromBackend(current);
+        DeploymentQueueMode? declared = plan?.Mode;
+
+        if (!response.Created && string.Equals(current, "Paused", StringComparison.OrdinalIgnoreCase))
+        {
+            warnings.Add(
+                $"Queue '{name}' still has the old Paused mode. A deploy does not change it, because changing it " +
+                "would also resume the queue: resume it in the Queuey console, then apply again.");
+            return new QueueApplyOutcome(warnings, "paused");
+        }
+
+        if (declared == DeploymentQueueMode.Deliver && !hasDestination)
+        {
+            throw new QueueyException(
+                $"Queue '{name}' declares \"mode\": \"deliver\" but has nowhere to deliver. Give it a delivery.url, " +
+                $"or set workspace.delivery.baseUrl, and apply again. Its mode was left as {current ?? "it was"}.",
+                errorCode: "deliver_without_destination");
+        }
+
+        DeploymentQueueMode? desired = declared
+            ?? (response.Created ? (hasDestination ? DeploymentQueueMode.Deliver : DeploymentQueueMode.LogOnly) : null);
+
+        if (desired is { } target && target != mode)
+        {
+            await _controlPlane.SetQueueModeAsync(queueId, target.ToWire(), cancellationToken).ConfigureAwait(false);
+            mode = target;
+        }
+
+        if (mode == DeploymentQueueMode.LogOnly && declared != DeploymentQueueMode.LogOnly)
+        {
+            warnings.Add(hasDestination
+                ? $"Queue '{name}' has a destination but is in logOnly mode, so its events are logged, not delivered. " +
+                  "Declare \"mode\": \"deliver\" for it to deliver."
+                : $"Queue '{name}' has no delivery target — neither its own nor one inherited from the workspace. " +
+                  "It accepts events and logs them without delivering. Give it a delivery.url, or set " +
+                  "workspace.delivery.baseUrl, to start delivering.");
+        }
+        else if (mode == DeploymentQueueMode.Deliver && !hasDestination)
+        {
+            warnings.Add(
+                $"Queue '{name}' is set to deliver but has nowhere to deliver, so its deliveries fail. Give it a " +
+                "delivery.url, or set workspace.delivery.baseUrl.");
+        }
+
+        if (existing?.DeliveryHeld == true)
+            warnings.Add($"Delivery is held on queue '{name}': its events wait until someone resumes it in the Queuey console. A deploy never resumes it.");
+        if (existing?.IngressClosed == true)
+            warnings.Add($"Queue '{name}' does not accept new events: its ingress was closed in the Queuey console. A deploy never reopens it.");
+
+        return new QueueApplyOutcome(warnings, mode?.ToFileText());
+    }
+
+    /// <summary>
+    /// Whether the queue has somewhere to deliver after this apply. An absolute URL of its own settles
+    /// it. Without one, the apply's answer counts — it already includes the workspace's base URL,
+    /// which was patched before any queue — unless this run just changed the queue's destination to
+    /// a path or back to inheriting, in which case the answer predates the change and is read again.
+    /// </summary>
+    private async Task<bool> HasDestinationAsync(
+        string queueId, string tenantPublicId, DeploymentQueuePlan? plan, QueueApplyResponse response, CancellationToken cancellationToken)
+    {
+        if (IsAbsoluteUrl(plan?.Delivery?.Url))
+            return true;
+
+        if (plan?.Delivery is null || response.Created)
+            return response.HasDeliveryTarget;
+
+        IReadOnlyList<QueueListItem> rows = await Management.ListQueuesAsync(tenantPublicId, cancellationToken).ConfigureAwait(false);
+        return rows.FirstOrDefault(r => r.PublicId == queueId)?.HasDeliveryTarget ?? response.HasDeliveryTarget;
+    }
+
+    private static bool IsAbsoluteUrl(string? url)
+        => !string.IsNullOrWhiteSpace(url) && Uri.TryCreate(url, UriKind.Absolute, out Uri? parsed)
+           && (parsed.Scheme == Uri.UriSchemeHttp || parsed.Scheme == Uri.UriSchemeHttps);
 
     /// <inheritdoc />
     public IReadOnlyList<QueuePlan> PlanQueues()
@@ -404,9 +550,25 @@ public sealed class QueueyService : IQueueyService
         _ = declared.Resolve();   // a file that cannot be applied is a failure, not "no drift"
 
         string tenant = declared.Tenant ?? tenantPublicId ?? RequireTenant();
-        DeploymentFile actual = await PullDeploymentAsync(tenant, cancellationToken).ConfigureAwait(false);
+
+        // Effective values, not the inherit-aware file a pull writes: that one leaves out a queue's
+        // value when it equals the workspace's, so a file declaring it reported drift right after a
+        // clean apply (2026-09-23).
+        DeploymentFile actual = await new DeploymentPuller(_controlPlane, Management)
+            .PullAsync(tenant, cancellationToken, effective: true).ConfigureAwait(false);
 
         return DeploymentDrift.Compare(declared, actual);
+    }
+
+    /// <inheritdoc />
+    public Task<DeliveryVerification> VerifyDeliveryAsync(
+        string queueName, byte[] payload, VerifyDeliveryOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(queueName)) throw new ArgumentException("A queue name is required.", nameof(queueName));
+        if (payload is null) throw new ArgumentNullException(nameof(payload));
+
+        return DeliveryVerifier.RunAsync(Client, _controlPlane, Management, _options.TenantPublicId, queueName, payload,
+            options ?? new VerifyDeliveryOptions(), cancellationToken);
     }
 
     /// <inheritdoc />
@@ -425,6 +587,19 @@ public sealed class QueueyService : IQueueyService
 
         string tenant = file.Tenant ?? (options.DryRun ? _options.TenantPublicId ?? string.Empty : RequireTenant());
         var credentials = new CredentialResolver(Management, tenant);
+        var existing = new Dictionary<string, QueueListItem>(StringComparer.Ordinal);
+
+        // The queues as they are before this run touches anything: an existing queue's mode and flow
+        // decide what the mode step may change and what it has to say. One read for the whole file,
+        // and first, so a key that cannot read the workspace fails before it has written to it.
+        if (!options.DryRun)
+        {
+            foreach (QueueListItem row in await Management.ListQueuesAsync(tenant, cancellationToken).ConfigureAwait(false))
+            {
+                if (row.DisplayName is { } name)
+                    existing[name] = row;
+            }
+        }
 
         // Workspace first: queues inherit from it, so converging it first means a queue that means to
         // inherit already has something to inherit. A failure here throws before any queue is
@@ -450,20 +625,29 @@ public sealed class QueueyService : IQueueyService
         QueueSyncResult result = await SyncQueueDefinitionsAsync(
             plans.Select(p => p.Definition).ToArray(),
             options,
-            cancellationToken,
-            beforePolicy: async (definition, queuePublicId, ct) =>
+            tenant,
+            new QueueApplyHooks
             {
-                if (byName.TryGetValue(definition.Name, out DeploymentQueuePlan? plan) && plan.Ingress is { } queueIngress)
-                    await Management.SetIngressAsync(queuePublicId, isQueue: true, queueIngress, ct).ConfigureAwait(false);
-            },
-            afterApply: async (definition, queuePublicId, ct) =>
-            {
-                if (byName.TryGetValue(definition.Name, out DeploymentQueuePlan? plan) && plan.Delivery is { } delivery)
+                BeforePolicy = async (definition, queuePublicId, ct) =>
                 {
-                    QueueDelivery resolved = await credentials.ResolveAsync(delivery, ct).ConfigureAwait(false);
-                    await Management.SetQueueDeliveryAsync(queuePublicId, resolved, ct).ConfigureAwait(false);
-                }
-            }).ConfigureAwait(false);
+                    if (byName.TryGetValue(definition.Name, out DeploymentQueuePlan? plan) && plan.Ingress is { } queueIngress)
+                        await Management.SetIngressAsync(queuePublicId, isQueue: true, queueIngress, ct).ConfigureAwait(false);
+                },
+                AfterApply = async (definition, queuePublicId, response, ct) =>
+                {
+                    byName.TryGetValue(definition.Name, out DeploymentQueuePlan? plan);
+                    if (plan?.Delivery is { } delivery)
+                    {
+                        QueueDelivery resolved = await credentials.ResolveAsync(delivery, ct).ConfigureAwait(false);
+                        await Management.SetQueueDeliveryAsync(queuePublicId, resolved, ct).ConfigureAwait(false);
+                    }
+
+                    existing.TryGetValue(definition.Name, out QueueListItem? row);
+                    return await ConvergeModeAsync(definition.Name, queuePublicId, tenant, plan, response,
+                        response.Created ? null : row, ct).ConfigureAwait(false);
+                },
+            },
+            cancellationToken).ConfigureAwait(false);
 
         return result;
     }
@@ -493,6 +677,12 @@ public sealed class QueueyService : IQueueyService
         DlqEnabled = policy.DlqEnabled,
         RetentionDays = policy.RetentionDays,
         Idempotent = policy.Idempotent,
+        MaxAttempts = policy.MaxAttempts,
+        DlqAfterAttempts = policy.DlqAfterAttempts,
+        Backoff = RetryBackoffWire.From(policy.Backoff),
+        RetryOnNetworkErrors = policy.RetryOnNetworkErrors,
+        RetryOnTimeouts = policy.RetryOnTimeouts,
+        Filter = DeliveryFilterWire.From(policy.Filter),
     };
 
     /// <summary>
@@ -503,9 +693,9 @@ public sealed class QueueyService : IQueueyService
     private async Task<QueueSyncResult> SyncQueueDefinitionsAsync(
         IReadOnlyList<QueueDefinition> definitions,
         SyncOptions? options,
-        CancellationToken cancellationToken,
-        Func<QueueDefinition, string, CancellationToken, Task>? beforePolicy = null,
-        Func<QueueDefinition, string, CancellationToken, Task>? afterApply = null)
+        string? tenantPublicId,
+        QueueApplyHooks? hooks,
+        CancellationToken cancellationToken)
     {
         options ??= new SyncOptions();
 
@@ -514,8 +704,9 @@ public sealed class QueueyService : IQueueyService
         foreach (QueueDefinition def in selected)
             QueueyName.EnsureValid(def.Name, "queue name");
 
+        string tenant = string.Empty;
         if (!options.DryRun)
-            RequireForSync();
+            tenant = RequireForSync(tenantPublicId);
 
         var results = new List<QueueApplyResult>();
         var notAttempted = new List<string>();
@@ -539,7 +730,7 @@ public sealed class QueueyService : IQueueyService
 
             try
             {
-                results.Add(await ApplyQueueAsync(def, beforePolicy, afterApply, cancellationToken).ConfigureAwait(false));
+                results.Add(await ApplyQueueAsync(def, tenant, hooks, cancellationToken).ConfigureAwait(false));
                 continue;
             }
             catch (QueueyException ex)
@@ -665,13 +856,17 @@ public sealed class QueueyService : IQueueyService
         HasPayloadSchema = !string.IsNullOrEmpty(d.PayloadSchema),
     };
 
-    private void RequireForSync()
+    private void RequireForSync() => RequireForSync(null);
+
+    /// <summary>The tenant a sync writes to — <paramref name="tenantPublicId"/> when the caller named one — after checking the rest is configured.</summary>
+    private string RequireForSync(string? tenantPublicId)
     {
-        RequireTenant();
+        string tenant = string.IsNullOrWhiteSpace(tenantPublicId) ? RequireTenant() : tenantPublicId!;
         if (string.IsNullOrWhiteSpace(_options.LicensePublicId))
             throw new QueueyConfigurationException("LicensePublicId is required for SyncStreams. Set QueueyOptions.LicensePublicId.");
         if (string.IsNullOrWhiteSpace(_options.ApiKey))
             throw new QueueyConfigurationException("An API key is required for SyncStreams. Set QueueyOptions.ApiKey.");
+        return tenant;
     }
 
     private string RequireTenant()

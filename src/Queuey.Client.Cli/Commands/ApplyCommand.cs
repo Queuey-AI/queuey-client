@@ -68,10 +68,13 @@ internal static class ApplyCommand
             result = ex.Queues!;
         }
 
+        // The workspace the queues went to: the file's own tenant when it names one.
+        string? tenant = file.ResolveTenant() ?? config.TenantPublicId;
+
         if (map.Has("json"))
-            Console.WriteLine(JsonSerializer.Serialize(ToJsonResult(result, path, config), CliHost.JsonOut));
+            Console.WriteLine(JsonSerializer.Serialize(ToJsonResult(result, path, config, tenant), CliHost.JsonOut));
         else
-            WriteHuman(result, path, config);
+            WriteHuman(result, path, config, tenant);
 
         return result.AllSucceeded ? ExitCodes.Success : ExitCodes.RuntimeError;
     }
@@ -117,6 +120,7 @@ internal static class ApplyCommand
             var parts = new List<string>();
             if (w.Ordering is not null) parts.Add($"ordering={w.Ordering}");
             if (w.RetentionDays is { } days) parts.Add($"retentionDays={days}");
+            parts.AddRange(Retry(w.MaxAttempts, w.DlqAfterAttempts, w.Backoff, w.RetryOnNetworkErrors, w.RetryOnTimeouts));
             if (w.Ingress?.AuthMode is { } auth) parts.Add($"ingressAuth={auth}");
             if (w.Ingress?.EventType is { } et) parts.Add($"eventType={et.From}:{et.Name}");
             if (w.Ingress?.GroupKey is { } gk) parts.Add($"groupKey={gk.From}:{gk.Name}");
@@ -131,20 +135,47 @@ internal static class ApplyCommand
             string dest = p.Delivery is null
                 ? "inherits the workspace"
                 : p.Delivery.Inherit ? "back to inheriting" : $"url={p.Delivery.Url}";
-            Console.WriteLine($"  • {p.Definition.Name}\t{dest}");
+
+            // Modus står først fordi den avgjør om noe leveres i det hele tatt.
+            var parts = new List<string>
+            {
+                p.Mode is { } mode ? $"mode={mode.ToFileText()}" : "mode=(deliver when it has a destination, if new)",
+                dest,
+            };
+            QueuePolicy policy = p.Definition.Policy;
+            if (policy.Ordering is not null) parts.Add($"ordering={policy.Ordering}");
+            parts.AddRange(Retry(policy.MaxAttempts, policy.DlqAfterAttempts, policy.Backoff, policy.RetryOnNetworkErrors, policy.RetryOnTimeouts));
+            if (policy.Filter is { } filter) parts.Add($"filter=({filter})");
+
+            Console.WriteLine($"  • {p.Definition.Name}\t{string.Join(" ", parts)}");
         }
 
         Console.WriteLine($"{plans.Count} queue(s) declared. Nothing was sent.");
     }
 
-    private static void WriteHuman(QueueSyncResult result, string path, ResolvedConfig config)
+    private static IEnumerable<string> Retry(int? maxAttempts, int? dlqAfterAttempts, RetryBackoff? backoff, bool? onNetwork, bool? onTimeouts)
     {
-        Console.WriteLine($"Queuey apply — {path} → {config.ResolvedApiBase()}  (tenant {config.TenantPublicId ?? "?"})");
+        if (maxAttempts is { } max) yield return $"maxAttempts={max}";
+        if (dlqAfterAttempts is { } dlq) yield return $"dlqAfterAttempts={dlq}";
+        if (backoff is { } b)
+        {
+            if (b.BaseDelayMs is { } baseMs) yield return $"backoff.baseDelayMs={baseMs}";
+            if (b.MaxDelayMs is { } maxMs) yield return $"backoff.maxDelayMs={maxMs}";
+            if (b.Jitter is { } jitter) yield return $"backoff.jitter={jitter}";
+        }
+        if (onNetwork is { } n) yield return $"retryOnNetworkErrors={(n ? "true" : "false")}";
+        if (onTimeouts is { } t) yield return $"retryOnTimeouts={(t ? "true" : "false")}";
+    }
+
+    private static void WriteHuman(QueueSyncResult result, string path, ResolvedConfig config, string? tenant)
+    {
+        Console.WriteLine($"Queuey apply — {path} → {config.ResolvedApiBase()}  (tenant {tenant ?? "?"})");
 
         foreach (QueueApplyResult r in result.Applied)
         {
             if (r.Succeeded)
-                Console.WriteLine($"  ✓ {r.Name}\t{r.PublicId}\t{(r.Created ? "created" : "exists")}{(r.PolicyApplied ? ", policy" : "")}");
+                Console.WriteLine($"  ✓ {r.Name}\t{r.PublicId}\t{(r.Created ? "created" : "exists")}{(r.PolicyApplied ? ", policy" : "")}"
+                                  + (r.Mode is { } mode ? $", {mode}" : ""));
             else
                 Console.WriteLine($"  ✗ {r.Name}\t{FormatError(r.Error)}");
         }
@@ -166,27 +197,38 @@ internal static class ApplyCommand
     private static object ToJsonPlan(DeploymentQueuePlan p) => new
     {
         p.Definition.Name,
+        // null: leave it, and a queue this file creates delivers when it has a destination.
+        mode = p.Mode?.ToFileText(),
         policy = new
         {
             p.Definition.Policy.Ordering,
             p.Definition.Policy.DlqEnabled,
             p.Definition.Policy.RetentionDays,
             p.Definition.Policy.Idempotent,
+            p.Definition.Policy.MaxAttempts,
+            p.Definition.Policy.DlqAfterAttempts,
+            backoff = p.Definition.Policy.Backoff is { } b ? new { b.BaseDelayMs, b.MaxDelayMs, b.Jitter } : null,
+            p.Definition.Policy.RetryOnNetworkErrors,
+            p.Definition.Policy.RetryOnTimeouts,
+            filter = p.Definition.Policy.Filter is { } f
+                ? new { match = f.Match ?? "all", conditions = f.Conditions.Select(c => new { c.Field, c.Op, c.Value }) }
+                : null,
         },
         delivery = p.Delivery is null ? null : new { p.Delivery.Url, p.Delivery.Inherit, p.Delivery.AuthMode, p.Delivery.CredentialRef },
         ingress = p.Ingress is null ? null : new { p.Ingress.AuthMode, eventType = p.Ingress.EventType?.Name, groupKey = p.Ingress.GroupKey?.Name },
     };
 
-    private static object ToJsonResult(QueueSyncResult result, string path, ResolvedConfig config) => new
+    private static object ToJsonResult(QueueSyncResult result, string path, ResolvedConfig config, string? tenant) => new
     {
         file = path,
         apiHost = config.ResolvedApiBase().ToString(),
+        tenant,
         total = result.Total,
         succeeded = result.Succeeded,
         created = result.Created,
         failed = result.Failed,
         notAttempted = result.NotAttempted,
         warnings = result.Warnings,
-        queues = result.Applied.Select(r => new { r.Name, r.Succeeded, r.PublicId, r.Created, r.PolicyApplied, error = r.Error?.Message }),
+        queues = result.Applied.Select(r => new { r.Name, r.Succeeded, r.PublicId, r.Created, r.PolicyApplied, r.Mode, error = r.Error?.Message, errorCode = r.Error?.ErrorCode }),
     };
 }

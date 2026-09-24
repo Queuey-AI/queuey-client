@@ -9,7 +9,13 @@ namespace Queuey.Client.Cli;
 /// <summary>Shared helpers: config resolution, DI host construction, and output formatting.</summary>
 internal static class CliHost
 {
-    public static readonly JsonSerializerOptions JsonOut = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+    // Relaxed escaping: output meant for a terminal and an agent, not for embedding in HTML. The default
+    // encoder writes ` as \u0060 and — as \u2014, which is valid JSON nobody can read.
+    public static readonly JsonSerializerOptions JsonOut = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = true,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
 
     public static ResolvedConfig Resolve(ArgMap args)
         => CliConfig.Resolve(args, Environment.GetEnvironmentVariable, ReadConfigJson(args));

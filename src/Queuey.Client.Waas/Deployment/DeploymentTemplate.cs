@@ -43,6 +43,7 @@ public static class DeploymentTemplate
             // Dropped on purpose: the workspace is what differs between environments, and a deploy
             // already knows its own from --tenant / QUEUEY_TENANT / queuey.json.
             Tenant = null,
+            Schema = file.Schema,
             Workspace = file.Workspace is null ? null : new DeploymentWorkspace
             {
                 // Behaviour and ingress travel untouched — a lane strategy and a "the type is in
@@ -51,6 +52,11 @@ public static class DeploymentTemplate
                 DlqEnabled = file.Workspace.DlqEnabled,
                 RetentionDays = file.Workspace.RetentionDays,
                 Idempotent = file.Workspace.Idempotent,
+                MaxAttempts = file.Workspace.MaxAttempts,
+                DlqAfterAttempts = file.Workspace.DlqAfterAttempts,
+                Backoff = file.Workspace.Backoff,
+                RetryOnNetworkErrors = file.Workspace.RetryOnNetworkErrors,
+                RetryOnTimeouts = file.Workspace.RetryOnTimeouts,
                 Ingress = file.Workspace.Ingress,
                 Delivery = file.Workspace.Delivery is null ? null : new WorkspaceDelivery
                 {
@@ -72,10 +78,17 @@ public static class DeploymentTemplate
 
             template.Queues[entry.Key] = new DeploymentQueue
             {
+                Mode = q.Mode,
                 Ordering = q.Ordering,
                 DlqEnabled = q.DlqEnabled,
                 RetentionDays = q.RetentionDays,
                 Idempotent = q.Idempotent,
+                MaxAttempts = q.MaxAttempts,
+                DlqAfterAttempts = q.DlqAfterAttempts,
+                Backoff = q.Backoff,
+                RetryOnNetworkErrors = q.RetryOnNetworkErrors,
+                RetryOnTimeouts = q.RetryOnTimeouts,
+                Filter = q.Filter,
                 Ingress = q.Ingress,
                 Delivery = q.Delivery is null ? null : new QueueDelivery
                 {

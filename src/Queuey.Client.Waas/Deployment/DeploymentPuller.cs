@@ -35,7 +35,15 @@ internal sealed class DeploymentPuller
         _management = management;
     }
 
-    public async Task<DeploymentFile> PullAsync(string tenantPublicId, CancellationToken cancellationToken)
+    /// <param name="tenantPublicId">The workspace to read.</param>
+    /// <param name="cancellationToken">Cancels the reads.</param>
+    /// <param name="effective">
+    /// Every queue with the values it actually runs with, inherited or not, and its current mode —
+    /// what the drift check compares against. The default is the inherit-aware file a pull writes,
+    /// which leaves out whatever a queue has from its workspace; compared against a file that
+    /// declares such a value, it reported drift right after a clean apply.
+    /// </param>
+    public async Task<DeploymentFile> PullAsync(string tenantPublicId, CancellationToken cancellationToken, bool effective = false)
     {
         var file = new DeploymentFile { Tenant = tenantPublicId };
 
@@ -51,7 +59,12 @@ internal sealed class DeploymentPuller
             DlqEnabled = config.Policy?.DlqEnabled,
             RetentionDays = config.Policy?.RetentionDays,
             Idempotent = config.Policy?.Idempotent,
-            Ingress = ToIngress(config.Ingress),
+            MaxAttempts = config.Policy?.MaxAttempts,
+            DlqAfterAttempts = config.Policy?.DlqAfterAttempts,
+            Backoff = config.Policy?.Backoff?.ToModel(),
+            RetryOnNetworkErrors = config.Policy?.RetryOnNetworkErrors,
+            RetryOnTimeouts = config.Policy?.RetryOnTimeouts,
+            Ingress = ToIngress(config.Ingress, effective),
         };
 
         if (config.Delivery is { } wd && !string.IsNullOrWhiteSpace(wd.BaseUrl))
@@ -85,10 +98,50 @@ internal sealed class DeploymentPuller
                 continue;
 
             QueueConfigResponse qc = await _controlPlane.GetQueueConfigAsync(id, cancellationToken).ConfigureAwait(false);
-            file.Queues[name] = ToDeploymentQueue(qc, nameByRef);
+            DeploymentQueue pulled = effective ? ToEffectiveQueue(qc, nameByRef) : ToDeploymentQueue(qc, nameByRef);
+            pulled.Mode = effective ? EffectiveMode(queue.Mode) : DeclaredMode(queue);
+            file.Queues[name] = pulled;
         }
 
         return file;
+    }
+
+    /// <summary>
+    /// The mode a pulled file writes: only what the default would get wrong. A queue that is created
+    /// from the file delivers when it has a destination and logs when it has none, so the mode is
+    /// written only for a queue that logs even though it has somewhere to deliver.
+    /// </summary>
+    private static string? DeclaredMode(QueueListItem queue)
+        => DeploymentQueueModes.FromBackend(queue.Mode) == DeploymentQueueMode.LogOnly && queue.HasDeliveryTarget
+            ? DeploymentQueueMode.LogOnly.ToFileText()
+            : null;
+
+    /// <summary>The mode as the drift check compares it: the file's words, and <c>paused</c> for the old Paused mode.</summary>
+    private static string? EffectiveMode(string? backendMode)
+        => DeploymentQueueModes.FromBackend(backendMode)?.ToFileText()
+           ?? (string.IsNullOrWhiteSpace(backendMode) ? null : backendMode!.ToLowerInvariant());
+
+    /// <summary>What a queue runs with — every policy field and its whole ingress, inherited or not.</summary>
+    private static DeploymentQueue ToEffectiveQueue(QueueConfigResponse qc, Dictionary<string, string> nameByRef)
+    {
+        DeploymentQueue queue = ToDeploymentQueue(qc, nameByRef);
+
+        if (qc.Policy is { } p)
+        {
+            queue.Ordering = p.Ordering;
+            queue.DlqEnabled = p.DlqEnabled;
+            queue.RetentionDays = p.RetentionDays;
+            queue.Idempotent = p.Idempotent;
+            queue.MaxAttempts = p.MaxAttempts;
+            queue.DlqAfterAttempts = p.DlqAfterAttempts;
+            queue.Backoff = p.Backoff?.ToModel();
+            queue.RetryOnNetworkErrors = p.RetryOnNetworkErrors;
+            queue.RetryOnTimeouts = p.RetryOnTimeouts;
+            queue.Filter = p.Filter?.ToModel();
+        }
+
+        queue.Ingress = ToIngress(qc.Ingress, effective: true);
+        return queue;
     }
 
     private static DeploymentQueue ToDeploymentQueue(QueueConfigResponse qc, Dictionary<string, string> nameByRef)
@@ -108,6 +161,16 @@ internal sealed class DeploymentPuller
             declared.DlqEnabled = DifferentOrNull(p.DlqEnabled, baseline?.DlqEnabled);
             declared.RetentionDays = DifferentOrNull(p.RetentionDays, baseline?.RetentionDays);
             declared.Idempotent = DifferentOrNull(p.Idempotent, baseline?.Idempotent);
+            declared.MaxAttempts = DifferentOrNull(p.MaxAttempts, baseline?.MaxAttempts);
+            declared.DlqAfterAttempts = DifferentOrNull(p.DlqAfterAttempts, baseline?.DlqAfterAttempts);
+            declared.RetryOnNetworkErrors = DifferentOrNull(p.RetryOnNetworkErrors, baseline?.RetryOnNetworkErrors);
+            declared.RetryOnTimeouts = DifferentOrNull(p.RetryOnTimeouts, baseline?.RetryOnTimeouts);
+
+            // Backoff and filter are small objects: written whole when they differ, left out when equal.
+            if (p.Backoff is { } backoff && !SameBackoff(backoff, baseline?.Backoff))
+                declared.Backoff = backoff.ToModel();
+            if (p.Filter is { } filter && DeploymentDrift.DescribeFilter(filter.ToModel()) != DeploymentDrift.DescribeFilter(baseline?.Filter?.ToModel()))
+                declared.Filter = filter.ToModel();
         }
 
         bool ownsDestination = qc.Inherited?.Destination == false;
@@ -147,8 +210,13 @@ internal sealed class DeploymentPuller
     private static bool SameIngress(DeploymentIngress a, DeploymentIngress? b)
         => b is not null
         && string.Equals(a.AuthMode, b.AuthMode, StringComparison.Ordinal)
+        && a.SuccessStatusCode == b.SuccessStatusCode
         && SameSource(a.EventType, b.EventType)
         && SameSource(a.GroupKey, b.GroupKey);
+
+    private static bool SameBackoff(RetryBackoffWire a, RetryBackoffWire? b)
+        => b is not null && a.BaseDelayMs == b.BaseDelayMs && a.MaxDelayMs == b.MaxDelayMs
+           && string.Equals(a.Jitter, b.Jitter, StringComparison.OrdinalIgnoreCase);
 
     private static bool SameSource(ContextSource? a, ContextSource? b)
         => a is null
@@ -203,7 +271,11 @@ internal sealed class DeploymentPuller
     /// The read-back is the EFFECTIVE ingress, so a queue's equals the workspace's unless it
     /// overrode something — the caller compares to decide whether to write it out.
     /// </summary>
-    private static DeploymentIngress? ToIngress(IngressResponse? r)
+    /// <remarks>
+    /// The success status was not read before 2026-09-23, so a file declaring 200 drifted forever.
+    /// A pulled file writes it only when it is not the default 202; the effective read always does.
+    /// </remarks>
+    private static DeploymentIngress? ToIngress(IngressResponse? r, bool effective = false)
     {
         if (r is null) return null;
 
@@ -212,10 +284,15 @@ internal sealed class DeploymentPuller
             AuthMode = NullIfNone(r.AuthMode),
             EventType = ToSource(r.EventType),
             GroupKey = ToSource(r.GroupKey),
+            SuccessStatusCode = r.SuccessStatusCode == 0 || (!effective && r.SuccessStatusCode == DefaultSuccessStatusCode)
+                ? null
+                : r.SuccessStatusCode,
         };
 
         return ingress.IsEmpty ? null : ingress;
     }
+
+    private const int DefaultSuccessStatusCode = 202;
 
     private static ContextSource? ToSource(ContextSourceWire? w)
         => w is null || string.IsNullOrWhiteSpace(w.Name) ? null : new ContextSource(w.From, w.Name);

@@ -46,7 +46,7 @@ public class PullTests
             return StubHttpMessageHandler.Json(HttpStatusCode.OK, new[]
             {
                 new { publicId = "que_orders", displayName = "orders", mode = "Deliver", hasDeliveryTarget = true },
-                new { publicId = "que_plain", displayName = "plain", mode = "LogOnly", hasDeliveryTarget = true },
+                new { publicId = "que_plain", displayName = "plain", mode = "Deliver", hasDeliveryTarget = true },
                 new { publicId = "que_legacy", displayName = "Legacy Queue", mode = "Deliver", hasDeliveryTarget = true },
             });
 
@@ -203,5 +203,83 @@ public class PullTests
         Assert.Equal(new[] { "orders", "plain" }, plans.Select(p => p.Definition.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray());
         Assert.Equal("bykey", plans.Single(p => p.Definition.Name == "orders").Definition.Policy.Ordering);
         Assert.Null(plans.Single(p => p.Definition.Name == "plain").Delivery);
+    }
+}
+
+/// <summary>What a pull writes for the fields a deployment file gained 2026-09-23.</summary>
+public class PullDesiredStateTests
+{
+    private static StubHttpMessageHandler Api(string mode, bool hasTarget, object queuePolicy, int successStatusCode = 202)
+        => new(req =>
+        {
+            string path = req.RequestUri!.AbsolutePath;
+            if (path.EndsWith("/credentials", StringComparison.Ordinal))
+                return StubHttpMessageHandler.Json(HttpStatusCode.OK, Array.Empty<object>());
+            if (path.EndsWith("/tenants/ten_abc/config", StringComparison.Ordinal))
+                return StubHttpMessageHandler.Json(HttpStatusCode.OK, new { policy = Baseline });
+            if (path.EndsWith("/tenants/ten_abc/queues", StringComparison.Ordinal))
+                return StubHttpMessageHandler.Json(HttpStatusCode.OK, new[] { new { publicId = "que_orders", displayName = "orders", mode, hasDeliveryTarget = hasTarget } });
+            return StubHttpMessageHandler.Json(HttpStatusCode.OK, new
+            {
+                policy = queuePolicy,
+                inherited = new { destination = true, auth = true, signing = true, rateLimit = true, behavior = false },
+                tenantBaseline = new { policy = Baseline, ingress = new { authMode = "None", successStatusCode = 202 } },
+                ingress = new { authMode = "None", successStatusCode },
+            });
+        });
+
+    private static object Baseline => new
+    {
+        idempotent = false, dlqEnabled = true, retentionDays = 7, ordering = "fifo", maxAttempts = 8, dlqAfterAttempts = (int?)null,
+        backoff = new { baseDelayMs = 1000, maxDelayMs = 60000, jitter = "full" }, retryOnNetworkErrors = true, retryOnTimeouts = true,
+    };
+
+    private static Task<DeploymentFile> Pull(StubHttpMessageHandler api) => WaasTestHost.Build(apiStub: api).PullDeploymentAsync("ten_abc");
+
+    [Theory]
+    [InlineData("LogOnly", true, "logOnly")]   // logger selv om den har et mål: det må stå i fila
+    [InlineData("LogOnly", false, null)]       // uten mål logger den uansett
+    [InlineData("Deliver", true, null)]        // standarden gir det samme
+    [InlineData("Paused", true, null)]         // ingen modus en fil setter
+    public async Task The_mode_is_written_only_where_the_default_would_get_it_wrong(string mode, bool hasTarget, string? expected)
+    {
+        DeploymentFile file = await Pull(Api(mode, hasTarget, Baseline));
+
+        Assert.Equal(expected, file.Queues["orders"].Mode);
+    }
+
+    [Fact]
+    public async Task Retry_and_filter_are_written_when_they_differ_from_the_workspace()
+    {
+        object policy = new
+        {
+            idempotent = false, dlqEnabled = true, retentionDays = 7, ordering = "fifo", maxAttempts = 3, dlqAfterAttempts = 2,
+            backoff = new { baseDelayMs = 1000, maxDelayMs = 60000, jitter = "full" }, retryOnNetworkErrors = false, retryOnTimeouts = true,
+            filter = new { match = "any", conditions = new[] { new { field = "type", op = "eq", value = "order.created" } } },
+        };
+
+        DeploymentQueue orders = (await Pull(Api("Deliver", true, policy))).Queues["orders"];
+
+        Assert.Equal(3, orders.MaxAttempts);
+        Assert.Equal(2, orders.DlqAfterAttempts);
+        Assert.False(orders.RetryOnNetworkErrors);
+        Assert.Equal("any: type eq order.created", orders.Filter!.ToString());
+
+        // Likt workspacet: utelatt, så det fortsetter å arve.
+        Assert.Null(orders.Backoff);
+        Assert.Null(orders.RetryOnTimeouts);
+
+        // Og det pull skriver, godtar apply.
+        Assert.Single(DeploymentFile.Parse((await Pull(Api("Deliver", true, policy))).ToJson()).Resolve());
+    }
+
+    [Theory]
+    [InlineData(200, 200)]
+    [InlineData(202, null)]
+    public async Task A_success_status_other_than_the_default_is_written(int actual, int? expected)
+    {
+        DeploymentFile file = await Pull(Api("Deliver", true, Baseline, successStatusCode: actual));
+
+        Assert.Equal(expected, file.Queues["orders"].Ingress?.SuccessStatusCode);
     }
 }

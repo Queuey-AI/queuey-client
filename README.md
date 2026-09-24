@@ -407,6 +407,74 @@ Every omitted field means **leave alone**, everywhere: a file that names only a 
 the base URL. A misspelled field is rejected rather than ignored — a declarative file that reports
 success while quietly skipping what you wrote is worse than one that fails.
 
+### Delivering, retrying and filtering
+
+```jsonc
+{
+  "workspace": {
+    "maxAttempts": 8,                                   // every queue retries this many times…
+    "backoff": { "baseDelayMs": 1000, "maxDelayMs": 300000, "jitter": "full" },
+    "delivery": { "baseUrl": "https://hooks.example.com" }
+  },
+  "queues": {
+    "orders": {
+      "delivery": { "url": "/orders" },
+      "dlqAfterAttempts": 5,                            // …and this one gives up to the DLQ sooner
+      "retryOnTimeouts": false,
+      "filter": { "match": "any", "conditions": [
+        { "field": "type", "op": "eq", "value": "order.created" },
+        { "field": "priority", "op": "exists" } ] }
+    },
+    "audit": { "mode": "logOnly" }                      // stores events, delivers nothing
+  }
+}
+```
+
+**A queue this file creates delivers when it has a destination** — its own `delivery.url`, or the
+workspace's `baseUrl` — and logs events until it has one. `mode` is `deliver` or `logOnly`; declare it
+to own it. An existing queue keeps the mode it has unless the file declares one, and `apply` warns
+when a queue has a destination but only logs. `"mode": "deliver"` on a queue with nowhere to deliver
+fails that queue instead of pretending.
+
+**Pausing is not a mode.** An operator pauses a queue in the console, and a deploy never resumes it:
+`apply` reports a paused queue and leaves it paused.
+
+**A filter decides what is delivered.** Events that do not match are kept as `Filtered` and never
+sent. `op` is `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `contains` or `exists`, on a top-level field of
+the JSON body. An empty `conditions` list delivers everything — that is how a file removes a filter.
+
+### Prove it delivers: `queuey verify`
+
+`apply` exiting 0 says the configuration landed. It does not say events arrive. `verify` publishes
+one event and follows it:
+
+```bash
+queuey verify orders --data '{"type":"order.created","test":true}'
+```
+
+```text
+✓ Delivered — orders (que_…), event evt_…
+  Delivered to https://hooks.example.com/orders: 200 in 38 ms.
+```
+
+It exits 0 only when the receiver got the event. Otherwise the verdict — `logged_not_delivered`,
+`filtered`, `failed` or `timeout` with `--json` — comes with what to change: the mode, the filter,
+the credential the receiver rejected, or the earlier event that holds an ordered queue. A failure is
+reported on its first attempt rather than after every retry.
+
+The event is real: the receiver gets it like any other, so send data it treats as harmless. `verify`
+uses the workspace `apply` wrote to — `--tenant`, else the deployment file's `tenant`, else your
+config — and needs a key that may publish and read events. A deploy key can.
+
+### The schema
+
+`queuey schema` prints the JSON Schema for the deployment file: every field, the values it accepts
+and what it does. Point `$schema` at it and your editor validates the file as you type:
+
+```jsonc
+{ "$schema": "https://raw.githubusercontent.com/Queuey-AI/queuey-client/main/schema/queuey.deploy.schema.json" }
+```
+
 ### One file, every environment
 
 Most of a deployment file is already portable — a queue that owns only `/orders` says the same thing
@@ -473,6 +541,8 @@ carries the per-flag detail this table leaves out.
 | `apply` | Converge a workspace from `queuey.deploy.json` — the deploy verb |
 | `apply --dry-run` | Validate the file locally. No credentials, no network, nothing sent |
 | `apply --check` | Report drift and exit non-zero. Read-only — the CI gate |
+| `verify <queue>` | Publish one event and follow it: delivered, or why not and what to change |
+| `schema` | Print the deployment file's JSON Schema. No credentials, no network |
 | `pull` | Read a workspace back into a deployment file (the inverse of `apply`) |
 | `queue plan` | Preview the `[QueueyQueue]` declarations in an assembly (network-free) |
 | `queue sync` | Apply those declarations |
@@ -519,6 +589,7 @@ A stable contract, so CI can branch on them:
 queuey credentials set --name partner-key --from-env PARTNER_KEY
 queuey apply --dry-run            # catch typos with no credentials and no network
 queuey apply
+queuey verify orders --data '{"type":"order.created","test":true}'   # did it arrive?
 ```
 
 **Adopt a workspace someone configured in the console**

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text.Json;
@@ -300,6 +301,40 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Patches how one queue reads arriving events (<c>PATCH /queues/{que}/ingress</c>). Returns 204.</summary>
     public Task PatchQueueIngressAsync(string queuePublicId, PatchIngressWireRequest request, CancellationToken cancellationToken)
         => PatchAsync(request, cancellationToken, "queues", queuePublicId, "ingress");
+
+    /// <summary>
+    /// Sets whether a queue delivers or only logs (<c>PATCH /queues/{que}/mode-change</c>, the mode as its
+    /// number). Returns 204. Never used for pausing: that is a separate lever a deploy does not touch.
+    /// </summary>
+    public Task SetQueueModeAsync(string queuePublicId, int mode, CancellationToken cancellationToken)
+        => PatchAsync(new QueueModeChangeRequest { Mode = mode }, cancellationToken, "queues", queuePublicId, "mode-change");
+
+    /// <summary>
+    /// The oldest event on a queue that is still failing (<c>GET /events/{que}?status=Failed</c>,
+    /// oldest first), or none. What holds the events behind it on an ordered queue.
+    /// </summary>
+    public async Task<EventListItemResponse?> GetOldestFailingEventAsync(string queuePublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), "status=Failed&pageSize=1&sortDirection=asc", "events", queuePublicId);
+        EventListPageResponse page = await _connection.SendForJsonAsync<EventListPageResponse>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+        return page.Items?.FirstOrDefault();
+    }
+
+    /// <summary>
+    /// Reads one event's status and delivery attempts (<c>GET /events/{que}/{evt}</c>). Envelope only —
+    /// the payload is a separate, recorded read this SDK does not make.
+    /// </summary>
+    public async Task<EventDetailsResponse> GetEventAsync(string queuePublicId, string eventPublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "events", queuePublicId, eventPublicId);
+        return await _connection.SendForJsonAsync<EventDetailsResponse>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
 
     /// <summary>One PATCH shape for the control plane: JSON body, API key + license header, 204 back.</summary>
     private async Task PatchAsync(object request, CancellationToken cancellationToken, params string[] segments)
