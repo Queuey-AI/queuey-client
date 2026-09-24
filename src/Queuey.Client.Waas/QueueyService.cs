@@ -561,6 +561,19 @@ public sealed class QueueyService : IQueueyService
     }
 
     /// <inheritdoc />
+    public async Task<DeploymentPlan> PlanDeploymentAsync(DeploymentFile file, CancellationToken cancellationToken = default)
+    {
+        if (file is null) throw new ArgumentNullException(nameof(file));
+
+        file = file.Expand();
+        IReadOnlyList<DeploymentQueuePlan> plans = file.Resolve();   // lokal validering først, som apply
+        string tenant = RequireForSync(file.Tenant);
+
+        return await new DeploymentPlanner(_controlPlane, Management)
+            .PlanAsync(file, plans, tenant, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public Task<DeliveryVerification> VerifyDeliveryAsync(
         string queueName, byte[] payload, VerifyDeliveryOptions? options = null, CancellationToken cancellationToken = default)
     {
@@ -671,7 +684,7 @@ public sealed class QueueyService : IQueueyService
         };
     }
 
-    private static QueuePolicyPatchRequest ToPatch(QueuePolicy policy) => new()
+    internal static QueuePolicyPatchRequest ToPatch(QueuePolicy policy) => new()
     {
         Ordering = policy.Ordering,
         DlqEnabled = policy.DlqEnabled,

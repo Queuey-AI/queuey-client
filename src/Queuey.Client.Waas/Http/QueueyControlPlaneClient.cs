@@ -336,6 +336,22 @@ internal sealed class QueueyControlPlaneClient
             HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// A write sent as a dry run (<c>?dryRun=true</c>): the server runs it the same way, stops before it
+    /// stores anything, and answers with what it would have done. Refusals come back as they would.
+    /// </summary>
+    public async Task<TPlan> DryRunAsync<TPlan>(HttpMethod method, object? request, CancellationToken cancellationToken, params string[] segments)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), "dryRun=true", segments);
+        byte[]? body = request is null ? null : JsonSerializer.SerializeToUtf8Bytes(request, request.GetType(), QueueyJson.Options);
+
+        return await _connection.SendForJsonAsync<TPlan>(
+            method, uri, body, body is null ? null : JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>One PATCH shape for the control plane: JSON body, API key + license header, 204 back.</summary>
     private async Task PatchAsync(object request, CancellationToken cancellationToken, params string[] segments)
     {

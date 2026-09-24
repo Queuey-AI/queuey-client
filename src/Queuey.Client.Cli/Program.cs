@@ -46,23 +46,21 @@ try
 }
 catch (QueueyConfigurationException ex)
 {
-    Console.Error.WriteLine($"Config error: {ex.Message}");
-    return ExitCodes.Configuration;
+    return CliErrors.Write(rest, "config_error", ex.Message, ex.SuggestedAction, status: null, ExitCodes.Configuration, "Config error");
 }
 catch (QueueyException ex)
 {
-    Console.Error.WriteLine($"Queuey error: {ex.Message}");
-    return ExitCodes.RuntimeError;
+    return CliErrors.Write(rest, ex.ErrorCode ?? "queuey_error", ex.Message, ex.SuggestedAction, ex.StatusCode, ExitCodes.RuntimeError, "Queuey error");
 }
 catch (HttpRequestException ex)
 {
-    Console.Error.WriteLine($"Could not reach Queuey: {ex.Message}");
-    return ExitCodes.RuntimeError;
+    return CliErrors.Write(rest, "unreachable", $"Could not reach Queuey: {ex.Message}",
+        "Check --api-base / --ingress-base (QUEUEY_API_BASE, QUEUEY_INGRESS_BASE) and the network.", status: null,
+        ExitCodes.RuntimeError, "Error");
 }
 catch (TaskCanceledException)
 {
-    Console.Error.WriteLine("The request timed out.");
-    return ExitCodes.RuntimeError;
+    return CliErrors.Write(rest, "timeout", "The request timed out.", action: null, status: null, ExitCodes.RuntimeError, "Error");
 }
 
 static int Unknown(string command)

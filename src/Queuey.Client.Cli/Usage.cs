@@ -73,13 +73,19 @@ QUEUE
                  accepts events and logs them without delivering until an endpoint is set.
 
 APPLY
-  queuey apply [--file queuey.deploy.json] [--dry-run] [--check] [--continue-on-error] [--json]
+  queuey apply [--file queuey.deploy.json] [--dry-run] [--plan] [--check] [--continue-on-error] [--json]
                  Converges the workspace's delivery defaults, then each declared queue's
                  behaviour and destination. Idempotent; exits non-zero unless it fully
                  converged. --dry-run validates the file locally and sends nothing.
                  The file carries NO secrets: auth and signing name a credentialRef, so it is
                  meant to be committed. Keep it separate from queuey.json, which holds your
                  API key and must not be.
+                 --plan asks Queuey itself: every write apply would send goes as a dry run
+                 (?dryRun=true), so it shows each value that would change and every refusal
+                 Queuey would give — retention caps, queue limits, bad values — with what to
+                 do about it. Writes nothing; exits non-zero if anything would be refused.
+                 Needs the key apply needs. A queue that does not exist yet shows as one
+                 that would be created.
                  --check writes nothing and exits non-zero when the file and the workspace
                  have diverged — the CI gate. Only what the file declares is compared, so a
                  workspace holding settings the file is silent about is not drift.

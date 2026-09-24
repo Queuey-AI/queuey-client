@@ -99,6 +99,18 @@ public interface IQueueyService
     Task<IReadOnlyList<DriftItem>> CheckDeploymentAsync(DeploymentFile file, string? tenantPublicId = null, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Asks Queuey what applying <paramref name="file"/> would do, without changing anything: every
+    /// write <see cref="ApplyDeploymentAsync"/> would send runs as a dry run on the server — the same
+    /// validation and the same refusals — and comes back as a list of changes. Needs the same key an
+    /// apply needs. A queue that does not exist yet is reported as one that would be created.
+    /// </summary>
+    /// <exception cref="QueueyException">
+    /// With code <c>dry_run_unsupported</c> when the server does not answer dry runs; nothing was
+    /// changed. <see cref="DryRunIgnoredException"/> if it answered one as a write.
+    /// </exception>
+    Task<DeploymentPlan> PlanDeploymentAsync(DeploymentFile file, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Proves a queue delivers: publishes <paramref name="payload"/> to <paramref name="queueName"/>
     /// and follows that event until it is delivered, logged, filtered or failed, or the timeout
     /// passes. A failure is reported on its first attempt, with the receiver's answer and what to

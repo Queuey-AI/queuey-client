@@ -103,6 +103,32 @@ public sealed class DeployCommandTests : IDisposable
     }
 
     [Fact]
+    public async Task With_json_an_error_is_json_on_stdout_with_its_action()
+    {
+        // Gap 5 fra gap-analysen: feil ble skrevet som prosa på stderr også med --json.
+        var (exit, output) = await Run(() => Task.FromResult(CliErrors.Write(
+            new[] { "orders", "--json" }, "filter_required", "Name what to replay.", "Send \"all\": true.", 400,
+            ExitCodes.RuntimeError, "Queuey error")));
+
+        Assert.Equal(ExitCodes.RuntimeError, exit);
+        JsonElement error = JsonDocument.Parse(output).RootElement.GetProperty("error");
+        Assert.Equal("filter_required", error.GetProperty("code").GetString());
+        Assert.Equal("Send \"all\": true.", error.GetProperty("action").GetString());
+        Assert.Equal(400, error.GetProperty("status").GetInt32());
+    }
+
+    [Fact]
+    public async Task Without_json_the_action_follows_the_message()
+    {
+        var (_, output) = await Run(() => Task.FromResult(CliErrors.Write(
+            new[] { "orders" }, "filter_required", "Name what to replay.", "Send \"all\": true.", 400,
+            ExitCodes.RuntimeError, "Queuey error")));
+
+        Assert.Contains("Queuey error: Name what to replay.", output);
+        Assert.Contains("→ Send \"all\": true.", output);
+    }
+
+    [Fact]
     public void The_tenant_verify_uses_is_the_one_the_file_names()
     {
         // Samme workspace som apply skrev til; bare tenant ekspanderes, så en annen ${VAR} som

@@ -59,36 +59,41 @@ internal sealed class QueueyManagement : IQueueyManagement
         if (string.IsNullOrWhiteSpace(tenantPublicId)) throw new ArgumentException("A tenant public id is required.", nameof(tenantPublicId));
         if (delivery is null) throw new ArgumentNullException(nameof(delivery));
 
-        return _controlPlane.PatchTenantDeliveryAsync(tenantPublicId, new PatchTenantDeliveryWireRequest
-        {
-            BaseUrl = delivery.BaseUrl,
-            AuthMode = delivery.AuthMode,
-            CredentialRef = delivery.CredentialRef,
-            AuthHeaderName = delivery.AuthHeaderName,
-            Method = delivery.Method,
-            TimeoutMs = delivery.TimeoutMs,
-            Signing = ToWire(delivery.Signing),
-            RateLimit = ToWire(delivery.RateLimit),
-        }, cancellationToken);
+        return _controlPlane.PatchTenantDeliveryAsync(tenantPublicId, WireOf(delivery), cancellationToken);
     }
+
+    // Samme body for apply og for planen (?dryRun=true), så planen spør om nøyaktig det apply sender.
+    internal static PatchTenantDeliveryWireRequest WireOf(WorkspaceDelivery delivery) => new()
+    {
+        BaseUrl = delivery.BaseUrl,
+        AuthMode = delivery.AuthMode,
+        CredentialRef = delivery.CredentialRef,
+        AuthHeaderName = delivery.AuthHeaderName,
+        Method = delivery.Method,
+        TimeoutMs = delivery.TimeoutMs,
+        Signing = ToWire(delivery.Signing),
+        RateLimit = ToWire(delivery.RateLimit),
+    };
 
     public Task SetQueueDeliveryAsync(string queuePublicId, QueueDelivery delivery, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(queuePublicId)) throw new ArgumentException("A queue public id is required.", nameof(queuePublicId));
         if (delivery is null) throw new ArgumentNullException(nameof(delivery));
 
-        return _controlPlane.PatchQueueDeliveryAsync(queuePublicId, new PatchQueueDeliveryWireRequest
-        {
-            Url = delivery.Url,
-            Inherit = delivery.Inherit,
-            AuthMode = delivery.AuthMode,
-            CredentialRef = delivery.CredentialRef,
-            AuthHeaderName = delivery.AuthHeaderName,
-            TimeoutMs = delivery.TimeoutMs,
-            Signing = ToWire(delivery.Signing),
-            RateLimit = ToWire(delivery.RateLimit),
-        }, cancellationToken);
+        return _controlPlane.PatchQueueDeliveryAsync(queuePublicId, WireOf(delivery), cancellationToken);
     }
+
+    internal static PatchQueueDeliveryWireRequest WireOf(QueueDelivery delivery) => new()
+    {
+        Url = delivery.Url,
+        Inherit = delivery.Inherit,
+        AuthMode = delivery.AuthMode,
+        CredentialRef = delivery.CredentialRef,
+        AuthHeaderName = delivery.AuthHeaderName,
+        TimeoutMs = delivery.TimeoutMs,
+        Signing = ToWire(delivery.Signing),
+        RateLimit = ToWire(delivery.RateLimit),
+    };
 
     public async Task<CredentialResult> CreateCredentialAsync(
         string tenantPublicId, string name, string type, string secret,
@@ -143,37 +148,41 @@ internal sealed class QueueyManagement : IQueueyManagement
         if (string.IsNullOrWhiteSpace(tenantPublicId)) throw new ArgumentException("A tenant public id is required.", nameof(tenantPublicId));
         if (policy is null) throw new ArgumentNullException(nameof(policy));
 
-        return _controlPlane.PatchTenantPolicyAsync(tenantPublicId, new PatchTenantPolicyWireRequest
-        {
-            Ordering = policy.Ordering,
-            DlqEnabled = policy.DlqEnabled,
-            RetentionDays = policy.RetentionDays,
-            Idempotent = policy.Idempotent,
-            MaxAttempts = policy.MaxAttempts,
-            DlqAfterAttempts = policy.DlqAfterAttempts,
-            Backoff = RetryBackoffWire.From(policy.Backoff),
-            RetryOnNetworkErrors = policy.RetryOnNetworkErrors,
-            RetryOnTimeouts = policy.RetryOnTimeouts,
-        }, cancellationToken);
+        return _controlPlane.PatchTenantPolicyAsync(tenantPublicId, WireOf(policy), cancellationToken);
     }
+
+    internal static PatchTenantPolicyWireRequest WireOf(DeploymentWorkspace policy) => new()
+    {
+        Ordering = policy.Ordering,
+        DlqEnabled = policy.DlqEnabled,
+        RetentionDays = policy.RetentionDays,
+        Idempotent = policy.Idempotent,
+        MaxAttempts = policy.MaxAttempts,
+        DlqAfterAttempts = policy.DlqAfterAttempts,
+        Backoff = RetryBackoffWire.From(policy.Backoff),
+        RetryOnNetworkErrors = policy.RetryOnNetworkErrors,
+        RetryOnTimeouts = policy.RetryOnTimeouts,
+    };
 
     public Task SetIngressAsync(string publicId, bool isQueue, DeploymentIngress ingress, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(publicId)) throw new ArgumentException("A public id is required.", nameof(publicId));
         if (ingress is null) throw new ArgumentNullException(nameof(ingress));
 
-        var request = new PatchIngressWireRequest
-        {
-            AuthMode = ingress.AuthMode,
-            EventType = ToWire(ingress.EventType),
-            GroupKey = ToWire(ingress.GroupKey),
-            SuccessStatusCode = ingress.SuccessStatusCode,
-        };
+        var request = WireOf(ingress);
 
         return isQueue
             ? _controlPlane.PatchQueueIngressAsync(publicId, request, cancellationToken)
             : _controlPlane.PatchTenantIngressAsync(publicId, request, cancellationToken);
     }
+
+    internal static PatchIngressWireRequest WireOf(DeploymentIngress ingress) => new()
+    {
+        AuthMode = ingress.AuthMode,
+        EventType = ToWire(ingress.EventType),
+        GroupKey = ToWire(ingress.GroupKey),
+        SuccessStatusCode = ingress.SuccessStatusCode,
+    };
 
     private static ContextSourceWire? ToWire(ContextSource? s)
         => s is null ? null : new ContextSourceWire { From = s.From, Name = s.Name };
