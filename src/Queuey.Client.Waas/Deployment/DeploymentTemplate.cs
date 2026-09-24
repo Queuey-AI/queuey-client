@@ -55,8 +55,6 @@ public static class DeploymentTemplate
                 MaxAttempts = file.Workspace.MaxAttempts,
                 DlqAfterAttempts = file.Workspace.DlqAfterAttempts,
                 Backoff = file.Workspace.Backoff,
-                RetryOnNetworkErrors = file.Workspace.RetryOnNetworkErrors,
-                RetryOnTimeouts = file.Workspace.RetryOnTimeouts,
                 Ingress = file.Workspace.Ingress,
                 Delivery = file.Workspace.Delivery is null ? null : new WorkspaceDelivery
                 {
@@ -86,8 +84,6 @@ public static class DeploymentTemplate
                 MaxAttempts = q.MaxAttempts,
                 DlqAfterAttempts = q.DlqAfterAttempts,
                 Backoff = q.Backoff,
-                RetryOnNetworkErrors = q.RetryOnNetworkErrors,
-                RetryOnTimeouts = q.RetryOnTimeouts,
                 Filter = q.Filter,
                 Ingress = q.Ingress,
                 Delivery = q.Delivery is null ? null : new QueueDelivery

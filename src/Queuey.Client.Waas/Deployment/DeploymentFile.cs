@@ -113,8 +113,6 @@ public sealed class DeploymentFile
                 MaxAttempts = Workspace.MaxAttempts,
                 DlqAfterAttempts = Workspace.DlqAfterAttempts,
                 Backoff = Workspace.Backoff,
-                RetryOnNetworkErrors = Workspace.RetryOnNetworkErrors,
-                RetryOnTimeouts = Workspace.RetryOnTimeouts,
                 Ingress = Workspace.Ingress,
                 Delivery = Workspace.Delivery is null ? null : new WorkspaceDelivery
                 {
@@ -143,8 +141,6 @@ public sealed class DeploymentFile
                 MaxAttempts = q.MaxAttempts,
                 DlqAfterAttempts = q.DlqAfterAttempts,
                 Backoff = q.Backoff,
-                RetryOnNetworkErrors = q.RetryOnNetworkErrors,
-                RetryOnTimeouts = q.RetryOnTimeouts,
                 Filter = q.Filter,
                 // Ingress på kø-nivå ble ikke kopiert her før (2026-09-23), så apply, check og
                 // dry-run droppet den stille: alle tre ekspanderer fila først.
@@ -217,8 +213,6 @@ public sealed class DeploymentFile
                     MaxAttempts = declared.MaxAttempts,
                     DlqAfterAttempts = declared.DlqAfterAttempts,
                     Backoff = declared.Backoff,
-                    RetryOnNetworkErrors = declared.RetryOnNetworkErrors,
-                    RetryOnTimeouts = declared.RetryOnTimeouts,
                     Filter = declared.Filter,
                 },
             });
@@ -270,12 +264,6 @@ public sealed class DeploymentQueue
 
     /// <summary>How long to wait between attempts.</summary>
     public RetryBackoff? Backoff { get; set; }
-
-    /// <summary>Whether a network error (no response at all) is retried.</summary>
-    public bool? RetryOnNetworkErrors { get; set; }
-
-    /// <summary>Whether a timeout is retried.</summary>
-    public bool? RetryOnTimeouts { get; set; }
 
     /// <summary>Which events this queue delivers. Omit it to deliver every event.</summary>
     public DeliveryFilter? Filter { get; set; }
@@ -332,12 +320,6 @@ public sealed class DeploymentWorkspace
     /// <summary>How long to wait between attempts, for every queue that does not say.</summary>
     public RetryBackoff? Backoff { get; set; }
 
-    /// <summary>Whether a network error (no response at all) is retried.</summary>
-    public bool? RetryOnNetworkErrors { get; set; }
-
-    /// <summary>Whether a timeout is retried.</summary>
-    public bool? RetryOnTimeouts { get; set; }
-
     /// <summary>Where events are delivered — the base every queue appends its path to.</summary>
     public WorkspaceDelivery? Delivery { get; set; }
 
@@ -347,8 +329,7 @@ public sealed class DeploymentWorkspace
     internal bool HasPolicy => Ordering is not null || DlqEnabled is not null
                             || RetentionDays is not null || Idempotent is not null
                             || MaxAttempts is not null || DlqAfterAttempts is not null
-                            || (Backoff is not null && !Backoff.IsEmpty)
-                            || RetryOnNetworkErrors is not null || RetryOnTimeouts is not null;
+                            || (Backoff is not null && !Backoff.IsEmpty);
 
     /// <summary>The workspace's retry declaration as a policy, so it is validated like a queue's.</summary>
     internal QueuePolicy AsPolicy() => new()
@@ -360,8 +341,6 @@ public sealed class DeploymentWorkspace
         MaxAttempts = MaxAttempts,
         DlqAfterAttempts = DlqAfterAttempts,
         Backoff = Backoff,
-        RetryOnNetworkErrors = RetryOnNetworkErrors,
-        RetryOnTimeouts = RetryOnTimeouts,
     };
 }
 

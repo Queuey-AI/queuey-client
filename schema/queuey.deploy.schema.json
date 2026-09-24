@@ -94,14 +94,6 @@
           },
           "additionalProperties": false
         },
-        "retryOnNetworkErrors": {
-          "description": "Whether a network error (no response at all) is retried.",
-          "type": "boolean"
-        },
-        "retryOnTimeouts": {
-          "description": "Whether a timeout is retried.",
-          "type": "boolean"
-        },
         "delivery": {
           "description": "Where events are delivered — the base every queue appends its path to.",
           "type": "object",
@@ -300,14 +292,6 @@
               }
             },
             "additionalProperties": false
-          },
-          "retryOnNetworkErrors": {
-            "description": "Whether a network error (no response at all) is retried.",
-            "type": "boolean"
-          },
-          "retryOnTimeouts": {
-            "description": "Whether a timeout is retried.",
-            "type": "boolean"
           },
           "filter": {
             "description": "Which events this queue delivers. Omit it to deliver every event.",

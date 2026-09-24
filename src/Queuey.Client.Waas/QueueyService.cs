@@ -309,8 +309,11 @@ public sealed class QueueyService : IQueueyService
         => SyncQueueDefinitionsAsync(Queues.Queues, options, tenantPublicId: null, hooks: null, cancellationToken);
 
     /// <inheritdoc />
-    public Task<QueueApplyResult> ApplyQueueAsync(QueueDefinition definition, CancellationToken cancellationToken = default)
-        => ApplyQueueAsync(definition, RequireTenant(), hooks: null, cancellationToken);
+    public async Task<QueueApplyResult> ApplyQueueAsync(QueueDefinition definition, CancellationToken cancellationToken = default)
+    {
+        QueueApplyResult result = await ApplyQueueAsync(definition, RequireTenant(), hooks: null, cancellationToken).ConfigureAwait(false);
+        return result.Succeeded ? result : throw result.Error!;
+    }
 
     /// <summary>What the deployment path hangs on one queue's apply.</summary>
     private sealed class QueueApplyHooks
@@ -320,6 +323,12 @@ public sealed class QueueyService : IQueueyService
 
         /// <summary>After the policy — destination, then mode. Returns the queue's warnings and mode.</summary>
         public Func<QueueDefinition, string, QueueApplyResponse, CancellationToken, Task<QueueApplyOutcome>>? AfterApply { get; init; }
+
+        /// <summary>
+        /// What to say about a queue this run created before its apply failed, or null when nothing
+        /// needs saying. It is in logOnly either way; what makes it deliver depends on the path.
+        /// </summary>
+        public Func<QueueDefinition, string?>? CreatedButFailed { get; init; }
     }
 
     private sealed class QueueApplyOutcome
@@ -360,26 +369,51 @@ public sealed class QueueyService : IQueueyService
                 $"Queuey accepted queue '{definition.Name}' but returned no queue id, so its policy cannot be applied.");
         }
 
-        // Ingress before policy, for the same reason as at workspace level: bykey needs its key
-        // source to exist already.
-        if (hooks?.BeforePolicy is not null)
-            await hooks.BeforePolicy(definition, queueId, cancellationToken).ConfigureAwait(false);
-
-        // Policy is a separate PATCH, and only when something is actually declared — an all-inherit
-        // queue must not send a patch that could pin values it meant to keep inheriting.
         bool policyApplied = false;
-        if (!definition.Policy.IsEmpty)
+        QueueApplyOutcome outcome;
+        try
         {
-            await _controlPlane.PatchQueuePolicyAsync(queueId, ToPatch(definition.Policy), cancellationToken).ConfigureAwait(false);
-            policyApplied = true;
-        }
+            // Ingress before policy, for the same reason as at workspace level: bykey needs its key
+            // source to exist already.
+            if (hooks?.BeforePolicy is not null)
+                await hooks.BeforePolicy(definition, queueId, cancellationToken).ConfigureAwait(false);
 
-        // Destination and mode, inside the same apply as the rest: a destination that fails to land,
-        // or a mode that cannot be set, fails the queue rather than leaving it "applied" while it
-        // delivers nowhere.
-        QueueApplyOutcome outcome = hooks?.AfterApply is not null
-            ? await hooks.AfterApply(definition, queueId, response, cancellationToken).ConfigureAwait(false)
-            : await ConvergeCreatedQueueModeAsync(definition, queueId, response, cancellationToken).ConfigureAwait(false);
+            // Policy is a separate PATCH, and only when something is actually declared — an all-inherit
+            // queue must not send a patch that could pin values it meant to keep inheriting.
+            if (!definition.Policy.IsEmpty)
+            {
+                await _controlPlane.PatchQueuePolicyAsync(queueId, ToPatch(definition.Policy), cancellationToken).ConfigureAwait(false);
+                policyApplied = true;
+            }
+
+            // Destination and mode, inside the same apply as the rest: a destination that fails to land,
+            // or a mode that cannot be set, fails the queue rather than leaving it "applied" while it
+            // delivers nowhere.
+            outcome = hooks?.AfterApply is not null
+                ? await hooks.AfterApply(definition, queueId, response, cancellationToken).ConfigureAwait(false)
+                : await ConvergeCreatedQueueModeAsync(definition, queueId, response, cancellationToken).ConfigureAwait(false);
+        }
+        catch (QueueyException ex)
+        {
+            // Køen finnes selv om resten feilet. Før 2026-09-24 mistet feilresultatet både id og at den
+            // var opprettet, så ingen fikk vite at en ny kø lå igjen i logOnly — og neste apply lar en
+            // eksisterende kø beholde modusen sin og ga exit 0. Modussteget er sist, så en kø som ble
+            // opprettet her og feilet, har fortsatt modusen en ny kø starter med.
+            return new QueueApplyResult
+            {
+                ModelType = definition.ModelType?.FullName ?? string.Empty,
+                Name = definition.Name,
+                Succeeded = false,
+                Error = ex,
+                PublicId = queueId,
+                Created = response.Created,
+                PolicyApplied = policyApplied,
+                Mode = response.Created ? DeploymentQueueMode.LogOnly.ToFileText() : null,
+                Warnings = response.Created && (hooks?.CreatedButFailed ?? CreatedButFailedInCode)(definition) is { } warning
+                    ? new[] { warning }
+                    : Array.Empty<string>(),
+            };
+        }
 
         return new QueueApplyResult
         {
@@ -393,6 +427,12 @@ public sealed class QueueyService : IQueueyService
             Warnings = outcome.Warnings,
         };
     }
+
+    /// <summary>A queue declared in code cannot declare a mode, so a later sync never sets one.</summary>
+    private static string CreatedButFailedInCode(QueueDefinition definition)
+        => $"Queue '{definition.Name}' was created before its apply failed, so it is in logOnly mode: it accepts events and " +
+           "logs them without delivering. A later sync leaves an existing queue's mode alone — set it to deliver in the " +
+           "Queuey console, or declare \"mode\": \"deliver\" for it in queuey.deploy.json.";
 
     /// <summary>
     /// The mode step for a queue declared in code, which carries no destination and no mode: a queue
@@ -599,8 +639,8 @@ public sealed class QueueyService : IQueueyService
         var byName = plans.ToDictionary(p => p.Definition.Name, StringComparer.Ordinal);
 
         string tenant = file.Tenant ?? (options.DryRun ? _options.TenantPublicId ?? string.Empty : RequireTenant());
-        var credentials = new CredentialResolver(Management, tenant);
         var existing = new Dictionary<string, QueueListItem>(StringComparer.Ordinal);
+        ResolvedDeliveries? deliveries = null;
 
         // The queues as they are before this run touches anything: an existing queue's mode and flow
         // decide what the mode step may change and what it has to say. One read for the whole file,
@@ -612,6 +652,11 @@ public sealed class QueueyService : IQueueyService
                 if (row.DisplayName is { } name)
                     existing[name] = row;
             }
+
+            // Every credential name, before the first write: a name that is missing fails the run
+            // here, with nothing sent, instead of halfway through it.
+            deliveries = await new CredentialResolver(Management, tenant)
+                .ResolveAllAsync(file.Workspace?.Delivery, plans, cancellationToken).ConfigureAwait(false);
         }
 
         // Workspace first: queues inherit from it, so converging it first means a queue that means to
@@ -628,11 +673,8 @@ public sealed class QueueyService : IQueueyService
             if (workspace.HasPolicy)
                 await Management.SetWorkspacePolicyAsync(tenant, workspace, cancellationToken).ConfigureAwait(false);
 
-            if (workspace.Delivery is { } delivery && !delivery.IsEmpty)
-            {
-                WorkspaceDelivery resolved = await credentials.ResolveAsync(delivery, cancellationToken).ConfigureAwait(false);
+            if (workspace.Delivery is { IsEmpty: false } && deliveries?.Workspace is { } resolved)
                 await Management.SetWorkspaceDeliveryAsync(tenant, resolved, cancellationToken).ConfigureAwait(false);
-            }
         }
 
         QueueSyncResult result = await SyncQueueDefinitionsAsync(
@@ -649,15 +691,28 @@ public sealed class QueueyService : IQueueyService
                 AfterApply = async (definition, queuePublicId, response, ct) =>
                 {
                     byName.TryGetValue(definition.Name, out DeploymentQueuePlan? plan);
-                    if (plan?.Delivery is { } delivery)
-                    {
-                        QueueDelivery resolved = await credentials.ResolveAsync(delivery, ct).ConfigureAwait(false);
+                    if (deliveries is not null && deliveries.Queues.TryGetValue(definition.Name, out QueueDelivery? resolved))
                         await Management.SetQueueDeliveryAsync(queuePublicId, resolved, ct).ConfigureAwait(false);
-                    }
 
                     existing.TryGetValue(definition.Name, out QueueListItem? row);
                     return await ConvergeModeAsync(definition.Name, queuePublicId, tenant, plan, response,
                         response.Created ? null : row, ct).ConfigureAwait(false);
+                },
+                CreatedButFailed = definition =>
+                {
+                    byName.TryGetValue(definition.Name, out DeploymentQueuePlan? plan);
+                    return plan?.Mode switch
+                    {
+                        // Der fila vil ha den: ingenting å si.
+                        DeploymentQueueMode.LogOnly => null,
+                        DeploymentQueueMode.Deliver =>
+                            $"Queue '{definition.Name}' was created before its apply failed, so it is in logOnly mode for now. " +
+                            "The file declares \"mode\": \"deliver\", so the next apply sets it once the error is fixed.",
+                        _ =>
+                            $"Queue '{definition.Name}' was created before its apply failed, so it is in logOnly mode: it accepts " +
+                            "events and logs them without delivering. A later apply leaves an existing queue's mode alone, so it " +
+                            "will not start delivering by itself — declare \"mode\": \"deliver\" for it, then apply again.",
+                    };
                 },
             },
             cancellationToken).ConfigureAwait(false);
@@ -693,8 +748,6 @@ public sealed class QueueyService : IQueueyService
         MaxAttempts = policy.MaxAttempts,
         DlqAfterAttempts = policy.DlqAfterAttempts,
         Backoff = RetryBackoffWire.From(policy.Backoff),
-        RetryOnNetworkErrors = policy.RetryOnNetworkErrors,
-        RetryOnTimeouts = policy.RetryOnTimeouts,
         Filter = DeliveryFilterWire.From(policy.Filter),
     };
 
@@ -741,21 +794,26 @@ public sealed class QueueyService : IQueueyService
                 continue;
             }
 
+            QueueApplyResult outcome;
             try
             {
-                results.Add(await ApplyQueueAsync(def, tenant, hooks, cancellationToken).ConfigureAwait(false));
-                continue;
+                outcome = await ApplyQueueAsync(def, tenant, hooks, cancellationToken).ConfigureAwait(false);
             }
             catch (QueueyException ex)
             {
-                results.Add(new QueueApplyResult
+                // Feilet før køen fantes (eller før svaret sa hvilken den er): det er ingen kø å rapportere.
+                outcome = new QueueApplyResult
                 {
                     ModelType = def.ModelType?.FullName ?? string.Empty,
                     Name = def.Name,
                     Succeeded = false,
                     Error = ex,
-                });
+                };
             }
+
+            results.Add(outcome);
+            if (outcome.Succeeded)
+                continue;
 
             if (!options.ContinueOnError)
             {

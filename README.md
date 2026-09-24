@@ -406,7 +406,8 @@ it cannot emit a secret, because Queuey's read surfaces never return one.
 stored encrypted by `queuey credentials set`, which reads the value from an environment variable
 (never an argument — those land in shell history and CI logs) and can never read it back. The
 reference is the credential's *name*, resolved per workspace at apply time, so the same file
-converges staging and production. Keep it
+converges staging and production. Every name is resolved before the first write, so one that is
+missing fails the apply with nothing changed. Keep it
 separate from `queuey.json`, which holds your API key and must *not* be committed.
 
 Every omitted field means **leave alone**, everywhere: a file that names only a base URL changes only
@@ -426,7 +427,6 @@ success while quietly skipping what you wrote is worse than one that fails.
     "orders": {
       "delivery": { "url": "/orders" },
       "dlqAfterAttempts": 5,                            // …and this one gives up to the DLQ sooner
-      "retryOnTimeouts": false,
       "filter": { "match": "any", "conditions": [
         { "field": "type", "op": "eq", "value": "order.created" },
         { "field": "priority", "op": "exists" } ] }
@@ -459,18 +459,21 @@ queuey verify orders --data '{"type":"order.created","test":true}'
 ```
 
 ```text
-✓ Delivered — orders (que_…), event evt_…
+✓ Delivered — orders (que_…) in ten_…, event evt_…
   Delivered to https://hooks.example.com/orders: 200 in 38 ms.
 ```
 
 It exits 0 only when the receiver got the event. Otherwise the verdict — `logged_not_delivered`,
 `filtered`, `failed` or `timeout` with `--json` — comes with what to change: the mode, the filter,
-the credential the receiver rejected, or the earlier event that holds an ordered queue. A failure is
-reported on its first attempt rather than after every retry.
+the credential the receiver rejected, held delivery, or the earlier event that holds a fifo queue. A
+failure is reported on its first attempt rather than after every retry.
 
 The event is real: the receiver gets it like any other, so send data it treats as harmless. `verify`
-uses the workspace `apply` wrote to — `--tenant`, else the deployment file's `tenant`, else your
-config — and needs a key that may publish and read events. A deploy key can.
+and `apply` pick the workspace by the same rule: the deployment file's `tenant` when it names one,
+otherwise `--tenant`, `QUEUEY_TENANT` or `queuey.json`. When `--tenant` or `QUEUEY_TENANT` names
+another workspace than the file, both commands fail and name the two, rather than guessing which
+one you meant. The output names the workspace. `verify` needs a key that may publish and read
+events. A deploy key can.
 
 ### The schema
 
@@ -722,7 +725,9 @@ queuey replay evt_… --api-key qak_… --queue que_…
 
 ### Configuration
 
-Every command resolves settings as **flag → environment variable → `queuey.json` → default**:
+Every command resolves settings as **flag → environment variable → `queuey.json` → default**. The
+one exception is the workspace of `apply` and `verify`: a deployment file that names a `tenant`
+decides it, and a `--tenant` or `QUEUEY_TENANT` that names another one fails the command.
 
 | Setting | Flag | Env var |
 | --- | --- | --- |

@@ -45,10 +45,10 @@ internal static class VerifyCommand
             return ExitCodes.Usage;
         }
 
-        // The workspace `apply` wrote to: --tenant, else the deployment file's, else the configured one.
-        ResolvedConfig config = CliHost.Resolve(map);
-        if (map.Get("tenant") is null && DeploymentTenant(map) is { } fileTenant)
-            config = config.WithTenant(fileTenant);
+        // Workspacet apply skrev til, etter samme regel som apply: fila sin tenant, ellers den
+        // konfigurerte, og feil når --tenant eller QUEUEY_TENANT navngir et annet enn fila.
+        (string? fileTenant, string filePath) = DeploymentFileTenant(map);
+        ResolvedConfig config = CliHost.ResolveForDeployment(map, fileTenant, filePath);
 
         using ServiceProvider provider = CliHost.BuildProvider(config);
         var service = provider.GetRequiredService<IQueueyService>();
@@ -69,7 +69,7 @@ internal static class VerifyCommand
     }
 
     /// <summary>The deployment file's tenant, when there is a file — named by --deployment, or the default one here.</summary>
-    private static string? DeploymentTenant(ArgMap map)
+    private static (string? Tenant, string Path) DeploymentFileTenant(ArgMap map)
     {
         string? named = map.Get("deployment");
         string path = named ?? DeploymentFile.DefaultFileName;
@@ -77,10 +77,10 @@ internal static class VerifyCommand
         {
             if (named is not null)
                 throw new QueueyConfigurationException($"No deployment file at '{path}'.");
-            return null;
+            return (null, path);
         }
 
-        return DeploymentFile.Parse(File.ReadAllText(path)).ResolveTenant();
+        return (DeploymentFile.Parse(File.ReadAllText(path)).ResolveTenant(), path);
     }
 
     private static void WriteHuman(DeliveryVerification r)
@@ -95,7 +95,7 @@ internal static class VerifyCommand
             _ => "No outcome yet",
         };
 
-        Console.WriteLine($"{mark} {verdict} — {r.Queue} ({r.QueuePublicId}), event {r.EventId}");
+        Console.WriteLine($"{mark} {verdict} — {r.Queue} ({r.QueuePublicId}) in {r.Tenant ?? "?"}, event {r.EventId}");
         Console.WriteLine($"  {r.Summary}");
         if (r.SuggestedAction is { } action)
             Console.WriteLine($"  → {action}");
@@ -103,6 +103,7 @@ internal static class VerifyCommand
 
     private static object ToJson(DeliveryVerification r) => new
     {
+        tenant = r.Tenant,
         queue = r.Queue,
         queuePublicId = r.QueuePublicId,
         eventId = r.EventId,

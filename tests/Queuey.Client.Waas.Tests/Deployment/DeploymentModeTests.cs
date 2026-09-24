@@ -33,11 +33,20 @@ public class DeploymentModeTests
         public bool Created { get; init; } = true;
         public bool HasTarget { get; init; } = true;
         public object[] Rows { get; init; } = Array.Empty<object>();
+        public object[] Credentials { get; init; } = Array.Empty<object>();
+
+        /// <summary>Svar som overstyrer standarden, nøklet på «METODE sti».</summary>
+        public Dictionary<string, Func<HttpResponseMessage>> Answers { get; } = new(StringComparer.Ordinal);
+
         public StubHttpMessageHandler Stub { get; }
 
         public Api() => Stub = new StubHttpMessageHandler((_, req, body) =>
         {
             string path = req.RequestUri!.AbsolutePath;
+            if (Answers.TryGetValue($"{req.Method.Method} {path}", out Func<HttpResponseMessage>? answer))
+                return answer();
+            if (req.Method == HttpMethod.Get && path.EndsWith("/credentials", StringComparison.Ordinal))
+                return StubHttpMessageHandler.Json(HttpStatusCode.OK, Credentials);
             if (req.Method == HttpMethod.Get && path.EndsWith("/queues", StringComparison.Ordinal))
                 return StubHttpMessageHandler.Json(HttpStatusCode.OK, Rows);
             if (req.Method == HttpMethod.Put && path == "/queues")
@@ -49,6 +58,8 @@ public class DeploymentModeTests
         });
 
         public List<string> Paths => Stub.Requests.Select(r => $"{r.Method.Method} {r.RequestUri!.AbsolutePath}").ToList();
+
+        public List<string> Writes => Paths.Where(p => !p.StartsWith("GET ", StringComparison.Ordinal)).ToList();
 
         public JsonElement Body(string methodAndPath)
         {
@@ -204,6 +215,91 @@ public class DeploymentModeTests
         Assert.Equal("type", ingress.GetProperty("eventType").GetProperty("name").GetString());
     }
 
+    // ── en apply som feiler halvveis (review 2026-09-24) ─────────────────────
+
+    [Fact]
+    public async Task A_missing_credential_name_on_a_queue_fails_before_anything_is_sent()
+    {
+        // Før ble navnet slått opp etter PUT: køen ble opprettet, feilet og lå igjen i logOnly.
+        var api = new Api { Credentials = new object[] { new { publicId = "cred_1", name = "partner-key", type = "ApiKeyHeader" } } };
+
+        var ex = await Assert.ThrowsAsync<QueueyConfigurationException>(() => Apply(api, """
+        { "workspace": { "delivery": { "baseUrl": "https://hooks.example.com", "credentialRef": "partner-key" } },
+          "queues": {
+            "orders":   { "delivery": { "url": "/orders" } },
+            "invoices": { "delivery": { "url": "/invoices", "credentialRef": "invoice-key",
+                                        "signing": { "enabled": true, "credentialRef": "invoice-signing" } } } } }
+        """));
+
+        Assert.Empty(api.Writes);
+        Assert.Contains("'invoice-key', 'invoice-signing'", ex.Message);
+        Assert.Contains("queues.invoices.delivery.credentialRef", ex.Message);
+        Assert.Contains("queues.invoices.delivery.signing.credentialRef", ex.Message);
+        Assert.Contains("Nothing was changed", ex.Message);
+        Assert.Contains("Available: partner-key", ex.Message);
+    }
+
+    [Fact]
+    public async Task Every_credential_name_is_resolved_before_the_first_write_and_reaches_its_queue()
+    {
+        var api = new Api { Credentials = new object[] { new { publicId = "cred_orders", name = "orders-key", type = "ApiKeyHeader" } } };
+
+        await Apply(api, """{ "queues": { "orders": { "delivery": { "url": "/orders", "credentialRef": "orders-key" } } } }""");
+
+        int credentials = api.Paths.IndexOf("GET /tenants/ten_abc/credentials");
+        int firstWrite = api.Paths.FindIndex(p => !p.StartsWith("GET ", StringComparison.Ordinal));
+        Assert.True(credentials >= 0 && credentials < firstWrite, string.Join(", ", api.Paths));
+        Assert.Equal("cred_orders", api.Body("PATCH /queues/que_orders/delivery").GetProperty("credentialRef").GetString());
+    }
+
+    [Theory]
+    [InlineData(null, "will not start delivering by itself")]
+    [InlineData("deliver", "the next apply sets it once the error is fixed")]
+    [InlineData("logOnly", null)]
+    public async Task A_queue_created_before_its_apply_failed_is_reported_as_created_with_the_mode_it_got(string? mode, string? warning)
+    {
+        // Før mistet feilresultatet id og «opprettet», og neste apply lot en eksisterende kø beholde
+        // logOnly og ga exit 0. Nå sier resultatet at køen finnes, og i hvilken modus.
+        var api = new Api { Created = true, HasTarget = true };
+        api.Answers["PATCH /queues/que_orders/policy"] = () => StubHttpMessageHandler.Json(HttpStatusCode.BadRequest,
+            new { error = new { code = "retention_cap_exceeded", message = "Your plan keeps events for at most 7 days." } });
+        string declared = mode is null ? "" : $"\"mode\": \"{mode}\", ";
+
+        QueueySyncException ex = await Assert.ThrowsAsync<QueueySyncException>(
+            () => Apply(api, $$"""{ "queues": { "orders": { {{declared}}"retentionDays": 3650 } } }"""));
+
+        QueueApplyResult orders = ex.Queues!.Applied.Single();
+        Assert.False(orders.Succeeded);
+        Assert.True(orders.Created);
+        Assert.Equal("que_orders", orders.PublicId);
+        Assert.Equal("logOnly", orders.Mode);
+        Assert.Equal("retention_cap_exceeded", orders.Error!.ErrorCode);
+        Assert.Equal(1, ex.Queues.Created);
+        Assert.DoesNotContain(api.Paths, p => p.EndsWith("/mode-change", StringComparison.Ordinal));
+
+        if (warning is null)
+            Assert.Empty(orders.Warnings);
+        else
+            Assert.Contains(warning, Assert.Single(orders.Warnings));
+    }
+
+    [Fact]
+    public async Task A_queue_that_existed_before_a_failed_apply_is_not_reported_as_created()
+    {
+        var api = new Api { Created = false, Rows = new[] { Row("orders", "Deliver") } };
+        api.Answers["PATCH /queues/que_orders/policy"] = () => StubHttpMessageHandler.Json(HttpStatusCode.BadRequest,
+            new { error = new { code = "invalid_policy", message = "no" } });
+
+        QueueySyncException ex = await Assert.ThrowsAsync<QueueySyncException>(
+            () => Apply(api, """{ "queues": { "orders": { "maxAttempts": 3 } } }"""));
+
+        QueueApplyResult orders = ex.Queues!.Applied.Single();
+        Assert.False(orders.Created);
+        Assert.Equal("que_orders", orders.PublicId);
+        Assert.Null(orders.Mode);
+        Assert.Empty(orders.Warnings);
+    }
+
     // ── retry og filter ──────────────────────────────────────────────────────
 
     [Fact]
@@ -215,7 +311,6 @@ public class DeploymentModeTests
         { "queues": { "orders": {
             "maxAttempts": 8, "dlqAfterAttempts": 6,
             "backoff": { "baseDelayMs": 500, "maxDelayMs": 60000, "jitter": "full" },
-            "retryOnNetworkErrors": true, "retryOnTimeouts": false,
             "filter": { "match": "any", "conditions": [
               { "field": "type", "op": "eq", "value": "order.created" },
               { "field": "priority", "op": "exists" } ] } } } }
@@ -226,8 +321,6 @@ public class DeploymentModeTests
         Assert.Equal(6, policy.GetProperty("dlqAfterAttempts").GetInt32());
         Assert.Equal(500, policy.GetProperty("backoff").GetProperty("baseDelayMs").GetInt32());
         Assert.Equal("full", policy.GetProperty("backoff").GetProperty("jitter").GetString());
-        Assert.True(policy.GetProperty("retryOnNetworkErrors").GetBoolean());
-        Assert.False(policy.GetProperty("retryOnTimeouts").GetBoolean());
 
         JsonElement filter = policy.GetProperty("filter");
         Assert.Equal("any", filter.GetProperty("match").GetString());
