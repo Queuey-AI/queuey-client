@@ -37,8 +37,10 @@ queuey publish order-events --event order.created --data '{"orderId":"A-1"}'
 queuey metrics que_… ; queuey issues ten_… ; queuey edge status
 ```
 
-`queuey --help` lists every command. Each one takes `--json`, so the tool
-composes into scripts rather than only into human eyes.
+`queuey --help` lists every command. Each one that reports takes `--json` —
+errors included, as JSON on stdout — so the tool composes into scripts rather
+than only into human eyes. An option a command does not take fails it with
+exit 2 and the list of options it does take, instead of being ignored.
 
 ## Configuration
 

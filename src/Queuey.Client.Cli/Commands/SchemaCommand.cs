@@ -9,7 +9,9 @@ namespace Queuey.Client.Cli;
 /// </summary>
 internal static class SchemaCommand
 {
-    internal static readonly CommandOptions Options = new("schema");
+    // --json er lov, men endrer ingenting: skjemaet er JSON uansett. Et skript som gir --json til hver
+    // kommando, skal ikke feile her fordi ukjente valg nå avvises.
+    internal static readonly CommandOptions Options = new("schema", flags: new[] { "json" });
 
     public static int Run(string[] args)
     {

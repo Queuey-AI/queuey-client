@@ -131,7 +131,7 @@ VERIFY
                  the workspace. Needs a key that may publish and read events; a deploy key can.
 
 SCHEMA
-  queuey schema
+  queuey schema [--json]
                  Prints the JSON Schema for queuey.deploy.json — every field, the values it
                  accepts and what it does. Save it, or point ""$schema"" at
                  https://raw.githubusercontent.com/Queuey-AI/queuey-client/main/schema/queuey.deploy.schema.json
