@@ -104,8 +104,9 @@ VERIFY
                  filtered or failed, or --timeout passes (default 30). Exits 0 only when the
                  receiver got it. Otherwise the verdict — logged_not_delivered, filtered,
                  failed or timeout — names what to change: the mode, the filter, the
-                 credential the receiver rejected, or the earlier event holding an ordered
-                 queue. A failure is reported on its first attempt, not after every retry.
+                 credential the receiver rejected, held delivery, or the earlier event
+                 holding a fifo queue. A failure is reported on its first attempt, not after
+                 every retry.
                  The event is real and reaches the receiver like any other: send data it
                  treats as harmless. The workspace follows apply's rule: the deployment file's
                  ""tenant"" (--deployment, default ./queuey.deploy.json) when it names one, else

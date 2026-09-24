@@ -224,10 +224,30 @@ internal static class DeliveryVerifier
             await Task.Delay(options.PollInterval, cancellationToken).ConfigureAwait(false);
         }
 
-        // Tidsavbrudd. To ting forklarer det oftest: en eldre event som feiler og holder køen
-        // (ordnet levering), eller køens flyt (levering holdt tilbake). Les begge én gang.
+        // Tidsavbrudd. Køens flyt leses først: holdt eller suspendert levering forklarer ventingen
+        // uansett hva som ligger foran eventen, og da er en eldre feilende event ikke årsaken.
+        QueueListItem? row = null;
+        if (!string.IsNullOrWhiteSpace(tenantPublicId))
+        {
+            try
+            {
+                row = (await management.ListQueuesAsync(tenantPublicId!, cancellationToken).ConfigureAwait(false))
+                    .FirstOrDefault(q => q.PublicId == published.QueuePublicId);
+            }
+            catch (QueueyException)
+            {
+                // Forklaringen er et tillegg; verdiktet står uten den.
+            }
+        }
+
+        // En eldre feilende event holder bare eventene bak seg når hele køen er én rekke: ordering fifo,
+        // uten partisjonsnøkkel. Med bykey holder den bare sin egen nøkkel, og med besteffort ingen. Før
+        // 2026-09-24 ble den navngitt uansett, og kunne peke på feil årsak.
         EventDetailsResponse? blocker = null;
-        if (last is null || (last.AttemptCount == 0 && (last.Attempts?.Count ?? 0) == 0))
+        bool flowExplains = row is { DeliveryHeld: true } or { Suspended: true };
+        bool notTriedYet = last is null || (last.AttemptCount == 0 && (last.Attempts?.Count ?? 0) == 0);
+        if (!flowExplains && notTriedYet
+            && await OrderingAsync(controlPlane, published.QueuePublicId, cancellationToken).ConfigureAwait(false) == "fifo")
         {
             try
             {
@@ -244,21 +264,24 @@ internal static class DeliveryVerifier
             }
         }
 
-        QueueListItem? row = null;
-        if (!string.IsNullOrWhiteSpace(tenantPublicId))
-        {
-            try
-            {
-                row = (await management.ListQueuesAsync(tenantPublicId!, cancellationToken).ConfigureAwait(false))
-                    .FirstOrDefault(q => q.PublicId == published.QueuePublicId);
-            }
-            catch (QueueyException)
-            {
-                // Forklaringen er et tillegg; verdiktet står uten den.
-            }
-        }
-
         return Judge(queueName, published, last, row, options.Timeout, blocker, tenantPublicId);
+    }
+
+    /// <summary>
+    /// The queue's effective ordering — <c>fifo</c>, <c>bykey</c> or <c>besteffort</c> — or null when it
+    /// cannot be read. Unknown is treated as "not one lane", so no event is blamed on a guess.
+    /// </summary>
+    private static async Task<string?> OrderingAsync(QueueyControlPlaneClient controlPlane, string queuePublicId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            QueueConfigResponse config = await controlPlane.GetQueueConfigAsync(queuePublicId, cancellationToken).ConfigureAwait(false);
+            return config.Policy?.Ordering?.Trim().ToLowerInvariant();
+        }
+        catch (QueueyException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -340,13 +363,8 @@ internal static class DeliveryVerifier
             ? $"The event could not be read within {timeout.TotalSeconds:0} s."
             : $"No outcome within {timeout.TotalSeconds:0} s: the event is still {status}.";
 
-        if (blocker?.Attempts?.OrderByDescending(a => a.AttemptNumber).FirstOrDefault() is { } blocking)
-            return Result(DeliveryVerdict.Timeout,
-                waiting + $" An earlier event on this queue, {blocker.PublicId}, is failing — {Outcome(blocking)}" +
-                (string.IsNullOrWhiteSpace(blocking.FailureClass) ? "" : $" [{blocking.FailureClass}]") +
-                " — and with ordered delivery the events behind it wait for it.",
-                FailureAction(blocking) + " Once that event is delivered or skipped, the events behind it go out.");
-
+        // Holdt og suspendert levering først: de stopper hele køen, så en feilende event foran er ikke
+        // grunnen til at denne venter.
         if (queueRow?.DeliveryHeld == true)
             return Result(DeliveryVerdict.Timeout,
                 waiting + " Delivery is held on this queue, so events wait until it is resumed.",
@@ -356,6 +374,13 @@ internal static class DeliveryVerifier
             return Result(DeliveryVerdict.Timeout,
                 waiting + " The queue is suspended.",
                 "Contact Queuey support: a suspended queue does not deliver.");
+
+        if (blocker?.Attempts?.OrderByDescending(a => a.AttemptNumber).FirstOrDefault() is { } blocking)
+            return Result(DeliveryVerdict.Timeout,
+                waiting + $" An earlier event on this queue, {blocker.PublicId}, is failing — {Outcome(blocking)}" +
+                (string.IsNullOrWhiteSpace(blocking.FailureClass) ? "" : $" [{blocking.FailureClass}]") +
+                " — and with fifo ordering the events behind it wait for it.",
+                FailureAction(blocking) + " Once that event is delivered or skipped, the events behind it go out.");
 
         if (queueRow is { HasDeliveryTarget: false })
             return Result(DeliveryVerdict.Timeout,

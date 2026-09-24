@@ -459,8 +459,8 @@ queuey verify orders --data '{"type":"order.created","test":true}'
 
 It exits 0 only when the receiver got the event. Otherwise the verdict — `logged_not_delivered`,
 `filtered`, `failed` or `timeout` with `--json` — comes with what to change: the mode, the filter,
-the credential the receiver rejected, or the earlier event that holds an ordered queue. A failure is
-reported on its first attempt rather than after every retry.
+the credential the receiver rejected, held delivery, or the earlier event that holds a fifo queue. A
+failure is reported on its first attempt rather than after every retry.
 
 The event is real: the receiver gets it like any other, so send data it treats as harmless. `verify`
 and `apply` pick the workspace by the same rule: the deployment file's `tenant` when it names one,

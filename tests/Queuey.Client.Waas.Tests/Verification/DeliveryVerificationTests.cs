@@ -122,6 +122,23 @@ public class DeliveryVerificationTests
         Assert.Contains("the events behind it go out", v.SuggestedAction);
     }
 
+    [Theory]
+    [InlineData(true, false, "Delivery is held")]
+    [InlineData(false, true, "The queue is suspended")]
+    public void A_held_or_suspended_queue_is_the_reason_even_with_a_failing_event_ahead(bool held, bool suspended, string reason)
+    {
+        // Review 2026-09-24: holdt og suspendert levering stopper hele køen, så en feilende event foran
+        // er ikke grunnen til at denne venter. Før ble eventen navngitt først.
+        EventDetailsResponse blocker = Event(4, Attempt(401, "AuthenticationFailed"));
+        blocker.PublicId = "evt_head";
+        var row = new QueueListItem { PublicId = "que_orders", HasDeliveryTarget = true, DeliveryHeld = held, Suspended = suspended };
+
+        DeliveryVerification v = DeliveryVerifier.Judge("orders", Published, Event(0), row, TimeSpan.FromSeconds(5), blocker);
+
+        Assert.Contains(reason, v.Summary);
+        Assert.DoesNotContain("evt_head", v.Summary);
+    }
+
     [Fact]
     public void A_timeout_otherwise_points_at_the_backlog()
     {
@@ -192,20 +209,68 @@ public class DeliveryVerificationTests
         Assert.Contains("Build profile", ex.Message);
     }
 
+    /// <summary>
+    /// En kø der eventen fortsatt venter, og en eldre event som feiler. Hver lesing verify gjør, har sin
+    /// egen rute: før svarte stuben med eventen på alt, også på listen over feilende events — den ble
+    /// lest som en side uten elementer, så testen besto uten at det fantes noen feilende event.
+    /// </summary>
+    private static StubHttpMessageHandler Waiting(string? ordering, bool held = false) => new(req => req.RequestUri!.AbsolutePath switch
+    {
+        "/tenants/ten_abc/queues" => StubHttpMessageHandler.Json(HttpStatusCode.OK, new[]
+        {
+            new { publicId = "que_1", displayName = "orders", mode = "Deliver", hasDeliveryTarget = true, deliveryHeld = held, suspended = false },
+        }),
+        "/queues/que_1/config" => ordering is null
+            ? StubHttpMessageHandler.Json(HttpStatusCode.Forbidden, new { error = new { code = "forbidden", message = "no" } })
+            : StubHttpMessageHandler.Json(HttpStatusCode.OK, new { policy = new { ordering } }),
+        "/events/que_1" => StubHttpMessageHandler.Json(HttpStatusCode.OK, new { items = new[] { new { publicId = "evt_head", attemptCount = 3 } } }),
+        "/events/que_1/evt_head" => StubHttpMessageHandler.Json(HttpStatusCode.OK, new
+        {
+            publicId = "evt_head", status = 4, attemptCount = 3,
+            attempts = new[] { new { attemptNumber = 3, targetEndpoint = "https://hooks.example.com/orders", responseCode = 401, failureClass = "AuthenticationFailed" } },
+        }),
+        "/events/que_1/evt_1" => StubHttpMessageHandler.Json(HttpStatusCode.OK, new { publicId = "evt_1", status = 0, attemptCount = 0 }),
+        string other => throw new InvalidOperationException(other),
+    });
+
+    private static Task<DeliveryVerification> VerifyUntilTimeout(StubHttpMessageHandler api)
+        => WaasTestHost.Build(apiStub: api).VerifyDeliveryAsync("orders", "{}"u8.ToArray(),
+            new VerifyDeliveryOptions { PollInterval = TimeSpan.FromMilliseconds(10), Timeout = TimeSpan.FromMilliseconds(50) });
+
     [Fact]
     public async Task Verify_times_out_with_the_queues_flow_as_the_reason()
     {
-        var api = new StubHttpMessageHandler(req => req.RequestUri!.AbsolutePath.StartsWith("/tenants/", StringComparison.Ordinal)
-            ? StubHttpMessageHandler.Json(HttpStatusCode.OK, new[] { new { publicId = "que_1", displayName = "orders", mode = "Deliver", hasDeliveryTarget = true, deliveryHeld = true } })
-            : StubHttpMessageHandler.Json(HttpStatusCode.OK, new { publicId = "evt_1", status = 0, attemptCount = 0 }));
+        // En feilende event ligger foran i en fifo-kø, men levering er holdt: det er grunnen.
+        StubHttpMessageHandler api = Waiting("fifo", held: true);
 
-        QueueyService service = WaasTestHost.Build(apiStub: api);
-
-        DeliveryVerification v = await service.VerifyDeliveryAsync("orders", "{}"u8.ToArray(),
-            new VerifyDeliveryOptions { PollInterval = TimeSpan.FromMilliseconds(10), Timeout = TimeSpan.FromMilliseconds(50) });
+        DeliveryVerification v = await VerifyUntilTimeout(api);
 
         Assert.Equal(DeliveryVerdict.Timeout, v.Verdict);
         Assert.Contains("Delivery is held", v.Summary);
+        Assert.DoesNotContain("evt_head", v.Summary);
+        Assert.Equal("ten_abc", v.Tenant);
         Assert.Contains(api.Requests, r => r.RequestUri!.AbsolutePath == "/tenants/ten_abc/queues");
+    }
+
+    [Theory]
+    [InlineData("fifo", true)]         // hele køen er én rekke: eventen foran holder denne
+    [InlineData("bykey", false)]       // den holder bare sin egen nøkkel
+    [InlineData("besteffort", false)]  // ingen rekkefølge, ingen holder noen
+    [InlineData(null, false)]          // rekkefølgen kunne ikke leses: ikke gjett
+    public async Task A_failing_event_ahead_is_named_only_when_the_queue_is_one_fifo_lane(string? ordering, bool named)
+    {
+        DeliveryVerification v = await VerifyUntilTimeout(Waiting(ordering));
+
+        Assert.Equal(DeliveryVerdict.Timeout, v.Verdict);
+        if (named)
+        {
+            Assert.Contains("evt_head, is failing", v.Summary);
+            Assert.Contains("delivery.credentialRef", v.SuggestedAction);
+        }
+        else
+        {
+            Assert.DoesNotContain("evt_head", v.Summary);
+            Assert.Contains("queuey metrics que_1", v.SuggestedAction);
+        }
     }
 }
