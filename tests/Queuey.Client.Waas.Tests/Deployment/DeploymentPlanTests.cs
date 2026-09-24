@@ -128,20 +128,41 @@ public class DeploymentPlanTests
         Assert.Single(plan.Steps.Single(s => s.Aspect == "ingress").Changes);
     }
 
-    [Fact]
-    public async Task A_dry_run_answered_as_a_write_stops_the_plan_at_once()
+    /// <summary>Svar på en 2xx som ikke er en plan. En server som ignorerer dryRun, kan ha skrevet.</summary>
+    public static TheoryData<string> NotAPlan => new() { "204", "empty", "not json", "no dryRun" };
+
+    private static HttpResponseMessage Answer(string kind) => kind switch
     {
+        "204" => new HttpResponseMessage(HttpStatusCode.NoContent),
+        "empty" => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(string.Empty) },
+        "not json" => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("<html>ok</html>", System.Text.Encoding.UTF8, "text/html") },
+        _ => StubHttpMessageHandler.Json(HttpStatusCode.OK, new { target = "queue que_orders", changes = Array.Empty<object>() }),
+    };
+
+    [Theory]
+    [MemberData(nameof(NotAPlan))]
+    public async Task A_dry_run_answered_with_anything_but_a_plan_stops_the_plan_and_names_the_write(string kind)
+    {
+        // Review 2026-09-24: en tom 2xx, en 204 eller tekst som ikke er JSON etter proben krasjet CLI-en
+        // med JsonException og stacktrace. Nå er det DryRunIgnoredException, som sier hvilken skriving.
         var server = new Server();
         server.Queues.Add(new { publicId = "que_orders", displayName = "orders", mode = "Deliver", hasDeliveryTarget = true });
-        server.Routes["PUT /queues"] = _ =>
-            StubHttpMessageHandler.Json(HttpStatusCode.OK, new { publicId = "que_orders", displayName = "orders", created = false, hasDeliveryTarget = true });
+        server.Routes["PUT /queues"] = req => System.Text.Encoding.UTF8.GetString(req.Content!.ReadAsByteArrayAsync().Result).Contains("\"orders\"")
+            ? StubHttpMessageHandler.Json(HttpStatusCode.OK, new { dryRun = true, publicId = "que_orders", displayName = "orders", created = false, hasDeliveryTarget = true })
+            : StubHttpMessageHandler.Json(HttpStatusCode.OK, new { dryRun = true, publicId = (string?)null, displayName = "invoices", created = true, hasDeliveryTarget = false });
+        server.Routes["PATCH /queues/que_orders/policy"] = _ => Answer(kind);
 
-        await Assert.ThrowsAsync<DryRunIgnoredException>(() => PlanAsync(server, """
+        DryRunIgnoredException ex = await Assert.ThrowsAsync<DryRunIgnoredException>(() => PlanAsync(server, """
         { "tenant": "ten_abc", "queues": { "orders": { "maxAttempts": 5 }, "invoices": {} } }
         """));
 
-        // Ingen flere skrivinger etter svaret som ikke var en plan.
-        Assert.Equal(2, server.Writes.Count());   // proben og PUT for orders
+        Assert.Equal("queues.orders", ex.Target);
+        Assert.Equal("policy", ex.Aspect);
+        Assert.Contains("queues.orders · policy", ex.Message);
+        Assert.Equal("dry_run_ignored", ex.ErrorCode);
+
+        // Ingen flere skrivinger etter svaret som ikke var en plan: invoices ble aldri spurt om.
+        Assert.Equal("/queues/que_orders/policy", server.Writes.Last().RequestUri!.AbsolutePath);
     }
 
     [Fact]

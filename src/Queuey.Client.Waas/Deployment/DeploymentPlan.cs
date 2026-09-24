@@ -67,23 +67,38 @@ public sealed class PlannedChange
 }
 
 /// <summary>
-/// Queuey answered a dry run as a write: it did not say <c>dryRun: true</c>. Planning stops at once,
-/// because every further call might write too.
+/// Queuey answered a dry run with something that is not a plan — an empty body, a 204, text that is
+/// not JSON, or JSON without <c>dryRun: true</c> — so it may have carried the write out. Planning
+/// stops at once, because every further call might write too.
 /// </summary>
 public sealed class DryRunIgnoredException : QueueyException
 {
-    internal DryRunIgnoredException()
-        : base("Queuey answered a dry run as a write, so planning stopped before sending anything else.", errorCode: "dry_run_ignored")
+    internal DryRunIgnoredException(string target, string aspect)
+        : base($"Queuey answered the dry run of {target} · {aspect} with something that is not a plan, so it may have " +
+               "carried that write out. Planning stopped before sending anything else.", errorCode: "dry_run_ignored")
     {
-        SuggestedAction = "Compare the workspace with the file using `queuey apply --check` to see what changed.";
+        Target = target;
+        Aspect = aspect;
+        SuggestedAction = $"Compare the workspace with the file using `queuey apply --check` to see whether {target} · {aspect} changed.";
     }
+
+    /// <summary>What the write touched: <c>workspace</c>, or <c>queues.&lt;name&gt;</c>.</summary>
+    public string Target { get; }
+
+    /// <summary>Which part of it: <c>queue</c>, <c>ingress</c>, <c>policy</c>, <c>delivery</c> or <c>mode</c>.</summary>
+    public string Aspect { get; }
 }
 
 // ── wire ──────────────────────────────────────────────────────────────────────
 
-internal sealed class ConfigPlanResponse
+/// <summary>What every dry-run answer carries: that it is one.</summary>
+internal abstract class DryRunAnswer
 {
     public bool DryRun { get; set; }
+}
+
+internal sealed class ConfigPlanResponse : DryRunAnswer
+{
     public string? Target { get; set; }
     public List<ConfigChangeResponse>? Changes { get; set; }
     public List<string>? Notes { get; set; }
@@ -96,9 +111,8 @@ internal sealed class ConfigChangeResponse
     public JsonElement? To { get; set; }
 }
 
-internal sealed class ApplyQueuePlanResponse
+internal sealed class ApplyQueuePlanResponse : DryRunAnswer
 {
-    public bool DryRun { get; set; }
     public string? PublicId { get; set; }
     public string? DisplayName { get; set; }
     public bool Created { get; set; }
@@ -170,8 +184,7 @@ internal sealed class DeploymentPlanner
         try
         {
             applied = await _controlPlane.DryRunAsync<ApplyQueuePlanResponse>(
-                HttpMethod.Put, new QueueApplyRequest { TenantPublicId = tenant, DisplayName = name }, ct, "queues").ConfigureAwait(false);
-            EnsurePlanned(applied.DryRun);
+                target, "queue", HttpMethod.Put, new QueueApplyRequest { TenantPublicId = tenant, DisplayName = name }, ct, "queues").ConfigureAwait(false);
         }
         catch (QueueyException ex) when (ex is not DryRunIgnoredException)
         {
@@ -248,18 +261,14 @@ internal sealed class DeploymentPlanner
     /// </summary>
     private async Task EnsureServerPlansAsync(string tenant, CancellationToken ct)
     {
-        ConfigPlanResponse? probe;
         try
         {
-            probe = await _controlPlane.DryRunAsync<ConfigPlanResponse>(
-                Patch, new PatchTenantPolicyWireRequest(), ct, "tenants", tenant, "policy").ConfigureAwait(false);
+            await _controlPlane.DryRunAsync<ConfigPlanResponse>(
+                "workspace", "policy", Patch, new PatchTenantPolicyWireRequest(), ct, "tenants", tenant, "policy").ConfigureAwait(false);
         }
-        catch (JsonException)
+        catch (DryRunIgnoredException)
         {
-            probe = null;   // 204 uten kropp: serveren utførte (den tomme) patchen i stedet for å planlegge
-        }
-
-        if (probe is null || !probe.DryRun)
+            // 204 uten kropp, eller et svar uten dryRun: serveren utførte (den tomme) patchen i stedet for å planlegge.
             throw new QueueyException(
                 "This Queuey API does not answer dry runs yet, so nothing was planned. Nothing was changed either: " +
                 "the check was an empty policy patch, which changes nothing.",
@@ -267,6 +276,7 @@ internal sealed class DeploymentPlanner
             {
                 SuggestedAction = "Use `queuey apply --check` to compare the file with the workspace, and `queuey apply --dry-run` to validate it locally.",
             };
+        }
     }
 
     private async Task<DeploymentPlanStep> StepAsync(
@@ -274,8 +284,7 @@ internal sealed class DeploymentPlanner
     {
         try
         {
-            ConfigPlanResponse plan = await _controlPlane.DryRunAsync<ConfigPlanResponse>(Patch, request, ct, segments).ConfigureAwait(false);
-            EnsurePlanned(plan.DryRun);
+            ConfigPlanResponse plan = await _controlPlane.DryRunAsync<ConfigPlanResponse>(target, aspect, Patch, request, ct, segments).ConfigureAwait(false);
             return new DeploymentPlanStep
             {
                 Target = target,
@@ -303,13 +312,6 @@ internal sealed class DeploymentPlanner
             // Et credential-navn som ikke finnes, er et avslag på lik linje med serverens.
             return new DeploymentPlanStep { Target = target, Aspect = aspect, Error = ex };
         }
-    }
-
-    // Svaret skal si dryRun: true. Gjør det ikke det, har serveren skrevet — stopp før flere kall.
-    private static void EnsurePlanned(bool dryRun)
-    {
-        if (!dryRun)
-            throw new DryRunIgnoredException();
     }
 
     private static QueueyException DeliverWithoutDestination(string name) => new(
