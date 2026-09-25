@@ -99,6 +99,28 @@ public interface IQueueyService
     Task<IReadOnlyList<DriftItem>> CheckDeploymentAsync(DeploymentFile file, string? tenantPublicId = null, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Asks Queuey what applying <paramref name="file"/> would do, without changing anything: every
+    /// write <see cref="ApplyDeploymentAsync"/> would send runs as a dry run on the server — the same
+    /// validation and the same refusals — and comes back as a list of changes. Needs the same key an
+    /// apply needs. A queue that does not exist yet is reported as one that would be created.
+    /// </summary>
+    /// <remarks>
+    /// The first dry run is also the proof that the server plans, and nothing else is sent before it
+    /// has answered with a plan. It is a write the plan sends anyway — preferably the apply of a
+    /// declared queue that exists, which changes nothing even on a server that ignores the dry run.
+    /// </remarks>
+    /// <exception cref="QueueyConfigurationException">
+    /// A <c>credentialRef</c> in the file names no credential in the workspace. Nothing was sent.
+    /// </exception>
+    /// <exception cref="QueueyException">
+    /// With code <c>dry_run_unsupported</c> when the server does not answer dry runs, or
+    /// <c>dry_run_probe_failed</c> when it refused the first dry run; nothing else was sent, and the
+    /// message says whether that first call can have changed anything. <see cref="DryRunIgnoredException"/>
+    /// when a later answer is not a plan.
+    /// </exception>
+    Task<DeploymentPlan> PlanDeploymentAsync(DeploymentFile file, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Proves a queue delivers: publishes <paramref name="payload"/> to <paramref name="queueName"/>
     /// and follows that event until it is delivered, logged, filtered or failed, or the timeout
     /// passes. A failure is reported on its first attempt, with the receiver's answer and what to

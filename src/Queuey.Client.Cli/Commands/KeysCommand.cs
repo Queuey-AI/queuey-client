@@ -19,7 +19,7 @@ namespace Queuey.Client.Cli;
 /// </remarks>
 internal static class KeysCommand
 {
-    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal) { "json", "help", "h" };
+    internal static readonly CommandOptions MintOptions = new("keys mint", flags: new[] { "json" }, values: new[] { "queue", "name" });
 
     public static async Task<int> RunAsync(string[] args)
     {
@@ -29,19 +29,16 @@ internal static class KeysCommand
         if (sub is "" or "-h" or "--help" or "help") { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
         if (sub != "mint")
         {
-            Console.Error.WriteLine($"Unknown keys subcommand '{sub}'. Expected 'mint'.");
-            return ExitCodes.Usage;
+            return CliErrors.Write(CliErrors.WantsJson(rest), "unknown_subcommand", $"Unknown keys subcommand '{sub}'. Expected 'mint'.",
+                action: null, status: null, ExitCodes.Usage);
         }
 
-        ArgMap map = ArgMap.Parse(rest, Flags);
+        if (!MintOptions.TryParse(rest, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
 
         string? queue = map.Get("queue");
         if (string.IsNullOrWhiteSpace(queue))
-        {
-            Console.Error.WriteLine("keys mint requires --queue <que_...>.");
-            return ExitCodes.Usage;
-        }
+            return CliErrors.Usage(map, "missing_argument", "keys mint requires --queue <que_...>.");
 
         ResolvedConfig config = CliHost.Resolve(map);
         using ServiceProvider provider = CliHost.BuildProvider(config);

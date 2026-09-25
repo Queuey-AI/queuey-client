@@ -336,6 +336,55 @@ internal sealed class QueueyControlPlaneClient
             HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// A write sent as a dry run (<c>?dryRun=true</c>): the server runs it the same way, stops before it
+    /// stores anything, and answers with what it would have done. Refusals come back as they would.
+    /// </summary>
+    /// <remarks>
+    /// Every 2xx must be a plan that says <c>dryRun: true</c>. Anything else — an empty body, a 204,
+    /// text that is not JSON, JSON without the flag — means the server may have done the write, and
+    /// throws <see cref="DryRunIgnoredException"/> naming <paramref name="target"/> and
+    /// <paramref name="aspect"/>.
+    /// </remarks>
+    public async Task<TPlan> DryRunAsync<TPlan>(
+        string target, string aspect, HttpMethod method, object? request, CancellationToken cancellationToken, params string[] segments)
+        where TPlan : DryRunAnswer
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), "dryRun=true", segments);
+        byte[]? body = request is null ? null : JsonSerializer.SerializeToUtf8Bytes(request, request.GetType(), QueueyJson.Options);
+
+        // Svaret leses først som JSON av hvilken som helst form, og så som en plan. Før 2026-09-24 ble det
+        // lest rett som en plan, så en tom 2xx eller en 204 kastet JsonException ut av CLI-en med stacktrace.
+        JsonElement answer;
+        try
+        {
+            answer = await _connection.SendForJsonAsync<JsonElement>(
+                method, uri, body, body is null ? null : JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+        }
+        catch (JsonException)
+        {
+            throw new DryRunIgnoredException(target, aspect);
+        }
+
+        TPlan? plan = null;
+        if (answer.ValueKind == JsonValueKind.Object)
+        {
+            try
+            {
+                plan = answer.Deserialize<TPlan>(QueueyJson.Options);
+            }
+            catch (JsonException)
+            {
+                // Et objekt som ikke er en plan, er det samme som ingen plan.
+            }
+        }
+
+        return plan is { DryRun: true } ? plan : throw new DryRunIgnoredException(target, aspect);
+    }
+
     /// <summary>One PATCH shape for the control plane: JSON body, API key + license header, 204 back.</summary>
     private async Task PatchAsync(object request, CancellationToken cancellationToken, params string[] segments)
     {

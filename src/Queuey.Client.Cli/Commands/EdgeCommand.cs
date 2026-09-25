@@ -28,12 +28,31 @@ namespace Queuey.Client.Cli;
 /// </summary>
 internal static class EdgeCommand
 {
-    private static readonly System.Collections.Generic.HashSet<string> Flags =
-        new(StringComparer.Ordinal) { "json", "all", "accept-data-loss", "report-health", "mqtt-tls", "help", "h" };
+    // Hvert underverb tar sine egne valg, så et valg som bare gir mening for ett av dem, er ukjent for
+    // resten i stedet for stille ignorert (2026-09-24).
+    internal static readonly System.Collections.Generic.Dictionary<string, CommandOptions> Verbs = new(StringComparer.Ordinal)
+    {
+        ["status"] = new("edge status", flags: new[] { "json" }, values: new[] { "spool" }),
+        ["publish"] = new("edge publish", flags: new[] { "json" },
+            values: new[] { "spool", "data", "file", "content-type", "idempotency-key", "event-type", "group-key", "occurred-at" }),
+        ["run"] = new("edge run", flags: new[] { "report-health", "mqtt-tls" },
+            values: new[] { "spool", "listen", "node-name", "mqtt", "mqtt-routes", "mqtt-user", "mqtt-password" }),
+        ["kick"] = new("edge kick", values: new[] { "spool" }),
+        ["drain"] = new("edge drain", values: new[] { "spool", "timeout" }),
+        ["retry"] = new("edge retry", flags: new[] { "all" }, values: new[] { "spool", "id" }),
+        ["discard"] = new("edge discard", values: new[] { "spool", "id" }),
+        ["recover"] = new("edge recover", values: new[] { "spool" }),
+        ["reset"] = new("edge reset", flags: new[] { "accept-data-loss" }, values: new[] { "spool" }),
+    };
 
     public static async Task<int> RunAsync(string[] args)
     {
         var sub = args.Length > 0 ? args[0] : string.Empty;
+        if (sub is "" or "help" or "-h" or "--help")
+        {
+            Console.WriteLine(Usage.Text);
+            return ExitCodes.Success;
+        }
 
         // "publish <queue> ..." carries a positional queue name; every other
         // verb is options-only.
@@ -43,9 +62,12 @@ internal static class EdgeCommand
         var optionArgs = positional is null
             ? (args.Length > 1 ? args[1..] : Array.Empty<string>())
             : args[2..];
-        var map = ArgMap.Parse(optionArgs, Flags);
 
-        if (map.Has("help") || map.Has("h") || sub is "" or "help")
+        if (!Verbs.TryGetValue(sub, out CommandOptions? options))
+            return UnknownSub(sub, optionArgs);
+
+        if (!options.TryParse(optionArgs, out ArgMap map, out int failure)) return failure;
+        if (map.Has("help") || map.Has("h"))
         {
             Console.WriteLine(Usage.Text);
             return ExitCodes.Success;
@@ -53,10 +75,7 @@ internal static class EdgeCommand
 
         var spoolPath = map.Get("spool");
         if (string.IsNullOrWhiteSpace(spoolPath))
-        {
-            Console.Error.WriteLine("Missing --spool <path> (the Edge spool file, e.g. queuey-edge/spool.db).");
-            return ExitCodes.Usage;
-        }
+            return CliErrors.Usage(map, "missing_argument", "Missing --spool <path> (the Edge spool file, e.g. queuey-edge/spool.db).");
 
         return sub switch
         {
@@ -69,7 +88,7 @@ internal static class EdgeCommand
             "discard" => await DiscardAsync(spoolPath!, map),
             "recover" => await RecoverAsync(spoolPath!),
             "reset" => Reset(spoolPath!, map.Has("accept-data-loss")),
-            _ => UnknownSub(sub)
+            _ => UnknownSub(sub, optionArgs),
         };
     }
 
@@ -87,17 +106,12 @@ internal static class EdgeCommand
     private static async Task<int> PublishAsync(string spoolPath, string? queue, ArgMap map)
     {
         if (string.IsNullOrWhiteSpace(queue))
-        {
-            Console.Error.WriteLine("Usage: queuey edge publish <queue> --spool <path> --tenant <ten_...> (--data <json> | --file <path>)");
-            return ExitCodes.Usage;
-        }
+            return CliErrors.Usage(map, "missing_argument",
+                "Usage: queuey edge publish <queue> --spool <path> --tenant <ten_...> (--data <json> | --file <path>)");
 
         var tenant = map.Get("tenant") ?? Environment.GetEnvironmentVariable("QUEUEY_TENANT");
         if (string.IsNullOrWhiteSpace(tenant))
-        {
-            Console.Error.WriteLine("Missing --tenant <ten_...> (or QUEUEY_TENANT).");
-            return ExitCodes.Usage;
-        }
+            return CliErrors.Usage(map, "missing_argument", "Missing --tenant <ten_...> (or QUEUEY_TENANT).");
 
         byte[] payload;
         var data = map.Get("data");
@@ -109,16 +123,12 @@ internal static class EdgeCommand
         else if (!string.IsNullOrEmpty(file))
         {
             if (!File.Exists(file))
-            {
-                Console.Error.WriteLine($"No payload file at '{file}'.");
-                return ExitCodes.RuntimeError;
-            }
+                return CliErrors.Write(map.Has("json"), "missing_file", $"No payload file at '{file}'.", action: null, status: null, ExitCodes.RuntimeError);
             payload = await File.ReadAllBytesAsync(file);
         }
         else
         {
-            Console.Error.WriteLine("Missing payload: provide --data '<json>' or --file <path>.");
-            return ExitCodes.Usage;
+            return CliErrors.Usage(map, "missing_body", "Missing payload: provide --data '<json>' or --file <path>.");
         }
 
         DateTimeOffset? occurredAt = null;
@@ -128,8 +138,7 @@ internal static class EdgeCommand
                     System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
                     out var parsed))
             {
-                Console.Error.WriteLine($"--occurred-at is not a valid ISO 8601 timestamp: '{occurredRaw}'.");
-                return ExitCodes.Usage;
+                return CliErrors.Usage(map, "invalid_value", $"--occurred-at is not a valid ISO 8601 timestamp: '{occurredRaw}'.");
             }
             occurredAt = parsed;
         }
@@ -701,11 +710,9 @@ internal static class EdgeCommand
         _ => $"{(int)age.TotalSeconds}s"
     };
 
-    private static int UnknownSub(string sub)
-    {
-        Console.Error.WriteLine($"Unknown edge subcommand '{sub}'. Expected: status | retry | discard | recover | reset.");
-        return ExitCodes.Usage;
-    }
+    private static int UnknownSub(string sub, string[] rest)
+        => CliErrors.Write(CliErrors.WantsJson(rest), "unknown_subcommand",
+            $"Unknown edge subcommand '{sub}'. Expected: {string.Join(" | ", Verbs.Keys)}.", action: null, status: null, ExitCodes.Usage);
 
     private sealed class CliClock : IEdgeClock
     {

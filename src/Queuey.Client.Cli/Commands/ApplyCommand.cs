@@ -16,24 +16,23 @@ namespace Queuey.Client.Cli;
 /// </summary>
 internal static class ApplyCommand
 {
-    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal)
-    {
-        "dry-run", "check", "continue-on-error", "json", "help", "h",
-    };
+    // --plan ble et eget verb (2026-09-24): et verb en eldre CLI ikke kjenner, feiler i alle versjoner,
+    // mens `apply --plan` i en CLI fra før flagget var en ekte apply. Ordet får et hint i stedet.
+    internal static readonly CommandOptions Options = new(
+        "apply",
+        flags: new[] { "dry-run", "check", "continue-on-error", "json" },
+        values: new[] { "file" },
+        hints: new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["plan"] = "`apply --plan` is now `queuey plan`: it asks Queuey what apply would change, and writes nothing.",
+        });
 
     public static async Task<int> RunAsync(string[] args)
     {
-        ArgMap map = ArgMap.Parse(args, Flags);
+        if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
 
-        string path = map.Get("file") ?? DeploymentFile.DefaultFileName;
-        if (!File.Exists(path))
-        {
-            Console.Error.WriteLine($"No deployment file at '{path}'. Create one, or pass --file <path>.");
-            return ExitCodes.Usage;
-        }
-
-        DeploymentFile file = DeploymentFile.Parse(File.ReadAllText(path));
+        if (!TryReadDeploymentFile(map, out string path, out DeploymentFile file, out failure)) return failure;
         bool dryRun = map.Has("dry-run");
 
         if (dryRun)
@@ -81,6 +80,26 @@ internal static class ApplyCommand
             WriteHuman(result, path, config, tenant);
 
         return result.AllSucceeded ? ExitCodes.Success : ExitCodes.RuntimeError;
+    }
+
+    /// <summary>
+    /// The deployment file named by <c>--file</c>, or <c>queuey.deploy.json</c> here. A missing file is
+    /// a usage error, written the way the caller asked for errors.
+    /// </summary>
+    internal static bool TryReadDeploymentFile(ArgMap map, out string path, out DeploymentFile file, out int failure)
+    {
+        path = map.Get("file") ?? DeploymentFile.DefaultFileName;
+        file = null!;
+        failure = ExitCodes.Success;
+
+        if (!File.Exists(path))
+        {
+            failure = CliErrors.Usage(map, "missing_file", $"No deployment file at '{path}'.", "Create one, or pass --file <path>.");
+            return false;
+        }
+
+        file = DeploymentFile.Parse(File.ReadAllText(path));
+        return true;
     }
 
     /// <summary>
@@ -183,6 +202,11 @@ internal static class ApplyCommand
                 Console.WriteLine($"  ✗ {r.Name}\t{r.PublicId}\tcreated, {r.Mode ?? "mode unknown"} — {FormatError(r.Error)}");
             else
                 Console.WriteLine($"  ✗ {r.Name}\t{FormatError(r.Error)}");
+
+            // Serverens forslag står under feilen den hører til. Før 2026-09-24 viste bare --plan og
+            // feil som stoppet hele kommandoen det; en vanlig apply mistet det.
+            if (!r.Succeeded && r.Error?.SuggestedAction is { } action)
+                Console.WriteLine($"      → {action}");
         }
 
         foreach (string skipped in result.NotAttempted)
@@ -232,6 +256,13 @@ internal static class ApplyCommand
         failed = result.Failed,
         notAttempted = result.NotAttempted,
         warnings = result.Warnings,
-        queues = result.Applied.Select(r => new { r.Name, r.Succeeded, r.PublicId, r.Created, r.PolicyApplied, r.Mode, error = r.Error?.Message, errorCode = r.Error?.ErrorCode }),
+        queues = result.Applied.Select(r => new
+        {
+            r.Name, r.Succeeded, r.PublicId, r.Created, r.PolicyApplied, r.Mode,
+            error = r.Error?.Message,
+            errorCode = r.Error?.ErrorCode,
+            action = r.Error?.SuggestedAction,
+            status = r.Error?.StatusCode,
+        }),
     };
 }

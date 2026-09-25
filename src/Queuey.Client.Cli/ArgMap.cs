@@ -6,17 +6,26 @@ namespace Queuey.Client.Cli;
 /// <summary>
 /// A tiny, dependency-free argument parser: <c>--key value</c>, <c>--key=value</c>, boolean <c>--flag</c>,
 /// and positionals. Boolean flag names (passed in) never consume the following token as a value.
+/// Which options a command accepts is <see cref="CommandOptions"/>' business, not this parser's.
 /// </summary>
 internal sealed class ArgMap
 {
     private readonly Dictionary<string, string?> _options;
     private readonly List<string> _positionals;
 
-    private ArgMap(Dictionary<string, string?> options, List<string> positionals)
+    private ArgMap(Dictionary<string, string?> options, List<string> positionals, List<string> keys, List<string> badSwitches)
     {
         _options = options;
         _positionals = positionals;
+        Keys = keys;
+        BadSwitches = badSwitches;
     }
+
+    /// <summary>Every option name as it appeared, in order, including one given twice or as <c>=false</c>.</summary>
+    internal IReadOnlyList<string> Keys { get; }
+
+    /// <summary>Boolean flags given a value other than <c>true</c> or <c>false</c>, e.g. <c>--json=yes</c>.</summary>
+    internal IReadOnlyList<string> BadSwitches { get; }
 
     /// <summary>Positional arguments, in order.</summary>
     public IReadOnlyList<string> Positionals => _positionals;
@@ -34,6 +43,8 @@ internal sealed class ArgMap
     {
         var options = new Dictionary<string, string?>(StringComparer.Ordinal);
         var positionals = new List<string>();
+        var keys = new List<string>();
+        var badSwitches = new List<string>();
         var list = args as IList<string> ?? new List<string>(args);
 
         for (int i = 0; i < list.Count; i++)
@@ -51,9 +62,31 @@ internal sealed class ArgMap
             int eq = key.IndexOf('=');
             if (eq >= 0)
             {
-                options[key.Substring(0, eq)] = key.Substring(eq + 1);
+                string name = key.Substring(0, eq);
+                string value = key.Substring(eq + 1);
+                keys.Add(name);
+
+                if (booleanFlags.Contains(name))
+                {
+                    // Et flagg med verdi betyr det verdien sier: --json=false gir ikke JSON. Før 2026-09-24 var
+                    // flagget satt uansett verdi. En annen verdi enn true og false er en feil kommandoen melder.
+                    if (string.Equals(value, "false", StringComparison.OrdinalIgnoreCase))
+                    {
+                        options.Remove(name);
+                        continue;
+                    }
+
+                    if (!string.Equals(value, "true", StringComparison.OrdinalIgnoreCase))
+                        badSwitches.Add(name);
+                    options[name] = null;
+                    continue;
+                }
+
+                options[name] = value;
                 continue;
             }
+
+            keys.Add(key);
 
             if (booleanFlags.Contains(key))
             {
@@ -68,7 +101,7 @@ internal sealed class ArgMap
                 options[key] = null;
         }
 
-        return new ArgMap(options, positionals);
+        return new ArgMap(options, positionals, keys, badSwitches);
     }
 
     // A leading '-' marks an option, except a bare "-" or a negative number.

@@ -29,14 +29,12 @@ namespace Queuey.Client.Cli;
 /// </summary>
 internal static class AdviseCommand
 {
-    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal)
-    {
-        "json", "help", "h", "write-files", "apply", "force",
-    };
+    internal static readonly CommandOptions Options = new(
+        "advise", flags: new[] { "json", "write-files", "apply", "force" }, values: new[] { "path", "queue" }, positionals: 1);
 
     public static async Task<int> RunAsync(string[] args)
     {
-        ArgMap map = ArgMap.Parse(args, Flags);
+        if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
 
         var root = map.Get("path") ?? map.FirstPositional ?? Directory.GetCurrentDirectory();
@@ -48,8 +46,7 @@ internal static class AdviseCommand
         }
         catch (DirectoryNotFoundException ex)
         {
-            Console.Error.WriteLine(ex.Message);
-            return ExitCodes.Usage;
+            return CliErrors.Usage(map, "missing_directory", ex.Message);
         }
 
         Advice advice = Recommendation.For(facts);

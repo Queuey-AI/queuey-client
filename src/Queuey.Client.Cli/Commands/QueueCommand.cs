@@ -17,10 +17,10 @@ namespace Queuey.Client.Cli;
 /// </summary>
 internal static class QueueCommand
 {
-    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal)
-    {
-        "continue-on-error", "json", "help", "h",
-    };
+    internal static readonly CommandOptions PlanOptions = new("queue plan", flags: new[] { "json" }, values: new[] { "assembly", "only" });
+
+    internal static readonly CommandOptions SyncOptions = new(
+        "queue sync", flags: new[] { "continue-on-error", "json" }, values: new[] { "assembly", "only" });
 
     public static async Task<int> RunAsync(string[] args)
     {
@@ -32,7 +32,7 @@ internal static class QueueCommand
             "plan" => Plan(rest),
             "sync" => await SyncAsync(rest),
             "" or "-h" or "--help" or "help" => Help(),
-            _ => Unknown(sub),
+            _ => Unknown(sub, rest),
         };
     }
 
@@ -42,15 +42,13 @@ internal static class QueueCommand
         return ExitCodes.Success;
     }
 
-    private static int Unknown(string sub)
-    {
-        Console.Error.WriteLine($"Unknown queue subcommand '{sub}'. Expected 'plan' or 'sync'.");
-        return ExitCodes.Usage;
-    }
+    private static int Unknown(string sub, string[] rest)
+        => CliErrors.Write(CliErrors.WantsJson(rest), "unknown_subcommand",
+            $"Unknown queue subcommand '{sub}'. Expected 'plan' or 'sync'.", action: null, status: null, ExitCodes.Usage);
 
     private static int Plan(string[] args)
     {
-        ArgMap map = ArgMap.Parse(args, Flags);
+        if (!PlanOptions.TryParse(args, out ArgMap map, out int optionFailure)) return optionFailure;
         if (map.Has("help") || map.Has("h")) return Help();
 
         if (!TryLoadAssembly(map, out Assembly? assembly, out int failure)) return failure;
@@ -77,7 +75,7 @@ internal static class QueueCommand
 
     private static async Task<int> SyncAsync(string[] args)
     {
-        ArgMap map = ArgMap.Parse(args, Flags);
+        if (!SyncOptions.TryParse(args, out ArgMap map, out int optionFailure)) return optionFailure;
         if (map.Has("help") || map.Has("h")) return Help();
 
         if (!TryLoadAssembly(map, out Assembly? assembly, out int failure)) return failure;
@@ -142,8 +140,7 @@ internal static class QueueCommand
         string? path = map.Get("assembly");
         if (string.IsNullOrWhiteSpace(path))
         {
-            Console.Error.WriteLine("queue requires --assembly <path.dll>.");
-            failure = ExitCodes.Usage;
+            failure = CliErrors.Usage(map, "missing_argument", "queue requires --assembly <path.dll>.");
             return false;
         }
 
@@ -154,8 +151,8 @@ internal static class QueueCommand
         }
         catch (Exception ex) when (ex is FileNotFoundException or BadImageFormatException or FileLoadException)
         {
-            Console.Error.WriteLine($"Could not load assembly '{path}': {ex.Message}");
-            failure = ExitCodes.AssemblyLoad;
+            failure = CliErrors.Write(map.Has("json"), "assembly_load_failed", $"Could not load assembly '{path}': {ex.Message}",
+                action: null, status: null, ExitCodes.AssemblyLoad);
             return false;
         }
     }

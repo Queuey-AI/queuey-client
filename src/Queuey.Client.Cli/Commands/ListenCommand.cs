@@ -13,12 +13,18 @@ namespace Queuey.Client.Cli;
 /// </summary>
 internal static class ListenCommand
 {
-    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal) { "tee", "help", "h", "yes", "y" };
+    // --forward-exact og --exact er brytere. Før 2026-09-24 sto de ikke her, så en url rett etter en
+    // av dem ble lest som verdien dens og forsvant.
+    internal static readonly CommandOptions Options = new(
+        "listen",
+        flags: new[] { "tee", "yes", "y", "forward-exact", "exact" },
+        values: new[] { "forward-to", "local-baseurl", "queue" });
+
     private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(8);
 
     public static async Task<int> RunAsync(string[] args)
     {
-        ArgMap map = ArgMap.Parse(args, Flags);
+        if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h"))
         {
             Console.WriteLine(Usage.Text);
@@ -27,10 +33,7 @@ internal static class ListenCommand
 
         string? forwardTo = map.Get("forward-to") ?? map.Get("local-baseurl");
         if (string.IsNullOrWhiteSpace(forwardTo) || !Uri.TryCreate(forwardTo, UriKind.Absolute, out _))
-        {
-            Console.Error.WriteLine("listen requires --forward-to <absolute url>, e.g. --forward-to http://localhost:5094");
-            return ExitCodes.Usage;
-        }
+            return CliErrors.Usage(map, "missing_argument", "listen requires --forward-to <absolute url>, e.g. --forward-to http://localhost:5094");
 
         // By default the original request path is appended to --forward-to (path fidelity — replay the webhook
         // at the same path). --forward-exact posts to --forward-to VERBATIM instead, for bridging to a fixed
@@ -39,16 +42,10 @@ internal static class ListenCommand
 
         ResolvedConfig config = CliHost.Resolve(map);
         if (string.IsNullOrWhiteSpace(config.ApiKey))
-        {
-            Console.Error.WriteLine("An API key is required (--api-key, QUEUEY_API_KEY, or queuey.json).");
-            return ExitCodes.Configuration;
-        }
+            return CliErrors.Configuration(map, "config_error", "An API key is required (--api-key, QUEUEY_API_KEY, or queuey.json).");
 
         if (!TryResolveScope(map, config, out string scopeKind, out string publicId, out string? scopeError))
-        {
-            Console.Error.WriteLine(scopeError);
-            return ExitCodes.Usage;
-        }
+            return CliErrors.Usage(map, "missing_argument", scopeError!);
 
         string mode = map.Has("tee") ? "tee" : "redirect";
         bool redirect = mode == "redirect";

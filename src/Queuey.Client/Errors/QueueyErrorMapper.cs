@@ -29,7 +29,7 @@ internal static class QueueyErrorMapper
         int status = (int)response.StatusCode;
         string body = await ReadBodyAsync(response, cancellationToken).ConfigureAwait(false);
 
-        ParseError(body, out string? code, out string? message);
+        ParseError(body, out string? code, out string? message, out string? action);
 
         if (string.IsNullOrWhiteSpace(message))
         {
@@ -40,13 +40,13 @@ internal static class QueueyErrorMapper
 
         return status switch
         {
-            400 => new QueueyValidationException(message!, code),
-            401 => new QueueyAuthException(message!, code),
-            403 => new QueueyForbiddenException(message!, code),
-            404 => new QueueyNotFoundException(message!, code),
-            409 => new QueueyConflictException(message!, code),
-            422 => new QueueyLoopDetectedException(message!, code),
-            _ => new QueueyException(message!, status, code),
+            400 => new QueueyValidationException(message!, code) { SuggestedAction = action },
+            401 => new QueueyAuthException(message!, code) { SuggestedAction = action },
+            403 => new QueueyForbiddenException(message!, code) { SuggestedAction = action },
+            404 => new QueueyNotFoundException(message!, code) { SuggestedAction = action },
+            409 => new QueueyConflictException(message!, code) { SuggestedAction = action },
+            422 => new QueueyLoopDetectedException(message!, code) { SuggestedAction = action },
+            _ => new QueueyException(message!, status, code) { SuggestedAction = action },
         };
     }
 
@@ -71,9 +71,14 @@ internal static class QueueyErrorMapper
 
     /// <summary>Best-effort extraction of an error code + message from any of the known body shapes.</summary>
     internal static void ParseError(string? body, out string? code, out string? message)
+        => ParseError(body, out code, out message, out _);
+
+    /// <summary>As <see cref="ParseError(string?, out string?, out string?)"/>, plus the suggested action when the API gives one.</summary>
+    internal static void ParseError(string? body, out string? code, out string? message, out string? action)
     {
         code = null;
         message = null;
+        action = null;
 
         if (string.IsNullOrWhiteSpace(body))
             return;
@@ -102,6 +107,7 @@ internal static class QueueyErrorMapper
                 {
                     code = GetString(error, "code");
                     message = GetString(error, "message");
+                    action = GetString(error, "action");
                 }
                 else if (error.ValueKind == JsonValueKind.String)
                 {

@@ -74,6 +74,40 @@ public class QueueyErrorMapperTests
         Assert.Equal("msg", ex.Message);
     }
 
+    [Theory]
+    [InlineData(400)]
+    [InlineData(403)]
+    [InlineData(409)]
+    [InlineData(500)]
+    public async Task The_suggested_action_rides_along_on_every_status(int status)
+    {
+        // Feilkoder med foreslått handling (2026-09-23): en agent skal kunne handle på svaret uten
+        // å tolke prosa.
+        using var response = new HttpResponseMessage((HttpStatusCode)status)
+        {
+            Content = new StringContent(
+                "{\"error\":{\"code\":\"filter_required\",\"message\":\"Name what to replay.\",\"action\":\"Send \\\"all\\\": true to replay every event.\"}}",
+                Encoding.UTF8, "application/json"),
+        };
+
+        QueueyException ex = await QueueyErrorMapper.CreateAsync(response, CancellationToken.None);
+
+        Assert.Equal("filter_required", ex.ErrorCode);
+        Assert.Equal("Name what to replay.", ex.Message);
+        Assert.Equal("Send \"all\": true to replay every event.", ex.SuggestedAction);
+    }
+
+    [Fact]
+    public async Task No_action_is_null_not_empty()
+    {
+        using var response = new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent("{\"error\":{\"code\":\"x\",\"message\":\"y\"}}", Encoding.UTF8, "application/json"),
+        };
+
+        Assert.Null((await QueueyErrorMapper.CreateAsync(response, CancellationToken.None)).SuggestedAction);
+    }
+
     [Fact]
     public async Task Empty_404_body_still_maps_to_not_found()
     {
