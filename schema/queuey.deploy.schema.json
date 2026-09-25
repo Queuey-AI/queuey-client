@@ -1,0 +1,488 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Queuey-AI/queuey-client/main/schema/queuey.deploy.schema.json",
+  "title": "queuey.deploy.json",
+  "description": "A declarative deployment file — queuey.deploy.json by default. Describes the workspace's delivery defaults and each queue's behaviour and destination, so a deploy converges Queuey from something reviewable in a pull request.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "The JSON Schema this file follows, for editors and agents: the published one, or a local copy written by queuey schema. Ignored when the file is applied.",
+      "type": "string"
+    },
+    "tenant": {
+      "description": "The workspace (ten_…) this file describes. Optional — the CLI falls back to the tenant in the connection config, so the same file can be applied to staging and production.",
+      "type": "string"
+    },
+    "workspace": {
+      "description": "The workspace — the layer every queue inherits from when it says nothing itself.",
+      "type": "object",
+      "properties": {
+        "ordering": {
+          "description": "Lane strategy for every queue that does not override it: fifo, bykey, besteffort.",
+          "type": "string",
+          "enum": [
+            "fifo",
+            "bykey",
+            "besteffort"
+          ]
+        },
+        "dlqEnabled": {
+          "description": "Whether a dead-letter queue collects events the receiver rejected.",
+          "type": "boolean"
+        },
+        "retentionDays": {
+          "description": "How many days events are retained.",
+          "type": [
+            "string",
+            "integer",
+            "null"
+          ],
+          "pattern": "^-?(?:0|[1-9]\\d*)$"
+        },
+        "idempotent": {
+          "description": "Whether duplicate publishes are collapsed by idempotency key.",
+          "type": "boolean"
+        },
+        "maxAttempts": {
+          "description": "How many times an event is attempted, for every queue that does not say.",
+          "type": [
+            "string",
+            "integer",
+            "null"
+          ],
+          "pattern": "^-?(?:0|[1-9]\\d*)$"
+        },
+        "dlqAfterAttempts": {
+          "description": "After how many attempts an event goes to the DLQ. Must be below maxAttempts.",
+          "type": [
+            "string",
+            "integer",
+            "null"
+          ],
+          "pattern": "^-?(?:0|[1-9]\\d*)$"
+        },
+        "backoff": {
+          "description": "How long to wait between attempts, for every queue that does not say.",
+          "type": "object",
+          "properties": {
+            "baseDelayMs": {
+              "description": "The first wait, in milliseconds. Each later wait doubles, up to MaxDelayMs.",
+              "type": [
+                "string",
+                "integer",
+                "null"
+              ],
+              "pattern": "^-?(?:0|[1-9]\\d*)$"
+            },
+            "maxDelayMs": {
+              "description": "The longest wait between two attempts, in milliseconds.",
+              "type": [
+                "string",
+                "integer",
+                "null"
+              ],
+              "pattern": "^-?(?:0|[1-9]\\d*)$"
+            },
+            "jitter": {
+              "description": "full spreads the waits randomly so retries do not arrive in step; none does not.",
+              "type": "string",
+              "enum": [
+                "none",
+                "full"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "delivery": {
+          "description": "Where events are delivered — the base every queue appends its path to.",
+          "type": "object",
+          "properties": {
+            "baseUrl": {
+              "description": "Base URL every inheriting queue delivers to.",
+              "type": "string"
+            },
+            "authMode": {
+              "description": "Outbound auth mode: None, Bearer, ApiKey, Basic or OAuth2ClientCredentials.",
+              "type": "string"
+            },
+            "credentialRef": {
+              "description": "The name of a stored credential to authenticate with. Never the secret itself.",
+              "type": "string"
+            },
+            "authHeaderName": {
+              "description": "Header name for ApiKey auth (e.g. X-Api-Key).",
+              "type": "string"
+            },
+            "method": {
+              "description": "HTTP method: POST, PUT or PATCH.",
+              "type": "string"
+            },
+            "timeoutMs": {
+              "description": "Per-request timeout in milliseconds.",
+              "type": [
+                "string",
+                "integer",
+                "null"
+              ],
+              "pattern": "^-?(?:0|[1-9]\\d*)$"
+            },
+            "signing": {
+              "description": "Outbound request signing. Null leaves signing untouched.",
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "description": "Whether outbound requests are signed.",
+                  "type": "boolean"
+                },
+                "credentialRef": {
+                  "description": "The name of the stored signing secret (or its cred_… id). Never the secret itself.",
+                  "type": "string"
+                },
+                "templateKey": {
+                  "description": "Which signature template to use.",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "rateLimit": {
+              "description": "Send budget. Null leaves the budget untouched.",
+              "type": "object",
+              "properties": {
+                "maxRequests": {
+                  "description": "Requests allowed per window.",
+                  "type": [
+                    "string",
+                    "integer",
+                    "null"
+                  ],
+                  "pattern": "^-?(?:0|[1-9]\\d*)$"
+                },
+                "perSeconds": {
+                  "description": "Window length in seconds.",
+                  "type": [
+                    "string",
+                    "integer",
+                    "null"
+                  ],
+                  "pattern": "^-?(?:0|[1-9]\\d*)$"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        "ingress": {
+          "description": "How arriving events are read: ingress auth, and where the type and key come from.",
+          "type": "object",
+          "properties": {
+            "authMode": {
+              "description": "What the ingress edge demands of a publisher: None, ApiKey, SignedRequest or ApiKeyAndSignedRequest.",
+              "type": "string"
+            },
+            "eventType": {
+              "description": "Where the event type is read from. Null leaves it as it is.",
+              "type": "object",
+              "properties": {
+                "from": {
+                  "description": "header, query, or body — the top level of the JSON you post.",
+                  "type": "string"
+                },
+                "name": {
+                  "description": "The header, query parameter, or field name. Empty clears the source.",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "groupKey": {
+              "description": "Where the group key is read from — and, by declaring it, what to lane on.",
+              "type": "object",
+              "properties": {
+                "from": {
+                  "description": "header, query, or body — the top level of the JSON you post.",
+                  "type": "string"
+                },
+                "name": {
+                  "description": "The header, query parameter, or field name. Empty clears the source.",
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "successStatusCode": {
+              "description": "The status the ingress returns on accept. Default 202. Some senders are stricter than the HTTP spec and treat anything but 200 as a failed webhook, so those queues set 200.",
+              "type": [
+                "string",
+                "integer",
+                "null"
+              ],
+              "pattern": "^-?(?:0|[1-9]\\d*)$"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "queues": {
+      "description": "The queues to converge, keyed by queue name.",
+      "type": "object",
+      "additionalProperties": {
+        "description": "One queue's declaration: behaviour, and optionally its own destination.",
+        "type": "object",
+        "properties": {
+          "mode": {
+            "description": "deliver or logOnly. Omit it and a queue this file creates delivers when it has a destination (its own delivery.url or the workspace's base URL) and logs events until it has one; an existing queue keeps its mode. Pausing is not a mode and never set by a deploy.",
+            "type": "string",
+            "enum": [
+              "deliver",
+              "logOnly"
+            ]
+          },
+          "maxAttempts": {
+            "description": "How many times an event is attempted before it gives up.",
+            "type": [
+              "string",
+              "integer",
+              "null"
+            ],
+            "pattern": "^-?(?:0|[1-9]\\d*)$"
+          },
+          "dlqAfterAttempts": {
+            "description": "After how many attempts an event goes to the DLQ. Must be below maxAttempts.",
+            "type": [
+              "string",
+              "integer",
+              "null"
+            ],
+            "pattern": "^-?(?:0|[1-9]\\d*)$"
+          },
+          "backoff": {
+            "description": "How long to wait between attempts.",
+            "type": "object",
+            "properties": {
+              "baseDelayMs": {
+                "description": "The first wait, in milliseconds. Each later wait doubles, up to MaxDelayMs.",
+                "type": [
+                  "string",
+                  "integer",
+                  "null"
+                ],
+                "pattern": "^-?(?:0|[1-9]\\d*)$"
+              },
+              "maxDelayMs": {
+                "description": "The longest wait between two attempts, in milliseconds.",
+                "type": [
+                  "string",
+                  "integer",
+                  "null"
+                ],
+                "pattern": "^-?(?:0|[1-9]\\d*)$"
+              },
+              "jitter": {
+                "description": "full spreads the waits randomly so retries do not arrive in step; none does not.",
+                "type": "string",
+                "enum": [
+                  "none",
+                  "full"
+                ]
+              }
+            },
+            "additionalProperties": false
+          },
+          "filter": {
+            "description": "Which events this queue delivers. Omit it to deliver every event.",
+            "type": "object",
+            "properties": {
+              "match": {
+                "description": "all or any.",
+                "type": "string",
+                "enum": [
+                  "all",
+                  "any"
+                ]
+              },
+              "conditions": {
+                "description": "The conditions. Empty delivers everything.",
+                "type": "array",
+                "items": {
+                  "description": "One condition on a top-level JSON body field.",
+                  "type": "object",
+                  "properties": {
+                    "field": {
+                      "description": "The top-level field of the JSON body.",
+                      "type": "string"
+                    },
+                    "op": {
+                      "description": "eq, ne, gt, gte, lt, lte, contains or exists.",
+                      "type": "string",
+                      "enum": [
+                        "eq",
+                        "ne",
+                        "gt",
+                        "gte",
+                        "lt",
+                        "lte",
+                        "contains",
+                        "exists"
+                      ]
+                    },
+                    "value": {
+                      "description": "The value to compare with. Not used by exists.",
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "ordering": {
+            "description": "Delivery ordering: fifo, bykey or besteffort.",
+            "type": "string",
+            "enum": [
+              "fifo",
+              "bykey",
+              "besteffort"
+            ]
+          },
+          "dlqEnabled": {
+            "description": "Whether a dead-letter queue collects exhausted events.",
+            "type": "boolean"
+          },
+          "retentionDays": {
+            "description": "Days events are retained.",
+            "type": [
+              "string",
+              "integer",
+              "null"
+            ],
+            "pattern": "^-?(?:0|[1-9]\\d*)$"
+          },
+          "idempotent": {
+            "description": "Whether duplicate publishes are collapsed by idempotency key.",
+            "type": "boolean"
+          },
+          "delivery": {
+            "description": "This queue's destination. Omit it — the usual case — and the queue inherits the workspace. A relative url appends to the workspace base, which is the shape to reach for.",
+            "type": "object",
+            "properties": {
+              "url": {
+                "description": "Where this queue delivers. A relative path (/orders) appends to the workspace base — the shape to reach for, since moving hosts is then one workspace edit. An absolute URL overrides the workspace outright.",
+                "type": "string"
+              },
+              "inherit": {
+                "description": "Hands the destination back to the workspace, discarding this queue's own override.",
+                "type": "boolean"
+              },
+              "authMode": {
+                "description": "Outbound auth mode for this queue only. Null inherits the workspace.",
+                "type": "string"
+              },
+              "credentialRef": {
+                "description": "The name of a stored credential. Never the secret itself.",
+                "type": "string"
+              },
+              "authHeaderName": {
+                "description": "Header name for ApiKey auth.",
+                "type": "string"
+              },
+              "timeoutMs": {
+                "description": "Per-request timeout in milliseconds.",
+                "type": [
+                  "string",
+                  "integer",
+                  "null"
+                ],
+                "pattern": "^-?(?:0|[1-9]\\d*)$"
+              },
+              "signing": {
+                "description": "Outbound request signing for this queue only.",
+                "type": "object",
+                "properties": {
+                  "enabled": {
+                    "description": "Whether outbound requests are signed.",
+                    "type": "boolean"
+                  },
+                  "credentialRef": {
+                    "description": "The name of the stored signing secret (or its cred_… id). Never the secret itself.",
+                    "type": "string"
+                  },
+                  "templateKey": {
+                    "description": "Which signature template to use.",
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              },
+              "rateLimit": {
+                "description": "Send budget for this queue only.",
+                "type": "object",
+                "properties": {
+                  "maxRequests": {
+                    "description": "Requests allowed per window.",
+                    "type": [
+                      "string",
+                      "integer",
+                      "null"
+                    ],
+                    "pattern": "^-?(?:0|[1-9]\\d*)$"
+                  },
+                  "perSeconds": {
+                    "description": "Window length in seconds.",
+                    "type": [
+                      "string",
+                      "integer",
+                      "null"
+                    ],
+                    "pattern": "^-?(?:0|[1-9]\\d*)$"
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "additionalProperties": false
+          },
+          "ingress": {
+            "description": "How this queue reads arriving events, when it differs from the workspace. Omit it and the queue inherits — which is what you want unless one producer sends a different shape.",
+            "type": "object",
+            "properties": {
+              "authMode": {
+                "description": "What the ingress edge demands of a publisher: None, ApiKey, SignedRequest or ApiKeyAndSignedRequest.",
+                "type": "string"
+              },
+              "eventType": {
+                "description": "Where the event type is read from. Null leaves it as it is.",
+                "$ref": "#/properties/workspace/properties/ingress/properties/eventType"
+              },
+              "groupKey": {
+                "description": "Where the group key is read from — and, by declaring it, what to lane on.",
+                "$ref": "#/properties/workspace/properties/ingress/properties/groupKey"
+              },
+              "successStatusCode": {
+                "description": "The status the ingress returns on accept. Default 202. Some senders are stricter than the HTTP spec and treat anything but 200 as a failed webhook, so those queues set 200.",
+                "type": [
+                  "string",
+                  "integer",
+                  "null"
+                ],
+                "pattern": "^-?(?:0|[1-9]\\d*)$"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "propertyNames": {
+        "pattern": "^[a-z0-9][a-z0-9._-]*$",
+        "maxLength": 64
+      }
+    }
+  },
+  "additionalProperties": false
+}

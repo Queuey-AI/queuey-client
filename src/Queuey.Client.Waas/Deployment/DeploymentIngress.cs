@@ -88,6 +88,9 @@ internal sealed class PatchTenantPolicyWireRequest
     public bool? DlqEnabled { get; set; }
     public int? RetentionDays { get; set; }
     public bool? Idempotent { get; set; }
+    public int? MaxAttempts { get; set; }
+    public int? DlqAfterAttempts { get; set; }
+    public RetryBackoffWire? Backoff { get; set; }
 }
 
 internal sealed class IngressResponse

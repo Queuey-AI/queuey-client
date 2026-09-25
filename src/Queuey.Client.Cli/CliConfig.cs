@@ -28,6 +28,18 @@ internal sealed class ResolvedConfig
         options.Source = Source;
     }
 
+    /// <summary>The same config pointed at another tenant — the one a deployment file names.</summary>
+    public ResolvedConfig WithTenant(string? tenantPublicId) => new()
+    {
+        Environment = Environment,
+        ApiBaseOverride = ApiBaseOverride,
+        IngressBaseOverride = IngressBaseOverride,
+        ApiKey = ApiKey,
+        TenantPublicId = string.IsNullOrWhiteSpace(tenantPublicId) ? TenantPublicId : tenantPublicId,
+        LicensePublicId = LicensePublicId,
+        Source = Source,
+    };
+
     public Uri ResolvedApiBase() => ToOptions().ResolveApiBaseAddress();
     public Uri ResolvedIngressBase() => ToOptions().ResolveIngressBaseAddress();
 

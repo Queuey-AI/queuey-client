@@ -245,13 +245,20 @@ internal sealed class DeliverySigningResponse
     public string? CredentialRef { get; set; }
 }
 
-/// <summary>The flat policy read-back — the six fields a deployment file can declare, plus the rest.</summary>
+/// <summary>The flat policy read-back — the fields a deployment file can declare.</summary>
 internal sealed class QueuePolicyResponse
 {
     public bool Idempotent { get; set; }
     public bool DlqEnabled { get; set; }
     public int RetentionDays { get; set; }
     public string? Ordering { get; set; }
+
+    // Nullable on purpose: an API from before 2026-09-23 does not send the rest of the retry
+    // policy or the filter, and "not sent" must read as unknown rather than as a value.
+    public int? MaxAttempts { get; set; }
+    public int? DlqAfterAttempts { get; set; }
+    public RetryBackoffWire? Backoff { get; set; }
+    public DeliveryFilterWire? Filter { get; set; }
 }
 
 /// <summary>An ingress signing key minted for a queue. The secret is returned <b>once</b>.</summary>

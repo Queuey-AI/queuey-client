@@ -63,10 +63,24 @@ public static class DeploymentDrift
                 continue;
             }
 
+            // Mode in the file's words; "Deliver" and "deliver" are the same mode.
+            if (want.Mode is { } mode && !string.Equals(mode.Trim(), have.Mode, StringComparison.OrdinalIgnoreCase))
+                drift.Add(new DriftItem(prefix + ".mode", mode, have.Mode));
+
             Compare(prefix + ".ordering", want.Ordering, have.Ordering, drift);
             Compare(prefix + ".dlqEnabled", want.DlqEnabled, have.DlqEnabled, drift);
             Compare(prefix + ".retentionDays", want.RetentionDays, have.RetentionDays, drift);
             Compare(prefix + ".idempotent", want.Idempotent, have.Idempotent, drift);
+            CompareRetry(prefix, want.MaxAttempts, want.DlqAfterAttempts, want.Backoff,
+                have.MaxAttempts, have.DlqAfterAttempts, have.Backoff, drift);
+
+            if (want.Filter is { } wf)
+            {
+                string declaredFilter = DescribeFilter(wf);
+                string actualFilter = DescribeFilter(have.Filter);
+                if (!string.Equals(declaredFilter, actualFilter, StringComparison.Ordinal))
+                    drift.Add(new DriftItem(prefix + ".filter", declaredFilter, actualFilter));
+            }
 
             if (want.Delivery is { } wd)
             {
@@ -91,6 +105,8 @@ public static class DeploymentDrift
         Compare("workspace.dlqEnabled", want.DlqEnabled, actual.DlqEnabled, drift);
         Compare("workspace.retentionDays", want.RetentionDays, actual.RetentionDays, drift);
         Compare("workspace.idempotent", want.Idempotent, actual.Idempotent, drift);
+        CompareRetry("workspace", want.MaxAttempts, want.DlqAfterAttempts, want.Backoff,
+            actual.MaxAttempts, actual.DlqAfterAttempts, actual.Backoff, drift);
 
         CompareIngress("workspace.ingress", want.Ingress, actual.Ingress, drift);
 
@@ -105,6 +121,32 @@ public static class DeploymentDrift
             Compare("workspace.delivery.timeoutMs", wd.TimeoutMs, hd.TimeoutMs, drift);
         }
     }
+
+    private static void CompareRetry(
+        string prefix,
+        int? maxAttempts, int? dlqAfterAttempts, RetryBackoff? backoff,
+        int? haveMaxAttempts, int? haveDlqAfterAttempts, RetryBackoff? haveBackoff,
+        List<DriftItem> drift)
+    {
+        Compare(prefix + ".maxAttempts", maxAttempts, haveMaxAttempts, drift);
+        Compare(prefix + ".dlqAfterAttempts", dlqAfterAttempts, haveDlqAfterAttempts, drift);
+
+        // Backoff per field, like everything else: a file may own the base delay and leave the rest.
+        if (backoff is not null)
+        {
+            Compare(prefix + ".backoff.baseDelayMs", backoff.BaseDelayMs, haveBackoff?.BaseDelayMs, drift);
+            Compare(prefix + ".backoff.maxDelayMs", backoff.MaxDelayMs, haveBackoff?.MaxDelayMs, drift);
+            if (backoff.Jitter is { } jitter && !string.Equals(jitter, haveBackoff?.Jitter, StringComparison.OrdinalIgnoreCase))
+                drift.Add(new DriftItem(prefix + ".backoff.jitter", jitter, haveBackoff?.Jitter));
+        }
+    }
+
+    /// <summary>
+    /// A filter as one comparable line. No filter and a filter with no conditions both deliver every
+    /// event, so they read the same — that is how a file removes the filter it had.
+    /// </summary>
+    internal static string DescribeFilter(DeliveryFilter? filter)
+        => filter is null || filter.Conditions.Count == 0 ? "(delivers every event)" : filter.Describe();
 
     /// <summary>Ingress differs per field like everything else — a source is its kind plus its name.</summary>
     private static void CompareIngress(string prefix, DeploymentIngress? want, DeploymentIngress? have, List<DriftItem> drift)
