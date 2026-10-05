@@ -124,7 +124,7 @@ internal static class EdgeCommand
         {
             if (!File.Exists(file))
                 return CliErrors.Write(map.Has("json"), "missing_file", $"No payload file at '{file}'.", action: null, status: null, ExitCodes.RuntimeError);
-            payload = await File.ReadAllBytesAsync(file);
+            payload = CliFiles.ReadAllBytes(file);
         }
         else
         {

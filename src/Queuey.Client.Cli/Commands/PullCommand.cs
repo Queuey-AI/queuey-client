@@ -39,7 +39,7 @@ internal static class PullCommand
         if (map.Get("emit-code") is { } codePath)
         {
             string code = QueueCodeWriter.ForFile(file, map.Get("namespace") ?? "Queues");
-            File.WriteAllText(codePath, code);
+            CliFiles.WriteAllText(codePath, code);
             Console.WriteLine($"Wrote {codePath} — {file.Queues.Count} [QueueyQueue] declaration(s). "
                               + "Behaviour only; destinations stay in the deployment file.");
         }
@@ -62,7 +62,7 @@ internal static class PullCommand
                 "Re-run with --force to overwrite, or --stdout to review the pull first (diff it before you replace anything).");
         }
 
-        File.WriteAllText(path, json + Environment.NewLine);
+        CliFiles.WriteAllText(path, json + Environment.NewLine);
 
         Console.WriteLine($"Wrote {path} — {file.Queues.Count} queue(s)"
                           + (file.Tenant is null ? "" : $" from {file.Tenant}") + ".");

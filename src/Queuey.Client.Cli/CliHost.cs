@@ -57,6 +57,6 @@ internal static class CliHost
     private static string? ReadConfigJson(ArgMap args)
     {
         string path = args.Get("config") ?? "queuey.json";
-        return File.Exists(path) ? File.ReadAllText(path) : null;
+        return File.Exists(path) ? CliFiles.ReadAllText(path) : null;
     }
 }

@@ -1,5 +1,4 @@
 using System;
-using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
@@ -82,11 +81,11 @@ internal static class CliEntry
         {
             return CliErrors.Write(json, "timeout", "The request timed out.", action: null, status: null, ExitCodes.RuntimeError, "Error");
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (CliFileException ex)
         {
-            // En fil som ikke kan leses (en mappe, manglende tilgang), ga exit 134 og stack trace (review 2026-10-05).
-            return CliErrors.Write(json, "file_unreadable", ex.Message, "Check that the path names a file this user can read.",
-                status: null, ExitCodes.Configuration, "Error");
+            // En fil som ikke kan leses (manglende tilgang), ga exit 134 og stack trace (review 2026-10-05). Bare filene
+            // kommandolinjen navngir havner her (re-review samme dag): en annen IOException er ikke en fil brukeren kan rette.
+            return CliErrors.Write(json, ex.Code, ex.Message, ex.Action, status: null, ExitCodes.Configuration, "Error");
         }
         catch (Exception ex) when (json)
         {
