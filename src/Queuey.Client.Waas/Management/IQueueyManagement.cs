@@ -37,7 +37,6 @@ public interface IQueueyManagement
     /// </summary>
     Task SetWorkspacePolicyAsync(string tenantPublicId, DeploymentWorkspace policy, CancellationToken cancellationToken = default);
 
-
     /// <summary>
     /// Patches how arriving events are read — ingress auth, and where the event type and group key
     /// come from. Set it on a workspace and every queue inherits; set it on a queue to override.
