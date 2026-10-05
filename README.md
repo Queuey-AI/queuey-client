@@ -294,10 +294,12 @@ its path:
 ```jsonc
 {
   "workspace": {
-    "baseUrl": "https://hooks.example.com",
-    "authMode": "ApiKey",
-    "credentialRef": "partner-key",     // a name, never the secret
-    "authHeaderName": "X-Api-Key"
+    "delivery": {
+      "baseUrl": "https://hooks.example.com",
+      "authMode": "ApiKey",
+      "credentialRef": "partner-key",   // a name, never the secret
+      "authHeaderName": "X-Api-Key"
+    }
   },
   "queues": {
     "orders":   { "ordering": "bykey", "retentionDays": 30, "delivery": { "url": "/orders" } },
@@ -511,8 +513,11 @@ queuey verify orders --data '{"type":"order.created","test":true}'
 
 It exits 0 only when the receiver got the event. Otherwise the verdict — `logged_not_delivered`,
 `filtered`, `failed` or `timeout` with `--json` — comes with what to change: the mode, the filter,
-the credential the receiver rejected, held delivery, or the earlier event that holds a fifo queue. A
-failure is reported on its first attempt rather than after every retry.
+the credential the receiver rejected, held delivery, or the earlier event that holds the queue. A
+rejected credential, a missing route or a TLS failure holds the whole queue, whatever its ordering,
+until it is fixed and resumed with Verify & resume (in the console, or over MCP), so the advice ends
+with that step; a verify run before it waits behind the held queue. A failure is reported on its
+first attempt rather than after every retry.
 
 The event is real: the receiver gets it like any other, so send data it treats as harmless. `verify`
 and `apply` pick the workspace by the same rule: the deployment file's `tenant` when it names one,
@@ -761,6 +766,11 @@ FullAccess or ProducerAdmin key — an ingress-only publish key can't listen).
 
 Read-only DLQ debugging: forwards an existing event (including a DLQ'd one) to your connected
 `queuey listen` session. The event is **not** modified and the real endpoint is never contacted.
+
+It works on a queue that forwards its deliveries to the listener (Local forward) and shares its payloads
+in full, and the key needs `queue.write` and `queue.listen` on it. Any other queue is refused, and
+`queuey replay` prints the server's reason, which says what to change. On a queue whose payload privacy
+is shape only, a person changes it in the console first; live deliveries still reach the listener.
 
 ```bash
 # terminal 1 — start a listener

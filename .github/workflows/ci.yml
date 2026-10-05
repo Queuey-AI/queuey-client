@@ -1,19 +1,22 @@
 name: CI
 
 # The test gate for the SDK repo (the same testport principle as the
-# backend and frontend repos): every PR and every push to main or a
-# feature branch builds the WHOLE solution and runs every test project.
-# Whole-solution on purpose — new projects (Queuey.Edge et al.) are
-# covered the moment they join the .sln, with no workflow edit to forget.
+# backend and frontend repos): a run builds the WHOLE solution and runs
+# every test project. Whole-solution on purpose — new projects
+# (Queuey.Edge et al.) are covered the moment they join the .sln, with no
+# workflow edit to forget.
+#
+# Runs only when someone asks for it, as in the backend and frontend
+# repos: `gh workflow run ci.yml --ref <branch>`, or the `run-tests` label
+# on a PR. Kenneth confirms each run (2026-10-05); a push never starts one.
 on:
+  workflow_dispatch:
   pull_request:
-  push:
-    branches:
-      - main
-      - "feat/**"
+    types: [labeled]
 
 jobs:
   build-and-test:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'run-tests'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

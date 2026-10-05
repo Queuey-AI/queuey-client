@@ -240,22 +240,29 @@ internal static class DeliveryVerifier
             }
         }
 
-        // En eldre feilende event holder bare eventene bak seg når hele køen er én rekke: ordering fifo,
-        // uten partisjonsnøkkel. Med bykey holder den bare sin egen nøkkel, og med besteffort ingen. Før
-        // 2026-09-24 ble den navngitt uansett, og kunne peke på feil årsak.
+        // En eldre feilende event holder eventene bak seg i to tilfeller:
+        // - Feilen parkerer målet eller køen (401, 403, 404, TLS, en permanent feil, transform eller
+        //   Stripe-signaturen). Da holder Queuey hele køen til noen gjenopptar den, uansett ordering.
+        // - Hele køen er én rekke: ordering fifo, uten partisjonsnøkkel. Med bykey holder eventen ellers
+        //   bare sin egen nøkkel, og med besteffort ingen.
+        // Før 2026-09-24 ble den navngitt uansett, og kunne peke på feil årsak. Fram til 2026-10-05 bare på
+        // fifo, også når en 401 holdt en bykey-kø.
         EventDetailsResponse? blocker = null;
         bool flowExplains = row is { DeliveryHeld: true } or { Suspended: true };
         bool notTriedYet = last is null || (last.AttemptCount == 0 && (last.Attempts?.Count ?? 0) == 0);
-        if (!flowExplains && notTriedYet
-            && await OrderingAsync(controlPlane, published.QueuePublicId, cancellationToken).ConfigureAwait(false) == "fifo")
+        if (!flowExplains && notTriedYet)
         {
             try
             {
                 if (await controlPlane.GetOldestFailingEventAsync(published.QueuePublicId, cancellationToken).ConfigureAwait(false) is { PublicId: { } id }
                     && id != published.EventId)
                 {
-                    blocker = await controlPlane.GetEventAsync(published.QueuePublicId, id, cancellationToken).ConfigureAwait(false);
-                    blocker.PublicId ??= id;
+                    EventDetailsResponse failing = await controlPlane.GetEventAsync(published.QueuePublicId, id, cancellationToken).ConfigureAwait(false);
+                    failing.PublicId ??= id;
+
+                    if (HoldsTheQueue(LastAttempt(failing)?.FailureClass)
+                        || await OrderingAsync(controlPlane, published.QueuePublicId, cancellationToken).ConfigureAwait(false) == "fifo")
+                        blocker = failing;
                 }
             }
             catch (QueueyException)
@@ -375,11 +382,13 @@ internal static class DeliveryVerifier
                 waiting + " The queue is suspended.",
                 "Contact Queuey support: a suspended queue does not deliver.");
 
-        if (blocker?.Attempts?.OrderByDescending(a => a.AttemptNumber).FirstOrDefault() is { } blocking)
+        if (LastAttempt(blocker) is { } blocking)
             return Result(DeliveryVerdict.Timeout,
-                waiting + $" An earlier event on this queue, {blocker.PublicId}, is failing — {Outcome(blocking)}" +
+                waiting + $" An earlier event on this queue, {blocker!.PublicId}, is failing — {Outcome(blocking)}" +
                 (string.IsNullOrWhiteSpace(blocking.FailureClass) ? "" : $" [{blocking.FailureClass}]") +
-                " — and with fifo ordering the events behind it wait for it.",
+                (HoldsTheQueue(blocking.FailureClass)
+                    ? " — and Queuey holds the queue's deliveries until that is fixed and the queue is resumed."
+                    : " — and with fifo ordering the events behind it wait for it."),
                 FailureAction(blocking) + " Once that event is delivered or skipped, the events behind it go out.");
 
         if (queueRow is { HasDeliveryTarget: false })
@@ -392,8 +401,28 @@ internal static class DeliveryVerifier
             $"See the backlog with `queuey metrics {published.QueuePublicId}`, or verify again with a longer --timeout.");
     }
 
+    private static EventAttemptResponse? LastAttempt(EventDetailsResponse? e)
+        => e?.Attempts?.OrderByDescending(a => a.AttemptNumber).FirstOrDefault();
+
+    /// <summary>
+    /// Failures that stop Queuey before it sends anything: the receiver was never contacted, so the
+    /// outcome is not the receiver's to explain.
+    /// </summary>
+    private static bool StoppedBeforeSending(string? failureClass)
+        => failureClass is "TransformFailed" or "OriginNotVerified" or "SignatureRecalculationFailed";
+
+    /// <summary>
+    /// Failures that park the receiver or the queue for a person: Queuey holds every delivery on the
+    /// queue, whatever its ordering, until someone fixes the cause and resumes the queue.
+    /// </summary>
+    private static bool HoldsTheQueue(string? failureClass) => failureClass is
+        "AuthenticationFailed" or "AuthorizationFailed" or "RouteOrConfigError" or "ProtocolOrSecurityIssue"
+        or "PermanentTargetError" or "TransformFailed" or "SignatureRecalculationFailed";
+
     private static string Outcome(EventAttemptResponse? a)
-        => a?.ResponseCode is { } code
+        => StoppedBeforeSending(a?.FailureClass)
+            ? $"Queuey did not send it to {a!.TargetEndpoint ?? "the receiver"}"
+            : a?.ResponseCode is { } code
             ? $"{a.TargetEndpoint ?? "the receiver"} answered {code}"
             : string.IsNullOrWhiteSpace(a?.ErrorMessage)
                 ? $"{a?.TargetEndpoint ?? "the receiver"} did not answer"
@@ -402,17 +431,49 @@ internal static class DeliveryVerifier
     private static string FailureSummary(EventAttemptResponse? a, bool inDlq)
     {
         string target = a?.TargetEndpoint ?? "the receiver";
+        string cls = string.IsNullOrWhiteSpace(a?.FailureClass) ? "" : $" [{a!.FailureClass}]";
+        string then = inDlq ? " The event is in the DLQ." : WhatQueueyDoesNext(a?.FailureClass);
+
+        // Stoppet før sending (2026-10-05): «it did not answer» la skylda på en mottaker som aldri ble
+        // kontaktet. Feilmeldingen fra forsøket sier hva som stoppet den.
+        if (StoppedBeforeSending(a?.FailureClass))
+            return $"Queuey did not send the event to {target}{cls}"
+                   + (string.IsNullOrWhiteSpace(a!.ErrorMessage) ? "" : $": {a.ErrorMessage!.Trim().TrimEnd('.')}")
+                   + $". The receiver was never contacted.{then}";
+
         string outcome = a?.ResponseCode is { } code
             ? $"it answered {code}"
             : string.IsNullOrWhiteSpace(a?.ErrorMessage) ? "it did not answer" : $"it could not be reached ({a!.ErrorMessage})";
-        string cls = string.IsNullOrWhiteSpace(a?.FailureClass) ? "" : $" [{a!.FailureClass}]";
-        string then = inDlq
-            ? " The event is in the DLQ."
-            : " Queuey retries it on the queue's schedule.";
         return $"Delivery to {target} failed: {outcome}{cls}.{then}";
     }
 
-    private static string FailureAction(EventAttemptResponse? a) => a?.FailureClass switch
+    /// <summary>
+    /// What Queuey does with a failed event that is not in the DLQ, by its class. A class whose next step
+    /// depends on more than the class (the DLQ setting, the ordering) gets no forecast.
+    /// </summary>
+    // Før 2026-10-05 sa hver feil «Queuey retries it on the queue's schedule», også en 401, der Queuey i stedet
+    // holder køen til en person gjenopptar den.
+    private static string WhatQueueyDoesNext(string? failureClass) => failureClass switch
+    {
+        "TargetServerError" or "TargetUnavailable" =>
+            " Queuey sends it again, and if the receiver stays down, probes it and resumes delivering when it answers.",
+        "RateLimited" =>
+            " Queuey sends it again after the wait the receiver asked for.",
+        _ when HoldsTheQueue(failureClass) =>
+            " Queuey holds the queue's deliveries until this is fixed and the queue is resumed.",
+        _ => "",
+    };
+
+    /// <summary>
+    /// What to change, and for a failure that holds the queue, the step after the fix. Without that step
+    /// the next verify waits behind the held queue and times out, even with the cause fixed.
+    /// </summary>
+    private static string FailureAction(EventAttemptResponse? a)
+        => WhatToFix(a) + (HoldsTheQueue(a?.FailureClass)
+            ? " Then resume the queue with Verify & resume, in the Queuey console or over MCP: until then Queuey holds its deliveries, so verifying again waits."
+            : "");
+
+    private static string WhatToFix(EventAttemptResponse? a) => a?.FailureClass switch
     {
         "AuthenticationFailed" =>
             "The receiver rejected the credentials. Check delivery.authMode and delivery.credentialRef (or signing) " +
@@ -433,6 +494,21 @@ internal static class DeliveryVerifier
             "The receiver failed while handling the event. Look at its logs around this event.",
         "TransformFailed" =>
             "Queuey could not transform the payload before sending it. Check the queue's payload mutations in the Queuey console.",
+
+        // OriginNotVerified og SignatureRecalculationFailed kom i backenden etter at verify ble skrevet (2026-09-24 og -25),
+        // og TLS og permanente feil manglet. Alle fire endte i rådet om en URL som ikke var nåbar, også når Queuey selv
+        // holdt eventen (2026-10-05).
+        "SignatureRecalculationFailed" =>
+            "Queuey could not recalculate the Stripe signature on this queue, so it held the delivery. Fix what the error names: " +
+            "turn the queue's Stripe verification back on, remove its payload mutations, or replace the signing secret.",
+        "OriginNotVerified" =>
+            "This queue re-signs its deliveries as the provider, and Queuey signs only what the provider sent through the queue's " +
+            "verified ingress, which a test event is not. Prove delivery with an event from the provider instead: for Stripe, " +
+            "the event's Resend button in the Dashboard or `stripe events resend`.",
+        "ProtocolOrSecurityIssue" =>
+            "The secure connection to the receiver failed. Check the delivery URL's scheme, and the receiver's certificate and the TLS version it requires.",
+        "PermanentTargetError" =>
+            "The receiver says this request will never succeed as it is. Have whoever runs it accept it, or point the delivery URL at a receiver that does.",
         _ when a?.ResponseCode is null =>
             "Check that the delivery URL is right and reachable from the internet.",
         _ => "Look at this attempt in the Queuey console for the receiver's response.",
