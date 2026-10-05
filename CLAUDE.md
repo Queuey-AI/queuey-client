@@ -29,8 +29,11 @@ dotnet build Queuey.Client.sln -c Release
 dotnet test Queuey.Client.sln -c Release
 ```
 
-CI (`ci.yml`) builds and tests the **whole solution** on every PR, using the .NET 9
-SDK. Libraries target `netstandard2.0;net8.0` (`Queuey.Edge` and the CLI are net8
+CI (`ci.yml`) builds and tests the **whole solution**, using the .NET 9 SDK, but it
+runs **only when Kenneth confirms it** (2026-10-05, the same rule as the backend and
+frontend repos): `gh workflow run ci.yml --ref <branch>`, or the `run-tests` label on
+the PR. A push or a new PR starts nothing. Verify locally with the commands above,
+and when a PR is ready, say so and ask whether CI should run. Libraries target `netstandard2.0;net8.0` (`Queuey.Edge` and the CLI are net8
 only); test projects are net9.0. A new project is covered by the gate only once it
 joins `Queuey.Client.sln` — adding it there is part of the change, not a follow-up.
 
