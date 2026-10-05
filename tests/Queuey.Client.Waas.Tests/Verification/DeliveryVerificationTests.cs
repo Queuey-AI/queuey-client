@@ -242,15 +242,69 @@ public class DeliveryVerificationTests
         Assert.DoesNotContain("reachable from the internet", v.SuggestedAction);
     }
 
-    [Fact]
-    public void Origin_not_verified_means_Queuey_cannot_vouch_for_a_verified_event_not_a_test_publish()
+    [Theory]
+    [InlineData("no_retry_origin_not_verified")]
+    [InlineData("no_retry_origin_from_a_later_backend")]
+    [InlineData(null)]
+    public void Origin_not_verified_for_a_reason_verify_does_not_know_points_at_the_error_and_resending(string? reason)
     {
-        // Ingress avviser en usignert publisering med 401 på en kø som verifiserer Stripe, så eventen ble verifisert, men
-        // Queuey kan ikke gå god for at Stripe sendte den (review 2026-10-05).
-        DeliveryVerification v = Judge(Event(6, Attempt(null, "OriginNotVerified", kind: "MoveToDlq", reason: "no_retry_origin_not_verified")));
+        // Backend #354 (2026-10-05): ingen frist etter et bytte av secret, og hver nekting har sin årsak. En årsak verify ikke
+        // kjenner, får det generelle rådet, som ikke gjetter på årsaken.
+        DeliveryVerification v = Judge(Event(6, Attempt(null, "OriginNotVerified", kind: "MoveToDlq", reason: reason)));
 
-        Assert.Contains("arrived before signature recalculation started, or just after the signing secret changed", v.SuggestedAction);
+        Assert.Contains("It could not vouch for this one, and the attempt's error says why.", v.SuggestedAction);
+        Assert.Contains("`stripe events resend`", v.SuggestedAction);
+        Assert.DoesNotContain("signing secret changed", v.SuggestedAction);
         Assert.DoesNotContain("test event", v.SuggestedAction);
+    }
+
+    [Theory]
+    [InlineData("no_retry_origin_before_recalculation", "arrived before Stripe signature recalculation was switched on for the queue", "`stripe events resend`")]
+    [InlineData("no_retry_origin_no_ingress_record", "it has no record of which secret verified this one", "`stripe events resend`")]
+    [InlineData("no_retry_origin_other_secret", "verified with an earlier Stripe secret of the queue's ingress, and that secret can no longer be used", "`stripe events resend`")]
+    [InlineData("no_retry_origin_test_event", "a test or sandbox event that never came through the queue's ingress", "have Stripe send an event to the queue's ingress")]
+    public void Origin_not_verified_says_why_by_its_reason_and_that_the_event_is_sent_from_Stripe_again(string reason, string why, string remedy)
+    {
+        DeliveryVerification v = Judge(Event(6, Attempt(null, "OriginNotVerified", "Not signed as Stripe.", kind: "MoveToDlq", reason: reason)));
+
+        Assert.Equal(DeliveryVerdict.Failed, v.Verdict);
+        Assert.Contains("The receiver was never contacted. The event is in the DLQ.", v.Summary);
+        Assert.Contains(why, v.SuggestedAction);
+        Assert.Contains(remedy, v.SuggestedAction);
+        Assert.DoesNotContain("the attempt's error says why", v.SuggestedAction);
+        Assert.DoesNotContain("signing secret changed", v.SuggestedAction);
+    }
+
+    [Theory]
+    [InlineData(401, "AuthenticationFailed")]
+    [InlineData(403, "AuthorizationFailed")]
+    public void A_receiver_that_refuses_the_earlier_secret_gets_the_event_from_Stripe_again_and_the_secret_revoked(int code, string failureClass)
+    {
+        // Backend #427: mottakeren har gått over til det nye secret-et. Ingenting er galt med oppsettet, så rådet om
+        // credentialRef ville sendt brukeren feil vei.
+        DeliveryVerification v = Judge(Event(6, Attempt(code, failureClass, kind: "MoveToDlq", reason: "no_retry_signed_with_earlier_secret")));
+
+        Assert.Equal(DeliveryVerdict.Failed, v.Verdict);
+        Assert.Contains($"it answered {code} [{failureClass}]. The event is in the DLQ.", v.Summary);
+        Assert.Contains("it has moved on to the secret the ingress has now", v.SuggestedAction);
+        Assert.Contains("resend it from Stripe instead", v.SuggestedAction);
+        Assert.Contains("Revoke the earlier secret in the Queuey console once the receiver no longer accepts it", v.SuggestedAction);
+        Assert.DoesNotContain("delivery.credentialRef", v.SuggestedAction);
+        Assert.DoesNotContain("allowlist", v.SuggestedAction);
+    }
+
+    [Theory]
+    [InlineData(null, "OriginNotVerified", "no_retry_origin_before_recalculation", "HoldQueue",
+        "Then a person skips the event in the Queuey console, which unlocks the queue: sending it again fails the same way.")]
+    [InlineData(401, "AuthenticationFailed", "no_retry_signed_with_earlier_secret", "HoldKey",
+        "Then a person skips the event in the Queuey console; until then, events with its key wait. Sending it again fails the same way.")]
+    public void With_the_dlq_off_an_event_to_resend_from_Stripe_is_skipped_not_sent_again(
+        int? code, string failureClass, string reason, string kind, string step)
+    {
+        DeliveryVerification v = Judge(Event(4, Attempt(code, failureClass, kind: kind, reason: reason)));
+
+        Assert.Contains(step, v.SuggestedAction);
+        Assert.DoesNotContain("sends the event again", v.SuggestedAction);
     }
 
     [Theory]

@@ -200,6 +200,10 @@ internal static class DeliveryVerifier
     // Årsaken Queuey skriver når et tidsavbrudd mot en mottaker som ikke er merket idempotent, parkerer køen.
     private const string TimeoutNotIdempotent = "target_requires_action_timeout_not_idempotent";
 
+    // Mottakeren avviste (401/403) en Stripe-signatur laget med et tidligere secret på inngangen, det som verifiserte
+    // eventen (backend #427, 2026-10-05). Eventen går til DLQ alene; et nytt forsøk signeres med det samme secret-et.
+    private const string SignedWithEarlierSecret = "no_retry_signed_with_earlier_secret";
+
     public static async Task<DeliveryVerification> RunAsync(
         QueueyClient client,
         QueueyControlPlaneClient controlPlane,
@@ -602,11 +606,21 @@ internal static class DeliveryVerifier
                    "then a person resumes the queue in the Queuey console.";
 
         string fix = WhatToFix(a);
+
+        // Et event Queuey ikke kunne signere som Stripe, eller som er signert med et secret mottakeren har forlatt, feiler
+        // likt hver gang det sendes på nytt: det sendes fra Stripe igjen, og den som låser opp, hopper over det.
+        bool resendFromStripe = a?.Class == "OriginNotVerified" || a?.DecisionReason == SignedWithEarlierSecret;
         return a?.DecisionKind switch
         {
             "HoldEvent" => fix + PersonResumes,
+            "HoldQueue" when resendFromStripe =>
+                fix + " Then a person skips the event in the Queuey console, which unlocks the queue: sending it again fails the " +
+                "same way. With \"dlqEnabled\": true, such an event goes to the DLQ instead, and the queue keeps delivering.",
             "HoldQueue" => fix + " Then a person unlocks the queue in the Queuey console, which sends the event again, or skips it. " +
                            "With \"dlqEnabled\": true, an event the receiver rejects goes to the DLQ instead, and the queue keeps delivering.",
+            "HoldKey" when resendFromStripe =>
+                fix + " Then a person skips the event in the Queuey console; until then, events with its key wait. Sending it again " +
+                "fails the same way.",
             "HoldKey" => fix + " Then a person sends the event again or skips it in the Queuey console; until then, events with its key wait. " +
                          "With \"dlqEnabled\": true, an event the receiver rejects goes to the DLQ instead.",
             "RetryLater" or "MoveToDlq" => fix,
@@ -620,7 +634,7 @@ internal static class DeliveryVerifier
         " Then a person resumes the queue in the Queuey console (Verify & resume): until then Queuey holds its deliveries, " +
         "so verifying again waits.";
 
-    private static string WhatToFix(EventAttemptResponse? a) => a?.Class switch
+    private static string WhatToFix(EventAttemptResponse? a) => WhatToFixFor(a?.DecisionReason) ?? a?.Class switch
     {
         // Uten svar kom feilen fra Queuey sitt oppsett av autentiseringen (credential eller identitetsleverandør), ikke fra
         // mottakeren (review 2026-10-05).
@@ -658,12 +672,12 @@ internal static class DeliveryVerifier
         "SignatureRecalculationFailed" =>
             "Queuey could not recalculate the Stripe signature on this queue, so it held the delivery. Fix what the error names: " +
             "turn the queue's Stripe verification back on, remove its payload mutations, or replace the signing secret.",
-        // Ingress avviser en usignert publisering med 401 på en kø som verifiserer Stripe, så eventen ble verifisert, men
-        // Queuey kan ikke gå god for at Stripe sendte den (review 2026-10-05).
+        // En årsak verify ikke kjenner, også no_retry_origin_not_verified, som backenden nå bare bruker for en kropp Stripe
+        // aldri sender, og som eldre forsøk har uansett årsak. Rådet før sa «just after the signing secret changed», en
+        // frist på 30 sekunder backenden ikke har lenger (#354, re-review 2026-10-05).
         "OriginNotVerified" =>
-            "Queuey re-signs this queue's deliveries as Stripe, and only for events it can vouch Stripe sent. This one arrived " +
-            "before signature recalculation started, or just after the signing secret changed. Resend it from Stripe: the " +
-            "event's Resend button in the Dashboard, or `stripe events resend`.",
+            "Queuey re-signs this queue's deliveries as Stripe, and only for events it can vouch Stripe sent through the " +
+            "queue's ingress. It could not vouch for this one, and the attempt's error says why. " + ResendFromStripe,
         "ProtocolOrSecurityIssue" =>
             "The secure connection to the receiver failed. Check the delivery URL's scheme, and the receiver's certificate and the TLS version it requires.",
         "PermanentTargetError" =>
@@ -671,6 +685,42 @@ internal static class DeliveryVerifier
         _ when a?.ResponseCode is null =>
             "Check that the delivery URL is right and reachable from the internet.",
         _ => "Look at this attempt in the Queuey console for the receiver's response.",
+    };
+
+    private const string ResendFromStripe =
+        "Resend it from Stripe: the event's Resend button in the Dashboard, or `stripe events resend`.";
+
+    /// <summary>
+    /// What to fix for a decision reason that says more than its class: why Queuey could not sign the event as Stripe, or
+    /// why the receiver refused the signature it made. Null for any other reason, so the class decides.
+    /// </summary>
+    // Backend #354 (2026-10-05): hver nekting har sin årsak, og ingen frist etter et bytte av secret. #427: mottakeren
+    // avviser et event signert med et tidligere secret. Rådet er det samme som konsollets, for hver årsak.
+    private static string? WhatToFixFor(string? reason) => reason switch
+    {
+        "no_retry_origin_before_recalculation" =>
+            "This event arrived before Stripe signature recalculation was switched on for the queue, so Queuey does not sign " +
+            "it as Stripe, and sending it again cannot change that. " + ResendFromStripe + " It arrives again, and is signed.",
+        "no_retry_origin_no_ingress_record" =>
+            "Queuey signs an event as Stripe only with the secret that verified it at the queue's ingress, and it has no record " +
+            "of which secret verified this one: the ingress accepted it without a Stripe signature check, it was copied from " +
+            "another queue, its body was changed, or it arrived before Queuey kept the record. " + ResendFromStripe +
+            " It arrives through the ingress again, which records the secret.",
+        "no_retry_origin_other_secret" =>
+            "This event was verified with an earlier Stripe secret of the queue's ingress, and that secret can no longer be " +
+            "used: it was deleted, revoked or has expired. Queuey signs an event only with the secret that verified it. " +
+            ResendFromStripe + " It arrives again, verified with the secret the ingress has now.",
+        "no_retry_origin_test_event" =>
+            "This is a test or sandbox event that never came through the queue's ingress, so Stripe never sent it and Queuey " +
+            "does not sign it as Stripe. To try the receiver, have Stripe send an event to the queue's ingress, for example " +
+            "with `stripe trigger` in test mode.",
+        SignedWithEarlierSecret =>
+            "The receiver refused the Stripe signature Queuey made with the earlier secret that verified this event at the " +
+            "queue's ingress: it has moved on to the secret the ingress has now, and nothing is wrong with its setup. Sending " +
+            "the event again signs it with the same earlier secret, so resend it from Stripe instead: the event's Resend " +
+            "button in the Dashboard, or `stripe events resend`. Revoke the earlier secret in the Queuey console once the " +
+            "receiver no longer accepts it, so no event it verified is signed with it again; after a leaked secret, revoke it at once.",
+        _ => null,
     };
 
     /// <summary>Why Queuey holds the event before sending it, from the held row's reason.</summary>
