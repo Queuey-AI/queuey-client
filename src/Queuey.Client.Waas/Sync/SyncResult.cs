@@ -70,9 +70,9 @@ public sealed class SyncResult : ISyncRunResult
         var failedPackages = Packages.Where(p => !p.Succeeded).Select(p => p.Name).ToArray();
 
         var parts = new List<string>();
-        if (failedStreams.Length > 0) parts.Add($"{failedStreams.Length} stream(s) failed: {string.Join(", ", failedStreams)}");
-        if (failedPackages.Length > 0) parts.Add($"{failedPackages.Length} package(s) failed: {string.Join(", ", failedPackages)}");
-        if (NotAttempted.Count > 0) parts.Add($"{NotAttempted.Count} stream(s) not attempted: {string.Join(", ", NotAttempted)}");
+        if (failedStreams.Length > 0) parts.Add(FormattableString.Invariant($"{failedStreams.Length} stream(s) failed: {string.Join(", ", failedStreams)}"));
+        if (failedPackages.Length > 0) parts.Add(FormattableString.Invariant($"{failedPackages.Length} package(s) failed: {string.Join(", ", failedPackages)}"));
+        if (NotAttempted.Count > 0) parts.Add(FormattableString.Invariant($"{NotAttempted.Count} stream(s) not attempted: {string.Join(", ", NotAttempted)}"));
 
         throw new QueueySyncException(
             $"Queuey sync did not fully converge — {string.Join("; ", parts)}. " +

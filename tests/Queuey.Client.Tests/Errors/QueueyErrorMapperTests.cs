@@ -44,6 +44,53 @@ public class QueueyErrorMapperTests
     }
 
     [Fact]
+    public void Parses_an_aspnet_validation_problem_into_its_title_and_each_error()
+    {
+        // ASP.NET svarer slik før kontrolleren når kroppen ikke kan leses, for eksempel med et felt en eldre server ikke
+        // kjenner: Queuey i prod svarer slik på backoff og filter. Før 2026-10-05 ble det «Bad Request» uten noe mer.
+        const string body = """
+            {"type":"https://tools.ietf.org/html/rfc9110#section-15.5.1","title":"One or more validation errors occurred.","status":400,
+             "errors":{"$.backoff":["The JSON property 'backoff' could not be mapped to any .NET member contained in type 'PatchTenantPolicyRequest'."],
+                       "request":["The request field is required."]},
+             "traceId":"00-1"}
+            """;
+
+        QueueyErrorMapper.ParseError(body, out string? code, out string? message);
+
+        Assert.Null(code);
+        Assert.Equal(
+            "One or more validation errors occurred. $.backoff: The JSON property 'backoff' could not be mapped to any .NET member " +
+            "contained in type 'PatchTenantPolicyRequest'. request: The request field is required.", message);
+    }
+
+    [Fact]
+    public void Parses_a_problem_without_errors_into_its_detail_or_title()
+    {
+        QueueyErrorMapper.ParseError("""{"title":"Arm requires a step body","status":400}""", out _, out string? titled);
+        QueueyErrorMapper.ParseError("""{"title":"Too large","detail":"The payload is over 1 MB.","status":413}""", out _, out string? detailed);
+
+        Assert.Equal("Arm requires a step body", titled);
+        Assert.Equal("The payload is over 1 MB.", detailed);
+    }
+
+    [Fact]
+    public async Task A_validation_problem_says_what_was_wrong_instead_of_bad_request()
+    {
+        using var response = new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            ReasonPhrase = "Bad Request",
+            Content = new StringContent(
+                """{"title":"One or more validation errors occurred.","status":400,"errors":{"$.filter":["The JSON property 'filter' could not be mapped."]}}""",
+                Encoding.UTF8, "application/problem+json"),
+        };
+
+        QueueyException ex = await QueueyErrorMapper.CreateAsync(response, CancellationToken.None);
+
+        Assert.IsType<QueueyValidationException>(ex);
+        Assert.Equal("One or more validation errors occurred. $.filter: The JSON property 'filter' could not be mapped.", ex.Message);
+    }
+
+    [Fact]
     public void Handles_empty_body()
     {
         QueueyErrorMapper.ParseError("", out string? code, out string? message);
@@ -72,6 +119,40 @@ public class QueueyErrorMapperTests
         Assert.Equal(status, ex.StatusCode);
         Assert.Equal("x_code", ex.ErrorCode);
         Assert.Equal("msg", ex.Message);
+    }
+
+    [Theory]
+    [InlineData(400)]
+    [InlineData(403)]
+    [InlineData(409)]
+    [InlineData(500)]
+    public async Task The_suggested_action_rides_along_on_every_status(int status)
+    {
+        // Feilkoder med foreslått handling (2026-09-23): en agent skal kunne handle på svaret uten
+        // å tolke prosa.
+        using var response = new HttpResponseMessage((HttpStatusCode)status)
+        {
+            Content = new StringContent(
+                "{\"error\":{\"code\":\"filter_required\",\"message\":\"Name what to replay.\",\"action\":\"Send \\\"all\\\": true to replay every event.\"}}",
+                Encoding.UTF8, "application/json"),
+        };
+
+        QueueyException ex = await QueueyErrorMapper.CreateAsync(response, CancellationToken.None);
+
+        Assert.Equal("filter_required", ex.ErrorCode);
+        Assert.Equal("Name what to replay.", ex.Message);
+        Assert.Equal("Send \"all\": true to replay every event.", ex.SuggestedAction);
+    }
+
+    [Fact]
+    public async Task No_action_is_null_not_empty()
+    {
+        using var response = new HttpResponseMessage(HttpStatusCode.BadRequest)
+        {
+            Content = new StringContent("{\"error\":{\"code\":\"x\",\"message\":\"y\"}}", Encoding.UTF8, "application/json"),
+        };
+
+        Assert.Null((await QueueyErrorMapper.CreateAsync(response, CancellationToken.None)).SuggestedAction);
     }
 
     [Fact]

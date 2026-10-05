@@ -43,30 +43,12 @@
           "description": "Whether the receiver handles the same event twice safely. Then Queuey sends an event again after a timeout or a conflict (409, 412, 423 or 428). Otherwise a timeout holds the queue until a person resumes it, and a conflict stops the event. It does not deduplicate publishes.",
           "type": "boolean"
         },
-        "maxAttempts": {
-          "description": "How many times an event is attempted, for every queue that does not say.",
-          "type": [
-            "string",
-            "integer",
-            "null"
-          ],
-          "pattern": "^-?(?:0|[1-9]\\d*)$"
-        },
-        "dlqAfterAttempts": {
-          "description": "After how many attempts an event goes to the DLQ. Must be below maxAttempts.",
-          "type": [
-            "string",
-            "integer",
-            "null"
-          ],
-          "pattern": "^-?(?:0|[1-9]\\d*)$"
-        },
         "backoff": {
-          "description": "How long to wait between attempts, for every queue that does not say.",
+          "description": "How long to wait between attempts, for every queue that does not say. The number of attempts is not a setting.",
           "type": "object",
           "properties": {
             "baseDelayMs": {
-              "description": "The first wait, in milliseconds. Each later wait doubles, up to MaxDelayMs.",
+              "description": "The first wait, in milliseconds: above 0, and at most 3600000 (one hour) unless a longer wait is already in place. Each later wait doubles, up to MaxDelayMs.",
               "type": [
                 "string",
                 "integer",
@@ -75,7 +57,7 @@
               "pattern": "^-?(?:0|[1-9]\\d*)$"
             },
             "maxDelayMs": {
-              "description": "The longest wait between two attempts, in milliseconds.",
+              "description": "The longest wait between two attempts, in milliseconds: above 0, not below the first wait, and at most 86400000 (24 hours) unless a longer wait is already in place.",
               "type": [
                 "string",
                 "integer",
@@ -300,30 +282,12 @@
               "logOnly"
             ]
           },
-          "maxAttempts": {
-            "description": "How many times an event is attempted before it gives up.",
-            "type": [
-              "string",
-              "integer",
-              "null"
-            ],
-            "pattern": "^-?(?:0|[1-9]\\d*)$"
-          },
-          "dlqAfterAttempts": {
-            "description": "After how many attempts an event goes to the DLQ. Must be below maxAttempts.",
-            "type": [
-              "string",
-              "integer",
-              "null"
-            ],
-            "pattern": "^-?(?:0|[1-9]\\d*)$"
-          },
           "backoff": {
-            "description": "How long to wait between attempts.",
+            "description": "How long to wait between attempts. The number of attempts is not a setting: Queuey decides what each failure needs.",
             "type": "object",
             "properties": {
               "baseDelayMs": {
-                "description": "The first wait, in milliseconds. Each later wait doubles, up to MaxDelayMs.",
+                "description": "The first wait, in milliseconds: above 0, and at most 3600000 (one hour) unless a longer wait is already in place. Each later wait doubles, up to MaxDelayMs.",
                 "type": [
                   "string",
                   "integer",
@@ -332,7 +296,7 @@
                 "pattern": "^-?(?:0|[1-9]\\d*)$"
               },
               "maxDelayMs": {
-                "description": "The longest wait between two attempts, in milliseconds.",
+                "description": "The longest wait between two attempts, in milliseconds: above 0, not below the first wait, and at most 86400000 (24 hours) unless a longer wait is already in place.",
                 "type": [
                   "string",
                   "integer",
@@ -352,7 +316,7 @@
             "additionalProperties": false
           },
           "filter": {
-            "description": "Which events this queue delivers. Omit it to deliver every event.",
+            "description": "Which events this queue delivers. Omit it to leave the queue's filter as it is; declare it with \"conditions\": [] to remove the filter, so the queue delivers every event.",
             "type": "object",
             "properties": {
               "match": {
@@ -364,14 +328,14 @@
                 ]
               },
               "conditions": {
-                "description": "The conditions. Empty delivers everything.",
+                "description": "The conditions, required whenever a filter is declared. An empty list delivers every event, which is how a filter is removed, so a filter without the list is refused rather than read as empty.",
                 "type": "array",
                 "items": {
                   "description": "One condition on a top-level JSON body field.",
                   "type": "object",
                   "properties": {
                     "field": {
-                      "description": "The top-level field of the JSON body.",
+                      "description": "The top-level field of the JSON body, exactly as it is written there: no whitespace around it.",
                       "type": "string"
                     },
                     "op": {
@@ -389,7 +353,7 @@
                       ]
                     },
                     "value": {
-                      "description": "The value to compare with. Not used by exists.",
+                      "description": "The value to compare with. gt, gte, lt and lte take a plain number written like 1.5. exists takes no value.",
                       "type": "string"
                     }
                   },
@@ -397,7 +361,10 @@
                 }
               }
             },
-            "additionalProperties": false
+            "additionalProperties": false,
+            "required": [
+              "conditions"
+            ]
           },
           "ordering": {
             "description": "Delivery ordering: fifo, bykey or besteffort.",
@@ -409,7 +376,7 @@
             ]
           },
           "dlqEnabled": {
-            "description": "Whether a dead-letter queue collects exhausted events.",
+            "description": "Whether a dead-letter queue collects events the receiver rejected.",
             "type": "boolean"
           },
           "retentionDays": {

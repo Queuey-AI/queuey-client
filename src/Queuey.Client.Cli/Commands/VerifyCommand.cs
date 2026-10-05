@@ -18,33 +18,28 @@ namespace Queuey.Client.Cli;
 /// </summary>
 internal static class VerifyCommand
 {
-    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal) { "stdin", "json", "help", "h" };
+    internal static readonly CommandOptions Options = new(
+        "verify",
+        flags: new[] { "stdin", "json" },
+        values: new[] { "data", "file", "timeout", "event-type", "content-type", "deployment", "queue" },
+        positionals: 1);
 
     public static async Task<int> RunAsync(string[] args)
     {
-        ArgMap map = ArgMap.Parse(args, Flags);
+        if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
 
         string? queue = map.FirstPositional ?? map.Get("queue");
         if (string.IsNullOrWhiteSpace(queue))
-        {
-            Console.Error.WriteLine("verify requires <queue>: the queue name you publish to.");
-            return ExitCodes.Usage;
-        }
+            return CliErrors.Usage(map, "missing_argument", "verify requires <queue>: the queue name you publish to.");
 
-        byte[]? body = ReadBody(map, out string? bodyError);
+        byte[]? body = ReadBody(map, out string? bodyCode, out string? bodyError, out string? bodyAction);
         if (bodyError != null)
-        {
-            Console.Error.WriteLine(bodyError);
-            return ExitCodes.Usage;
-        }
+            return CliErrors.Usage(map, bodyCode!, bodyError, bodyAction);
 
         int timeoutSeconds = 30;
         if (map.Get("timeout") is { } rawTimeout && (!int.TryParse(rawTimeout, out timeoutSeconds) || timeoutSeconds < 1))
-        {
-            Console.Error.WriteLine($"--timeout takes whole seconds, at least 1; got '{rawTimeout}'.");
-            return ExitCodes.Usage;
-        }
+            return CliErrors.Usage(map, "invalid_value", $"--timeout takes whole seconds, at least 1; got '{rawTimeout}'.");
 
         // Workspacet apply skrev til, etter samme regel som apply: fila sin tenant, ellers den
         // konfigurerte, og feil når --tenant eller QUEUEY_TENANT navngir et annet enn fila.
@@ -81,7 +76,7 @@ internal static class VerifyCommand
             return (null, path);
         }
 
-        return (DeploymentFile.Parse(File.ReadAllText(path)).ResolveTenant(), path);
+        return (DeploymentTenant.ReadFromFile(File.ReadAllText(path), path), path);
     }
 
     private static void WriteHuman(DeliveryVerification r)
@@ -129,9 +124,9 @@ internal static class VerifyCommand
         action = r.SuggestedAction,
     };
 
-    private static byte[]? ReadBody(ArgMap map, out string? error)
+    private static byte[]? ReadBody(ArgMap map, out string? code, out string? error, out string? action)
     {
-        error = null;
+        code = error = action = null;
 
         if (map.Has("stdin"))
             return Encoding.UTF8.GetBytes(Console.In.ReadToEnd());
@@ -139,12 +134,13 @@ internal static class VerifyCommand
         string? file = map.Get("file");
         if (!string.IsNullOrWhiteSpace(file))
         {
-            if (!File.Exists(file)) { error = $"File not found: {file}"; return null; }
+            if (!File.Exists(file)) { code = "missing_file"; error = $"File not found: {file}"; return null; }
             byte[] bytes = File.ReadAllBytes(file);
             if (IsDeploymentFile(bytes))
             {
-                error = $"--file is the event to send, and {file} is a deployment file. Name the deployment file with --deployment, " +
-                        "and send the event with --data, --file or --stdin.";
+                code = "deployment_file_as_event";
+                error = $"--file is the event to send, and {file} is a deployment file.";
+                action = "Name the deployment file with --deployment, and send the event with --data, --file or --stdin.";
                 return null;
             }
             return bytes;
@@ -155,8 +151,9 @@ internal static class VerifyCommand
             return Encoding.UTF8.GetBytes(data);
 
         // Ingen standard-payload: eventen går til den ekte mottakeren, så hva den får, skal være et valg.
-        error = "verify requires the event to send: --data <json>, --file <path>, or --stdin. " +
-                "It is delivered to the real receiver like any other event, so send data it treats as harmless.";
+        code = "missing_body";
+        error = "verify requires the event to send: --data <json>, --file <path>, or --stdin.";
+        action = "It is delivered to the real receiver like any other event, so send data it treats as harmless.";
         return null;
     }
 

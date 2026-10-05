@@ -40,7 +40,7 @@ public sealed class QueueyQueueAttribute : Attribute
     /// </summary>
     public string? Ordering { get; set; }
 
-    /// <summary>Whether a dead-letter queue collects events that exhaust their attempts. Null inherits.</summary>
+    /// <summary>Whether a dead-letter queue collects events the receiver rejected. Null inherits.</summary>
     public bool DlqEnabled { get => _dlqEnabled ?? false; set => _dlqEnabled = value; }
 
     /// <summary>How many days events are retained. Null inherits the workspace.</summary>

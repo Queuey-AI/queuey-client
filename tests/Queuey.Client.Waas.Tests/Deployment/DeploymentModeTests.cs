@@ -291,7 +291,7 @@ public class DeploymentModeTests
             new { error = new { code = "invalid_policy", message = "no" } });
 
         QueueySyncException ex = await Assert.ThrowsAsync<QueueySyncException>(
-            () => Apply(api, """{ "queues": { "orders": { "maxAttempts": 3 } } }"""));
+            () => Apply(api, """{ "queues": { "orders": { "retentionDays": 3 } } }"""));
 
         QueueApplyResult orders = ex.Queues!.Applied.Single();
         Assert.False(orders.Created);
@@ -300,16 +300,15 @@ public class DeploymentModeTests
         Assert.Empty(orders.Warnings);
     }
 
-    // ── retry og filter ──────────────────────────────────────────────────────
+    // ── backoff og filter ────────────────────────────────────────────────────
 
     [Fact]
-    public async Task Retry_and_filter_reach_the_queue_policy_patch()
+    public async Task Backoff_and_filter_reach_the_queue_policy_patch()
     {
         var api = new Api();
 
         await Apply(api, """
         { "queues": { "orders": {
-            "maxAttempts": 8, "dlqAfterAttempts": 6,
             "backoff": { "baseDelayMs": 500, "maxDelayMs": 60000, "jitter": "full" },
             "filter": { "match": "any", "conditions": [
               { "field": "type", "op": "eq", "value": "order.created" },
@@ -317,8 +316,6 @@ public class DeploymentModeTests
         """);
 
         JsonElement policy = api.Body("PATCH /queues/que_orders/policy");
-        Assert.Equal(8, policy.GetProperty("maxAttempts").GetInt32());
-        Assert.Equal(6, policy.GetProperty("dlqAfterAttempts").GetInt32());
         Assert.Equal(500, policy.GetProperty("backoff").GetProperty("baseDelayMs").GetInt32());
         Assert.Equal("full", policy.GetProperty("backoff").GetProperty("jitter").GetString());
 
@@ -328,8 +325,9 @@ public class DeploymentModeTests
         Assert.Equal("exists", exists.GetProperty("op").GetString());
         Assert.False(exists.TryGetProperty("value", out _));   // udeklarert er fraværende, ikke null
 
-        // Ikke deklarert: ikke med i patchen, så verdien arves videre.
+        // Ikke deklarert: ikke med i patchen, så verdien arves videre. Forsøkene har patchen ikke noe felt for.
         Assert.False(policy.TryGetProperty("ordering", out _));
+        Assert.Equal(new[] { "backoff", "filter" }, policy.EnumerateObject().Select(p => p.Name).ToArray());
     }
 
     [Fact]
@@ -343,26 +341,27 @@ public class DeploymentModeTests
     }
 
     [Fact]
-    public async Task Workspace_retry_reaches_the_workspace_policy_patch()
+    public async Task Workspace_backoff_reaches_the_workspace_policy_patch()
     {
         var api = new Api();
 
-        await Apply(api, """{ "tenant": "ten_abc", "workspace": { "maxAttempts": 5, "backoff": { "baseDelayMs": 1000 } }, "queues": {} }""");
+        await Apply(api, """{ "tenant": "ten_abc", "workspace": { "backoff": { "baseDelayMs": 1000 } }, "queues": {} }""");
 
         JsonElement policy = api.Body("PATCH /tenants/ten_abc/policy");
-        Assert.Equal(5, policy.GetProperty("maxAttempts").GetInt32());
         Assert.Equal(1000, policy.GetProperty("backoff").GetProperty("baseDelayMs").GetInt32());
         Assert.False(policy.GetProperty("backoff").TryGetProperty("jitter", out _));
+        Assert.Equal(new[] { "backoff" }, policy.EnumerateObject().Select(p => p.Name).ToArray());
     }
 
     [Theory]
-    [InlineData("""{ "maxAttempts": 5, "dlqAfterAttempts": 5 }""", "must be below MaxAttempts")]
     [InlineData("""{ "backoff": { "jitter": "some" } }""", "Jitter must be one of none, full")]
     [InlineData("""{ "backoff": { "baseDelayMs": 2000, "maxDelayMs": 1000 } }""", "cannot be below BaseDelayMs")]
     [InlineData("""{ "filter": { "match": "most", "conditions": [] } }""", "Match must be one of all, any")]
     [InlineData("""{ "filter": { "conditions": [ { "field": "type", "op": "like", "value": "x" } ] } }""", "must be one of eq, ne")]
     [InlineData("""{ "filter": { "conditions": [ { "field": "type", "op": "eq" } ] } }""", "needs a value")]
-    public void A_retry_or_filter_mistake_fails_locally_and_names_what_works(string queue, string expected)
+    [InlineData("""{ "backoff": { "baseDelayMs": 0 } }""", "Backoff.BaseDelayMs must be above 0; got 0.")]
+    [InlineData("""{ "backoff": { "maxDelayMs": 0 } }""", "Backoff.MaxDelayMs must be above 0; got 0.")]
+    public void A_backoff_or_filter_mistake_fails_locally_and_names_what_works(string queue, string expected)
     {
         DeploymentFile file = DeploymentFile.Parse($$"""{ "queues": { "orders": {{queue}} } }""");
 
@@ -370,14 +369,116 @@ public class DeploymentModeTests
         Assert.Contains(expected, ex.Message);
     }
 
-    [Fact]
-    public void A_workspace_retry_mistake_fails_locally_too()
+    private const string PlainNumber = "Write it like 1.5: a point for decimals, and no thousands separators, currency or parentheses.";
+
+    // Det backenden avviser i et filter siden Queuey#391 (2026-10-04), avvist her før apply skriver noe. Før gikk
+    // "1,5" gjennom og ble sammenlignet som 15, "exists" med en verdi leverte events med feltet, og "amount " traff aldri.
+    [Theory]
+    [InlineData("""{ "field": "amount", "op": "gt", "value": "1,5" }""", "'1,5' is not a number. " + PlainNumber)]
+    [InlineData("""{ "field": "amount", "op": "gte", "value": "1,000" }""", "'1,000' is not a number.")]
+    [InlineData("""{ "field": "amount", "op": "lt", "value": "$5" }""", "'$5' is not a number.")]
+    [InlineData("""{ "field": "amount", "op": "lte", "value": "(5)" }""", "'(5)' is not a number.")]
+    [InlineData("""{ "field": "amount", "op": "gt", "value": "5-" }""", "'5-' is not a number.")]
+    [InlineData("""{ "field": "amount", "op": "gt", "value": "NaN" }""", "'NaN' is not a number.")]
+    [InlineData("""{ "field": "amount", "op": "gt", "value": "1e309" }""", "Filter condition 'amount gt' compares numbers, and '1e309' is out of range.")]
+    [InlineData("""{ "field": "priority", "op": "exists", "value": "false" }""", "Filter condition 'priority exists' takes no value: it matches every event that has the field, whatever the value. Leave the value out.")]
+    [InlineData("""{ "field": "priority", "op": "exists", "value": "" }""", "takes no value")]
+    [InlineData("""{ "field": "amount ", "op": "eq", "value": "5" }""", "Filter field 'amount ' has whitespace around it, so it never matches")]
+    [InlineData("""{ "field": " type", "op": "exists" }""", "Write it as 'type'.")]
+    public void A_filter_Queuey_would_refuse_is_refused_before_anything_is_sent(string condition, string expected)
     {
-        DeploymentFile file = DeploymentFile.Parse("""{ "workspace": { "maxAttempts": 0 }, "queues": {} }""");
+        DeploymentFile file = DeploymentFile.Parse($$"""{ "queues": { "orders": { "filter": { "conditions": [ {{condition}} ] } } } }""");
+
+        var ex = Assert.Throws<QueueyConfigurationException>(() => file.Resolve());
+        Assert.Contains(expected, ex.Message);
+    }
+
+    [Theory]
+    [InlineData("gt", "1.5")]
+    [InlineData("lte", "-2")]
+    [InlineData("gte", "1e3")]
+    [InlineData("lt", "+.5")]
+    public void A_plain_number_passes_the_comparison(string op, string value)
+    {
+        // Det NumberStyles.Float godtar, godtar backenden også, og workeren leser det som samme tall.
+        DeploymentFile file = DeploymentFile.Parse($$"""{ "queues": { "orders": { "filter": { "conditions": [ { "field": "amount", "op": "{{op}}", "value": "{{value}}" } ] } } } }""");
+
+        Assert.Single(file.Resolve());
+    }
+
+    [Fact]
+    public void A_comma_is_only_refused_where_a_number_is_compared()
+    {
+        // eq og contains sammenligner tekst, så "1,5" er en verdi som alle andre der.
+        DeploymentFile file = DeploymentFile.Parse("""
+        { "queues": { "orders": { "filter": { "match": "any", "conditions": [
+            { "field": "amount", "op": "eq", "value": "1,5" }, { "field": "note", "op": "contains", "value": "(5)" } ] } } } }
+        """);
+
+        Assert.Single(file.Resolve());
+    }
+
+    [Fact]
+    public void A_workspace_backoff_mistake_fails_locally_too()
+    {
+        DeploymentFile file = DeploymentFile.Parse("""{ "workspace": { "backoff": { "baseDelayMs": -1 } }, "queues": {} }""");
 
         var ex = Assert.Throws<QueueyConfigurationException>(() => file.Resolve());
         Assert.Contains("workspace", ex.Message);
-        Assert.Contains("MaxAttempts must be at least 1", ex.Message);
+        Assert.Contains("Backoff.BaseDelayMs must be above 0; got -1.", ex.Message);
+    }
+
+    [Fact]
+    public void Numbers_in_a_refusal_are_written_the_same_in_every_culture()
+    {
+        // Som i backenden (re-review 2026-10-05): med nb-NO ble -1 skrevet «−1» med U+2212, og en melding var ulik fra
+        // maskin til maskin.
+        System.Globalization.CultureInfo before = System.Globalization.CultureInfo.CurrentCulture;
+        System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("nb-NO");
+        try
+        {
+            DeploymentFile file = DeploymentFile.Parse("""{ "queues": { "orders": { "retentionDays": -5, "backoff": { "baseDelayMs": -1 } } } }""");
+
+            var ex = Assert.Throws<QueueyConfigurationException>(() => file.Resolve());
+            Assert.Contains("RetentionDays cannot be negative; got -5.", ex.Message);
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = before;
+        }
+    }
+
+    private const string NeedsConditions = "A filter needs its conditions. To remove the filter, write \"conditions\": [].";
+
+    // En manglende liste ble lest som tom, og en tom liste fjerner filteret (review 2026-10-05): "filter": {"match":
+    // "any"} sendte "conditions": [], og køen leverte hvert event. null og [null] krasjet CLI-en.
+    [Theory]
+    [InlineData("""{ }""", NeedsConditions)]
+    [InlineData("""{ "match": "any" }""", NeedsConditions)]
+    [InlineData("""{ "match": "all", "conditions": null }""", NeedsConditions)]
+    [InlineData("""{ "conditions": [ null ] }""", "A filter condition cannot be null.")]
+    [InlineData("""{ "conditions": [ { "field": "type", "op": "eq", "value": "order.created" }, null ] }""", "A filter condition cannot be null.")]
+    public async Task A_filter_without_its_conditions_is_refused_and_nothing_is_sent(string filter, string expected)
+    {
+        var api = new Api();
+
+        var ex = await Assert.ThrowsAsync<QueueyConfigurationException>(
+            () => Apply(api, $$"""{ "queues": { "orders": { "filter": {{filter}} } } }"""));
+
+        Assert.Contains(expected, ex.Message);
+        Assert.Empty(api.Paths);
+    }
+
+    [Fact]
+    public void A_filter_declared_in_code_needs_its_conditions_too()
+    {
+        // Samme regel kode-først: et filter uten liste ville fjernet køens filter ved neste sync.
+        var ex = Assert.Throws<QueueyConfigurationException>(() => QueueDefinitionFactory.FromName("orders", new QueueOptions
+        {
+            Policy = { Filter = new DeliveryFilter { Match = "any" } },
+        }));
+
+        Assert.Contains(NeedsConditions, ex.Message);
     }
 
     [Fact]

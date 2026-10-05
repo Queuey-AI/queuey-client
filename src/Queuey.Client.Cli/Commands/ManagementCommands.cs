@@ -10,15 +10,16 @@ namespace Queuey.Client.Cli;
 
 internal static class CreateTenantCommand
 {
-    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal) { "as-producer", "with-default-queue", "json", "help", "h" };
+    internal static readonly CommandOptions Options = new(
+        "create-tenant", flags: new[] { "as-producer", "with-default-queue", "json" }, values: new[] { "name" }, positionals: 1);
 
     public static async Task<int> RunAsync(string[] args)
     {
-        ArgMap map = ArgMap.Parse(args, Flags);
+        if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
 
         string? name = map.Get("name") ?? map.FirstPositional;
-        if (string.IsNullOrWhiteSpace(name)) { Console.Error.WriteLine("create-tenant requires --name <display>."); return ExitCodes.Usage; }
+        if (string.IsNullOrWhiteSpace(name)) return CliErrors.Usage(map, "missing_argument", "create-tenant requires --name <display>.");
 
         using ServiceProvider sp = CliHost.BuildProvider(CliHost.Resolve(map));
         var svc = sp.GetRequiredService<IQueueyService>();
@@ -32,20 +33,17 @@ internal static class CreateTenantCommand
 
 internal static class CreateQueueCommand
 {
-    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal) { "json", "help", "h" };
+    internal static readonly CommandOptions Options = new("create-queue", flags: new[] { "json" }, values: new[] { "name" }, positionals: 1);
 
     public static async Task<int> RunAsync(string[] args)
     {
-        ArgMap map = ArgMap.Parse(args, Flags);
+        if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
 
         string? tenant = map.Get("tenant");
         string? name = map.Get("name") ?? map.FirstPositional;
         if (string.IsNullOrWhiteSpace(tenant) || string.IsNullOrWhiteSpace(name))
-        {
-            Console.Error.WriteLine("create-queue requires --tenant <ten_…> and --name <display>.");
-            return ExitCodes.Usage;
-        }
+            return CliErrors.Usage(map, "missing_argument", "create-queue requires --tenant <ten_…> and --name <display>.");
 
         using ServiceProvider sp = CliHost.BuildProvider(CliHost.Resolve(map));
         var svc = sp.GetRequiredService<IQueueyService>();
@@ -59,15 +57,15 @@ internal static class CreateQueueCommand
 
 internal static class MetricsCommand
 {
-    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal) { "json", "help", "h" };
+    internal static readonly CommandOptions Options = new("metrics", flags: new[] { "json" }, values: new[] { "queue" }, positionals: 1);
 
     public static async Task<int> RunAsync(string[] args)
     {
-        ArgMap map = ArgMap.Parse(args, Flags);
+        if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
 
         string? queue = map.FirstPositional ?? map.Get("queue");
-        if (string.IsNullOrWhiteSpace(queue)) { Console.Error.WriteLine("metrics requires <que_…>."); return ExitCodes.Usage; }
+        if (string.IsNullOrWhiteSpace(queue)) return CliErrors.Usage(map, "missing_argument", "metrics requires <que_…>.");
 
         using ServiceProvider sp = CliHost.BuildProvider(CliHost.Resolve(map));
         var svc = sp.GetRequiredService<IQueueyService>();
@@ -84,15 +82,16 @@ internal static class MetricsCommand
 
 internal static class IssuesCommand
 {
-    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal) { "json", "help", "h" };
+    internal static readonly CommandOptions Options = new(
+        "issues", flags: new[] { "json" }, values: new[] { "status", "severity", "queue", "limit", "cursor" }, positionals: 1);
 
     public static async Task<int> RunAsync(string[] args)
     {
-        ArgMap map = ArgMap.Parse(args, Flags);
+        if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
 
         string? tenant = map.FirstPositional ?? map.Get("tenant");
-        if (string.IsNullOrWhiteSpace(tenant)) { Console.Error.WriteLine("issues requires <ten_…>."); return ExitCodes.Usage; }
+        if (string.IsNullOrWhiteSpace(tenant)) return CliErrors.Usage(map, "missing_argument", "issues requires <ten_…>.");
 
         var query = new IssueQuery
         {

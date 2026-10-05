@@ -349,6 +349,55 @@ internal sealed class QueueyControlPlaneClient
             HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// A write sent as a dry run (<c>?dryRun=true</c>): the server runs it the same way, stops before it
+    /// stores anything, and answers with what it would have done. Refusals come back as they would.
+    /// </summary>
+    /// <remarks>
+    /// Every 2xx must be a plan that says <c>dryRun: true</c>. Anything else — an empty body, a 204,
+    /// text that is not JSON, JSON without the flag — means the server may have done the write, and
+    /// throws <see cref="DryRunIgnoredException"/> naming <paramref name="target"/> and
+    /// <paramref name="aspect"/>.
+    /// </remarks>
+    public async Task<TPlan> DryRunAsync<TPlan>(
+        string target, string aspect, HttpMethod method, object? request, CancellationToken cancellationToken, params string[] segments)
+        where TPlan : DryRunAnswer
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), "dryRun=true", segments);
+        byte[]? body = request is null ? null : JsonSerializer.SerializeToUtf8Bytes(request, request.GetType(), QueueyJson.Options);
+
+        // Svaret leses først som JSON av hvilken som helst form, og så som en plan. Før 2026-09-24 ble det
+        // lest rett som en plan, så en tom 2xx eller en 204 kastet JsonException ut av CLI-en med stacktrace.
+        JsonElement answer;
+        try
+        {
+            answer = await _connection.SendForJsonAsync<JsonElement>(
+                method, uri, body, body is null ? null : JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+        }
+        catch (JsonException)
+        {
+            throw new DryRunIgnoredException(target, aspect);
+        }
+
+        TPlan? plan = null;
+        if (answer.ValueKind == JsonValueKind.Object)
+        {
+            try
+            {
+                plan = answer.Deserialize<TPlan>(QueueyJson.Options);
+            }
+            catch (JsonException)
+            {
+                // Et objekt som ikke er en plan, er det samme som ingen plan.
+            }
+        }
+
+        return plan is { DryRun: true } ? plan : throw new DryRunIgnoredException(target, aspect);
+    }
+
     /// <summary>One PATCH shape for the control plane: JSON body, API key + license header, 204 back.</summary>
     private async Task PatchAsync(object request, CancellationToken cancellationToken, params string[] segments)
     {
@@ -381,6 +430,19 @@ internal sealed class QueueyControlPlaneClient
         string license = RequireLicense();
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues", queuePublicId, "config");
         return await _connection.SendForJsonAsync<QueueConfigResponse>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reads what one queue stores itself (<c>GET /queues/{que}</c>): its raw overrides, without what it
+    /// inherits. Needs only <c>queue.read</c>.
+    /// </summary>
+    public async Task<QueueStoredResponse> GetQueueStoredAsync(string queuePublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues", queuePublicId);
+        return await _connection.SendForJsonAsync<QueueStoredResponse>(
             HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
     }
 
@@ -493,27 +555,37 @@ internal sealed class QueueyControlPlaneClient
     private static Action<HttpRequestHeaders> LicenseHeader(string license)
         => headers => QueueyHttpHeaders.Set(headers, QueueyHeaders.LicensePublicId, license);
 
+    // «(SyncStreams)» sto i meldingene for alle kall, også apply og verify, og ingen sa hvor verdien settes (review
+    // 2026-10-05). Handlingen nevner både SDK-en og CLI-en, fordi begge ender her.
     private string RequireTenant()
     {
         if (string.IsNullOrWhiteSpace(_options.TenantPublicId))
-            throw new QueueyConfigurationException(
-                "TenantPublicId is required for control-plane operations. Set QueueyOptions.TenantPublicId.");
+            throw new QueueyConfigurationException("A workspace (ten_…) is required for this call, and none is set.")
+            {
+                SuggestedAction = "Set QueueyOptions.TenantPublicId. In the CLI: --tenant, QUEUEY_TENANT, or tenant in queuey.json.",
+            };
         return _options.TenantPublicId!;
     }
 
     private string RequireApiKey()
     {
         if (string.IsNullOrWhiteSpace(_options.ApiKey))
-            throw new QueueyConfigurationException(
-                "An API key is required for control-plane operations (SyncStreams). Set QueueyOptions.ApiKey.");
+            throw new QueueyConfigurationException("An API key is required for this call, and none is set.")
+            {
+                SuggestedAction = "Set QueueyOptions.ApiKey. In the CLI: --api-key, QUEUEY_API_KEY, or apiKey in queuey.json. " +
+                                  "Keys are made in the Queuey console.",
+            };
         return _options.ApiKey!;
     }
 
     private string RequireLicense()
     {
         if (string.IsNullOrWhiteSpace(_options.LicensePublicId))
-            throw new QueueyConfigurationException(
-                "LicensePublicId is required for control-plane operations (SyncStreams). Set QueueyOptions.LicensePublicId.");
+            throw new QueueyConfigurationException("A license id (lic_…) is required for this call, and none is set.")
+            {
+                SuggestedAction = "Set QueueyOptions.LicensePublicId. In the CLI: --license, QUEUEY_LICENSE, or license in queuey.json. " +
+                                  "The Queuey console shows it with your keys.",
+            };
         return _options.LicensePublicId!;
     }
 }

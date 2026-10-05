@@ -412,9 +412,9 @@ internal static class DeliveryVerifier
             case "Delivered":
                 return Result(DeliveryVerdict.Delivered,
                     $"Delivered to {attempt?.TargetEndpoint ?? "the receiver"}"
-                    + (attempt?.ResponseCode is { } code ? $": {code}" : "")
-                    + (attempt?.DurationMs is { } ms ? $" in {ms} ms" : "")
-                    + (attempts > 1 ? $", on attempt {attempts}." : "."),
+                    + (attempt?.ResponseCode is { } code ? FormattableString.Invariant($": {code}") : "")
+                    + (attempt?.DurationMs is { } ms ? FormattableString.Invariant($" in {ms} ms") : "")
+                    + (attempts > 1 ? FormattableString.Invariant($", on attempt {attempts}.") : "."),
                     null);
 
             case "Logged":
@@ -445,10 +445,10 @@ internal static class DeliveryVerifier
 
         // Ingen utfall innen fristen.
         string waiting = held
-            ? $"No outcome within {timeout.TotalSeconds:0} s: Queuey is holding the event before sending it."
+            ? FormattableString.Invariant($"No outcome within {timeout.TotalSeconds:0} s: Queuey is holding the event before sending it.")
             : status is null
-                ? $"The event could not be read within {timeout.TotalSeconds:0} s."
-                : $"No outcome within {timeout.TotalSeconds:0} s: the event is still {status}.";
+                ? FormattableString.Invariant($"The event could not be read within {timeout.TotalSeconds:0} s.")
+                : FormattableString.Invariant($"No outcome within {timeout.TotalSeconds:0} s: the event is still {status}.");
 
         // Holdt og suspendert levering først: de stopper hele køen, så en feilende event foran er ikke
         // grunnen til at denne venter.
@@ -646,7 +646,7 @@ internal static class DeliveryVerifier
         "TargetUnavailable" when a.ResponseCode is null =>
             $"Queuey could not reach {a.TargetEndpoint}. Check the URL, and that the receiver is reachable from the internet — localhost is not.",
         "TargetUnavailable" =>
-            $"The receiver's side reported it unavailable ({a.ResponseCode}). Check that it is running.",
+            FormattableString.Invariant($"The receiver's side reported it unavailable ({a.ResponseCode}). Check that it is running."),
         "TargetServerError" =>
             "The receiver failed while handling the event. Look at its logs around this event.",
         "TransformFailed" =>

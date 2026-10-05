@@ -13,22 +13,17 @@ namespace Queuey.Client.Cli;
 
 internal static class SyncCommand
 {
-    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal)
-    {
-        "dry-run", "continue-on-error", "json", "help", "h",
-    };
+    internal static readonly CommandOptions Options = new(
+        "sync", flags: new[] { "dry-run", "continue-on-error", "json" }, values: new[] { "assembly", "only" });
 
     public static async Task<int> RunAsync(string[] args)
     {
-        ArgMap map = ArgMap.Parse(args, Flags);
+        if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
 
         string? assemblyPath = map.Get("assembly");
         if (string.IsNullOrWhiteSpace(assemblyPath))
-        {
-            Console.Error.WriteLine("sync requires --assembly <path.dll>.");
-            return ExitCodes.Usage;
-        }
+            return CliErrors.Usage(map, "missing_argument", "sync requires --assembly <path.dll>.");
 
         Assembly assembly;
         try
@@ -37,8 +32,8 @@ internal static class SyncCommand
         }
         catch (Exception ex) when (ex is FileNotFoundException or BadImageFormatException or FileLoadException)
         {
-            Console.Error.WriteLine($"Could not load assembly '{assemblyPath}': {ex.Message}");
-            return ExitCodes.AssemblyLoad;
+            return CliErrors.Write(map.Has("json"), "assembly_load_failed", $"Could not load assembly '{assemblyPath}': {ex.Message}",
+                action: null, status: null, ExitCodes.AssemblyLoad);
         }
 
         bool dryRun = map.Has("dry-run");

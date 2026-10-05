@@ -146,4 +146,36 @@ public sealed class DeploymentTenantCommandTests : IDisposable
         CliRun verifyJson = await CliHarness.RunAsync(() => Verify(path, tenantArgs.Append("--json").ToArray()), Server());
         Assert.Equal(expected, JsonDocument.Parse(verifyJson.Stdout).RootElement.GetProperty("tenant").GetString());
     }
+
+    [Fact]
+    public async Task Verify_reads_only_the_tenant_and_a_file_it_cannot_read_is_named()
+    {
+        // Review 2026-10-05: verify leste hele fila for å finne workspacet, så et felt apply avviser, som forsøkene,
+        // stoppet en verifisering som ikke bruker det, og feilen sa ikke hvilken fil.
+        string path = Path.Combine(_dir, "queuey.deploy.json");
+        File.WriteAllText(path, """{ "tenant": "ten_file", "queues": { "orders": { "maxAttempts": 8 } } }""");
+
+        RecordingHandler verified = Server();
+        CliRun verify = await CliHarness.RunAsync(() => Verify(path), verified);
+
+        Assert.Equal(ExitCodes.Success, verify.Exit);
+        Assert.Contains("POST /events/ten_file/orders", verified.Requests.Select(r => r.Key));
+
+        // Apply leser hele fila, og feilen begynner med hvilken fil det er.
+        var refused = await Assert.ThrowsAsync<Queuey.Client.QueueyConfigurationException>(() => CliHarness.RunAsync(() => Apply(path), Server()));
+        Assert.StartsWith($"{path}: The deployment file declares queues.orders.maxAttempts", refused.Message);
+
+        // To tenant-er avvises av begge (re-review 2026-10-05): apply tok den siste og verify den første, så de traff
+        // hvert sitt workspace.
+        File.WriteAllText(path, """{ "tenant": "ten_a", "Tenant": "ten_b", "queues": {} }""");
+        var twiceInVerify = await Assert.ThrowsAsync<Queuey.Client.QueueyConfigurationException>(() => CliHarness.RunAsync(() => Verify(path), Server()));
+        Assert.Equal($"{path}: The deployment file names the tenant 2 times (tenant, Tenant), and only the last would count. Keep one.", twiceInVerify.Message);
+        var twiceInApply = await Assert.ThrowsAsync<Queuey.Client.QueueyConfigurationException>(() => CliHarness.RunAsync(() => Apply(path), Server()));
+        Assert.StartsWith($"{path}: The deployment file has both 'tenant' and 'Tenant'", twiceInApply.Message);
+
+        // JSON som ikke kan leses, stopper verify også, med fila navngitt.
+        File.WriteAllText(path, "{ \"tenant\": ");
+        var broken = await Assert.ThrowsAsync<Queuey.Client.QueueyConfigurationException>(() => CliHarness.RunAsync(() => Verify(path), Server()));
+        Assert.StartsWith($"{path}: Could not parse the deployment file", broken.Message);
+    }
 }

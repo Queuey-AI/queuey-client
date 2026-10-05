@@ -53,7 +53,7 @@ public static class QueueyName
         string candidate = value!.Trim();
 
         if (candidate.Length > MaxLength)
-            return $"names must be at most {MaxLength} characters; got {candidate.Length}.";
+            return FormattableString.Invariant($"names must be at most {MaxLength} characters; got {candidate.Length}.");
 
         if (!Pattern.IsMatch(candidate))
             return "names must be lowercase and contain only letters, digits, '.', '-' or '_', " +

@@ -14,10 +14,9 @@ namespace Queuey.Client.Waas.Tests;
 /// </summary>
 public class EffectiveCheckTests
 {
-    private static object Policy(string ordering = "fifo", int maxAttempts = 8, object? filter = null) => new
+    private static object Policy(string ordering = "fifo", object? filter = null) => new
     {
-        idempotent = false, dlqEnabled = true, retentionDays = 7, ordering, maxAttempts,
-        dlqAfterAttempts = 6,
+        idempotent = false, dlqEnabled = true, retentionDays = 7, ordering,
         backoff = new { baseDelayMs = 1000, maxDelayMs = 60000, jitter = "full" },
         filter,
     };
@@ -50,10 +49,10 @@ public class EffectiveCheckTests
     [Fact]
     public async Task A_queue_value_equal_to_the_workspace_is_in_sync_right_after_apply()
     {
-        // Fila eier ordering=fifo og maxAttempts=8 på køen; workspacet har de samme verdiene.
+        // Fila eier ordering=fifo og backoff på køen; workspacet har de samme verdiene.
         IReadOnlyList<DriftItem> drift = await Check(Workspace(), """
         { "tenant": "ten_abc", "queues": { "orders": {
-            "ordering": "fifo", "maxAttempts": 8, "dlqAfterAttempts": 6,
+            "ordering": "fifo", "retentionDays": 7,
             "backoff": { "baseDelayMs": 1000, "jitter": "full" } } } }
         """);
 
@@ -61,14 +60,15 @@ public class EffectiveCheckTests
     }
 
     [Fact]
-    public async Task Retry_that_differs_is_drift_field_by_field()
+    public async Task Backoff_that_differs_is_drift_field_by_field()
     {
         IReadOnlyList<DriftItem> drift = await Check(Workspace(), """
-        { "tenant": "ten_abc", "queues": { "orders": { "maxAttempts": 5, "backoff": { "maxDelayMs": 1000 } } } }
+        { "tenant": "ten_abc", "queues": { "orders": { "backoff": { "baseDelayMs": 500, "maxDelayMs": 1000, "jitter": "full" } } } }
         """);
 
-        Assert.Equal(new[] { "queues.orders.maxAttempts", "queues.orders.backoff.maxDelayMs" }, drift.Select(d => d.Path).ToArray());
-        Assert.Equal("8", drift[0].Actual);
+        Assert.Equal(new[] { "queues.orders.backoff.baseDelayMs", "queues.orders.backoff.maxDelayMs" }, drift.Select(d => d.Path).ToArray());
+        Assert.Equal("1000", drift[0].Actual);
+        Assert.Equal("60000", drift[1].Actual);
     }
 
     [Theory]

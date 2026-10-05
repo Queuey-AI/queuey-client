@@ -70,9 +70,81 @@ public class DeploymentFileTests
         // The failure a declarative file must not have: reporting success while silently ignoring
         // what you wrote.
         var ex = Assert.Throws<QueueyConfigurationException>(
-            () => DeploymentFile.Parse("""{ "queues": { "orders": { "maxAttemps": 8 } } }"""));
+            () => DeploymentFile.Parse("""{ "queues": { "orders": { "retentionDayz": 8 } } }"""));
 
-        Assert.Contains("maxAttemps", ex.Message);
+        Assert.Contains("retentionDayz", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("""{ "queues": { "orders": { "maxAttempts": 8 } } }""", "queues.orders.maxAttempts")]
+    [InlineData("""{ "queues": { "orders": { "dlqAfterAttempts": 5 } } }""", "queues.orders.dlqAfterAttempts")]
+    [InlineData("""{ "workspace": { "maxAttempts": 8 }, "queues": {} }""", "workspace.maxAttempts")]
+    [InlineData("""{ "workspace": { "dlqAfterAttempts": 5 }, "queues": {} }""", "workspace.dlqAfterAttempts")]
+    [InlineData("""{ "queues": { "orders": { "MaxAttempts": 8 } } }""", "queues.orders.MaxAttempts")]
+    public void A_file_that_declares_attempts_is_refused_with_why_and_what_to_remove(string json, string where)
+    {
+        // Antall forsøk er ikke en innstilling (Queuey#391, 2026-10-04), og en policy-patch med feltene får 400. En fil
+        // skrevet for hånd, eller med en build av #40 fra før dette, kan ha dem. Den avvises før noe er sendt, med
+        // grunnen og hva som skal bort.
+        var ex = Assert.Throws<QueueyConfigurationException>(() => DeploymentFile.Parse(json));
+
+        Assert.Contains(where, ex.Message);
+        Assert.Contains("the number of attempts is not a setting", ex.Message);
+        Assert.Contains("a transient failure is retried until the receiver's probe takes over", ex.Message);
+        Assert.Contains("an event the receiver rejects goes to the dead-letter queue", ex.Message);
+        Assert.Contains("With the dead-letter queue off, that event locks its queue instead, or holds just its key on a bykey queue, until a person acts.", ex.Message);
+        Assert.Equal("Remove maxAttempts and dlqAfterAttempts from the file. backoff and filter stay as they are.", ex.SuggestedAction);
+    }
+
+    [Theory]
+    [InlineData("""{ "tenant": "ten_a", "Tenant": "ten_b", "queues": {} }""", "has both 'tenant' and 'Tenant', which name the same field, and only the last would count.")]
+    [InlineData("""{ "tenant": "ten_a", "queues": {}, "tenant": "ten_b" }""", "has 'tenant' twice and only the last would count.")]
+    [InlineData("""{ "queues": { "orders": {} }, "queues": { "invoices": {} } }""", "has 'queues' twice and only the last would count.")]
+    public void A_top_level_field_named_twice_is_refused(string json, string expected)
+    {
+        // Parseren tar den siste av to like navn, uten et ord (re-review 2026-10-05): to tenant-er ga apply ten_b og
+        // verify ten_a, og to queues-blokker droppet den første.
+        var ex = Assert.Throws<QueueyConfigurationException>(() => DeploymentFile.Parse(json));
+
+        Assert.Contains(expected, ex.Message);
+        Assert.EndsWith("Keep one.", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("""{ "queues": { "orders": { "retentionDays": 3, "RetentionDays": 30 } } }""", "queues.orders has both 'retentionDays' and 'RetentionDays', which name the same field, and only the last would count. Keep one.")]
+    [InlineData("""{ "workspace": { "delivery": { "baseUrl": "https://a.example.com", "baseUrl": "https://b.example.com" } } }""", "workspace.delivery has 'baseUrl' twice and only the last would count. Keep one.")]
+    [InlineData("""{ "queues": { "orders": {}, "orders": { "mode": "logOnly" } } }""", "queues has 'orders' twice and only the last would count. Keep one.")]
+    [InlineData("""{ "queues": { "orders": { "filter": { "conditions": [ { "field": "a", "op": "eq", "Op": "ne", "value": "1" } ] } } } }""", "queues.orders.filter.conditions[0] has both 'op' and 'Op', which name the same field, and only the last would count. Keep one.")]
+    public void A_field_named_twice_below_the_top_is_refused_too(string json, string expected)
+    {
+        // Review 2026-10-05: bare toppnivået ble sjekket, så et felt to ganger på en kø eller i en betingelse tok den siste.
+        var ex = Assert.Throws<QueueyConfigurationException>(() => DeploymentFile.Parse(json));
+
+        Assert.Equal(expected, ex.Message);
+    }
+
+    [Fact]
+    public void Queue_names_are_keys_and_differ_by_case_without_being_duplicates()
+    {
+        // "Orders" er et ugyldig kønavn, men ikke det samme navnet som "orders": det avvises av navneregelen, ikke her.
+        DeploymentFile file = DeploymentFile.Parse("""{ "queues": { "orders": {}, "Orders": {} } }""");
+
+        Assert.Equal(2, file.Queues.Count);
+    }
+
+    [Fact]
+    public void Every_attempts_field_in_the_file_is_named_at_once()
+    {
+        // Parseren alene ville stoppet på det første feltet; da måtte en fil med fem av dem kjøres fem ganger.
+        var ex = Assert.Throws<QueueyConfigurationException>(() => DeploymentFile.Parse("""
+        {
+          // med kommentarer og komma til slutt, som parseren godtar
+          "workspace": { "maxAttempts": 8, "dlqAfterAttempts": 6, "backoff": { "baseDelayMs": 1000 } },
+          "queues": { "orders": { "maxAttempts": 3 }, "invoices": {}, },
+        }
+        """));
+
+        Assert.Contains("declares workspace.maxAttempts, workspace.dlqAfterAttempts, queues.orders.maxAttempts, but", ex.Message);
     }
 
     [Theory]

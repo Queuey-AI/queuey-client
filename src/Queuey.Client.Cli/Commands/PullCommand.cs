@@ -14,14 +14,14 @@ namespace Queuey.Client.Cli;
 /// </summary>
 internal static class PullCommand
 {
-    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal)
-    {
-        "force", "stdout", "json", "help", "h",
-    };
+    internal static readonly CommandOptions Options = new(
+        "pull",
+        flags: new[] { "force", "stdout", "json" },
+        values: new[] { "file", "as", "emit-code", "namespace" });
 
     public static async Task<int> RunAsync(string[] args)
     {
-        ArgMap map = ArgMap.Parse(args, Flags);
+        if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
 
         ResolvedConfig config = CliHost.Resolve(map);
@@ -49,6 +49,7 @@ internal static class PullCommand
         if (map.Has("stdout"))
         {
             Console.WriteLine(json);
+            WarnAboutRefusedFilters(file);
             return ExitCodes.Success;
         }
 
@@ -57,9 +58,8 @@ internal static class PullCommand
         {
             // Overwriting a committed declaration is how you lose an intentional edit that has not
             // been applied yet — that belongs behind an explicit flag, or under a diff.
-            Console.Error.WriteLine($"'{path}' already exists. Re-run with --force to overwrite, "
-                                    + "or --stdout to review the pull first (diff it before you replace anything).");
-            return ExitCodes.Usage;
+            return CliErrors.Usage(map, "file_exists", $"'{path}' already exists.",
+                "Re-run with --force to overwrite, or --stdout to review the pull first (diff it before you replace anything).");
         }
 
         File.WriteAllText(path, json + Environment.NewLine);
@@ -77,6 +77,24 @@ internal static class PullCommand
                               + "same thing in every environment.");
         }
 
+        WarnAboutRefusedFilters(file);
         return ExitCodes.Success;
+    }
+
+    /// <summary>
+    /// One warning per filter problem apply would refuse, on stderr so <c>--stdout</c> stays a clean file. Pull
+    /// writes the filter as Queuey stored it; the warning says what has to be fixed before the file applies.
+    /// </summary>
+    private static void WarnAboutRefusedFilters(DeploymentFile file)
+    {
+        // Rå overrides eller en deploy fra før Queuey#391 kan ha lagret "gt": "1,000" eller exists med en verdi. Pull
+        // skriver det som det står, og da avviste apply, plan og --check fila uten at pull hadde sagt noe (review
+        // 2026-10-05). Fila skrives fortsatt: den viser hva Queuey har.
+        IReadOnlyList<string> problems = file.FilterProblems();
+        foreach (string problem in problems)
+            Console.Error.WriteLine($"Warning: {problem}");
+        if (problems.Count > 0)
+            Console.Error.WriteLine("apply, plan and apply --check refuse the file until "
+                                    + (problems.Count == 1 ? "this is" : "these are") + " fixed in it.");
     }
 }

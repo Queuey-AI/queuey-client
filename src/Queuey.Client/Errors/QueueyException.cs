@@ -14,6 +14,12 @@ public class QueueyException : Exception
     /// </summary>
     public string? ErrorCode { get; }
 
+    /// <summary>
+    /// What to do about it, when the API says (<c>{ "error": { "code", "message", "action" } }</c>) —
+    /// the setting to change or the call to make instead. Null when the API gave none.
+    /// </summary>
+    public string? SuggestedAction { get; init; }
+
     /// <summary>Creates a <see cref="QueueyException"/>.</summary>
     public QueueyException(string message, int? statusCode = null, string? errorCode = null, Exception? innerException = null)
         : base(message, innerException)

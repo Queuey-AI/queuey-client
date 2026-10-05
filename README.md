@@ -311,8 +311,43 @@ its path:
 ```bash
 queuey credentials set --name partner-key --from-env PARTNER_KEY
 queuey apply --dry-run     # validates locally, sends nothing
+queuey plan                # asks Queuey what would change and what it would refuse
 queuey apply
 ```
+
+`queuey plan` sends every write `apply` would make as a server-side dry run (`?dryRun=true`), so the
+answer comes from Queuey: each value that would change, and each refusal — a retention cap, a queue
+limit, a bad value — with what to do about it. Each write is asked about on its own, against what is
+stored now, so a refusal that depends on a workspace change in the same file shows only in `apply`.
+Nothing is written, and it exits non-zero if anything would be refused. A queue that does not exist
+yet shows as one that would be created, and its settings are checked locally. The first dry
+run also proves that Queuey answers dry runs; against an API that does not, the plan stops there and
+says what that one call may have changed — nothing, when a declared queue already exists. It is a verb of
+its own rather than an `apply` flag, so a CLI too old to know it answers "Unknown command" instead of
+running the apply you meant to plan. For the same reason every command rejects an option it does not
+take — a typo like `--paln` fails with exit 2 and the options that command accepts. `queuey plan --json`
+prints the plan as an object a script can read: `schemaVersion` (1, so check it first), `file`, `tenant`,
+`wouldSucceed`, `changeCount`, and `steps`, each with its `target`, `aspect`, `creates`, `changes`, `notes`
+and `error`. A change's `from` and `to` are the values as Queuey's config reads them back, so a number,
+a boolean or an object stays JSON. With `--json`, before or after the command, every error is JSON too.
+
+`queuey apply --dry-run --json` prints what the file declares, checked locally, for a script or an
+agent to read:
+
+```json
+{
+  "schemaVersion": 2,
+  "workspace": { "policy": { … }, "delivery": { … }, "ingress": null, "notes": [] },
+  "queues": [ { "name": "orders", "mode": "deliver", "policy": { … }, "delivery": null, "ingress": null, "notes": [] } ]
+}
+```
+
+`workspace` is null when the file declares none, and `notes` says what a dry run can tell without
+asking Queuey, such as a wait above its ceiling. Each declaration carries every field the file can set
+on the workspace or the queue, in the file's words, grouped as Queuey's config reads them back:
+behaviour under `policy`, then `delivery` and `ingress` (where `eventType` is `{ "from", "name" }`). A
+field the file leaves out is null, and a `${VAR}` is shown as written, not expanded. Check
+`schemaVersion` first: version 1, a bare array of queues, is what 0.1.0-preview.8 printed.
 
 A relative `url` appends to the workspace base, so moving hosts is one edit instead of N. An absolute
 URL overrides outright. A queue with no `delivery` block inherits — the shape to reach for.
@@ -417,14 +452,14 @@ success while quietly skipping what you wrote is worse than one that fails.
 ```jsonc
 {
   "workspace": {
-    "maxAttempts": 8,                                   // every queue retries this many times…
+    // every queue waits like this between attempts…
     "backoff": { "baseDelayMs": 1000, "maxDelayMs": 300000, "jitter": "full" },
     "delivery": { "baseUrl": "https://hooks.example.com" }
   },
   "queues": {
     "orders": {
       "delivery": { "url": "/orders" },
-      "dlqAfterAttempts": 5,                            // …and this one gives up to the DLQ sooner
+      "backoff": { "maxDelayMs": 60000 },               // …and this one never waits more than a minute
       "filter": { "match": "any", "conditions": [
         { "field": "type", "op": "eq", "value": "order.created" },
         { "field": "priority", "op": "exists" } ] }
@@ -433,6 +468,24 @@ success while quietly skipping what you wrote is worse than one that fails.
   }
 }
 ```
+
+**The number of attempts is not a setting.** Queuey makes the same number of attempts for every event
+and decides what a failure needs: a transient failure is retried, with the backoff you declare, until
+the receiver's probe takes over, and an event the receiver rejects goes to the dead-letter queue. With
+the dead-letter queue off, that event locks its queue instead, or holds just its key on a `bykey`
+queue, until a person acts. A file that declares `maxAttempts` or `dlqAfterAttempts` is refused before
+anything is sent, naming every place it does, and `pull` never writes them.
+
+**A backoff waits at most an hour at first and a day at most.** `baseDelayMs` is at most 3600000 and
+`maxDelayMs` at most 86400000, both above 0. A longer wait that is already in place stays: Queuey
+refuses only a write that changes it. `apply` checks this before it writes anything, against the wait
+each declaration would replace: a queue's own, or for a new queue and a queue that inherits its wait,
+the workspace's once this apply has written the workspace. When a queue's config cannot tell whether
+the queue owns its wait, `apply` reads what the queue stores; if that read is refused, Queuey decides
+when it writes the queue. `baseDelayMs` above `maxDelayMs` is refused up front when one backoff declares
+both; when one of them comes from the workspace, Queuey checks it when the queue is written.
+`queuey plan` asks Queuey about each write on its own, against what is stored now, so a refusal that
+depends on the workspace this apply changes, or on a queue it would create, shows only in `apply`.
 
 **A queue this file creates delivers when it has a destination** — its own `delivery.url`, or the
 workspace's `baseUrl` — and logs events until it has one. `mode` is `deliver` or `logOnly`; declare it
@@ -445,7 +498,13 @@ fails that queue instead of pretending.
 
 **A filter decides what is delivered.** Events that do not match are kept as `Filtered` and never
 sent. `op` is `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `contains` or `exists`, on a top-level field of
-the JSON body. An empty `conditions` list delivers everything — that is how a file removes a filter.
+the JSON body. A filter needs its `conditions`. An empty list delivers everything, which is how a file
+removes a filter, so a filter without the list is refused rather than read as empty; leave `filter`
+out to keep the queue's filter as it is. `gt`, `gte`, `lt` and `lte` compare numbers, so their value
+is a plain number like `1.5`: no comma decimals, thousands separators, currency or parentheses.
+`exists` takes no value, and a field is looked up exactly as written, so whitespace around it is
+refused rather than trimmed. A condition Queuey stored before it checked these is pulled as it is,
+with a warning, and `apply` refuses the file until it is fixed.
 
 ### Prove it delivers: `queuey verify`
 
@@ -564,6 +623,7 @@ carries the per-flag detail this table leaves out.
 | --- | --- |
 | `apply` | Converge a workspace from `queuey.deploy.json` — the deploy verb |
 | `apply --dry-run` | Validate the file locally. No credentials, no network, nothing sent |
+| `plan` | Ask Queuey what apply would change and refuse, as dry runs. Writes nothing |
 | `apply --check` | Report drift and exit non-zero. Read-only — the CI gate |
 | `verify <queue>` | Publish one event and follow it: delivered, or why not and what to change |
 | `schema` | Print the deployment file's JSON Schema. No credentials, no network |
@@ -601,7 +661,7 @@ A stable contract, so CI can branch on them:
 | --- | --- |
 | `0` | Success — and for `--check`, no drift |
 | `1` | The run did not fully converge, or `--check` found drift |
-| `2` | Bad arguments |
+| `2` | Bad arguments — among them an option the command does not take |
 | `3` | Missing or invalid credentials / configuration (including an unset `${VAR}`) |
 | `4` | The target assembly could not be loaded |
 
@@ -612,6 +672,7 @@ A stable contract, so CI can branch on them:
 ```bash
 queuey credentials set --name partner-key --from-env PARTNER_KEY
 queuey apply --dry-run            # catch typos with no credentials and no network
+queuey plan                       # what would change, and would Queuey accept it?
 queuey apply
 queuey verify orders --data '{"type":"order.created","test":true}'   # did it arrive?
 ```

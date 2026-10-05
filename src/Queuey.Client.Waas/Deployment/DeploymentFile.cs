@@ -95,11 +95,17 @@ public sealed class DeploymentFile
     /// <summary>The queues to converge, keyed by queue name.</summary>
     public Dictionary<string, DeploymentQueue> Queues { get; set; } = new(StringComparer.Ordinal);
 
-    /// <summary>Parses a deployment file. Throws <see cref="QueueyConfigurationException"/> on malformed JSON.</summary>
+    /// <summary>
+    /// Parses a deployment file. Throws <see cref="QueueyConfigurationException"/> on malformed JSON, on
+    /// a field the file does not have, on a top-level field it names twice, and on <c>maxAttempts</c> or
+    /// <c>dlqAfterAttempts</c>, which it no longer has: the number of attempts is not a setting.
+    /// </summary>
     public static DeploymentFile Parse(string json)
     {
         if (string.IsNullOrWhiteSpace(json))
             return new DeploymentFile();
+
+        RefuseWhatTheParserWouldMisread(json);
 
         try
         {
@@ -114,6 +120,135 @@ public sealed class DeploymentFile
             throw new QueueyConfigurationException($"Could not parse the deployment file: {ex.Message}");
         }
     }
+
+    /// <summary>
+    /// What the parser would get wrong without a word, or name less helpfully than it should, refused
+    /// before it runs. Malformed JSON passes here, and the parser reports it in its own words.
+    /// </summary>
+    private static void RefuseWhatTheParserWouldMisread(string json)
+    {
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(json, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
+        }
+        catch (JsonException)
+        {
+            return;
+        }
+
+        using (document)
+        {
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+                return;
+
+            // Parseren tar den siste av to like navn, og leser store og små bokstaver likt, så {"tenant": "ten_a",
+            // "Tenant": "ten_b"} skrev til ten_b, mens verify leste ten_a (re-review 2026-10-05). Et navn to ganger er en feil
+            // i fila, ikke et valg: avvist, på alle nivåer (review 2026-10-05). Før ble bare toppen sjekket, så
+            // {"retentionDays": 3, "RetentionDays": 30} på en kø ga 30 uten et ord.
+            RefuseNamesGivenTwice(document.RootElement, path: null);
+
+            // Før parseren, som ville sagt «could not be mapped» om det første feltet den møtte. En fil som har
+            // forsøksfeltene (skrevet for hånd, eller med en build av #40 fra før dette), trenger grunnen og hva som
+            // skal bort, for alle feltene på én gang. Ingen sluppet CLI har skrevet dem.
+            if (RetiredAttemptFields(document.RootElement) is { Count: > 0 } retired)
+                throw AttemptsAreNotASetting(retired);
+        }
+    }
+
+    /// <summary>
+    /// Refuses a field named twice in one object, at any depth and in any casing, since the parser reads names in any
+    /// casing and keeps the last. Queue names are keys rather than fields, so they are compared exactly.
+    /// </summary>
+    private static void RefuseNamesGivenTwice(JsonElement element, string? path)
+    {
+        if (element.ValueKind == JsonValueKind.Array)
+        {
+            int index = 0;
+            foreach (JsonElement item in element.EnumerateArray())
+                RefuseNamesGivenTwice(item, FormattableString.Invariant($"{path}[{index++}]"));
+            return;
+        }
+
+        if (element.ValueKind != JsonValueKind.Object)
+            return;
+
+        bool queueNames = string.Equals(path, "queues", StringComparison.OrdinalIgnoreCase);
+        var seen = new Dictionary<string, string>(queueNames ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase);
+        foreach (JsonProperty property in element.EnumerateObject())
+        {
+            if (seen.TryGetValue(property.Name, out string? first))
+            {
+                string where = path is null ? "The deployment file" : path;
+                throw new QueueyConfigurationException(
+                    (string.Equals(first, property.Name, StringComparison.Ordinal)
+                        ? $"{where} has '{property.Name}' twice"
+                        : $"{where} has both '{first}' and '{property.Name}', which name the same field,")
+                    + " and only the last would count. Keep one.");
+            }
+
+            seen[property.Name] = property.Name;
+            RefuseNamesGivenTwice(property.Value, path is null ? property.Name : $"{path}.{property.Name}");
+        }
+    }
+
+    // Antall forsøk er ikke en innstilling (vedtatt 2026-10-04, Queuey#391): backenden gjør like mange forsøk for
+    // hvert event, og en policy-patch som bærer feltene, avvises med 400. En fil som fortsatt har dem, avvises her,
+    // før noe er sendt, slik ethvert felt fila ikke har avvises. Ikke fjernet i stillhet: en deklarativ fil skal
+    // aldri melde suksess for noe den ikke gjorde.
+    private static readonly string[] RetiredAttempts = { "maxAttempts", "dlqAfterAttempts" };
+
+    /// <summary>
+    /// Every place the file still declares the number of attempts, as written there:
+    /// <c>queues.orders.maxAttempts</c>. Empty when it declares none.
+    /// </summary>
+    private static List<string> RetiredAttemptFields(JsonElement root)
+    {
+        var found = new List<string>();
+
+        // Store og små bokstaver teller ikke, som når parseren leser navnene.
+        foreach (JsonProperty section in root.EnumerateObject())
+        {
+            if (section.Value.ValueKind != JsonValueKind.Object)
+                continue;
+
+            if (string.Equals(section.Name, "workspace", StringComparison.OrdinalIgnoreCase))
+            {
+                Collect(section.Name, section.Value);
+            }
+            else if (string.Equals(section.Name, "queues", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (JsonProperty queue in section.Value.EnumerateObject())
+                {
+                    if (queue.Value.ValueKind == JsonValueKind.Object)
+                        Collect($"{section.Name}.{queue.Name}", queue.Value);
+                }
+            }
+        }
+
+        return found;
+
+        void Collect(string path, JsonElement declaration)
+        {
+            foreach (JsonProperty field in declaration.EnumerateObject())
+            {
+                if (RetiredAttempts.Any(r => string.Equals(field.Name, r, StringComparison.OrdinalIgnoreCase)))
+                    found.Add($"{path}.{field.Name}");
+            }
+        }
+    }
+
+    // Med DLQ av går et avvist event ikke til DLQ: backenden låser køen (HoldQueue), eller holder bare nøkkelen på en
+    // bykey-kø (HoldKey). Meldingen gjelder begge (review 2026-10-05).
+    private static QueueyConfigurationException AttemptsAreNotASetting(IReadOnlyList<string> where) => new(
+        $"The deployment file declares {string.Join(", ", where)}, but the number of attempts is not a setting. " +
+        "Queuey makes the same number of attempts for every event and decides what a failure needs: a transient " +
+        "failure is retried until the receiver's probe takes over, and an event the receiver rejects goes to the " +
+        "dead-letter queue. With the dead-letter queue off, that event locks its queue instead, or holds just its " +
+        "key on a bykey queue, until a person acts.")
+    {
+        SuggestedAction = "Remove maxAttempts and dlqAfterAttempts from the file. backoff and filter stay as they are.",
+    };
 
     /// <summary>
     /// Expands every <c>${VAR}</c> in the file against the environment, returning the file with the
@@ -133,8 +268,6 @@ public sealed class DeploymentFile
                 DlqEnabled = Workspace.DlqEnabled,
                 RetentionDays = Workspace.RetentionDays,
                 Idempotent = Workspace.Idempotent,
-                MaxAttempts = Workspace.MaxAttempts,
-                DlqAfterAttempts = Workspace.DlqAfterAttempts,
                 Backoff = Workspace.Backoff,
                 Ingress = Workspace.Ingress,
                 Delivery = Workspace.Delivery is null ? null : new WorkspaceDelivery
@@ -161,8 +294,6 @@ public sealed class DeploymentFile
                 DlqEnabled = q.DlqEnabled,
                 RetentionDays = q.RetentionDays,
                 Idempotent = q.Idempotent,
-                MaxAttempts = q.MaxAttempts,
-                DlqAfterAttempts = q.DlqAfterAttempts,
                 Backoff = q.Backoff,
                 Filter = q.Filter,
                 // Ingress på kø-nivå ble ikke kopiert her før (2026-09-23), så apply, check og
@@ -214,7 +345,7 @@ public sealed class DeploymentFile
     {
         var plans = new List<DeploymentQueuePlan>();
 
-        // The workspace's retry declaration is checked like a queue's, so a typo there fails here too.
+        // The workspace's behaviour is checked like a queue's, so a typo there fails here too.
         if (Workspace?.AsPolicy().Validate() is { } workspaceReason)
             throw new QueueyConfigurationException($"The workspace has an invalid policy: {workspaceReason}");
 
@@ -240,8 +371,6 @@ public sealed class DeploymentFile
                     DlqEnabled = declared.DlqEnabled,
                     RetentionDays = declared.RetentionDays,
                     Idempotent = declared.Idempotent,
-                    MaxAttempts = declared.MaxAttempts,
-                    DlqAfterAttempts = declared.DlqAfterAttempts,
                     Backoff = declared.Backoff,
                     Filter = declared.Filter,
                 },
@@ -263,6 +392,36 @@ public sealed class DeploymentFile
         if (method is not null && !WorkspaceDelivery.MethodValues.Contains(method.Trim(), StringComparer.OrdinalIgnoreCase))
             throw new QueueyConfigurationException(
                 $"{where}.method must be one of {string.Join(", ", WorkspaceDelivery.MethodValues)}; got '{method}'.");
+    }
+
+    /// <summary>
+    /// Everything in the file's filters apply would refuse as written, with where it is and why:
+    /// <c>queues.orders.filter.conditions[1] (amount gt 1,000): …</c>, or <c>queues.orders.filter: …</c>
+    /// for the filter as a whole. A pulled file can hold one, because Queuey checks a filter when it is
+    /// written and reads a stored one back as it is. Empty when there is none.
+    /// </summary>
+    public IReadOnlyList<string> FilterProblems()
+    {
+        var problems = new List<string>();
+        foreach (KeyValuePair<string, DeploymentQueue> entry in Queues)
+        {
+            if (entry.Value?.Filter is not { } filter)
+                continue;
+
+            if (filter.WholeFilterProblem() is { } whole)
+                problems.Add($"queues.{entry.Key}.filter: {whole}");
+
+            if (filter.Conditions is not { } conditions)
+                continue;
+
+            for (int i = 0; i < conditions.Count; i++)
+            {
+                if (DeliveryFilter.ConditionProblem(conditions[i]) is { } problem)
+                    problems.Add(FormattableString.Invariant($"queues.{entry.Key}.filter.conditions[{i}] ({DeliveryFilter.Describe(conditions[i])}): {problem}"));
+            }
+        }
+
+        return problems;
     }
 
     /// <summary>
@@ -297,22 +456,22 @@ public sealed class DeploymentQueue
     /// </summary>
     public string? Mode { get; set; }
 
-    /// <summary>How many times an event is attempted before it gives up.</summary>
-    public int? MaxAttempts { get; set; }
-
-    /// <summary>After how many attempts an event goes to the DLQ. Must be below <c>maxAttempts</c>.</summary>
-    public int? DlqAfterAttempts { get; set; }
-
-    /// <summary>How long to wait between attempts.</summary>
+    /// <summary>
+    /// How long to wait between attempts. The number of attempts is not a setting: Queuey decides what
+    /// each failure needs.
+    /// </summary>
     public RetryBackoff? Backoff { get; set; }
 
-    /// <summary>Which events this queue delivers. Omit it to deliver every event.</summary>
+    /// <summary>
+    /// Which events this queue delivers. Omit it to leave the queue's filter as it is; declare it with
+    /// <c>"conditions": []</c> to remove the filter, so the queue delivers every event.
+    /// </summary>
     public DeliveryFilter? Filter { get; set; }
 
     /// <summary>Delivery ordering: <c>fifo</c>, <c>bykey</c> or <c>besteffort</c>.</summary>
     public string? Ordering { get; set; }
 
-    /// <summary>Whether a dead-letter queue collects exhausted events.</summary>
+    /// <summary>Whether a dead-letter queue collects events the receiver rejected.</summary>
     public bool? DlqEnabled { get; set; }
 
     /// <summary>Days events are retained.</summary>
@@ -360,13 +519,10 @@ public sealed class DeploymentWorkspace
     /// </summary>
     public bool? Idempotent { get; set; }
 
-    /// <summary>How many times an event is attempted, for every queue that does not say.</summary>
-    public int? MaxAttempts { get; set; }
-
-    /// <summary>After how many attempts an event goes to the DLQ. Must be below <c>maxAttempts</c>.</summary>
-    public int? DlqAfterAttempts { get; set; }
-
-    /// <summary>How long to wait between attempts, for every queue that does not say.</summary>
+    /// <summary>
+    /// How long to wait between attempts, for every queue that does not say. The number of attempts
+    /// is not a setting.
+    /// </summary>
     public RetryBackoff? Backoff { get; set; }
 
     /// <summary>Where events are delivered — the base every queue appends its path to.</summary>
@@ -377,18 +533,15 @@ public sealed class DeploymentWorkspace
 
     internal bool HasPolicy => Ordering is not null || DlqEnabled is not null
                             || RetentionDays is not null || Idempotent is not null
-                            || MaxAttempts is not null || DlqAfterAttempts is not null
                             || (Backoff is not null && !Backoff.IsEmpty);
 
-    /// <summary>The workspace's retry declaration as a policy, so it is validated like a queue's.</summary>
+    /// <summary>The workspace's behaviour as a policy, so it is validated like a queue's.</summary>
     internal QueuePolicy AsPolicy() => new()
     {
         Ordering = Ordering,
         DlqEnabled = DlqEnabled,
         RetentionDays = RetentionDays,
         Idempotent = Idempotent,
-        MaxAttempts = MaxAttempts,
-        DlqAfterAttempts = DlqAfterAttempts,
         Backoff = Backoff,
     };
 }

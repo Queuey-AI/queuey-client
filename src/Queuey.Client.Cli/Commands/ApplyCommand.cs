@@ -16,24 +16,23 @@ namespace Queuey.Client.Cli;
 /// </summary>
 internal static class ApplyCommand
 {
-    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal)
-    {
-        "dry-run", "check", "continue-on-error", "json", "help", "h",
-    };
+    // --plan ble et eget verb (2026-09-24): et verb en eldre CLI ikke kjenner, feiler i alle versjoner,
+    // mens `apply --plan` i en CLI fra før flagget var en ekte apply. Ordet får et hint i stedet.
+    internal static readonly CommandOptions Options = new(
+        "apply",
+        flags: new[] { "dry-run", "check", "continue-on-error", "json" },
+        values: new[] { "file" },
+        hints: new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["plan"] = "`apply --plan` is now `queuey plan`: it asks Queuey what apply would change, and writes nothing.",
+        });
 
     public static async Task<int> RunAsync(string[] args)
     {
-        ArgMap map = ArgMap.Parse(args, Flags);
+        if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
 
-        string path = map.Get("file") ?? DeploymentFile.DefaultFileName;
-        if (!File.Exists(path))
-        {
-            Console.Error.WriteLine($"No deployment file at '{path}'. Create one, or pass --file <path>.");
-            return ExitCodes.Usage;
-        }
-
-        DeploymentFile file = DeploymentFile.Parse(File.ReadAllText(path));
+        if (!TryReadDeploymentFile(map, out string path, out DeploymentFile file, out failure)) return failure;
         bool dryRun = map.Has("dry-run");
 
         if (dryRun)
@@ -45,9 +44,13 @@ internal static class ApplyCommand
             // before a deploy window rather than during one.
             // Expanding first means an unset ${VAR} fails here, in the dry run, rather than during
             // the deploy it was meant to protect.
-            IReadOnlyList<DeploymentQueuePlan> plans = file.Expand().Resolve();
+            file.Expand().Resolve();
+
+            // Det som vises, er fila slik den står, med ${VAR} uutvidet. Før skrev --json de utvidede verdiene, også et
+            // token i en ?code=, mens teksten viste workspacet uutvidet og køene utvidet (review 2026-10-05).
+            IReadOnlyList<DeploymentQueuePlan> plans = file.Resolve();
             if (map.Has("json"))
-                Console.WriteLine(JsonSerializer.Serialize(plans.Select(ToJsonPlan), CliHost.JsonOut));
+                Console.WriteLine(JsonSerializer.Serialize(ToJsonDryRun(file, plans), CliHost.JsonOut));
             else
                 WritePlan(path, file, plans);
             return ExitCodes.Success;
@@ -81,6 +84,43 @@ internal static class ApplyCommand
             WriteHuman(result, path, config, tenant);
 
         return result.AllSucceeded ? ExitCodes.Success : ExitCodes.RuntimeError;
+    }
+
+    /// <summary>
+    /// The deployment file named by <c>--file</c>, or <c>queuey.deploy.json</c> here. A missing file is
+    /// a usage error, written the way the caller asked for errors.
+    /// </summary>
+    internal static bool TryReadDeploymentFile(ArgMap map, out string path, out DeploymentFile file, out int failure)
+    {
+        path = map.Get("file") ?? DeploymentFile.DefaultFileName;
+        file = null!;
+        failure = ExitCodes.Success;
+
+        if (!File.Exists(path))
+        {
+            failure = CliErrors.Usage(map, "missing_file", $"No deployment file at '{path}'.", "Create one, or pass --file <path>.");
+            return false;
+        }
+
+        file = ParseNamed(path);
+        return true;
+    }
+
+    /// <summary>
+    /// The deployment file at <paramref name="path"/>, parsed, with the path in front of the error when it
+    /// cannot be: the parser speaks of "the deployment file", and a command can read more than one file.
+    /// </summary>
+    internal static DeploymentFile ParseNamed(string path)
+    {
+        try
+        {
+            return DeploymentFile.Parse(File.ReadAllText(path));
+        }
+        catch (QueueyConfigurationException ex)
+        {
+            // Parseren sier «the deployment file», ikke hvilken (review 2026-10-05).
+            throw new QueueyConfigurationException($"{path}: {ex.Message}") { SuggestedAction = ex.SuggestedAction };
+        }
     }
 
     /// <summary>
@@ -124,7 +164,7 @@ internal static class ApplyCommand
             var parts = new List<string>();
             if (w.Ordering is not null) parts.Add($"ordering={w.Ordering}");
             if (w.RetentionDays is { } days) parts.Add($"retentionDays={days}");
-            parts.AddRange(Retry(w.MaxAttempts, w.DlqAfterAttempts, w.Backoff));
+            parts.AddRange(Backoff(w.Backoff));
             if (w.Ingress?.AuthMode is { } auth) parts.Add($"ingressAuth={auth}");
             if (w.Ingress?.EventType is { } et) parts.Add($"eventType={et.From}:{et.Name}");
             if (w.Ingress?.GroupKey is { } gk) parts.Add($"groupKey={gk.From}:{gk.Name}");
@@ -132,6 +172,8 @@ internal static class ApplyCommand
 
             if (parts.Count > 0)
                 Console.WriteLine($"  workspace\t{string.Join(" ", parts)}");
+            foreach (string note in CeilingNotes(w.Backoff))
+                Console.WriteLine($"    ! {note}");
         }
 
         foreach (DeploymentQueuePlan p in plans)
@@ -148,19 +190,33 @@ internal static class ApplyCommand
             };
             QueuePolicy policy = p.Definition.Policy;
             if (policy.Ordering is not null) parts.Add($"ordering={policy.Ordering}");
-            parts.AddRange(Retry(policy.MaxAttempts, policy.DlqAfterAttempts, policy.Backoff));
+            parts.AddRange(Backoff(policy.Backoff));
             if (policy.Filter is { } filter) parts.Add($"filter=({filter})");
 
             Console.WriteLine($"  • {p.Definition.Name}\t{string.Join(" ", parts)}");
+            foreach (string note in CeilingNotes(policy.Backoff))
+                Console.WriteLine($"    ! {note}");
         }
 
         Console.WriteLine($"{plans.Count} queue(s) declared. Nothing was sent.");
     }
 
-    private static IEnumerable<string> Retry(int? maxAttempts, int? dlqAfterAttempts, RetryBackoff? backoff)
+    /// <summary>
+    /// What a dry run says about a wait above Queuey's ceilings. It cannot say more without asking Queuey:
+    /// apply refuses the wait only when it would change what is in place, which is what it reads first.
+    /// </summary>
+    internal static IEnumerable<string> CeilingNotes(RetryBackoff? backoff)
     {
-        if (maxAttempts is { } max) yield return $"maxAttempts={max}";
-        if (dlqAfterAttempts is { } dlq) yield return $"dlqAfterAttempts={dlq}";
+        if (backoff?.BaseDelayMs is { } baseMs && baseMs > RetryBackoff.BaseDelayCeilingMs)
+            yield return FormattableString.Invariant(
+                $"backoff.baseDelayMs={baseMs} is above the {RetryBackoff.BaseDelayCeilingMs} (one hour) a first wait may be: apply refuses it unless that wait is already in place.");
+        if (backoff?.MaxDelayMs is { } maxMs && maxMs > RetryBackoff.MaxDelayCeilingMs)
+            yield return FormattableString.Invariant(
+                $"backoff.maxDelayMs={maxMs} is above the {RetryBackoff.MaxDelayCeilingMs} (24 hours) the longest wait may be: apply refuses it unless that wait is already in place.");
+    }
+
+    private static IEnumerable<string> Backoff(RetryBackoff? backoff)
+    {
         if (backoff is { } b)
         {
             if (b.BaseDelayMs is { } baseMs) yield return $"backoff.baseDelayMs={baseMs}";
@@ -183,6 +239,11 @@ internal static class ApplyCommand
                 Console.WriteLine($"  ✗ {r.Name}\t{r.PublicId}\tcreated, {r.Mode ?? "mode unknown"} — {FormatError(r.Error)}");
             else
                 Console.WriteLine($"  ✗ {r.Name}\t{FormatError(r.Error)}");
+
+            // Serverens forslag står under feilen den hører til. Før 2026-09-24 viste bare --plan og
+            // feil som stoppet hele kommandoen det; en vanlig apply mistet det.
+            if (!r.Succeeded && r.Error?.SuggestedAction is { } action)
+                Console.WriteLine($"      → {action}");
         }
 
         foreach (string skipped in result.NotAttempted)
@@ -199,6 +260,45 @@ internal static class ApplyCommand
     private static string FormatError(QueueyException? e)
         => e is null ? "failed" : $"{(e.StatusCode?.ToString() ?? "error")} {e.ErrorCode} {e.Message}".Replace("  ", " ").Trim();
 
+    /// <summary>
+    /// The version of <c>apply --dry-run --json</c>'s shape. 1 was the bare array of queues that
+    /// 0.1.0-preview.8 printed; 2 is the object with the workspace and the queues. A script that reads
+    /// it checks this first.
+    /// </summary>
+    internal const int DryRunJsonSchemaVersion = 2;
+
+    /// <summary>
+    /// The dry run as JSON: <c>{ schemaVersion, workspace, queues }</c>. The workspace is null when the
+    /// file declares none; each queue carries the notes the dry run has about it.
+    /// </summary>
+    private static object ToJsonDryRun(DeploymentFile file, IReadOnlyList<DeploymentQueuePlan> plans)
+    {
+        // Lista var bare køer, så en ventetid over taket på workspacet hadde ingen plass (re-review 2026-10-05).
+        // Kenneth valgte et versjonert objekt (2026-10-05) framfor å legge workspacet inn i lista: nøklene sier hva
+        // hver del er, og et skript som leste lista, feiler tydelig i stedet for å lese workspacet som en kø.
+        return new
+        {
+            schemaVersion = DryRunJsonSchemaVersion,
+            workspace = file.Workspace is { } w ? ToJsonWorkspace(w) : null,
+            queues = plans.Select(ToJsonPlan).ToArray(),
+        };
+    }
+
+    private static object ToJsonWorkspace(DeploymentWorkspace w) => new
+    {
+        policy = new
+        {
+            w.Ordering,
+            w.DlqEnabled,
+            w.RetentionDays,
+            w.Idempotent,
+            backoff = w.Backoff is { } b ? new { b.BaseDelayMs, b.MaxDelayMs, b.Jitter } : null,
+        },
+        delivery = ToJson(w.Delivery),
+        ingress = ToJson(w.Ingress),
+        notes = CeilingNotes(w.Backoff).ToArray(),
+    };
+
     private static object ToJsonPlan(DeploymentQueuePlan p) => new
     {
         p.Definition.Name,
@@ -210,16 +310,57 @@ internal static class ApplyCommand
             p.Definition.Policy.DlqEnabled,
             p.Definition.Policy.RetentionDays,
             p.Definition.Policy.Idempotent,
-            p.Definition.Policy.MaxAttempts,
-            p.Definition.Policy.DlqAfterAttempts,
             backoff = p.Definition.Policy.Backoff is { } b ? new { b.BaseDelayMs, b.MaxDelayMs, b.Jitter } : null,
             filter = p.Definition.Policy.Filter is { } f
-                ? new { match = f.Match ?? "all", conditions = f.Conditions.Select(c => new { c.Field, c.Op, c.Value }) }
+                ? new { match = f.Match ?? "all", conditions = f.Conditions?.Select(c => new { c.Field, c.Op, c.Value }) }
                 : null,
         },
-        delivery = p.Delivery is null ? null : new { p.Delivery.Url, p.Delivery.Inherit, p.Delivery.AuthMode, p.Delivery.CredentialRef },
-        ingress = p.Ingress is null ? null : new { p.Ingress.AuthMode, eventType = p.Ingress.EventType?.Name, groupKey = p.Ingress.GroupKey?.Name },
+        delivery = ToJson(p.Delivery),
+        ingress = ToJson(p.Ingress),
+        notes = CeilingNotes(p.Definition.Policy.Backoff).ToArray(),
     };
+
+    // Levering og ingress som fila skriver dem, felt for felt, og som serverens config-lesing har dem: der er
+    // ingress.eventType { from, name }, så en sti fra `queuey plan` peker på det samme her. Før 2026-10-05 var eventType
+    // og groupKey bare navnet, uten hvor det leses fra, og timeoutMs, signing, rateLimit, authHeaderName, method og
+    // successStatusCode manglet, så en fil som satte dem, så ut som en som lot dem stå.
+    private static object? ToJson(WorkspaceDelivery? d) => d is null ? null : new
+    {
+        d.BaseUrl,
+        d.AuthMode,
+        d.CredentialRef,
+        d.AuthHeaderName,
+        d.Method,
+        d.TimeoutMs,
+        signing = ToJson(d.Signing),
+        rateLimit = ToJson(d.RateLimit),
+    };
+
+    private static object? ToJson(QueueDelivery? d) => d is null ? null : new
+    {
+        d.Url,
+        d.Inherit,
+        d.AuthMode,
+        d.CredentialRef,
+        d.AuthHeaderName,
+        d.TimeoutMs,
+        signing = ToJson(d.Signing),
+        rateLimit = ToJson(d.RateLimit),
+    };
+
+    private static object? ToJson(DeliverySigning? s) => s is null ? null : new { s.Enabled, s.CredentialRef, s.TemplateKey };
+
+    private static object? ToJson(DeliveryRateLimit? r) => r is null ? null : new { r.MaxRequests, r.PerSeconds };
+
+    private static object? ToJson(DeploymentIngress? i) => i is null ? null : new
+    {
+        i.AuthMode,
+        eventType = ToJson(i.EventType),
+        groupKey = ToJson(i.GroupKey),
+        i.SuccessStatusCode,
+    };
+
+    private static object? ToJson(ContextSource? s) => s is null ? null : new { s.From, s.Name };
 
     private static object ToJsonResult(QueueSyncResult result, string path, ResolvedConfig config, string? tenant) => new
     {
@@ -232,6 +373,13 @@ internal static class ApplyCommand
         failed = result.Failed,
         notAttempted = result.NotAttempted,
         warnings = result.Warnings,
-        queues = result.Applied.Select(r => new { r.Name, r.Succeeded, r.PublicId, r.Created, r.PolicyApplied, r.Mode, error = r.Error?.Message, errorCode = r.Error?.ErrorCode }),
+        queues = result.Applied.Select(r => new
+        {
+            r.Name, r.Succeeded, r.PublicId, r.Created, r.PolicyApplied, r.Mode,
+            error = r.Error?.Message,
+            errorCode = r.Error?.ErrorCode,
+            action = r.Error?.SuggestedAction,
+            status = r.Error?.StatusCode,
+        }),
     };
 }

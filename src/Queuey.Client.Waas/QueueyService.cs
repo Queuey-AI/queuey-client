@@ -352,6 +352,12 @@ public sealed class QueueyService : IQueueyService
         if (definition is null) throw new ArgumentNullException(nameof(definition));
         QueueyName.EnsureValid(definition.Name, "queue name");
 
+        // Policyen også, før køen finnes (review 2026-10-05). En QueueDefinition kan bygges uten fabrikken som
+        // validerer den, og da kom et filter uten conditions eller med null først etter PUT /queues: som en patch
+        // serveren avviste, eller en NullReferenceException.
+        if (definition.Policy.Validate() is { } reason)
+            throw new QueueyConfigurationException($"Queue '{definition.Name}' has an invalid policy: {reason}");
+
         // The tenant is passed in, never re-read from the options here: a deployment file that names
         // its workspace must put its queues in that workspace too. Before 2026-09-23 the workspace
         // went to the file's tenant and the queues to the configured one.
@@ -601,6 +607,19 @@ public sealed class QueueyService : IQueueyService
     }
 
     /// <inheritdoc />
+    public async Task<DeploymentPlan> PlanDeploymentAsync(DeploymentFile file, CancellationToken cancellationToken = default)
+    {
+        if (file is null) throw new ArgumentNullException(nameof(file));
+
+        file = file.Expand();
+        IReadOnlyList<DeploymentQueuePlan> plans = file.Resolve();   // lokal validering først, som apply
+        string tenant = RequireForSync(file.Tenant);
+
+        return await new DeploymentPlanner(_controlPlane, Management)
+            .PlanAsync(file, plans, tenant, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc />
     public Task<DeliveryVerification> VerifyDeliveryAsync(
         string queueName, byte[] payload, VerifyDeliveryOptions? options = null, CancellationToken cancellationToken = default)
     {
@@ -644,6 +663,11 @@ public sealed class QueueyService : IQueueyService
             // here, with nothing sent, instead of halfway through it.
             deliveries = await new CredentialResolver(Management, tenant)
                 .ResolveAllAsync(file.Workspace?.Delivery, plans, cancellationToken).ConfigureAwait(false);
+
+            // Backoff-takene også før første skriving (2026-10-05). Før feilet en ventetid Queuey avviser, først på
+            // køen den sto på, etter at workspacet og køene foran allerede var skrevet.
+            await BackoffCeilings.EnsureAsync(_controlPlane, tenant, file,
+                plans.Where(p => options.QueueFilter?.Invoke(p.Definition) ?? true), existing, cancellationToken).ConfigureAwait(false);
         }
 
         // Workspace first: queues inherit from it, so converging it first means a queue that means to
@@ -726,14 +750,12 @@ public sealed class QueueyService : IQueueyService
         };
     }
 
-    private static QueuePolicyPatchRequest ToPatch(QueuePolicy policy) => new()
+    internal static QueuePolicyPatchRequest ToPatch(QueuePolicy policy) => new()
     {
         Ordering = policy.Ordering,
         DlqEnabled = policy.DlqEnabled,
         RetentionDays = policy.RetentionDays,
         Idempotent = policy.Idempotent,
-        MaxAttempts = policy.MaxAttempts,
-        DlqAfterAttempts = policy.DlqAfterAttempts,
         Backoff = RetryBackoffWire.From(policy.Backoff),
         Filter = DeliveryFilterWire.From(policy.Filter),
     };

@@ -1,11 +1,15 @@
 using System;
+using System.Linq;
+using System.Text.Json;
 using Queuey.Client;
+using Queuey.Client.Waas;
 
 namespace Queuey.Client.Cli;
 
 /// <summary>
 /// The workspace a deployment command acts on — one rule for <c>apply</c> (with <c>--check</c> and
-/// <c>--dry-run</c>) and <c>verify</c>, so a verification reaches the workspace the apply wrote to.
+/// <c>--dry-run</c>), <c>plan</c> and <c>verify</c>, so a plan and a verification reach the workspace
+/// the apply writes to.
 /// </summary>
 /// <remarks>
 /// The deployment file's <c>tenant</c> when it names one, otherwise the configured tenant: the flag,
@@ -50,6 +54,52 @@ internal static class DeploymentTenant
             $"{filePath} names workspace {fileTenant!.Trim()}, but {source} names {explicitTenant}. " +
             "A deploy and its verification have to reach the same workspace, so neither is picked: remove one of " +
             "them, or make them name the same workspace.");
+    }
+
+    /// <summary>
+    /// The tenant a deployment file names, with its <c>${VAR}</c> expanded, read without the rest of the
+    /// file. For <c>verify</c>, which needs nothing else from it. Null when the file names none.
+    /// </summary>
+    public static string? ReadFromFile(string json, string path)
+    {
+        // verify leser bare tenant (review 2026-10-05): et felt apply avviser et annet sted i fila, som forsøkene,
+        // stoppet en verifisering som ikke bruker det. JSON som ikke kan leses, feiler fortsatt, med fila navngitt.
+        if (string.IsNullOrWhiteSpace(json))
+            return null;
+
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(json, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
+        }
+        catch (JsonException ex)
+        {
+            throw new QueueyConfigurationException($"{path}: Could not parse the deployment file: {ex.Message}");
+        }
+
+        using (document)
+        {
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+                throw new QueueyConfigurationException($"{path}: A deployment file is a JSON object, like {{ \"tenant\": \"ten_…\", \"queues\": {{}} }}.");
+
+            // Store og små bokstaver teller ikke, som når apply leser fila. To tenant-er avvises, som apply avviser dem:
+            // parseren tar den siste, og den første tok verify, så de traff hvert sitt workspace (re-review 2026-10-05).
+            JsonProperty[] tenants = document.RootElement.EnumerateObject()
+                .Where(p => string.Equals(p.Name, "tenant", StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (tenants.Length > 1)
+                throw new QueueyConfigurationException(
+                    $"{path}: The deployment file names the tenant {tenants.Length} times ({string.Join(", ", tenants.Select(t => t.Name))}), and only the last would count. Keep one.");
+            if (tenants.Length == 0)
+                return null;
+
+            return tenants[0].Value.ValueKind switch
+            {
+                JsonValueKind.String => DeploymentVariables.Expand(tenants[0].Value.GetString(), null, "tenant"),
+                JsonValueKind.Null => null,
+                _ => throw new QueueyConfigurationException($"{path}: tenant is a workspace id in quotes, like \"ten_…\"."),
+            };
+        }
     }
 
     private static (string? Tenant, string Source) Explicit(ArgMap args, Func<string, string?> getEnv)

@@ -21,6 +21,33 @@ public class SyncQueuesTests
     private static QueueyService Build(HttpMessageHandler api, params QueueDefinition[] queues)
         => WaasTestHost.Build(apiStub: api, queues: queues);
 
+    [Theory]
+    [InlineData("without conditions", "A filter needs its conditions.")]
+    [InlineData("with a null condition", "A filter condition cannot be null.")]
+    public async Task ApplyQueue_refuses_a_policy_Queuey_would_refuse_before_the_queue_exists(string filter, string expected)
+    {
+        // Re-review 2026-10-05: ApplyQueueAsync sjekket bare navnet, og QueueDefinition.Policy kan settes direkte. Et
+        // filter uten liste sendte PUT /queues og så en patch serveren avviste etter at køen fantes; [null] kastet
+        // NullReferenceException etter PUT.
+        var api = new StubHttpMessageHandler((_, _, _) => StubHttpMessageHandler.Json(HttpStatusCode.OK, ApplyBody("orders")));
+        var definition = new QueueDefinition
+        {
+            Name = "orders",
+            Policy = new QueuePolicy
+            {
+                Filter = filter == "without conditions"
+                    ? new DeliveryFilter { Match = "any" }
+                    : new DeliveryFilter { Conditions = new() { null! } },
+            },
+        };
+
+        var ex = await Assert.ThrowsAsync<QueueyConfigurationException>(() => Build(api).ApplyQueueAsync(definition));
+
+        Assert.Contains("Queue 'orders' has an invalid policy", ex.Message);
+        Assert.Contains(expected, ex.Message);
+        Assert.Empty(api.Requests);
+    }
+
     [Fact]
     public async Task Applies_each_queue_and_patches_only_declared_policy()
     {

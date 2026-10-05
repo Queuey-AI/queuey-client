@@ -51,8 +51,8 @@ public sealed class QueueSyncResult : ISyncRunResult
         var failed = Applied.Where(r => !r.Succeeded).Select(r => r.Name).ToArray();
 
         var parts = new List<string>();
-        if (failed.Length > 0) parts.Add($"{failed.Length} queue(s) failed: {string.Join(", ", failed)}");
-        if (NotAttempted.Count > 0) parts.Add($"{NotAttempted.Count} queue(s) not attempted: {string.Join(", ", NotAttempted)}");
+        if (failed.Length > 0) parts.Add(FormattableString.Invariant($"{failed.Length} queue(s) failed: {string.Join(", ", failed)}"));
+        if (NotAttempted.Count > 0) parts.Add(FormattableString.Invariant($"{NotAttempted.Count} queue(s) not attempted: {string.Join(", ", NotAttempted)}"));
 
         throw new QueueySyncException(
             $"Queuey queue sync did not fully converge — {string.Join("; ", parts)}. " +

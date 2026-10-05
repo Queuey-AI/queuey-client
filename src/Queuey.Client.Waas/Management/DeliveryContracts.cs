@@ -213,6 +213,36 @@ internal sealed class QueueConfigResponse
     public IngressResponse? Ingress { get; set; }
 }
 
+/// <summary>
+/// Wire shape of <c>GET /queues/{que}</c>, read for one thing: the backoff the queue stores itself, in its
+/// raw <c>overrides</c>. A field set there is the queue's own; a field left out is inherited. The rest of
+/// the read is not mapped.
+/// </summary>
+/// <remarks>
+/// Its own types, not <see cref="RetryBackoffWire"/>: the stored overrides carry jitter as the enum's
+/// number, which that type reads as text.
+/// </remarks>
+internal sealed class QueueStoredResponse
+{
+    public StoredOverridesWire? Overrides { get; set; }
+}
+
+internal sealed class StoredOverridesWire
+{
+    public StoredRetryWire? Retry { get; set; }
+}
+
+internal sealed class StoredRetryWire
+{
+    public StoredBackoffWire? Backoff { get; set; }
+}
+
+internal sealed class StoredBackoffWire
+{
+    public int? BaseDelayMs { get; set; }
+    public int? MaxDelayMs { get; set; }
+}
+
 /// <summary>Which sections a queue inherits from the workspace (true) versus overrides (false).</summary>
 internal sealed class QueueInheritResponse
 {
@@ -259,12 +289,13 @@ internal sealed class QueuePolicyResponse
     public int RetentionDays { get; set; }
     public string? Ordering { get; set; }
 
-    // Nullable on purpose: an API from before 2026-09-23 does not send the rest of the retry
-    // policy or the filter, and "not sent" must read as unknown rather than as a value.
-    public int? MaxAttempts { get; set; }
-    public int? DlqAfterAttempts { get; set; }
+    // Nullable on purpose: an API from before 2026-09-23 does not send the backoff or the filter,
+    // and "not sent" must read as unknown rather than as a value.
     public RetryBackoffWire? Backoff { get; set; }
     public DeliveryFilterWire? Filter { get; set; }
+
+    // Ingen maxAttempts eller dlqAfterAttempts: antall forsøk er ikke en innstilling (Queuey#391,
+    // 2026-10-04). Et API fra før det sender dem fortsatt; de leses ikke, så pull skriver dem aldri.
 }
 
 /// <summary>An ingress signing key minted for a queue. The secret is returned <b>once</b>.</summary>

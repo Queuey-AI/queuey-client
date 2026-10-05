@@ -13,6 +13,7 @@ COMMANDS
   sync           Apply every [QueueyModel] stream found in an assembly (PUT /waas/streams).
   queue          Declare queues from [QueueyQueue] types: queue plan | queue sync.
   apply          Converge Queuey from a declarative deployment file (queuey.deploy.json).
+  plan           Ask Queuey what apply would change and refuse, as dry runs. Writes nothing.
   verify         Publish one event to a queue and follow it: delivered, or why not and what to change.
   schema         Print the JSON Schema for queuey.deploy.json. Reads nothing, needs no credentials.
   pull           Read a workspace back into a deployment file (the inverse of apply).
@@ -76,7 +77,13 @@ APPLY
   queuey apply [--file queuey.deploy.json] [--dry-run] [--check] [--continue-on-error] [--json]
                  Converges the workspace's delivery defaults, then each declared queue's
                  behaviour and destination. Idempotent; exits non-zero unless it fully
-                 converged. --dry-run validates the file locally and sends nothing.
+                 converged. --dry-run validates the file locally and sends nothing. To ask
+                 Queuey what it would change first, run `queuey plan`.
+                 --dry-run --json prints { ""schemaVersion"": 2, ""workspace"": …, ""queues"": […] }:
+                 the workspace's declaration (null when the file has none) and each queue's,
+                 with what the dry run notes about them. Each carries every field the file
+                 can set on it, in the file's words, null when the file leaves it out.
+                 Version 1, a bare array of queues, was what 0.1.0-preview.8 printed.
                  The file carries NO secrets: auth and signing name a credentialRef, so it is
                  meant to be committed. Keep it separate from queuey.json, which holds your
                  API key and must not be.
@@ -89,12 +96,34 @@ APPLY
                  delivery.url or workspace.delivery.baseUrl) and logs events until it has one.
                  Declare ""mode"": ""deliver"" or ""logOnly"" to own it; an existing queue keeps its
                  mode otherwise. Pausing is an operator's lever: a deploy never resumes a queue.
-                 Retry (maxAttempts, dlqAfterAttempts, backoff) and a delivery filter are
-                 declared per workspace or queue; `queuey schema` lists every field and the
-                 values it accepts.
+                 Backoff (the wait between attempts: at most an hour at first and a day at
+                 most, unless a longer wait is already in place) and a delivery filter are
+                 declared per workspace or queue. The number of attempts is not a setting:
+                 a file that still declares maxAttempts or dlqAfterAttempts is refused
+                 before anything is sent. `queuey schema` lists every field and the values
+                 it accepts.
                  The workspace is the file's ""tenant"" when it names one, else --tenant /
                  QUEUEY_TENANT / queuey.json. When --tenant or QUEUEY_TENANT names another
-                 workspace than the file, apply fails and names both. verify uses the same rule.
+                 workspace than the file, apply fails and names both. plan and verify use the
+                 same rule.
+
+PLAN
+  queuey plan [--file queuey.deploy.json] [--json]
+                 Asks Queuey itself what apply would do: every write apply would send goes as
+                 a dry run (?dryRun=true), so it shows each value that would change and each
+                 refusal Queuey would give that write — retention caps, queue limits, bad
+                 values — with what to do about it. Each write is asked about on its own,
+                 against what is stored now: a refusal that depends on a workspace change in
+                 the same file shows only in apply. Writes nothing; exits non-zero if anything
+                 would be refused. Needs the key apply needs. A queue that does not exist yet
+                 shows as one that would be created, with its settings checked locally. The first dry run also proves that Queuey answers
+                 dry runs; against an API that does not, planning stops there and says what
+                 that one call may have changed — nothing, when a declared queue exists.
+                 A verb and not an apply flag on purpose: a CLI too old to know it answers
+                 ""Unknown command"" instead of running the apply you meant to plan.
+                 --json prints { ""schemaVersion"": 1, ""file"", ""tenant"", ""wouldSucceed"",
+                 ""changeCount"", ""steps"": […] }; check schemaVersion first. A change's from and
+                 to are JSON values, as Queuey's config reads them back.
 
 VERIFY
   queuey verify <queue> (--data <json> | --file <path> | --stdin)
@@ -123,7 +152,7 @@ VERIFY
                  event; a deployment file there is refused (name that one with --deployment).
 
 SCHEMA
-  queuey schema
+  queuey schema [--json]
                  Prints the JSON Schema for queuey.deploy.json — every field, the values it
                  accepts and what it does. Save it, or point ""$schema"" at its ""$id"": the copy
                  published at this version's release tag,
@@ -137,7 +166,8 @@ PULL
                  nothing for it, so the file says what is actually owned rather than freezing
                  today's defaults as permanent overrides. No secrets: credentials appear by
                  name. Refuses to overwrite an existing file without --force; use --stdout to
-                 diff first.
+                 diff first. A filter condition Queuey stored before it checked it is written
+                 as it is, with a warning on stderr: apply refuses the file until it is fixed.
                  --as <env> rewrites the values that do not travel between workspaces (the
                  workspace binding, the base URL, absolute queue URLs) into ${VAR} references,
                  so one file converges every environment. Paths and credential names travel
@@ -246,6 +276,7 @@ WHOAMI
   queuey whoami [--json]
 
 GLOBAL OPTIONS (all commands)
+  An option a command does not take fails it (exit 2) and lists the ones it does.
   --api-base <uri>                Control-plane (API) host (default: https://api.queuey.ai).
                                   Set it to point at a locally-running instance, e.g. for testing.
   --ingress-base <uri>            Ingress (publish) host (default: https://ingress.queuey.ai).
