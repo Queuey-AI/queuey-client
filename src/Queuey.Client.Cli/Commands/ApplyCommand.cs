@@ -44,10 +44,13 @@ internal static class ApplyCommand
             // before a deploy window rather than during one.
             // Expanding first means an unset ${VAR} fails here, in the dry run, rather than during
             // the deploy it was meant to protect.
-            DeploymentFile expanded = file.Expand();
-            IReadOnlyList<DeploymentQueuePlan> plans = expanded.Resolve();
+            file.Expand().Resolve();
+
+            // Det som vises, er fila slik den står, med ${VAR} uutvidet. Før skrev --json de utvidede verdiene, også et
+            // token i en ?code=, mens teksten viste workspacet uutvidet og køene utvidet (review 2026-10-05).
+            IReadOnlyList<DeploymentQueuePlan> plans = file.Resolve();
             if (map.Has("json"))
-                Console.WriteLine(JsonSerializer.Serialize(ToJsonDryRun(expanded, plans), CliHost.JsonOut));
+                Console.WriteLine(JsonSerializer.Serialize(ToJsonDryRun(file, plans), CliHost.JsonOut));
             else
                 WritePlan(path, file, plans);
             return ExitCodes.Success;

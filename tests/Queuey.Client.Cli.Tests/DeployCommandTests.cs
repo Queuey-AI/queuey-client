@@ -129,6 +129,48 @@ public sealed class DeployCommandTests : IDisposable
     }
 
     [Fact]
+    public async Task A_dry_run_shows_a_variable_as_written_in_json_and_in_text()
+    {
+        // Review 2026-10-05: --json skrev de utvidede verdiene, også et token i en ?code=, mens teksten viste fila.
+        Environment.SetEnvironmentVariable("QUEUEY_TEST_HOOK_TOKEN", "s3cr3t-token");
+        try
+        {
+            string path = DeployFile("""
+                { "workspace": { "delivery": { "baseUrl": "https://hooks.example.com/in?code=${QUEUEY_TEST_HOOK_TOKEN}" } },
+                  "queues": { "orders": { "delivery": { "url": "https://other.example.com/orders?code=${QUEUEY_TEST_HOOK_TOKEN}" } } } }
+                """);
+
+            CliRun json = await CliHarness.RunAsync(() => ApplyCommand.RunAsync(new[] { "--file", path, "--dry-run", "--json" }));
+            CliRun text = await CliHarness.RunAsync(() => ApplyCommand.RunAsync(new[] { "--file", path, "--dry-run" }));
+
+            Assert.Equal(ExitCodes.Success, json.Exit);
+            Assert.Equal(ExitCodes.Success, text.Exit);
+            JsonElement root = JsonDocument.Parse(json.Stdout).RootElement;
+            Assert.Equal("https://hooks.example.com/in?code=${QUEUEY_TEST_HOOK_TOKEN}",
+                root.GetProperty("workspace").GetProperty("delivery").GetProperty("baseUrl").GetString());
+            Assert.Equal("https://other.example.com/orders?code=${QUEUEY_TEST_HOOK_TOKEN}",
+                root.GetProperty("queues")[0].GetProperty("delivery").GetProperty("url").GetString());
+            Assert.DoesNotContain("s3cr3t-token", json.Stdout + text.Stdout);
+            Assert.Contains("${QUEUEY_TEST_HOOK_TOKEN}", text.Stdout);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("QUEUEY_TEST_HOOK_TOKEN", null);
+        }
+    }
+
+    [Fact]
+    public async Task A_dry_run_still_fails_on_a_variable_that_is_not_set()
+    {
+        string path = DeployFile("""{ "workspace": { "delivery": { "baseUrl": "${QUEUEY_TEST_NOT_SET_ANYWHERE}" } } }""");
+
+        var ex = await Assert.ThrowsAsync<Queuey.Client.QueueyConfigurationException>(
+            () => CliHarness.RunAsync(() => ApplyCommand.RunAsync(new[] { "--file", path, "--dry-run", "--json" })));
+
+        Assert.Contains("QUEUEY_TEST_NOT_SET_ANYWHERE", ex.Message);
+    }
+
+    [Fact]
     public async Task A_dry_run_fails_on_a_mode_the_file_cannot_set()
     {
         string path = DeployFile("""{ "queues": { "orders": { "mode": "paused" } } }""");

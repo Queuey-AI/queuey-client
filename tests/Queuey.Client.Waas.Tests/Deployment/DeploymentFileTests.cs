@@ -110,6 +110,28 @@ public class DeploymentFileTests
         Assert.EndsWith("Keep one.", ex.Message);
     }
 
+    [Theory]
+    [InlineData("""{ "queues": { "orders": { "retentionDays": 3, "RetentionDays": 30 } } }""", "queues.orders has both 'retentionDays' and 'RetentionDays', which name the same field, and only the last would count. Keep one.")]
+    [InlineData("""{ "workspace": { "delivery": { "baseUrl": "https://a.example.com", "baseUrl": "https://b.example.com" } } }""", "workspace.delivery has 'baseUrl' twice and only the last would count. Keep one.")]
+    [InlineData("""{ "queues": { "orders": {}, "orders": { "mode": "logOnly" } } }""", "queues has 'orders' twice and only the last would count. Keep one.")]
+    [InlineData("""{ "queues": { "orders": { "filter": { "conditions": [ { "field": "a", "op": "eq", "Op": "ne", "value": "1" } ] } } } }""", "queues.orders.filter.conditions[0] has both 'op' and 'Op', which name the same field, and only the last would count. Keep one.")]
+    public void A_field_named_twice_below_the_top_is_refused_too(string json, string expected)
+    {
+        // Review 2026-10-05: bare toppnivået ble sjekket, så et felt to ganger på en kø eller i en betingelse tok den siste.
+        var ex = Assert.Throws<QueueyConfigurationException>(() => DeploymentFile.Parse(json));
+
+        Assert.Equal(expected, ex.Message);
+    }
+
+    [Fact]
+    public void Queue_names_are_keys_and_differ_by_case_without_being_duplicates()
+    {
+        // "Orders" er et ugyldig kønavn, men ikke det samme navnet som "orders": det avvises av navneregelen, ikke her.
+        DeploymentFile file = DeploymentFile.Parse("""{ "queues": { "orders": {}, "Orders": {} } }""");
+
+        Assert.Equal(2, file.Queues.Count);
+    }
+
     [Fact]
     public void Every_attempts_field_in_the_file_is_named_at_once()
     {

@@ -143,25 +143,52 @@ public sealed class DeploymentFile
                 return;
 
             // Parseren tar den siste av to like navn, og leser store og små bokstaver likt, så {"tenant": "ten_a",
-            // "Tenant": "ten_b"} skrev til ten_b, mens verify leste ten_a (re-review 2026-10-05). Et navn to ganger på
-            // toppen er en feil i fila, ikke et valg: avvist.
-            var seen = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (JsonProperty top in document.RootElement.EnumerateObject())
-            {
-                if (seen.TryGetValue(top.Name, out string? first))
-                    throw new QueueyConfigurationException(
-                        (string.Equals(first, top.Name, StringComparison.Ordinal)
-                            ? $"The deployment file has '{top.Name}' twice"
-                            : $"The deployment file has both '{first}' and '{top.Name}', which name the same field,")
-                        + " and only the last would count. Keep one.");
-                seen[top.Name] = top.Name;
-            }
+            // "Tenant": "ten_b"} skrev til ten_b, mens verify leste ten_a (re-review 2026-10-05). Et navn to ganger er en feil
+            // i fila, ikke et valg: avvist, på alle nivåer (review 2026-10-05). Før ble bare toppen sjekket, så
+            // {"retentionDays": 3, "RetentionDays": 30} på en kø ga 30 uten et ord.
+            RefuseNamesGivenTwice(document.RootElement, path: null);
 
             // Før parseren, som ville sagt «could not be mapped» om det første feltet den møtte. En fil som har
             // forsøksfeltene (skrevet for hånd, eller med en build av #40 fra før dette), trenger grunnen og hva som
             // skal bort, for alle feltene på én gang. Ingen sluppet CLI har skrevet dem.
             if (RetiredAttemptFields(document.RootElement) is { Count: > 0 } retired)
                 throw AttemptsAreNotASetting(retired);
+        }
+    }
+
+    /// <summary>
+    /// Refuses a field named twice in one object, at any depth and in any casing, since the parser reads names in any
+    /// casing and keeps the last. Queue names are keys rather than fields, so they are compared exactly.
+    /// </summary>
+    private static void RefuseNamesGivenTwice(JsonElement element, string? path)
+    {
+        if (element.ValueKind == JsonValueKind.Array)
+        {
+            int index = 0;
+            foreach (JsonElement item in element.EnumerateArray())
+                RefuseNamesGivenTwice(item, FormattableString.Invariant($"{path}[{index++}]"));
+            return;
+        }
+
+        if (element.ValueKind != JsonValueKind.Object)
+            return;
+
+        bool queueNames = string.Equals(path, "queues", StringComparison.OrdinalIgnoreCase);
+        var seen = new Dictionary<string, string>(queueNames ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase);
+        foreach (JsonProperty property in element.EnumerateObject())
+        {
+            if (seen.TryGetValue(property.Name, out string? first))
+            {
+                string where = path is null ? "The deployment file" : path;
+                throw new QueueyConfigurationException(
+                    (string.Equals(first, property.Name, StringComparison.Ordinal)
+                        ? $"{where} has '{property.Name}' twice"
+                        : $"{where} has both '{first}' and '{property.Name}', which name the same field,")
+                    + " and only the last would count. Keep one.");
+            }
+
+            seen[property.Name] = property.Name;
+            RefuseNamesGivenTwice(property.Value, path is null ? property.Name : $"{path}.{property.Name}");
         }
     }
 
