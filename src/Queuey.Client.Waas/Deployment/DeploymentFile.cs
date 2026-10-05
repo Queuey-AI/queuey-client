@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -38,8 +39,26 @@ public sealed class DeploymentFile
     [JsonPropertyName("$schema")]
     public string? Schema { get; set; }
 
-    /// <summary>Where the published JSON Schema for this file lives.</summary>
-    public const string SchemaUrl = "https://raw.githubusercontent.com/Queuey-AI/queuey-client/main/schema/queuey.deploy.schema.json";
+    /// <summary>
+    /// Where the published JSON Schema for this file lives: the copy at the release tag of this library's version, so an
+    /// editor checks a file against the fields this version accepts. It exists once that release is tagged.
+    /// </summary>
+    // Review 2026-10-05: main endrer seg før en release, og et skjema derfra kan beskrive felt ingen sluppet CLI godtar.
+    // Versjonen er pakkens (<Version>, eller taggen ved release), så commiten som bumper den, skriver skjemaet på nytt.
+    public static string SchemaUrl { get; } =
+        $"https://raw.githubusercontent.com/Queuey-AI/queuey-client/v{PackageVersion()}/schema/queuey.deploy.schema.json";
+
+    private static string PackageVersion()
+    {
+        string version = typeof(DeploymentFile).Assembly
+            .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? typeof(DeploymentFile).Assembly.GetName().Version?.ToString(3)
+            ?? "0.0.0";
+
+        // SDK-en henger på +<commit> etter versjonen; taggen har den ikke.
+        int plus = version.IndexOf('+');
+        return plus >= 0 ? version.Substring(0, plus) : version;
+    }
 
     /// <summary>
     /// The JSON Schema for a deployment file: every field, the values each one accepts, and what it
@@ -84,7 +103,11 @@ public sealed class DeploymentFile
 
         try
         {
-            return JsonSerializer.Deserialize<DeploymentFile>(json, ReadOptions) ?? new DeploymentFile();
+            DeploymentFile file = JsonSerializer.Deserialize<DeploymentFile>(json, ReadOptions) ?? new DeploymentFile();
+
+            // "queues": null leses som ingen køer, som et utelatt felt. Før 2026-10-05 ga det NullReferenceException.
+            file.Queues ??= new Dictionary<string, DeploymentQueue>(StringComparer.Ordinal);
+            return file;
         }
         catch (JsonException ex)
         {
@@ -195,12 +218,19 @@ public sealed class DeploymentFile
         if (Workspace?.AsPolicy().Validate() is { } workspaceReason)
             throw new QueueyConfigurationException($"The workspace has an invalid policy: {workspaceReason}");
 
+        // Ingress og levering sjekkes her, før noe sendes (2026-10-05). Backenden gjør en ukjent authMode for levering om til
+        // None og en ukjent method til POST uten å si fra, og en kilde uten navn fjernet den som var lagret.
+        Workspace?.Ingress?.Validate("workspace.ingress");
+        ValidateDelivery("workspace.delivery", Workspace?.Delivery?.AuthMode, Workspace?.Delivery?.Method);
+
         foreach (KeyValuePair<string, DeploymentQueue> entry in Queues)
         {
             DeploymentQueue declared = entry.Value ?? new DeploymentQueue();
 
             // The key is the queue name — validated as written, like every other name a caller chose.
             QueueyName.EnsureValid(entry.Key, "queue name");
+            declared.Ingress?.Validate($"queues.{entry.Key}.ingress");
+            ValidateDelivery($"queues.{entry.Key}.delivery", declared.Delivery?.AuthMode, method: null);
 
             var definition = QueueDefinitionFactory.FromName(entry.Key, new QueueOptions
             {
@@ -222,6 +252,17 @@ public sealed class DeploymentFile
         }
 
         return plans;
+    }
+
+    private static void ValidateDelivery(string where, string? authMode, string? method)
+    {
+        if (authMode is not null && !WorkspaceDelivery.AuthModeValues.Contains(authMode.Trim(), StringComparer.OrdinalIgnoreCase))
+            throw new QueueyConfigurationException(
+                $"{where}.authMode must be one of {string.Join(", ", WorkspaceDelivery.AuthModeValues)}; got '{authMode}'.");
+
+        if (method is not null && !WorkspaceDelivery.MethodValues.Contains(method.Trim(), StringComparer.OrdinalIgnoreCase))
+            throw new QueueyConfigurationException(
+                $"{where}.method must be one of {string.Join(", ", WorkspaceDelivery.MethodValues)}; got '{method}'.");
     }
 
     /// <summary>
@@ -277,7 +318,11 @@ public sealed class DeploymentQueue
     /// <summary>Days events are retained.</summary>
     public int? RetentionDays { get; set; }
 
-    /// <summary>Whether duplicate publishes are collapsed by idempotency key.</summary>
+    /// <summary>
+    /// Whether the receiver handles the same event twice safely. Then Queuey sends an event again after a timeout or a
+    /// conflict (409, 412, 423 or 428). Otherwise a timeout holds the queue until a person resumes it, and a conflict
+    /// stops the event. It does not deduplicate publishes.
+    /// </summary>
     public bool? Idempotent { get; set; }
 
     /// <summary>
@@ -308,7 +353,11 @@ public sealed class DeploymentWorkspace
     /// <summary>How many days events are retained.</summary>
     public int? RetentionDays { get; set; }
 
-    /// <summary>Whether duplicate publishes are collapsed by idempotency key.</summary>
+    /// <summary>
+    /// Whether the receiver handles the same event twice safely. Then Queuey sends an event again after a timeout or a
+    /// conflict (409, 412, 423 or 428). Otherwise a timeout holds the queue until a person resumes it, and a conflict
+    /// stops the event. It does not deduplicate publishes.
+    /// </summary>
     public bool? Idempotent { get; set; }
 
     /// <summary>How many times an event is attempted, for every queue that does not say.</summary>

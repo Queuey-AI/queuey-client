@@ -119,8 +119,9 @@ VERIFY
 SCHEMA
   queuey schema
                  Prints the JSON Schema for queuey.deploy.json — every field, the values it
-                 accepts and what it does. Save it, or point ""$schema"" at
-                 https://raw.githubusercontent.com/Queuey-AI/queuey-client/main/schema/queuey.deploy.schema.json
+                 accepts and what it does. Save it, or point ""$schema"" at its ""$id"": the copy
+                 published at this version's release tag,
+                 https://raw.githubusercontent.com/Queuey-AI/queuey-client/v<version>/schema/queuey.deploy.schema.json
 
 PULL
   queuey pull [--file queuey.deploy.json] [--force] [--stdout]

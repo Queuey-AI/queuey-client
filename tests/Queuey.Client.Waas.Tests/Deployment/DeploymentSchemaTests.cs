@@ -16,6 +16,7 @@ namespace Queuey.Client.Waas.Tests;
 /// parseren avviser, eller mangler et den godtar. Beskrivelsene er XML-dokumentasjonen, og de
 /// tillatte verdiene er de samme listene valideringen bruker.
 /// Skriv fila på nytt med: QUEUEY_UPDATE_SCHEMA=1 dotnet test --filter DeploymentSchemaTests
+/// <c>$id</c> peker på release-taggen for pakkens versjon (2026-10-05), så fila skrives på nytt når versjonen bumpes.
 /// </summary>
 public class DeploymentSchemaTests
 {
@@ -33,6 +34,17 @@ public class DeploymentSchemaTests
         Assert.True(committed == generated,
             "schema/queuey.deploy.schema.json is out of date with the deployment model. " +
             "Regenerate it: QUEUEY_UPDATE_SCHEMA=1 dotnet test --filter DeploymentSchemaTests");
+    }
+
+    [Fact]
+    public void The_schema_id_names_the_release_tag_of_this_version_not_main()
+    {
+        // Review 2026-10-05: main er integrasjonsbranchen og kan beskrive felt ingen sluppet CLI godtar.
+        string version = typeof(DeploymentFile).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()!
+            .InformationalVersion.Split('+')[0];
+
+        Assert.Equal($"https://raw.githubusercontent.com/Queuey-AI/queuey-client/v{version}/schema/queuey.deploy.schema.json", DeploymentFile.SchemaUrl);
+        Assert.DoesNotContain("/main/", DeploymentFile.SchemaUrl);
     }
 
     [Fact]
@@ -55,6 +67,24 @@ public class DeploymentSchemaTests
         Assert.Equal(new[] { "all", "any" }, Values(filter["properties"]!["match"]!));
         JsonNode condition = Defs(schema, filter["properties"]!["conditions"]!["items"]!);
         Assert.Equal(new[] { "eq", "ne", "gt", "gte", "lt", "lte", "contains", "exists" }, Values(condition["properties"]!["op"]!));
+
+        // Ingress og levering har de samme lukkede verdiene som valideringen (2026-10-05).
+        JsonNode workspace = schema["properties"]!["workspace"]!;
+        JsonNode ingress = Defs(schema, workspace["properties"]!["ingress"]!);
+        Assert.Equal(new[] { "None", "ApiKey", "SignedRequest", "ApiKeyAndSignedRequest" }, Values(ingress["properties"]!["authMode"]!));
+        JsonNode source = Defs(schema, ingress["properties"]!["eventType"]!);
+        Assert.Equal(new[] { "header", "query", "body" }, Values(source["properties"]!["from"]!));
+        Assert.Equal(new[] { "name" }, source["required"]!.AsArray().Select(r => r!.GetValue<string>()).ToArray());
+        Assert.Equal(new[] { "from" }, source["then"]!["required"]!.AsArray().Select(r => r!.GetValue<string>()).ToArray());
+        JsonNode delivery = Defs(schema, workspace["properties"]!["delivery"]!);
+        Assert.Equal(new[] { "None", "Bearer", "ApiKey", "Basic", "OAuth2ClientCredentials" }, Values(delivery["properties"]!["authMode"]!));
+        Assert.Equal(new[] { "POST", "PUT", "PATCH" }, Values(delivery["properties"]!["method"]!));
+        Assert.Equal(new[] { "None", "Bearer", "ApiKey", "Basic", "OAuth2ClientCredentials" },
+            Values(Defs(schema, queue["properties"]!["delivery"]!)["properties"]!["authMode"]!));
+
+        // idempotent er mottakerens løfte om duplikater, ikke deduplisering av publiseringer (review 2026-10-05).
+        Assert.Contains("handles the same event twice", queue["properties"]!["idempotent"]!["description"]!.GetValue<string>());
+        Assert.DoesNotContain("idempotency key", schema.ToJsonString());
 
         // Strengt som parseren: et felt med skrivefeil er en feil, ikke noe som ignoreres.
         Assert.False(queue["additionalProperties"]!.GetValue<bool>());
@@ -86,7 +116,23 @@ public class DeploymentSchemaTests
         [(typeof(RetryBackoff), nameof(RetryBackoff.Jitter))] = RetryBackoff.JitterValues,
         [(typeof(DeliveryFilter), nameof(DeliveryFilter.Match))] = DeliveryFilter.MatchValues,
         [(typeof(DeliveryFilterCondition), nameof(DeliveryFilterCondition.Op))] = DeliveryFilterCondition.OpValues,
+        [(typeof(DeploymentIngress), nameof(DeploymentIngress.AuthMode))] = DeploymentIngress.AuthModeValues,
+        [(typeof(ContextSource), nameof(ContextSource.From))] = ContextSource.FromValues,
+        [(typeof(WorkspaceDelivery), nameof(WorkspaceDelivery.AuthMode))] = WorkspaceDelivery.AuthModeValues,
+        [(typeof(WorkspaceDelivery), nameof(WorkspaceDelivery.Method))] = WorkspaceDelivery.MethodValues,
+        [(typeof(QueueDelivery), nameof(QueueDelivery.AuthMode))] = WorkspaceDelivery.AuthModeValues,
     };
+
+    /// <summary>
+    /// A source needs its name, and a name that names something needs its <c>from</c> (2026-10-05): the same rules as
+    /// <c>ContextSource.Validate</c>. An empty name removes the source, so it needs no <c>from</c>.
+    /// </summary>
+    private static void SourceRules(JsonObject source)
+    {
+        source["required"] = new JsonArray("name");
+        source["if"] = new JsonObject { ["properties"] = new JsonObject { ["name"] = new JsonObject { ["minLength"] = 1 } } };
+        source["then"] = new JsonObject { ["required"] = new JsonArray("from") };
+    }
 
     private static string Generate()
     {
@@ -109,6 +155,9 @@ public class DeploymentSchemaTests
                 // Uten null blir typene enkle, og enum-listene gjelder uten unntak.
                 if (obj["type"] is JsonArray types && types.Count == 2 && types.Any(t => t?.GetValue<string>() == "null"))
                     obj["type"] = types.First(t => t?.GetValue<string>() != "null")!.GetValue<string>();
+
+                if (context.TypeInfo.Type == typeof(ContextSource) && obj.ContainsKey("properties"))
+                    SourceRules(obj);
 
                 if (context.PropertyInfo is { } property && property.AttributeProvider is MemberInfo member)
                 {

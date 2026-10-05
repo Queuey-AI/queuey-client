@@ -1,3 +1,7 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
 namespace Queuey.Client.Waas;
 
 /// <summary>
@@ -18,6 +22,9 @@ namespace Queuey.Client.Waas;
 /// </remarks>
 public sealed class DeploymentIngress
 {
+    /// <summary>The values <see cref="AuthMode"/> accepts, in any casing.</summary>
+    public static readonly IReadOnlyList<string> AuthModeValues = new[] { "None", "ApiKey", "SignedRequest", "ApiKeyAndSignedRequest" };
+
     /// <summary>
     /// What the ingress edge demands of a publisher: <c>None</c>, <c>ApiKey</c>,
     /// <c>SignedRequest</c> or <c>ApiKeyAndSignedRequest</c>.
@@ -42,28 +49,76 @@ public sealed class DeploymentIngress
     public int? SuccessStatusCode { get; set; }
 
     internal bool IsEmpty => AuthMode is null && EventType is null && GroupKey is null && SuccessStatusCode is null;
+
+    /// <summary>
+    /// Refuses what Queuey would refuse, or quietly read another way, before anything is sent.
+    /// <paramref name="where"/> is the declaration's path in the file, e.g. <c>queues.orders.ingress</c>.
+    /// </summary>
+    internal void Validate(string where)
+    {
+        if (AuthMode is not null && !AuthModeValues.Contains(AuthMode.Trim(), StringComparer.OrdinalIgnoreCase))
+            throw new QueueyConfigurationException(
+                $"{where}.authMode must be one of {string.Join(", ", AuthModeValues)}; got '{AuthMode}'.");
+
+        EventType?.Validate($"{where}.eventType");
+        GroupKey?.Validate($"{where}.groupKey");
+    }
 }
 
-/// <summary>Where one context value is read from.</summary>
+/// <summary>
+/// Where one context value is read from. <c>name</c> is required, and an empty name removes the source;
+/// <c>from</c> is required whenever the name names something.
+/// </summary>
 public sealed class ContextSource
 {
+    /// <summary>The values <see cref="From"/> accepts, in any casing.</summary>
+    public static readonly IReadOnlyList<string> FromValues = new[] { "header", "query", "body" };
+
     /// <summary>Creates an empty source (for deserialization).</summary>
     public ContextSource() { }
 
     /// <summary>Creates a source.</summary>
-    public ContextSource(string from, string name)
+    public ContextSource(string? from, string? name)
     {
         From = from;
         Name = name;
     }
 
     /// <summary>
-    /// <c>header</c>, <c>query</c>, or <c>body</c> — the top level of the JSON you post.
+    /// Where the value is read: <c>header</c>, <c>query</c>, or <c>body</c>, the top level of the JSON you post.
+    /// Required whenever <c>name</c> is not empty.
     /// </summary>
-    public string From { get; set; } = "header";
+    // Før 2026-10-05 var from «header» og name tom når fila ikke skrev dem. {"from":"body"} ble da sendt som et tomt navn
+    // og fjernet kilden som var lagret, og {"name":"type"} betydde header uten at fila sa det.
+    public string? From { get; set; }
 
-    /// <summary>The header, query parameter, or field name. Empty clears the source.</summary>
-    public string Name { get; set; } = string.Empty;
+    /// <summary>
+    /// The header, query parameter, or body field to read. Required: <c>""</c> removes the source, so the
+    /// value is no longer read from anywhere.
+    /// </summary>
+    public string? Name { get; set; }
+
+    /// <summary>True when the declaration removes the source rather than setting one.</summary>
+    internal bool Clears => Name is not null && Name.Trim().Length == 0;
+
+    /// <summary>Refuses a source Queuey would read another way than the file says, before anything is sent.</summary>
+    internal void Validate(string where)
+    {
+        if (Name is null)
+            throw new QueueyConfigurationException(
+                $"{where} needs a name: the header, query parameter or body field to read. To remove the source, write \"name\": \"\".");
+
+        if (Clears)
+            return;
+
+        if (From is null)
+            throw new QueueyConfigurationException(
+                $"{where} needs \"from\": {string.Join(", ", FromValues)}, the place '{Name}' is read from.");
+
+        if (!FromValues.Contains(From.Trim(), StringComparer.OrdinalIgnoreCase))
+            throw new QueueyConfigurationException(
+                $"{where}.from must be one of {string.Join(", ", FromValues)}; got '{From}'.");
+    }
 }
 
 // ── wire ──────────────────────────────────────────────────────────────────────

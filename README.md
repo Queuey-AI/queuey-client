@@ -379,7 +379,9 @@ policy for exactly this reason.
 **Where the type can come from.** `from` is `header`, `query`, or `body` — the top level of the JSON
 you post. A Stripe-style sender that puts the type in the body needs no header at all; one that sends
 `?event=order.created` uses `query`. Set it per queue instead of per workspace when one producer
-speaks differently from the rest.
+speaks differently from the rest. A source needs its `name`, and its `from` whenever the name is not
+empty: `{ "name": "" }` removes the source, and a source that leaves out either is refused before
+anything is sent, rather than read as a header or as a removal.
 
 **Retention is capped by your plan.** Declaring more days than the plan allows fails the apply with
 `retention_cap_exceeded` rather than being silently clamped — a shorter window is always accepted.
@@ -477,10 +479,11 @@ events. A deploy key can.
 ### The schema
 
 `queuey schema` prints the JSON Schema for the deployment file: every field, the values it accepts
-and what it does. Point `$schema` at it and your editor validates the file as you type:
+and what it does. Its `$id` is the copy published with that release, at its tag, so it describes the
+fields the CLI you run accepts. Point `$schema` at it and your editor validates the file as you type:
 
 ```jsonc
-{ "$schema": "https://raw.githubusercontent.com/Queuey-AI/queuey-client/main/schema/queuey.deploy.schema.json" }
+{ "$schema": "https://raw.githubusercontent.com/Queuey-AI/queuey-client/v<version>/schema/queuey.deploy.schema.json" }
 ```
 
 ### One file, every environment

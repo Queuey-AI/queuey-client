@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://raw.githubusercontent.com/Queuey-AI/queuey-client/main/schema/queuey.deploy.schema.json",
+  "$id": "https://raw.githubusercontent.com/Queuey-AI/queuey-client/v0.1.0-preview.8/schema/queuey.deploy.schema.json",
   "title": "queuey.deploy.json",
   "description": "A declarative deployment file — queuey.deploy.json by default. Describes the workspace's delivery defaults and each queue's behaviour and destination, so a deploy converges Queuey from something reviewable in a pull request.",
   "type": "object",
@@ -40,7 +40,7 @@
           "pattern": "^-?(?:0|[1-9]\\d*)$"
         },
         "idempotent": {
-          "description": "Whether duplicate publishes are collapsed by idempotency key.",
+          "description": "Whether the receiver handles the same event twice safely. Then Queuey sends an event again after a timeout or a conflict (409, 412, 423 or 428). Otherwise a timeout holds the queue until a person resumes it, and a conflict stops the event. It does not deduplicate publishes.",
           "type": "boolean"
         },
         "maxAttempts": {
@@ -104,7 +104,14 @@
             },
             "authMode": {
               "description": "Outbound auth mode: None, Bearer, ApiKey, Basic or OAuth2ClientCredentials.",
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "None",
+                "Bearer",
+                "ApiKey",
+                "Basic",
+                "OAuth2ClientCredentials"
+              ]
             },
             "credentialRef": {
               "description": "The name of a stored credential to authenticate with. Never the secret itself.",
@@ -116,7 +123,12 @@
             },
             "method": {
               "description": "HTTP method: POST, PUT or PATCH.",
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "POST",
+                "PUT",
+                "PATCH"
+              ]
             },
             "timeoutMs": {
               "description": "Per-request timeout in milliseconds.",
@@ -180,37 +192,83 @@
           "properties": {
             "authMode": {
               "description": "What the ingress edge demands of a publisher: None, ApiKey, SignedRequest or ApiKeyAndSignedRequest.",
-              "type": "string"
+              "type": "string",
+              "enum": [
+                "None",
+                "ApiKey",
+                "SignedRequest",
+                "ApiKeyAndSignedRequest"
+              ]
             },
             "eventType": {
               "description": "Where the event type is read from. Null leaves it as it is.",
               "type": "object",
               "properties": {
                 "from": {
-                  "description": "header, query, or body — the top level of the JSON you post.",
-                  "type": "string"
+                  "description": "Where the value is read: header, query, or body, the top level of the JSON you post. Required whenever name is not empty.",
+                  "type": "string",
+                  "enum": [
+                    "header",
+                    "query",
+                    "body"
+                  ]
                 },
                 "name": {
-                  "description": "The header, query parameter, or field name. Empty clears the source.",
+                  "description": "The header, query parameter, or body field to read. Required: \"\" removes the source, so the value is no longer read from anywhere.",
                   "type": "string"
                 }
               },
-              "additionalProperties": false
+              "additionalProperties": false,
+              "required": [
+                "name"
+              ],
+              "if": {
+                "properties": {
+                  "name": {
+                    "minLength": 1
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "from"
+                ]
+              }
             },
             "groupKey": {
               "description": "Where the group key is read from — and, by declaring it, what to lane on.",
               "type": "object",
               "properties": {
                 "from": {
-                  "description": "header, query, or body — the top level of the JSON you post.",
-                  "type": "string"
+                  "description": "Where the value is read: header, query, or body, the top level of the JSON you post. Required whenever name is not empty.",
+                  "type": "string",
+                  "enum": [
+                    "header",
+                    "query",
+                    "body"
+                  ]
                 },
                 "name": {
-                  "description": "The header, query parameter, or field name. Empty clears the source.",
+                  "description": "The header, query parameter, or body field to read. Required: \"\" removes the source, so the value is no longer read from anywhere.",
                   "type": "string"
                 }
               },
-              "additionalProperties": false
+              "additionalProperties": false,
+              "required": [
+                "name"
+              ],
+              "if": {
+                "properties": {
+                  "name": {
+                    "minLength": 1
+                  }
+                }
+              },
+              "then": {
+                "required": [
+                  "from"
+                ]
+              }
             },
             "successStatusCode": {
               "description": "The status the ingress returns on accept. Default 202. Some senders are stricter than the HTTP spec and treat anything but 200 as a failed webhook, so those queues set 200.",
@@ -364,7 +422,7 @@
             "pattern": "^-?(?:0|[1-9]\\d*)$"
           },
           "idempotent": {
-            "description": "Whether duplicate publishes are collapsed by idempotency key.",
+            "description": "Whether the receiver handles the same event twice safely. Then Queuey sends an event again after a timeout or a conflict (409, 412, 423 or 428). Otherwise a timeout holds the queue until a person resumes it, and a conflict stops the event. It does not deduplicate publishes.",
             "type": "boolean"
           },
           "delivery": {
@@ -381,7 +439,14 @@
               },
               "authMode": {
                 "description": "Outbound auth mode for this queue only. Null inherits the workspace.",
-                "type": "string"
+                "type": "string",
+                "enum": [
+                  "None",
+                  "Bearer",
+                  "ApiKey",
+                  "Basic",
+                  "OAuth2ClientCredentials"
+                ]
               },
               "credentialRef": {
                 "description": "The name of a stored credential. Never the secret itself.",
@@ -453,7 +518,13 @@
             "properties": {
               "authMode": {
                 "description": "What the ingress edge demands of a publisher: None, ApiKey, SignedRequest or ApiKeyAndSignedRequest.",
-                "type": "string"
+                "type": "string",
+                "enum": [
+                  "None",
+                  "ApiKey",
+                  "SignedRequest",
+                  "ApiKeyAndSignedRequest"
+                ]
               },
               "eventType": {
                 "description": "Where the event type is read from. Null leaves it as it is.",

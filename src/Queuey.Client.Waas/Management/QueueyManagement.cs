@@ -173,8 +173,14 @@ internal sealed class QueueyManagement : IQueueyManagement
             : _controlPlane.PatchTenantIngressAsync(publicId, request, cancellationToken);
     }
 
+    // Et tomt navn fjerner kilden, og da leser backenden ikke from. Feltet står likevel i ContextSourceRequest(From, Name),
+    // så det sendes som header når fila ikke har skrevet det.
     private static ContextSourceWire? ToWire(ContextSource? s)
-        => s is null ? null : new ContextSourceWire { From = s.From, Name = s.Name };
+        => s is null ? null : new ContextSourceWire
+        {
+            From = s.From?.Trim() is { Length: > 0 } from ? from : "header",
+            Name = s.Name ?? string.Empty,
+        };
 
     private static CredentialResult ToResult(CredentialWireResponse r)
         => new() { PublicId = r.PublicId, Name = r.Name, Type = r.Type, KeyId = r.KeyId };

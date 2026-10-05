@@ -164,11 +164,23 @@ public static class DeploymentDrift
     {
         if (want is null) return;
 
-        string declared = $"{want.From}:{want.Name}";
-        string? actual = have is null ? null : $"{have.From}:{have.Name}";
+        string? actual = have is null || string.IsNullOrWhiteSpace(have.Name) ? null : $"{Word(have.From)}:{have.Name!.Trim()}";
+
+        // Et tomt navn fjerner kilden: i synk når Queuey ikke leser verdien noe sted (2026-10-05). Før ble
+        // "header:" sammenlignet med ingenting, og fila meldte drift for alltid.
+        if (want.Clears)
+        {
+            if (actual is not null) drift.Add(new DriftItem(path, "(removed)", actual));
+            return;
+        }
+
+        string declared = $"{Word(want.From)}:{want.Name?.Trim()}";
         if (string.Equals(declared, actual, StringComparison.Ordinal)) return;
 
         drift.Add(new DriftItem(path, declared, actual));
+
+        // Queuey skriver kilden med små bokstaver; fila kan skrive Body.
+        static string? Word(string? from) => from?.Trim().ToLowerInvariant();
     }
 
     /// <summary>A field the file does not declare is never drift — see the type's remarks.</summary>
