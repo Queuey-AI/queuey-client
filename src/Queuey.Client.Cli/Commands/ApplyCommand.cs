@@ -47,7 +47,7 @@ internal static class ApplyCommand
             DeploymentFile expanded = file.Expand();
             IReadOnlyList<DeploymentQueuePlan> plans = expanded.Resolve();
             if (map.Has("json"))
-                Console.WriteLine(JsonSerializer.Serialize(ToJsonPlans(expanded, plans), CliHost.JsonOut));
+                Console.WriteLine(JsonSerializer.Serialize(ToJsonDryRun(expanded, plans), CliHost.JsonOut));
             else
                 WritePlan(path, file, plans);
             return ExitCodes.Success;
@@ -258,23 +258,31 @@ internal static class ApplyCommand
         => e is null ? "failed" : $"{(e.StatusCode?.ToString() ?? "error")} {e.ErrorCode} {e.Message}".Replace("  ", " ").Trim();
 
     /// <summary>
-    /// The dry run as JSON: one entry per queue, and the workspace last when the file declares one. Every
-    /// entry says what it is in <c>target</c>, in the words <c>queuey plan</c> uses.
+    /// The version of <c>apply --dry-run --json</c>'s shape. 1 was the bare array of queues that
+    /// 0.1.0-preview.8 printed; 2 is the object with the workspace and the queues. A script that reads
+    /// it checks this first.
     /// </summary>
-    private static IEnumerable<object> ToJsonPlans(DeploymentFile file, IReadOnlyList<DeploymentQueuePlan> plans)
+    internal const int DryRunJsonSchemaVersion = 2;
+
+    /// <summary>
+    /// The dry run as JSON: <c>{ schemaVersion, workspace, queues }</c>. The workspace is null when the
+    /// file declares none; each queue carries the notes the dry run has about it.
+    /// </summary>
+    private static object ToJsonDryRun(DeploymentFile file, IReadOnlyList<DeploymentQueuePlan> plans)
     {
-        // Lista var bare køer, så en ventetid over taket på workspacet hadde ingen plass i JSON (re-review 2026-10-05).
-        // Workspacet kommer sist, så den som leser den første køen som [0], fortsatt treffer en kø.
-        foreach (DeploymentQueuePlan plan in plans)
-            yield return ToJsonPlan(plan);
-        if (file.Workspace is { } w)
-            yield return ToJsonWorkspace(w);
+        // Lista var bare køer, så en ventetid over taket på workspacet hadde ingen plass (re-review 2026-10-05).
+        // Kenneth valgte et versjonert objekt (2026-10-05) framfor å legge workspacet inn i lista: nøklene sier hva
+        // hver del er, og et skript som leste lista, feiler tydelig i stedet for å lese workspacet som en kø.
+        return new
+        {
+            schemaVersion = DryRunJsonSchemaVersion,
+            workspace = file.Workspace is { } w ? ToJsonWorkspace(w) : null,
+            queues = plans.Select(ToJsonPlan).ToArray(),
+        };
     }
 
     private static object ToJsonWorkspace(DeploymentWorkspace w) => new
     {
-        target = "workspace",
-        name = (string?)null,
         policy = new
         {
             w.Ordering,
@@ -290,7 +298,6 @@ internal static class ApplyCommand
 
     private static object ToJsonPlan(DeploymentQueuePlan p) => new
     {
-        target = $"queues.{p.Definition.Name}",
         p.Definition.Name,
         // null: leave it, and a queue this file creates delivers when it has a destination.
         mode = p.Mode?.ToFileText(),

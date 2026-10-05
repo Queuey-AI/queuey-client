@@ -325,6 +325,21 @@ its own rather than an `apply` flag, so a CLI too old to know it answers "Unknow
 running the apply you meant to plan. For the same reason every command rejects an option it does not
 take — a typo like `--paln` fails with exit 2 and the options that command accepts.
 
+`queuey apply --dry-run --json` prints what the file declares, checked locally, for a script or an
+agent to read:
+
+```json
+{
+  "schemaVersion": 2,
+  "workspace": { "policy": { … }, "delivery": { … }, "ingress": null, "notes": [] },
+  "queues": [ { "name": "orders", "mode": "deliver", "policy": { … }, "delivery": null, "ingress": null, "notes": [] } ]
+}
+```
+
+`workspace` is null when the file declares none, and `notes` says what a dry run can tell without
+asking Queuey, such as a wait above its ceiling. Check `schemaVersion` first: version 1, a bare array of
+queues, is what 0.1.0-preview.8 printed.
+
 A relative `url` appends to the workspace base, so moving hosts is one edit instead of N. An absolute
 URL overrides outright. A queue with no `delivery` block inherits — the shape to reach for.
 

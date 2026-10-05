@@ -71,7 +71,16 @@ public sealed class DeployCommandTests : IDisposable
         CliRun run = await CliHarness.RunAsync(() => ApplyCommand.RunAsync(new[] { "--file", path, "--dry-run", "--json" }));
 
         Assert.Equal(ExitCodes.Success, run.Exit);
-        JsonElement plan = JsonDocument.Parse(run.Stdout).RootElement[0];
+        JsonElement root = JsonDocument.Parse(run.Stdout).RootElement;
+
+        // Versjon 2 (Kenneth, 2026-10-05): et objekt med workspacet og køene. Versjon 1 var lista fra preview.8.
+        Assert.Equal(new[] { "schemaVersion", "workspace", "queues" }, root.EnumerateObject().Select(p => p.Name).ToArray());
+        Assert.Equal(2, root.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("workspace").ValueKind);   // fila har ikke noe workspace
+
+        JsonElement plan = Assert.Single(root.GetProperty("queues").EnumerateArray());
+        Assert.Equal(new[] { "name", "mode", "policy", "delivery", "ingress", "notes" }, plan.EnumerateObject().Select(p => p.Name).ToArray());
+        Assert.Equal("orders", plan.GetProperty("name").GetString());
         Assert.Equal("logOnly", plan.GetProperty("mode").GetString());
         Assert.Equal("any", plan.GetProperty("policy").GetProperty("filter").GetProperty("match").GetString());
     }
@@ -257,14 +266,18 @@ public sealed class DeployCommandTests : IDisposable
 
         CliRun json = await CliHarness.RunAsync(() => ApplyCommand.RunAsync(new[] { "--file", path, "--dry-run", "--json" }));
 
-        // Køene først, i fila sin rekkefølge, og workspacet sist (re-review 2026-10-05: det manglet), alle med target.
-        JsonElement[] entries = JsonDocument.Parse(json.Stdout).RootElement.EnumerateArray().ToArray();
-        Assert.Equal(new[] { "queues.orders", "queues.audit", "workspace" }, entries.Select(e => e.GetProperty("target").GetString()).ToArray());
-        Assert.Contains("apply refuses it unless that wait is already in place", Assert.Single(entries[0].GetProperty("notes").EnumerateArray()).GetString());
-        Assert.Empty(entries[1].GetProperty("notes").EnumerateArray());
-        Assert.Equal(JsonValueKind.Null, entries[2].GetProperty("name").ValueKind);
-        Assert.Equal(172800000, entries[2].GetProperty("policy").GetProperty("backoff").GetProperty("maxDelayMs").GetInt32());
-        Assert.StartsWith("backoff.maxDelayMs=172800000 is above the 86400000 (24 hours)", Assert.Single(entries[2].GetProperty("notes").EnumerateArray()).GetString());
+        // Merknaden om workspacet har sin egen plass (re-review 2026-10-05: det manglet), og køene står i fila sin
+        // rekkefølge.
+        JsonElement root = JsonDocument.Parse(json.Stdout).RootElement;
+        JsonElement[] queues = root.GetProperty("queues").EnumerateArray().ToArray();
+        Assert.Equal(new[] { "orders", "audit" }, queues.Select(q => q.GetProperty("name").GetString()).ToArray());
+        Assert.Contains("apply refuses it unless that wait is already in place", Assert.Single(queues[0].GetProperty("notes").EnumerateArray()).GetString());
+        Assert.Empty(queues[1].GetProperty("notes").EnumerateArray());
+
+        JsonElement workspace = root.GetProperty("workspace");
+        Assert.Equal(new[] { "policy", "delivery", "ingress", "notes" }, workspace.EnumerateObject().Select(p => p.Name).ToArray());
+        Assert.Equal(172800000, workspace.GetProperty("policy").GetProperty("backoff").GetProperty("maxDelayMs").GetInt32());
+        Assert.StartsWith("backoff.maxDelayMs=172800000 is above the 86400000 (24 hours)", Assert.Single(workspace.GetProperty("notes").EnumerateArray()).GetString());
     }
 
     [Fact]
