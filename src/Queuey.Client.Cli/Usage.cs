@@ -96,6 +96,10 @@ APPLY
                  delivery.url or workspace.delivery.baseUrl) and logs events until it has one.
                  Declare ""mode"": ""deliver"" or ""logOnly"" to own it; an existing queue keeps its
                  mode otherwise. Pausing is an operator's lever: a deploy never resumes a queue.
+                 workspace.environment (dev, test, staging or prod; a workspace without one
+                 counts as prod) is written first. A key may raise it towards prod, but only a
+                 person lowers it: Queuey refuses a key that would, apply stops before it has
+                 written anything else, and the error says what a person does instead.
                  Backoff (the wait between attempts: at most an hour at first and a day at
                  most, unless a longer wait is already in place) and a delivery filter are
                  declared per workspace or queue. The number of attempts is not a setting:
@@ -169,9 +173,9 @@ PULL
                  diff first. A filter condition Queuey stored before it checked it is written
                  as it is, with a warning on stderr: apply refuses the file until it is fixed.
                  --as <env> rewrites the values that do not travel between workspaces (the
-                 workspace binding, the base URL, absolute queue URLs) into ${VAR} references,
-                 so one file converges every environment. Paths and credential names travel
-                 as they are.
+                 workspace binding, its environment, the base URL, absolute queue URLs) into
+                 ${VAR} references, so one file converges every environment. Paths and
+                 credential names travel as they are.
                  --emit-code writes [QueueyQueue] declarations for the pulled queues —
                  behaviour only; destinations stay in the deployment file.
 

@@ -100,6 +100,8 @@ public static class DeploymentDrift
         if (want is null) return;
         DeploymentWorkspace actual = have ?? new DeploymentWorkspace();
 
+        // Queuey lagrer merket med små bokstaver; fila kan skrive Prod.
+        Compare("workspace.environment", want.EnvironmentToSend, actual.Environment, drift);
         Compare("workspace.ordering", want.Ordering, actual.Ordering, drift);
         Compare("workspace.dlqEnabled", want.DlqEnabled, actual.DlqEnabled, drift);
         Compare("workspace.retentionDays", want.RetentionDays, actual.RetentionDays, drift);

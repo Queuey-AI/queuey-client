@@ -337,15 +337,16 @@ agent to read:
 ```json
 {
   "schemaVersion": 2,
-  "workspace": { "policy": { … }, "delivery": { … }, "ingress": null, "notes": [] },
+  "workspace": { "environment": "staging", "policy": { … }, "delivery": { … }, "ingress": null, "notes": [] },
   "queues": [ { "name": "orders", "mode": "deliver", "policy": { … }, "delivery": null, "ingress": null, "notes": [] } ]
 }
 ```
 
 `workspace` is null when the file declares none, and `notes` says what a dry run can tell without
 asking Queuey, such as a wait above its ceiling. Each declaration carries every field the file can set
-on the workspace or the queue, in the file's words, grouped as Queuey's config reads them back:
-behaviour under `policy`, then `delivery` and `ingress` (where `eventType` is `{ "from", "name" }`). A
+on the workspace or the queue, in the file's words, grouped as Queuey's config reads them back: the
+workspace's `environment`, behaviour under `policy`, then `delivery` and `ingress` (where `eventType` is
+`{ "from", "name" }`). A
 field the file leaves out is null, and a `${VAR}` is shown as written, not expanded. Check
 `schemaVersion` first: version 1, a bare array of queues, is what 0.1.0-preview.8 printed.
 
@@ -361,6 +362,9 @@ queues that own nothing but their own path:
 ```jsonc
 {
   "workspace": {
+    // What this workspace is: dev, test, staging or prod. Without it, Queuey treats it as prod.
+    "environment": "staging",
+
     // Behaviour every queue inherits unless it says otherwise.
     "ordering": "bykey",          // lane by the group key below — order per customer, parallel across
     "retentionDays": 30,
@@ -417,6 +421,14 @@ you post. A Stripe-style sender that puts the type in the body needs no header a
 speaks differently from the rest. A source needs its `name`, and its `from` whenever the name is not
 empty: `{ "name": "" }` removes the source, and a source that leaves out either is refused before
 anything is sent, rather than read as a header or as a removal.
+
+**Only a person lowers the environment.** `environment` is `dev`, `test`, `staging` or `prod`, lowest
+first, and a workspace without one counts as `prod`. `apply` writes it before anything else. A key may
+raise it towards `prod`, but a file that names a lower environment than the workspace has, including
+anything but `prod` on a workspace that has none, is refused with `environment_lowering_needs_a_person`
+before anything else is written, and the error says where a person changes it in the Queuey console.
+A file applied to several workspaces takes it from a variable: `"environment": "${QUEUEY_WORKSPACE_ENVIRONMENT}"`,
+which `pull --as` writes for you.
 
 **Retention is capped by your plan.** Declaring more days than the plan allows fails the apply with
 `retention_cap_exceeded` rather than being silently clamped — a shorter window is always accepted.

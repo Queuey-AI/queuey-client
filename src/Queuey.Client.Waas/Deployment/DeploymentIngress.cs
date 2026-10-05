@@ -137,6 +137,12 @@ internal sealed class ContextSourceWire
     public string Name { get; set; } = default!;
 }
 
+/// <summary>Wire shape of <c>PATCH /tenants/{ten}</c>: the workspace itself. Null leaves a field alone.</summary>
+internal sealed class PatchWorkspaceWireRequest
+{
+    public string? Environment { get; set; }
+}
+
 internal sealed class PatchTenantPolicyWireRequest
 {
     public string? Ordering { get; set; }

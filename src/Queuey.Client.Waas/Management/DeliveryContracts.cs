@@ -193,6 +193,9 @@ internal sealed class TenantConfigResponse
     public TenantDeliveryResponse? Delivery { get; set; }
     public QueuePolicyResponse? Policy { get; set; }
     public IngressResponse? Ingress { get; set; }
+
+    // Miljø-merket (Queuey F2.2): null når workspacet ikke har noe, eller når API-et er eldre enn merket.
+    public string? Environment { get; set; }
 }
 
 /// <summary>Wire shape of <c>GET /queues/{que}/config</c>: effective values plus per-section inherit flags.</summary>

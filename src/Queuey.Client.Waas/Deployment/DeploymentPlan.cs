@@ -34,7 +34,9 @@ public sealed class DeploymentPlanStep
     /// <summary><c>workspace</c>, or <c>queues.&lt;name&gt;</c>.</summary>
     public string Target { get; init; } = default!;
 
-    /// <summary>What the write touches: <c>queue</c>, <c>ingress</c>, <c>policy</c>, <c>delivery</c> or <c>mode</c>.</summary>
+    /// <summary>
+    /// What the write touches: <c>environment</c>, <c>queue</c>, <c>ingress</c>, <c>policy</c>, <c>delivery</c> or <c>mode</c>.
+    /// </summary>
     public string Aspect { get; init; } = default!;
 
     /// <summary>True when the write would create the queue.</summary>
@@ -197,12 +199,16 @@ internal sealed class DeploymentPlanner
         return new DeploymentPlan { Tenant = tenant, Steps = steps };
     }
 
-    /// <summary>The workspace's writes, in the order apply sends them: ingress, policy, delivery.</summary>
+    /// <summary>The workspace's writes, in the order apply sends them: environment, ingress, policy, delivery.</summary>
     private static List<PlannedWrite> WorkspaceWrites(DeploymentWorkspace? workspace, ResolvedDeliveries deliveries, string tenant)
     {
         var writes = new List<PlannedWrite>();
         if (workspace is null)
             return writes;
+
+        // Planen spør om miljø-merket som apply sender det, så en senking en nøkkel ikke får gjøre, står som avslag her.
+        if (workspace.EnvironmentToSend is { } environment)
+            writes.Add(new PlannedWrite("workspace", "environment", Patch, QueueyManagement.WireOfEnvironment(environment), new[] { "tenants", tenant }));
 
         if (workspace.Ingress is { IsEmpty: false } ingress)
             writes.Add(new PlannedWrite("workspace", "ingress", Patch, QueueyManagement.WireOf(ingress), new[] { "tenants", tenant, "ingress" }));

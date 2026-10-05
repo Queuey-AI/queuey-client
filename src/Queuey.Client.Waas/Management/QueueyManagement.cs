@@ -160,6 +160,20 @@ internal sealed class QueueyManagement : IQueueyManagement
         Backoff = RetryBackoffWire.From(policy.Backoff),
     };
 
+    public Task SetWorkspaceEnvironmentAsync(string tenantPublicId, string environment, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(tenantPublicId)) throw new ArgumentException("A tenant public id is required.", nameof(tenantPublicId));
+        if (string.IsNullOrWhiteSpace(environment)) throw new ArgumentException("An environment is required.", nameof(environment));
+
+        return _controlPlane.PatchTenantAsync(tenantPublicId, WireOfEnvironment(environment), cancellationToken);
+    }
+
+    // Samme body for apply og for planen (?dryRun=true), og med små bokstaver, slik Queuey lagrer merket.
+    internal static PatchWorkspaceWireRequest WireOfEnvironment(string environment) => new()
+    {
+        Environment = environment.Trim().ToLowerInvariant(),
+    };
+
     public Task SetIngressAsync(string publicId, bool isQueue, DeploymentIngress ingress, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(publicId)) throw new ArgumentException("A public id is required.", nameof(publicId));

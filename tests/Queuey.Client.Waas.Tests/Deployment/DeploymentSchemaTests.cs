@@ -86,6 +86,15 @@ public class DeploymentSchemaTests
         Assert.Equal(new[] { "None", "Bearer", "ApiKey", "Basic", "OAuth2ClientCredentials" },
             Values(Defs(schema, queue["properties"]!["delivery"]!)["properties"]!["authMode"]!));
 
+        // Miljø-merket er en av de fire, eller en ${VAR} som skiller workspacene en fil brukes mot (Queuey F2.2, 2026-10-05).
+        JsonNode environment = workspace["properties"]!["environment"]!;
+        Assert.Equal(new[] { "dev", "test", "staging", "prod" }, Values(environment["anyOf"]![0]!));
+        var variable = new Regex(environment["anyOf"]![1]!["pattern"]!.GetValue<string>());
+        Assert.Matches(variable, "${QUEUEY_WORKSPACE_ENVIRONMENT}");
+        Assert.Matches(variable, "${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}");
+        Assert.DoesNotMatch(variable, "production");
+        Assert.Contains("only a person lowers it", environment["description"]!.GetValue<string>());
+
         // idempotent er mottakerens løfte om duplikater, ikke deduplisering av publiseringer (review 2026-10-05).
         Assert.Contains("handles the same event twice", queue["properties"]!["idempotent"]!["description"]!.GetValue<string>());
         Assert.DoesNotContain("idempotency key", schema.ToJsonString());
@@ -126,6 +135,16 @@ public class DeploymentSchemaTests
         [(typeof(WorkspaceDelivery), nameof(WorkspaceDelivery.Method))] = WorkspaceDelivery.MethodValues,
         [(typeof(QueueDelivery), nameof(QueueDelivery.AuthMode))] = WorkspaceDelivery.AuthModeValues,
     };
+
+    // Felt som tar en av de lukkede verdiene eller en ${VAR} som utvides før apply: miljø-merket (Queuey F2.2, 2026-10-05), som
+    // skiller workspacene en fil brukes mot. Valideringen sjekker verdien når variabelen er utvidet.
+    private static readonly Dictionary<(Type, string), IReadOnlyList<string>> ClosedValuesOrVariable = new()
+    {
+        [(typeof(DeploymentWorkspace), nameof(DeploymentWorkspace.Environment))] = DeploymentWorkspace.EnvironmentValues,
+    };
+
+    /// <summary>A <c>${VAR}</c> or <c>${VAR:-default}</c> anywhere in the value, as DeploymentVariables expands it.</summary>
+    internal const string VariablePattern = @"\$\{[A-Za-z_][A-Za-z0-9_]*(:-[^}]*)?\}";
 
     // Felt som må stå når typen er deklarert: de samme som valideringen krever (DeliveryFilter.Validate).
     private static readonly Dictionary<Type, string[]> RequiredWhenDeclared = new()
@@ -181,6 +200,13 @@ public class DeploymentSchemaTests
                     {
                         var list = new JsonArray(values.Select(v => (JsonNode?)JsonValue.Create(v)).ToArray());
                         obj["enum"] = list;
+                    }
+
+                    if (ClosedValuesOrVariable.TryGetValue((member.DeclaringType!, member.Name), out IReadOnlyList<string>? orVariable))
+                    {
+                        obj["anyOf"] = new JsonArray(
+                            new JsonObject { ["enum"] = new JsonArray(orVariable.Select(v => (JsonNode?)JsonValue.Create(v)).ToArray()) },
+                            new JsonObject { ["pattern"] = VariablePattern });
                     }
                 }
                 else if (context.PropertyInfo is null && context.TypeInfo.Type is { IsClass: true } type

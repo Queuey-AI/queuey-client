@@ -12,9 +12,10 @@ namespace Queuey.Client.Waas;
 /// <remarks>
 /// Most of a pulled file is already portable, and that is the payoff of the thin-queue shape: a queue
 /// that owns only <c>/orders</c> says the same thing in staging and production. What does not travel
-/// is the workspace's host, the workspace binding itself, and any queue that overrides the host
-/// outright. Those three become variables; everything else is left exactly as pulled, because
-/// substituting more would be guessing at what the operator considers environment-specific.
+/// is the workspace's host, its environment, the workspace binding itself, and any queue that
+/// overrides the host outright. The binding is dropped and the rest become variables; everything else
+/// is left exactly as pulled, because substituting more would be guessing at what the operator
+/// considers environment-specific.
 /// <para>
 /// Credential names travel as they are — that they are names and not ids is precisely what makes them
 /// portable.
@@ -24,6 +25,12 @@ public static class DeploymentTemplate
 {
     /// <summary>The variable a templated workspace base URL refers to.</summary>
     public const string BaseUrlVariable = "QUEUEY_BASE_URL";
+
+    /// <summary>
+    /// The variable a templated workspace environment refers to. Not <c>QUEUEY_ENV</c>, which names the Queuey
+    /// deployment the CLI talks to.
+    /// </summary>
+    public const string EnvironmentVariable = "QUEUEY_WORKSPACE_ENVIRONMENT";
 
     /// <summary>
     /// Rewrites <paramref name="file"/> as a portable template. The workspace binding is dropped (a
@@ -46,6 +53,8 @@ public static class DeploymentTemplate
             Schema = file.Schema,
             Workspace = file.Workspace is null ? null : new DeploymentWorkspace
             {
+                // Miljø-merket er det som skiller miljøene (Queuey F2.2), så det blir en variabel som vertene.
+                Environment = string.IsNullOrWhiteSpace(file.Workspace.Environment) ? null : Reference(EnvironmentVariable),
                 // Behaviour and ingress travel untouched — a lane strategy and a "the type is in
                 // the body" rule mean the same thing in every environment.
                 Ordering = file.Workspace.Ordering,

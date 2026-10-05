@@ -53,6 +53,8 @@ internal sealed class DeploymentPuller
 
         var workspace = new DeploymentWorkspace
         {
+            // Miljø-merket som det er satt (Queuey F2.2), og ingenting uten: en fil som ikke nevner det, lar det stå.
+            Environment = config.Environment,
             // The workspace has nothing above it, so everything it resolves to IS its own — no
             // baseline to compare against, unlike a queue.
             Ordering = config.Policy?.Ordering,

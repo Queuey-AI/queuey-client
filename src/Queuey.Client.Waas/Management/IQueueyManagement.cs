@@ -38,6 +38,13 @@ public interface IQueueyManagement
     Task SetWorkspacePolicyAsync(string tenantPublicId, DeploymentWorkspace policy, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Sets the workspace's environment: <c>dev</c>, <c>test</c>, <c>staging</c> or <c>prod</c>. An API key may raise it
+    /// towards <c>prod</c>; lowering it needs a person, so Queuey refuses a key that would with 403
+    /// <c>environment_lowering_needs_a_person</c>. A workspace without one counts as <c>prod</c>.
+    /// </summary>
+    Task SetWorkspaceEnvironmentAsync(string tenantPublicId, string environment, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Patches how arriving events are read — ingress auth, and where the event type and group key
     /// come from. Set it on a workspace and every queue inherits; set it on a queue to override.
     /// </summary>
