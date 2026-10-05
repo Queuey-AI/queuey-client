@@ -27,7 +27,11 @@ public sealed class QueuePolicy
     /// <summary>How many days events are retained.</summary>
     public int? RetentionDays { get; set; }
 
-    /// <summary>Whether duplicate publishes are collapsed by idempotency key.</summary>
+    /// <summary>
+    /// Whether the receiver handles the same event twice safely. Then Queuey sends an event again after a timeout or a
+    /// conflict (409, 412, 423 or 428). Otherwise a timeout holds the queue until a person resumes it, and a conflict
+    /// stops the event. It does not deduplicate publishes.
+    /// </summary>
     public bool? Idempotent { get; set; }
 
     /// <summary>

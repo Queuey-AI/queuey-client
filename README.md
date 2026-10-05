@@ -413,7 +413,9 @@ policy for exactly this reason.
 **Where the type can come from.** `from` is `header`, `query`, or `body` — the top level of the JSON
 you post. A Stripe-style sender that puts the type in the body needs no header at all; one that sends
 `?event=order.created` uses `query`. Set it per queue instead of per workspace when one producer
-speaks differently from the rest.
+speaks differently from the rest. A source needs its `name`, and its `from` whenever the name is not
+empty: `{ "name": "" }` removes the source, and a source that leaves out either is refused before
+anything is sent, rather than read as a header or as a removal.
 
 **Retention is capped by your plan.** Declaring more days than the plan allows fails the apply with
 `retention_cap_exceeded` rather than being silently clamped — a shorter window is always accepted.
@@ -519,26 +521,40 @@ queuey verify orders --data '{"type":"order.created","test":true}'
 
 It exits 0 only when the receiver got the event. Otherwise the verdict — `logged_not_delivered`,
 `filtered`, `failed` or `timeout` with `--json` — comes with what to change: the mode, the filter,
-the credential the receiver rejected, held delivery, or the earlier event that holds the queue. A
-rejected credential, a missing route or a TLS failure holds the whole queue, whatever its ordering,
-until it is fixed and resumed with Verify & resume (in the console, or over MCP), so the advice ends
-with that step; a verify run before it waits behind the held queue. A failure is reported on its
-first attempt rather than after every retry.
+the credential the receiver rejected, held delivery, or the earlier event that holds the queue. The
+advice follows what Queuey decided after the attempt, not a guess from the response code:
+
+- A rejected credential, a missing route or a TLS failure parks the receiver, and Queuey holds the
+  whole queue, whatever its ordering, until a person resumes it in the Queuey console (Verify &
+  resume). The advice ends with that step: a verify run before it waits behind the held queue.
+- A timeout does the same while the queue is not marked `idempotent`, since the receiver may have
+  got the event. Declare `"idempotent": true` if it handles the same event twice safely, or raise
+  `delivery.timeoutMs` if it is only slow.
+- With `"dlqEnabled": false`, an event the receiver rejects holds the queue (or just its key on a
+  `bykey` queue) instead of going to the DLQ.
+- A delivery Queuey holds before sending, for the send budget or a receiver it is probing, is not a
+  failure: `verify` keeps waiting, and a timeout says what holds it.
+
+A failure is reported on its first attempt rather than after every retry. With `--json`, the result
+is an object with `schemaVersion` (1) first, the `verdict`, and the `action` to take.
 
 The event is real: the receiver gets it like any other, so send data it treats as harmless. `verify`
 and `apply` pick the workspace by the same rule: the deployment file's `tenant` when it names one,
 otherwise `--tenant`, `QUEUEY_TENANT` or `queuey.json`. When `--tenant` or `QUEUEY_TENANT` names
 another workspace than the file, both commands fail and name the two, rather than guessing which
 one you meant. The output names the workspace. `verify` needs a key that may publish and read
-events. A deploy key can.
+events (`event.read`). It reads one event from the queue first, and publishes nothing when the key
+cannot. `--file` is the event to send: a deployment file there is refused, since `--deployment`
+names that one.
 
 ### The schema
 
 `queuey schema` prints the JSON Schema for the deployment file: every field, the values it accepts
-and what it does. Point `$schema` at it and your editor validates the file as you type:
+and what it does. Its `$id` is the copy published with that release, at its tag, so it describes the
+fields the CLI you run accepts. Point `$schema` at it and your editor validates the file as you type:
 
 ```jsonc
-{ "$schema": "https://raw.githubusercontent.com/Queuey-AI/queuey-client/main/schema/queuey.deploy.schema.json" }
+{ "$schema": "https://raw.githubusercontent.com/Queuey-AI/queuey-client/v<version>/schema/queuey.deploy.schema.json" }
 ```
 
 ### One file, every environment

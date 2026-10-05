@@ -133,22 +133,29 @@ VERIFY
                  receiver got it. Otherwise the verdict — logged_not_delivered, filtered,
                  failed or timeout — names what to change: the mode, the filter, the
                  credential the receiver rejected, held delivery, or the earlier event
-                 holding the queue. A rejected credential, a missing route or a TLS failure
-                 holds the whole queue until it is fixed and resumed with Verify & resume,
-                 and the advice ends with that step. A failure is reported on its first
-                 attempt, not after every retry.
+                 holding the queue. The advice follows what Queuey decided after the
+                 attempt. When Queuey holds the queue for a person (a rejected credential,
+                 a missing route, a TLS failure, or a timeout on a queue not marked
+                 idempotent), the advice ends with a person resuming it in the Queuey
+                 console. A delivery Queuey holds before sending (the send budget, a
+                 receiver it probes) is not a failure: verify keeps waiting. A failure is
+                 reported on its first attempt, not after every retry.
+                 --json prints an object with ""schemaVersion"": 1, the verdict and the action.
                  The event is real and reaches the receiver like any other: send data it
                  treats as harmless. The workspace follows apply's rule: the deployment file's
                  ""tenant"" (--deployment, default ./queuey.deploy.json) when it names one, else
                  --tenant / QUEUEY_TENANT / queuey.json; when --tenant or QUEUEY_TENANT names
                  another workspace than the file, verify fails and names both. The output names
-                 the workspace. Needs a key that may publish and read events; a deploy key can.
+                 the workspace. Needs a key that may publish and read events (event.read):
+                 verify reads one event first and publishes nothing without it. --file is the
+                 event; a deployment file there is refused (name that one with --deployment).
 
 SCHEMA
   queuey schema [--json]
                  Prints the JSON Schema for queuey.deploy.json — every field, the values it
-                 accepts and what it does. Save it, or point ""$schema"" at
-                 https://raw.githubusercontent.com/Queuey-AI/queuey-client/main/schema/queuey.deploy.schema.json
+                 accepts and what it does. Save it, or point ""$schema"" at its ""$id"": the copy
+                 published at this version's release tag,
+                 https://raw.githubusercontent.com/Queuey-AI/queuey-client/v<version>/schema/queuey.deploy.schema.json
 
 PULL
   queuey pull [--file queuey.deploy.json] [--force] [--stdout]

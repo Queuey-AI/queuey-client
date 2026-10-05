@@ -324,6 +324,19 @@ internal sealed class QueueyControlPlaneClient
     }
 
     /// <summary>
+    /// Reads one page of one event from a queue (<c>GET /events/{que}?pageSize=1</c>): the cheapest read that needs
+    /// <c>event.read</c>, so a caller can learn it may read events before it publishes one.
+    /// </summary>
+    public async Task ReadOneEventAsync(string queuePublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), "pageSize=1", "events", queuePublicId);
+        await _connection.SendForJsonAsync<EventListPageResponse>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Reads one event's status and delivery attempts (<c>GET /events/{que}/{evt}</c>). Envelope only —
     /// the payload is a separate, recorded read this SDK does not make.
     /// </summary>

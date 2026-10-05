@@ -46,7 +46,10 @@ public sealed class QueueyQueueAttribute : Attribute
     /// <summary>How many days events are retained. Null inherits the workspace.</summary>
     public int RetentionDays { get => _retentionDays ?? 0; set => _retentionDays = value; }
 
-    /// <summary>Whether duplicate publishes are collapsed by idempotency key. Null inherits.</summary>
+    /// <summary>
+    /// Whether the receiver handles the same event twice safely, so Queuey may send an event again after a timeout or a
+    /// conflict. It does not deduplicate publishes. Unset inherits.
+    /// </summary>
     public bool Idempotent { get => _idempotent ?? false; set => _idempotent = value; }
 
     private bool? _dlqEnabled;

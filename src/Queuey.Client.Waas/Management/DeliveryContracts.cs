@@ -21,6 +21,12 @@ namespace Queuey.Client.Waas;
 /// </remarks>
 public sealed class WorkspaceDelivery
 {
+    /// <summary>The values <see cref="AuthMode"/> accepts, in any casing. A queue's delivery takes the same.</summary>
+    public static readonly IReadOnlyList<string> AuthModeValues = new[] { "None", "Bearer", "ApiKey", "Basic", "OAuth2ClientCredentials" };
+
+    /// <summary>The values <see cref="Method"/> accepts, in any casing.</summary>
+    public static readonly IReadOnlyList<string> MethodValues = new[] { "POST", "PUT", "PATCH" };
+
     /// <summary>Base URL every inheriting queue delivers to.</summary>
     public string? BaseUrl { get; set; }
 
