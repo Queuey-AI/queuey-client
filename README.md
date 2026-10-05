@@ -328,7 +328,8 @@ running the apply you meant to plan. For the same reason every command rejects a
 take — a typo like `--paln` fails with exit 2 and the options that command accepts. `queuey plan --json`
 prints the plan as an object a script can read: `schemaVersion` (1, so check it first), `file`, `tenant`,
 `wouldSucceed`, `changeCount`, and `steps`, each with its `target`, `aspect`, `creates`, `changes`, `notes`
-and `error`.
+and `error`. A change's `from` and `to` are the values as Queuey's config reads them back, so a number,
+a boolean or an object stays JSON. With `--json`, before or after the command, every error is JSON too.
 
 `queuey apply --dry-run --json` prints what the file declares, checked locally, for a script or an
 agent to read:

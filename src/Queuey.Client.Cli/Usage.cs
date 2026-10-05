@@ -122,7 +122,8 @@ PLAN
                  A verb and not an apply flag on purpose: a CLI too old to know it answers
                  ""Unknown command"" instead of running the apply you meant to plan.
                  --json prints { ""schemaVersion"": 1, ""file"", ""tenant"", ""wouldSucceed"",
-                 ""changeCount"", ""steps"": […] }; check schemaVersion first.
+                 ""changeCount"", ""steps"": […] }; check schemaVersion first. A change's from and
+                 to are JSON values, as Queuey's config reads them back.
 
 VERIFY
   queuey verify <queue> (--data <json> | --file <path> | --stdin)

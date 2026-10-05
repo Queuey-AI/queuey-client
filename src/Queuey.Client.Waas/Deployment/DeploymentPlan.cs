@@ -56,14 +56,31 @@ public sealed class PlannedChange
     /// <summary>Where, e.g. <c>policy.retentionDays</c>.</summary>
     public string Path { get; init; } = default!;
 
-    /// <summary>The value now, as JSON text (a string without quotes), or null.</summary>
-    public string? From { get; init; }
+    /// <summary>
+    /// The value now, as Queuey's config reads it back: a number, a boolean, a string or an object. Null when there is none.
+    /// </summary>
+    // Typet som serverens ConfigChangeDto (review 2026-10-05). Før var verdiene tekst, så plan --json skrev 7 og true
+    // som strenger, og en streng "7" kunne ikke skilles fra tallet.
+    public JsonElement? From { get; init; }
 
-    /// <summary>The value after, as JSON text (a string without quotes), or null.</summary>
-    public string? To { get; init; }
+    /// <summary>The value after, as Queuey's config would read it back. Null when there would be none.</summary>
+    public JsonElement? To { get; init; }
 
     /// <inheritdoc />
-    public override string ToString() => $"{Path}: {From ?? "(none)"} → {To ?? "(none)"}";
+    public override string ToString() => $"{Path}: {Text(From) ?? "(none)"} → {Text(To) ?? "(none)"}";
+
+    /// <summary>A value as one line of text: a string without its quotes, anything else as JSON.</summary>
+    internal static string? Text(JsonElement? value) => value switch
+    {
+        null => null,
+        { ValueKind: JsonValueKind.Null or JsonValueKind.Undefined } => null,
+        { ValueKind: JsonValueKind.String } v => v.GetString(),
+        { } v => v.GetRawText(),
+    };
+
+    /// <summary>The value as it came, detached from the answer it was read from, or null for none.</summary>
+    internal static JsonElement? Raw(JsonElement? value)
+        => value is { ValueKind: not JsonValueKind.Null and not JsonValueKind.Undefined } v ? v.Clone() : null;
 }
 
 /// <summary>
@@ -169,8 +186,13 @@ internal sealed class DeploymentPlanner
         foreach (PlannedWrite write in workspaceWrites)
             steps.Add(await StepAsync(write, answered, ct).ConfigureAwait(false));
 
+        // Apply sender workspacets levering før køene, så en base-URL i fila er et mål for hver kø uten egen absolutt URL,
+        // også når workspacet ikke har noen ennå. Planen ser bare det som er lagret, og avviste derfor en gyldig første
+        // fil med deliver_without_destination (review 2026-10-05).
+        bool workspaceBase = !string.IsNullOrWhiteSpace(file.Workspace?.Delivery?.BaseUrl);
+
         foreach (DeploymentQueuePlan plan in plans)
-            steps.AddRange(await PlanQueueAsync(plan, tenant, deliveries, existing, answered, ct).ConfigureAwait(false));
+            steps.AddRange(await PlanQueueAsync(plan, tenant, deliveries, existing, answered, workspaceBase, ct).ConfigureAwait(false));
 
         return new DeploymentPlan { Tenant = tenant, Steps = steps };
     }
@@ -270,7 +292,7 @@ internal sealed class DeploymentPlanner
 
     private async Task<IEnumerable<DeploymentPlanStep>> PlanQueueAsync(
         DeploymentQueuePlan plan, string tenant, ResolvedDeliveries deliveries,
-        Dictionary<string, QueueListItem> existing, Dictionary<string, DryRunAnswer> answered, CancellationToken ct)
+        Dictionary<string, QueueListItem> existing, Dictionary<string, DryRunAnswer> answered, bool workspaceBase, CancellationToken ct)
     {
         string name = plan.Definition.Name;
         string target = $"queues.{name}";
@@ -287,7 +309,7 @@ internal sealed class DeploymentPlanner
             return steps;
         }
 
-        bool hasDestination = IsAbsoluteUrl(plan.Delivery?.Url) || applied.HasDeliveryTarget;
+        bool hasDestination = IsAbsoluteUrl(plan.Delivery?.Url) || applied.HasDeliveryTarget || workspaceBase;
 
         if (applied.Created || applied.PublicId is not { } queueId)
         {
@@ -302,7 +324,7 @@ internal sealed class DeploymentPlanner
                         : "It would log events until it has a destination: give it a delivery.url, or set workspace.delivery.baseUrl.",
             };
             if (!plan.Definition.Policy.IsEmpty || plan.Ingress is not null || plan.Delivery is not null)
-                notes.Add("Its policy, ingress and delivery passed local validation; Queuey checks them against the queue once it exists.");
+                notes.Add("Its policy, ingress and delivery passed the checks the CLI makes; Queuey checks the rest, such as a signing template, once the queue exists.");
 
             DeploymentPlanStep create = new() { Target = target, Aspect = "queue", Creates = true, Notes = notes };
             if (plan.Mode == DeploymentQueueMode.Deliver && !hasDestination)
@@ -336,7 +358,7 @@ internal sealed class DeploymentPlanner
                     Target = target, Aspect = "mode",
                     Notes = new[] { "It has the old Paused mode, which a deploy does not change: resume it in the Queuey console first." },
                 });
-            else if (declared == DeploymentQueueMode.Deliver && !(IsAbsoluteUrl(plan.Delivery?.Url) || (row?.HasDeliveryTarget ?? false)))
+            else if (declared == DeploymentQueueMode.Deliver && !(IsAbsoluteUrl(plan.Delivery?.Url) || (row?.HasDeliveryTarget ?? false) || workspaceBase))
                 steps.Add(new DeploymentPlanStep { Target = target, Aspect = "mode", Error = DeliverWithoutDestination(name) });
             else if (declared != current)
                 steps.Add(await StepAsync(new PlannedWrite(target, "mode", Patch, new QueueModeChangeRequest { Mode = declared.ToWire() }, new[] { "queues", queueId, "mode-change" }), answered, ct).ConfigureAwait(false));
@@ -355,7 +377,7 @@ internal sealed class DeploymentPlanner
                 Target = write.Target,
                 Aspect = write.Aspect,
                 Changes = (plan.Changes ?? new List<ConfigChangeResponse>())
-                    .Select(c => new PlannedChange { Path = c.Path ?? string.Empty, From = Text(c.From), To = Text(c.To) })
+                    .Select(c => new PlannedChange { Path = c.Path ?? string.Empty, From = PlannedChange.Raw(c.From), To = PlannedChange.Raw(c.To) })
                     .ToList(),
                 Notes = plan.Notes ?? new List<string>(),
             };
@@ -370,14 +392,6 @@ internal sealed class DeploymentPlanner
         $"Queue '{name}' declares \"mode\": \"deliver\" but has nowhere to deliver.", errorCode: "deliver_without_destination")
     {
         SuggestedAction = "Give it a delivery.url, or set workspace.delivery.baseUrl.",
-    };
-
-    private static string? Text(JsonElement? value) => value switch
-    {
-        null => null,
-        { ValueKind: JsonValueKind.Null or JsonValueKind.Undefined } => null,
-        { ValueKind: JsonValueKind.String } v => v.GetString(),
-        { } v => v.GetRawText(),
     };
 
     private static bool IsAbsoluteUrl(string? url)

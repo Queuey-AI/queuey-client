@@ -35,7 +35,7 @@ public sealed class PlanCommandTests : IDisposable
         _ => RecordingHandler.Json(HttpStatusCode.OK, new { dryRun = true, target = "workspace ten_abc", changes = Array.Empty<object>(), notes = Array.Empty<string>() }),
     });
 
-    /// <summary>Planlegger alt, og køens policy ville endret retention fra 7 til 5.</summary>
+    /// <summary>Planlegger alt: køens policy ville endret retention fra 7 til 5, slått av DLQ-en og satt en ventetid.</summary>
     private static RecordingHandler PlansEverything() => new(req => req switch
     {
         { Method.Method: "GET" } when req.Path.EndsWith("/queues", StringComparison.Ordinal)
@@ -45,7 +45,13 @@ public sealed class PlanCommandTests : IDisposable
         { Path: "/queues/que_orders/policy" } => RecordingHandler.Json(HttpStatusCode.OK, new
         {
             dryRun = true, target = "queue que_orders",
-            changes = new[] { new { path = "policy.retentionDays", from = 7, to = 5 } }, notes = Array.Empty<string>(),
+            changes = new object[]
+            {
+                new { path = "policy.retentionDays", from = 7, to = 5 },
+                new { path = "policy.dlqEnabled", from = true, to = false },
+                new { path = "policy.backoff", from = (object?)null, to = new { baseDelayMs = 1000, jitter = "full" } },
+            },
+            notes = Array.Empty<string>(),
         }),
         _ => throw new InvalidOperationException(req.Key),
     });
@@ -64,7 +70,7 @@ public sealed class PlanCommandTests : IDisposable
         Assert.Equal(1, root.GetProperty("schemaVersion").GetInt32());
         Assert.Equal("ten_abc", root.GetProperty("tenant").GetString());
         Assert.True(root.GetProperty("wouldSucceed").GetBoolean());
-        Assert.Equal(1, root.GetProperty("changeCount").GetInt32());
+        Assert.Equal(3, root.GetProperty("changeCount").GetInt32());
 
         // Køen finnes, så den eneste skrivingen som endrer noe, er policyen.
         JsonElement step = Assert.Single(root.GetProperty("steps").EnumerateArray());
@@ -72,11 +78,23 @@ public sealed class PlanCommandTests : IDisposable
             step.EnumerateObject().Select(p => p.Name).ToArray());
         Assert.Equal("queues.orders", step.GetProperty("target").GetString());
         Assert.Equal("policy", step.GetProperty("aspect").GetString());
-        JsonElement change = Assert.Single(step.GetProperty("changes").EnumerateArray());
-        Assert.Equal("policy.retentionDays", change.GetProperty("path").GetString());
-        Assert.Equal("7", change.GetProperty("from").GetString());
-        Assert.Equal("5", change.GetProperty("to").GetString());
         Assert.Equal(JsonValueKind.Null, step.GetProperty("error").ValueKind);
+
+        // Verdiene er typet som i serverens plan (review 2026-10-05): tall, sannhetsverdier og objekter som JSON, ikke tekst.
+        JsonElement[] changes = step.GetProperty("changes").EnumerateArray().ToArray();
+        Assert.Equal(new[] { "policy.retentionDays", "policy.dlqEnabled", "policy.backoff" }, changes.Select(c => c.GetProperty("path").GetString()).ToArray());
+        Assert.Equal(7, changes[0].GetProperty("from").GetInt32());
+        Assert.Equal(5, changes[0].GetProperty("to").GetInt32());
+        Assert.Equal(JsonValueKind.True, changes[1].GetProperty("from").ValueKind);
+        Assert.Equal(JsonValueKind.False, changes[1].GetProperty("to").ValueKind);
+        Assert.Equal(JsonValueKind.Null, changes[2].GetProperty("from").ValueKind);
+        Assert.Equal(1000, changes[2].GetProperty("to").GetProperty("baseDelayMs").GetInt32());
+
+        // Uten --json står de som en linje hver.
+        CliRun human = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("plan", "--file", DeployFile())), PlansEverything());
+        Assert.Contains("~ policy.retentionDays: 7 → 5", human.Stdout);
+        Assert.Contains("~ policy.dlqEnabled: true → false", human.Stdout);
+        Assert.Contains("~ policy.backoff: (none) → {\"baseDelayMs\":1000,\"jitter\":\"full\"}", human.Stdout);
     }
 
     [Fact]

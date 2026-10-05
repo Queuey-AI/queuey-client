@@ -187,13 +187,73 @@ public class DeploymentPlanTests
         Assert.Equal("policy.retentionDays: 7 → 30", Assert.Single(workspace.Changes).ToString());
 
         DeploymentPlanStep orders = plan.Steps.Single(s => s.Target == "queues.orders" && s.Aspect == "policy");
-        Assert.Equal("5", Assert.Single(orders.Changes).To);
+        Assert.Equal(5, Assert.Single(orders.Changes).To!.Value.GetInt32());
 
         DeploymentPlanStep invoices = plan.Steps.Single(s => s.Target == "queues.invoices");
         Assert.True(invoices.Creates);
         Assert.Contains(invoices.Notes, n => n.Contains("log events until it has a destination"));
-        Assert.Contains(invoices.Notes, n => n.Contains("local validation"));
+        Assert.Contains(invoices.Notes, n => n.Contains("passed the checks the CLI makes; Queuey checks the rest"));
         Assert.DoesNotContain(server.Writes, r => r.RequestUri!.AbsolutePath.StartsWith("/queues/que_invoices", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("\"mode\": \"deliver\", ")]
+    [InlineData("")]
+    public async Task A_new_queue_delivers_to_the_base_url_the_file_gives_a_workspace_that_has_none_yet(string mode)
+    {
+        // Review 2026-10-05: apply sender workspacets levering før køene, men planen så bare det som var lagret. En gyldig
+        // første fil med baseUrl og "mode": "deliver" ble avvist med deliver_without_destination, og uten modus sa planen
+        // at køen ville logge.
+        var server = new Server();
+        server.Routes["PUT /queues"] = _ => StubHttpMessageHandler.Json(HttpStatusCode.OK,
+            new { dryRun = true, publicId = (string?)null, displayName = "orders", created = true, hasDeliveryTarget = false });
+        server.Routes["PATCH /tenants/ten_abc/delivery"] = _ => StubHttpMessageHandler.Json(HttpStatusCode.OK,
+            Plan("workspace ten_abc", ("delivery.baseUrl", null, "https://hooks.example.com")));
+
+        DeploymentPlan plan = await PlanAsync(server, $$"""
+            { "tenant": "ten_abc", "workspace": { "delivery": { "baseUrl": "https://hooks.example.com" } },
+              "queues": { "orders": { {{mode}}"delivery": { "url": "/orders" } } } }
+            """);
+
+        Assert.True(plan.WouldSucceed);
+        DeploymentPlanStep orders = plan.Steps.Single(s => s.Target == "queues.orders");
+        Assert.True(orders.Creates);
+        Assert.Null(orders.Error);
+        Assert.Contains("It would deliver: it has a destination.", orders.Notes);
+    }
+
+    [Fact]
+    public async Task An_existing_queue_with_no_destination_may_declare_deliver_when_the_file_gives_the_workspace_a_base_url()
+    {
+        var server = new Server();
+        server.Queues.Add(new { publicId = "que_orders", displayName = "orders", mode = "LogOnly", hasDeliveryTarget = false });
+        server.Routes["PUT /queues"] = _ => StubHttpMessageHandler.Json(HttpStatusCode.OK,
+            new { dryRun = true, publicId = "que_orders", displayName = "orders", created = false, hasDeliveryTarget = false });
+        server.Routes["PATCH /queues/que_orders/mode-change"] = _ => StubHttpMessageHandler.Json(HttpStatusCode.OK,
+            Plan("queue que_orders", ("mode", "LogOnly", "Deliver")));
+
+        DeploymentPlan plan = await PlanAsync(server, """
+            { "tenant": "ten_abc", "workspace": { "delivery": { "baseUrl": "https://hooks.example.com" } },
+              "queues": { "orders": { "mode": "deliver" } } }
+            """);
+
+        Assert.True(plan.WouldSucceed);
+        DeploymentPlanStep mode = plan.Steps.Single(s => s.Target == "queues.orders" && s.Aspect == "mode");
+        Assert.Null(mode.Error);
+        Assert.Equal("mode: LogOnly → Deliver", Assert.Single(mode.Changes).ToString());
+    }
+
+    [Fact]
+    public async Task Deliver_without_any_destination_is_still_refused()
+    {
+        var server = new Server();
+        server.Routes["PUT /queues"] = _ => StubHttpMessageHandler.Json(HttpStatusCode.OK,
+            new { dryRun = true, publicId = (string?)null, displayName = "orders", created = true, hasDeliveryTarget = false });
+
+        DeploymentPlan plan = await PlanAsync(server, """{ "tenant": "ten_abc", "queues": { "orders": { "mode": "deliver" } } }""");
+
+        Assert.False(plan.WouldSucceed);
+        Assert.Equal("deliver_without_destination", plan.Steps.Single(s => s.Target == "queues.orders").Error!.ErrorCode);
     }
 
     [Fact]
