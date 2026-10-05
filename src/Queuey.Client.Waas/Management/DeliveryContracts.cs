@@ -207,6 +207,36 @@ internal sealed class QueueConfigResponse
     public IngressResponse? Ingress { get; set; }
 }
 
+/// <summary>
+/// Wire shape of <c>GET /queues/{que}</c>, read for one thing: the backoff the queue stores itself, in its
+/// raw <c>overrides</c>. A field set there is the queue's own; a field left out is inherited. The rest of
+/// the read is not mapped.
+/// </summary>
+/// <remarks>
+/// Its own types, not <see cref="RetryBackoffWire"/>: the stored overrides carry jitter as the enum's
+/// number, which that type reads as text.
+/// </remarks>
+internal sealed class QueueStoredResponse
+{
+    public StoredOverridesWire? Overrides { get; set; }
+}
+
+internal sealed class StoredOverridesWire
+{
+    public StoredRetryWire? Retry { get; set; }
+}
+
+internal sealed class StoredRetryWire
+{
+    public StoredBackoffWire? Backoff { get; set; }
+}
+
+internal sealed class StoredBackoffWire
+{
+    public int? BaseDelayMs { get; set; }
+    public int? MaxDelayMs { get; set; }
+}
+
 /// <summary>Which sections a queue inherits from the workspace (true) versus overrides (false).</summary>
 internal sealed class QueueInheritResponse
 {

@@ -420,6 +420,19 @@ internal sealed class QueueyControlPlaneClient
             HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Reads what one queue stores itself (<c>GET /queues/{que}</c>): its raw overrides, without what it
+    /// inherits. Needs only <c>queue.read</c>.
+    /// </summary>
+    public async Task<QueueStoredResponse> GetQueueStoredAsync(string queuePublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues", queuePublicId);
+        return await _connection.SendForJsonAsync<QueueStoredResponse>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Mints an ingress signing key for a queue (<c>POST /hmacclients/queues/{que}</c>).</summary>
     public async Task<CreateQueueHmacClientWireResponse> MintIngressKeyAsync(
         string queuePublicId, CreateQueueHmacClientWireRequest request, CancellationToken cancellationToken)

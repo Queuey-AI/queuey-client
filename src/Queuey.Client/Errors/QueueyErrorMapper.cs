@@ -35,7 +35,7 @@ internal static class QueueyErrorMapper
         {
             message = response.ReasonPhrase;
             if (string.IsNullOrWhiteSpace(message))
-                message = $"Queuey request failed with status {status}.";
+                message = FormattableString.Invariant($"Queuey request failed with status {status}.");
         }
 
         return status switch

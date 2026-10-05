@@ -165,6 +165,14 @@ public sealed class DeploymentTenantCommandTests : IDisposable
         var refused = await Assert.ThrowsAsync<Queuey.Client.QueueyConfigurationException>(() => CliHarness.RunAsync(() => Apply(path), Server()));
         Assert.StartsWith($"{path}: The deployment file declares queues.orders.maxAttempts", refused.Message);
 
+        // To tenant-er avvises av begge (re-review 2026-10-05): apply tok den siste og verify den første, så de traff
+        // hvert sitt workspace.
+        File.WriteAllText(path, """{ "tenant": "ten_a", "Tenant": "ten_b", "queues": {} }""");
+        var twiceInVerify = await Assert.ThrowsAsync<Queuey.Client.QueueyConfigurationException>(() => CliHarness.RunAsync(() => Verify(path), Server()));
+        Assert.Equal($"{path}: The deployment file names the tenant 2 times (tenant, Tenant), and only the last would count. Keep one.", twiceInVerify.Message);
+        var twiceInApply = await Assert.ThrowsAsync<Queuey.Client.QueueyConfigurationException>(() => CliHarness.RunAsync(() => Apply(path), Server()));
+        Assert.StartsWith($"{path}: The deployment file has both 'tenant' and 'Tenant'", twiceInApply.Message);
+
         // JSON som ikke kan leses, stopper verify også, med fila navngitt.
         File.WriteAllText(path, "{ \"tenant\": ");
         var broken = await Assert.ThrowsAsync<Queuey.Client.QueueyConfigurationException>(() => CliHarness.RunAsync(() => Verify(path), Server()));

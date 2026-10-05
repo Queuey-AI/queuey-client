@@ -338,10 +338,27 @@ public class PullDesiredStateTests
                 + "Queuey looks a field up exactly as written. Write it as 'amount'.",
             "queues.orders.filter.conditions[2] (total lte (5)): Filter condition 'total lte' compares numbers, and '(5)' is not a number. "
                 + "Write it like 1.5: a point for decimals, and no thousands separators, currency or parentheses.",
-        }, pulled.FilterConditionProblems());
+        }, pulled.FilterProblems());
 
         var ex = Assert.Throws<QueueyConfigurationException>(() => DeploymentFile.Parse(pulled.ToJson()).Resolve());
         Assert.Contains("has whitespace around it", ex.Message);
+    }
+
+    [Fact]
+    public async Task A_stored_filter_over_the_condition_limit_is_named_too()
+    {
+        // Grensen på 32 betingelser gjelder hele filteret (re-review 2026-10-05): et filter lagret før grensen leses
+        // tilbake som det er, og apply avviser fila.
+        object policy = new
+        {
+            idempotent = false, dlqEnabled = true, retentionDays = 7, ordering = "fifo",
+            backoff = new { baseDelayMs = 1000, maxDelayMs = 60000, jitter = "full" },
+            filter = new { match = "any", conditions = Enumerable.Range(1, 33).Select(i => new { field = $"f{i}", op = "exists" }).ToArray() },
+        };
+
+        DeploymentFile pulled = await Pull(Api("Deliver", true, policy));
+
+        Assert.Equal(new[] { "queues.orders.filter: A filter supports at most 32 conditions; got 33." }, pulled.FilterProblems());
     }
 
     [Theory]

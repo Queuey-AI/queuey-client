@@ -233,7 +233,7 @@ public sealed class DeployCommandTests : IDisposable
                 + "Write it like 1.5: a point for decimals, and no thousands separators, currency or parentheses.",
             "Warning: queues.orders.filter.conditions[2] (priority exists false): Filter condition 'priority exists' takes no value: it matches every "
                 + "event that has the field, whatever the value. Leave the value out.",
-            "apply, plan and apply --check refuse the file until these conditions are fixed in it.",
+            "apply, plan and apply --check refuse the file until these are fixed in it.",
         }, warnings);
     }
 
@@ -257,8 +257,14 @@ public sealed class DeployCommandTests : IDisposable
 
         CliRun json = await CliHarness.RunAsync(() => ApplyCommand.RunAsync(new[] { "--file", path, "--dry-run", "--json" }));
 
-        JsonElement orders = JsonDocument.Parse(json.Stdout).RootElement.EnumerateArray().Single(q => q.GetProperty("name").GetString() == "orders");
-        Assert.Contains("apply refuses it unless that wait is already in place", Assert.Single(orders.GetProperty("notes").EnumerateArray()).GetString());
+        // Køene først, i fila sin rekkefølge, og workspacet sist (re-review 2026-10-05: det manglet), alle med target.
+        JsonElement[] entries = JsonDocument.Parse(json.Stdout).RootElement.EnumerateArray().ToArray();
+        Assert.Equal(new[] { "queues.orders", "queues.audit", "workspace" }, entries.Select(e => e.GetProperty("target").GetString()).ToArray());
+        Assert.Contains("apply refuses it unless that wait is already in place", Assert.Single(entries[0].GetProperty("notes").EnumerateArray()).GetString());
+        Assert.Empty(entries[1].GetProperty("notes").EnumerateArray());
+        Assert.Equal(JsonValueKind.Null, entries[2].GetProperty("name").ValueKind);
+        Assert.Equal(172800000, entries[2].GetProperty("policy").GetProperty("backoff").GetProperty("maxDelayMs").GetInt32());
+        Assert.StartsWith("backoff.maxDelayMs=172800000 is above the 86400000 (24 hours)", Assert.Single(entries[2].GetProperty("notes").EnumerateArray()).GetString());
     }
 
     [Fact]

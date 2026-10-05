@@ -352,6 +352,12 @@ public sealed class QueueyService : IQueueyService
         if (definition is null) throw new ArgumentNullException(nameof(definition));
         QueueyName.EnsureValid(definition.Name, "queue name");
 
+        // Policyen også, før køen finnes (review 2026-10-05). En QueueDefinition kan bygges uten fabrikken som
+        // validerer den, og da kom et filter uten conditions eller med null først etter PUT /queues: som en patch
+        // serveren avviste, eller en NullReferenceException.
+        if (definition.Policy.Validate() is { } reason)
+            throw new QueueyConfigurationException($"Queue '{definition.Name}' has an invalid policy: {reason}");
+
         // The tenant is passed in, never re-read from the options here: a deployment file that names
         // its workspace must put its queues in that workspace too. Before 2026-09-23 the workspace
         // went to the file's tenant and the queues to the configured one.

@@ -78,19 +78,15 @@ public sealed class DeploymentFile
 
     /// <summary>
     /// Parses a deployment file. Throws <see cref="QueueyConfigurationException"/> on malformed JSON, on
-    /// a field the file does not have, and on <c>maxAttempts</c> or <c>dlqAfterAttempts</c>, which it no
-    /// longer has: the number of attempts is not a setting.
+    /// a field the file does not have, on a top-level field it names twice, and on <c>maxAttempts</c> or
+    /// <c>dlqAfterAttempts</c>, which it no longer has: the number of attempts is not a setting.
     /// </summary>
     public static DeploymentFile Parse(string json)
     {
         if (string.IsNullOrWhiteSpace(json))
             return new DeploymentFile();
 
-        // Før parseren, som ville sagt «could not be mapped» om det første feltet den møtte. En fil som har
-        // forsøksfeltene (skrevet for hånd, eller med en build av #40 fra før dette), trenger grunnen og hva som skal
-        // bort, for alle feltene på én gang. Ingen sluppet CLI har skrevet dem.
-        if (RetiredAttemptFields(json) is { Count: > 0 } retired)
-            throw AttemptsAreNotASetting(retired);
+        RefuseWhatTheParserWouldMisread(json);
 
         try
         {
@@ -102,6 +98,50 @@ public sealed class DeploymentFile
         }
     }
 
+    /// <summary>
+    /// What the parser would get wrong without a word, or name less helpfully than it should, refused
+    /// before it runs. Malformed JSON passes here, and the parser reports it in its own words.
+    /// </summary>
+    private static void RefuseWhatTheParserWouldMisread(string json)
+    {
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(json, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
+        }
+        catch (JsonException)
+        {
+            return;
+        }
+
+        using (document)
+        {
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+                return;
+
+            // Parseren tar den siste av to like navn, og leser store og små bokstaver likt, så {"tenant": "ten_a",
+            // "Tenant": "ten_b"} skrev til ten_b, mens verify leste ten_a (re-review 2026-10-05). Et navn to ganger på
+            // toppen er en feil i fila, ikke et valg: avvist.
+            var seen = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (JsonProperty top in document.RootElement.EnumerateObject())
+            {
+                if (seen.TryGetValue(top.Name, out string? first))
+                    throw new QueueyConfigurationException(
+                        (string.Equals(first, top.Name, StringComparison.Ordinal)
+                            ? $"The deployment file has '{top.Name}' twice"
+                            : $"The deployment file has both '{first}' and '{top.Name}', which name the same field,")
+                        + " and only the last would count. Keep one.");
+                seen[top.Name] = top.Name;
+            }
+
+            // Før parseren, som ville sagt «could not be mapped» om det første feltet den møtte. En fil som har
+            // forsøksfeltene (skrevet for hånd, eller med en build av #40 fra før dette), trenger grunnen og hva som
+            // skal bort, for alle feltene på én gang. Ingen sluppet CLI har skrevet dem.
+            if (RetiredAttemptFields(document.RootElement) is { Count: > 0 } retired)
+                throw AttemptsAreNotASetting(retired);
+        }
+    }
+
     // Antall forsøk er ikke en innstilling (vedtatt 2026-10-04, Queuey#391): backenden gjør like mange forsøk for
     // hvert event, og en policy-patch som bærer feltene, avvises med 400. En fil som fortsatt har dem, avvises her,
     // før noe er sendt, slik ethvert felt fila ikke har avvises. Ikke fjernet i stillhet: en deklarativ fil skal
@@ -110,45 +150,28 @@ public sealed class DeploymentFile
 
     /// <summary>
     /// Every place the file still declares the number of attempts, as written there:
-    /// <c>queues.orders.maxAttempts</c>. Empty when it declares none, and when the JSON is malformed,
-    /// which the parser then reports in its own words.
+    /// <c>queues.orders.maxAttempts</c>. Empty when it declares none.
     /// </summary>
-    private static List<string> RetiredAttemptFields(string json)
+    private static List<string> RetiredAttemptFields(JsonElement root)
     {
         var found = new List<string>();
 
-        JsonDocument document;
-        try
+        // Store og små bokstaver teller ikke, som når parseren leser navnene.
+        foreach (JsonProperty section in root.EnumerateObject())
         {
-            document = JsonDocument.Parse(json, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
-        }
-        catch (JsonException)
-        {
-            return found;
-        }
+            if (section.Value.ValueKind != JsonValueKind.Object)
+                continue;
 
-        using (document)
-        {
-            if (document.RootElement.ValueKind != JsonValueKind.Object)
-                return found;
-
-            // Store og små bokstaver teller ikke, som når parseren leser navnene.
-            foreach (JsonProperty section in document.RootElement.EnumerateObject())
+            if (string.Equals(section.Name, "workspace", StringComparison.OrdinalIgnoreCase))
             {
-                if (section.Value.ValueKind != JsonValueKind.Object)
-                    continue;
-
-                if (string.Equals(section.Name, "workspace", StringComparison.OrdinalIgnoreCase))
+                Collect(section.Name, section.Value);
+            }
+            else if (string.Equals(section.Name, "queues", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (JsonProperty queue in section.Value.EnumerateObject())
                 {
-                    Collect(section.Name, section.Value);
-                }
-                else if (string.Equals(section.Name, "queues", StringComparison.OrdinalIgnoreCase))
-                {
-                    foreach (JsonProperty queue in section.Value.EnumerateObject())
-                    {
-                        if (queue.Value.ValueKind == JsonValueKind.Object)
-                            Collect($"{section.Name}.{queue.Name}", queue.Value);
-                    }
+                    if (queue.Value.ValueKind == JsonValueKind.Object)
+                        Collect($"{section.Name}.{queue.Name}", queue.Value);
                 }
             }
         }
@@ -304,23 +327,29 @@ public sealed class DeploymentFile
     }
 
     /// <summary>
-    /// Every filter condition apply would refuse as written, with where it is and why:
-    /// <c>queues.orders.filter.conditions[1] (amount gt 1,000): …</c>. A pulled file can hold one, because
-    /// Queuey checks a condition when it is written and stored ones from before a check are read back as
-    /// they are. Empty when there is none.
+    /// Everything in the file's filters apply would refuse as written, with where it is and why:
+    /// <c>queues.orders.filter.conditions[1] (amount gt 1,000): …</c>, or <c>queues.orders.filter: …</c>
+    /// for the filter as a whole. A pulled file can hold one, because Queuey checks a filter when it is
+    /// written and reads a stored one back as it is. Empty when there is none.
     /// </summary>
-    public IReadOnlyList<string> FilterConditionProblems()
+    public IReadOnlyList<string> FilterProblems()
     {
         var problems = new List<string>();
         foreach (KeyValuePair<string, DeploymentQueue> entry in Queues)
         {
-            if (entry.Value?.Filter?.Conditions is not { } conditions)
+            if (entry.Value?.Filter is not { } filter)
+                continue;
+
+            if (filter.WholeFilterProblem() is { } whole)
+                problems.Add($"queues.{entry.Key}.filter: {whole}");
+
+            if (filter.Conditions is not { } conditions)
                 continue;
 
             for (int i = 0; i < conditions.Count; i++)
             {
                 if (DeliveryFilter.ConditionProblem(conditions[i]) is { } problem)
-                    problems.Add($"queues.{entry.Key}.filter.conditions[{i}] ({DeliveryFilter.Describe(conditions[i])}): {problem}");
+                    problems.Add(FormattableString.Invariant($"queues.{entry.Key}.filter.conditions[{i}] ({DeliveryFilter.Describe(conditions[i])}): {problem}"));
             }
         }
 

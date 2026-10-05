@@ -425,7 +425,27 @@ public class DeploymentModeTests
 
         var ex = Assert.Throws<QueueyConfigurationException>(() => file.Resolve());
         Assert.Contains("workspace", ex.Message);
-        Assert.Contains("Backoff.BaseDelayMs must be above 0; got ", ex.Message);   // -1 skrives med kulturens minustegn
+        Assert.Contains("Backoff.BaseDelayMs must be above 0; got -1.", ex.Message);
+    }
+
+    [Fact]
+    public void Numbers_in_a_refusal_are_written_the_same_in_every_culture()
+    {
+        // Som i backenden (re-review 2026-10-05): med nb-NO ble -1 skrevet «−1» med U+2212, og en melding var ulik fra
+        // maskin til maskin.
+        System.Globalization.CultureInfo before = System.Globalization.CultureInfo.CurrentCulture;
+        System.Globalization.CultureInfo.CurrentCulture = new System.Globalization.CultureInfo("nb-NO");
+        try
+        {
+            DeploymentFile file = DeploymentFile.Parse("""{ "queues": { "orders": { "retentionDays": -5, "backoff": { "baseDelayMs": -1 } } } }""");
+
+            var ex = Assert.Throws<QueueyConfigurationException>(() => file.Resolve());
+            Assert.Contains("RetentionDays cannot be negative; got -5.", ex.Message);
+        }
+        finally
+        {
+            System.Globalization.CultureInfo.CurrentCulture = before;
+        }
     }
 
     private const string NeedsConditions = "A filter needs its conditions. To remove the filter, write \"conditions\": [].";

@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Text.Json;
 using Queuey.Client;
 using Queuey.Client.Waas;
@@ -81,21 +82,23 @@ internal static class DeploymentTenant
             if (document.RootElement.ValueKind != JsonValueKind.Object)
                 throw new QueueyConfigurationException($"{path}: A deployment file is a JSON object, like {{ \"tenant\": \"ten_…\", \"queues\": {{}} }}.");
 
-            foreach (JsonProperty property in document.RootElement.EnumerateObject())
+            // Store og små bokstaver teller ikke, som når apply leser fila. To tenant-er avvises, som apply avviser dem:
+            // parseren tar den siste, og den første tok verify, så de traff hvert sitt workspace (re-review 2026-10-05).
+            JsonProperty[] tenants = document.RootElement.EnumerateObject()
+                .Where(p => string.Equals(p.Name, "tenant", StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (tenants.Length > 1)
+                throw new QueueyConfigurationException(
+                    $"{path}: The deployment file names the tenant {tenants.Length} times ({string.Join(", ", tenants.Select(t => t.Name))}), and only the last would count. Keep one.");
+            if (tenants.Length == 0)
+                return null;
+
+            return tenants[0].Value.ValueKind switch
             {
-                // Store og små bokstaver teller ikke, som når apply leser fila.
-                if (!string.Equals(property.Name, "tenant", StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                return property.Value.ValueKind switch
-                {
-                    JsonValueKind.String => DeploymentVariables.Expand(property.Value.GetString(), null, "tenant"),
-                    JsonValueKind.Null => null,
-                    _ => throw new QueueyConfigurationException($"{path}: tenant is a workspace id in quotes, like \"ten_…\"."),
-                };
-            }
-
-            return null;
+                JsonValueKind.String => DeploymentVariables.Expand(tenants[0].Value.GetString(), null, "tenant"),
+                JsonValueKind.Null => null,
+                _ => throw new QueueyConfigurationException($"{path}: tenant is a workspace id in quotes, like \"ten_…\"."),
+            };
         }
     }
 

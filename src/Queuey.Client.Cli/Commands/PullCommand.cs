@@ -82,19 +82,19 @@ internal static class PullCommand
     }
 
     /// <summary>
-    /// One warning per filter condition apply would refuse, on stderr so <c>--stdout</c> stays a clean file.
-    /// Pull writes the condition as Queuey stored it; the warning says it has to be fixed before the file applies.
+    /// One warning per filter problem apply would refuse, on stderr so <c>--stdout</c> stays a clean file. Pull
+    /// writes the filter as Queuey stored it; the warning says what has to be fixed before the file applies.
     /// </summary>
     private static void WarnAboutRefusedFilters(DeploymentFile file)
     {
         // Rå overrides eller en deploy fra før Queuey#391 kan ha lagret "gt": "1,000" eller exists med en verdi. Pull
         // skriver det som det står, og da avviste apply, plan og --check fila uten at pull hadde sagt noe (review
         // 2026-10-05). Fila skrives fortsatt: den viser hva Queuey har.
-        IReadOnlyList<string> problems = file.FilterConditionProblems();
+        IReadOnlyList<string> problems = file.FilterProblems();
         foreach (string problem in problems)
             Console.Error.WriteLine($"Warning: {problem}");
         if (problems.Count > 0)
             Console.Error.WriteLine("apply, plan and apply --check refuse the file until "
-                                    + (problems.Count == 1 ? "this condition is" : "these conditions are") + " fixed in it.");
+                                    + (problems.Count == 1 ? "this is" : "these are") + " fixed in it.");
     }
 }

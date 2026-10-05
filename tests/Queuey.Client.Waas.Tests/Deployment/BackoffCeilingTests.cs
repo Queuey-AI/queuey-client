@@ -34,6 +34,11 @@ public class BackoffCeilingTests
         /// <summary>Et API fra før 2026-09-23 sender ikke backoff i config.</summary>
         public bool ConfigWithoutBackoff { get; init; }
 
+        /// <summary>Det køen lagrer selv i <c>overrides.retry.backoff.baseDelayMs</c> (GET /queues/{que}); null arver.</summary>
+        public int? StoredBaseDelayMs { get; init; }
+
+        public HttpStatusCode StoredStatus { get; init; } = HttpStatusCode.OK;
+
         public StubHttpMessageHandler Stub { get; }
 
         public Api() => Stub = new StubHttpMessageHandler((_, req, body) =>
@@ -55,6 +60,21 @@ public class BackoffCeilingTests
                         policy = ConfigWithoutBackoff ? new { ordering = "fifo" } : (object)new { ordering = "fifo", backoff = QueueBackoff },
                         inherited = QueueOwnsPolicy is { } owns ? new { destination = true, auth = true, signing = true, rateLimit = true, behavior = !owns } : null,
                         tenantBaseline = new { policy = workspacePolicy },
+                    });
+                case "GET /queues/que_orders" when StoredStatus != HttpStatusCode.OK:
+                    return StubHttpMessageHandler.Json(StoredStatus, new { error = new { code = "refused", message = "Not here." } });
+                case "GET /queues/que_orders":
+                    // De rå overstyringene, med enumene som tall slik API-et sender dem.
+                    return StubHttpMessageHandler.Json(HttpStatusCode.OK, new
+                    {
+                        publicId = "que_orders",
+                        displayName = "orders",
+                        overrides = new
+                        {
+                            retention = new { days = 30 },
+                            retry = new { backoff = StoredBaseDelayMs is { } own ? (object)new { baseDelayMs = own, jitter = 0 } : new { jitter = 0 } },
+                        },
+                        mode = 3,
                     });
                 case "PUT /queues":
                     string name = JsonDocument.Parse(body!).RootElement.GetProperty("displayName").GetString()!;
@@ -205,27 +225,70 @@ public class BackoffCeilingTests
     }
 
     [Fact]
-    public async Task A_queue_that_may_own_or_inherit_the_wait_is_left_to_Queuey_when_the_workspace_changes()
+    public async Task A_wait_unlike_both_candidates_is_refused_without_reading_what_the_queue_stores()
     {
-        // Saken fra review 2026-10-05, der lesingen ikke kan avgjøre: køen eier en annen del av policyen
-        // (inherited.behavior er false), og ventetiden er lik workspacets. Den kan være køens egen, og da godtar
-        // serveren en uendret apply, eller arvet, og da avviser serveren køen etter at workspacet er skrevet. Klienten
-        // avviser ikke det serveren kan godta, så her avgjør serveren.
+        // Re-review 2026-10-05: køen arver ventetiden, men eier retentionDays, så inherited.behavior er false, og
+        // ventetiden er lik workspacets. Fila setter workspacet til en halvtime og køen til to timer. Serveren har
+        // «før» lik ett sekund hvis køen har ventetiden selv, eller en halvtime hvis den arver den: to timer er ulik
+        // begge, så serveren avviser uansett, og det gjør klienten også, før noe er skrevet.
+        var api = new Api
+        {
+            Rows = OrdersExists,
+            QueueOwnsPolicy = true,
+            WorkspaceBackoff = new { baseDelayMs = 1_000, maxDelayMs = Day, jitter = "full" },
+            QueueBackoff = new { baseDelayMs = 1_000, maxDelayMs = Day, jitter = "full" },
+        };
+
+        var ex = await Assert.ThrowsAsync<QueueyConfigurationException>(() => Apply(api, $$"""
+        { "workspace": { "backoff": { "baseDelayMs": 1800000 } },
+          "queues": { "orders": { "backoff": { "baseDelayMs": {{2 * Hour}} } } } }
+        """));
+
+        Assert.Contains($"queues.orders.backoff.baseDelayMs is {2 * Hour}, above the {Hour} (one hour) a first wait may be, "
+                        + "and would change the wait whether the queue has its own 1000 or inherits the workspace's 1800000", ex.Message);
+        Assert.Empty(api.Writes);
+        Assert.DoesNotContain("GET /queues/que_orders", api.Paths);
+    }
+
+    // Saken fra review 2026-10-05 der config-lesingen ikke kan avgjøre: køen eier en annen del av policyen
+    // (inherited.behavior er false), ventetiden er lik workspacets to timer fra før taket, og fila senker workspacet
+    // til en halvtime mens køen beholder to timer. Har køen ventetiden selv, er den uendret og godtas; arver den,
+    // avviser serveren køen etter at workspacet er skrevet. Det køen lagrer selv (GET /queues/{que}), avgjør.
+    [Theory]
+    [InlineData(2 * Hour, HttpStatusCode.OK, true)]          // køen lagrer to timer selv: uendret
+    [InlineData(null, HttpStatusCode.OK, false)]             // køen lagrer ingen: den arver, og får en halvtime
+    [InlineData(null, HttpStatusCode.Forbidden, true)]       // lesingen nektes: serveren avgjør
+    public async Task What_the_queue_stores_decides_whether_it_owns_the_wait(int? stored, HttpStatusCode storedStatus, bool applies)
+    {
         var api = new Api
         {
             Rows = OrdersExists,
             QueueOwnsPolicy = true,
             WorkspaceBackoff = new { baseDelayMs = 2 * Hour, maxDelayMs = Day, jitter = "full" },
             QueueBackoff = new { baseDelayMs = 2 * Hour, maxDelayMs = Day, jitter = "none" },
+            StoredBaseDelayMs = stored,
+            StoredStatus = storedStatus,
         };
 
-        QueueSyncResult result = await Apply(api, $$"""
+        Task<QueueSyncResult> apply = Apply(api, $$"""
         { "workspace": { "backoff": { "baseDelayMs": 1800000 } },
           "queues": { "orders": { "backoff": { "baseDelayMs": {{2 * Hour}}, "maxDelayMs": {{Day}}, "jitter": "none" } } } }
         """);
 
-        Assert.True(result.AllSucceeded);
-        Assert.True(api.Writes.IndexOf("PATCH /tenants/ten_abc/policy") < api.Writes.IndexOf("PATCH /queues/que_orders/policy"));
+        if (applies)
+        {
+            Assert.True((await apply).AllSucceeded);
+            Assert.True(api.Writes.IndexOf("PATCH /tenants/ten_abc/policy") < api.Writes.IndexOf("PATCH /queues/que_orders/policy"));
+        }
+        else
+        {
+            var ex = await Assert.ThrowsAsync<QueueyConfigurationException>(() => apply);
+            Assert.Contains($"queues.orders.backoff.baseDelayMs is {2 * Hour}, above the {Hour} (one hour) a first wait may be, "
+                            + "and would change it from the 1800000 the queue inherits from the workspace", ex.Message);
+            Assert.Empty(api.Writes);
+        }
+
+        Assert.Single(api.Paths, p => p == "GET /queues/que_orders");
     }
 
     [Fact]

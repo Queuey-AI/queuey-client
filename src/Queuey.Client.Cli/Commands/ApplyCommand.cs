@@ -44,9 +44,10 @@ internal static class ApplyCommand
             // before a deploy window rather than during one.
             // Expanding first means an unset ${VAR} fails here, in the dry run, rather than during
             // the deploy it was meant to protect.
-            IReadOnlyList<DeploymentQueuePlan> plans = file.Expand().Resolve();
+            DeploymentFile expanded = file.Expand();
+            IReadOnlyList<DeploymentQueuePlan> plans = expanded.Resolve();
             if (map.Has("json"))
-                Console.WriteLine(JsonSerializer.Serialize(plans.Select(ToJsonPlan), CliHost.JsonOut));
+                Console.WriteLine(JsonSerializer.Serialize(ToJsonPlans(expanded, plans), CliHost.JsonOut));
             else
                 WritePlan(path, file, plans);
             return ExitCodes.Success;
@@ -204,11 +205,11 @@ internal static class ApplyCommand
     internal static IEnumerable<string> CeilingNotes(RetryBackoff? backoff)
     {
         if (backoff?.BaseDelayMs is { } baseMs && baseMs > RetryBackoff.BaseDelayCeilingMs)
-            yield return $"backoff.baseDelayMs={baseMs} is above the {RetryBackoff.BaseDelayCeilingMs} (one hour) a first wait may be: "
-                         + "apply refuses it unless that wait is already in place.";
+            yield return FormattableString.Invariant(
+                $"backoff.baseDelayMs={baseMs} is above the {RetryBackoff.BaseDelayCeilingMs} (one hour) a first wait may be: apply refuses it unless that wait is already in place.");
         if (backoff?.MaxDelayMs is { } maxMs && maxMs > RetryBackoff.MaxDelayCeilingMs)
-            yield return $"backoff.maxDelayMs={maxMs} is above the {RetryBackoff.MaxDelayCeilingMs} (24 hours) the longest wait may be: "
-                         + "apply refuses it unless that wait is already in place.";
+            yield return FormattableString.Invariant(
+                $"backoff.maxDelayMs={maxMs} is above the {RetryBackoff.MaxDelayCeilingMs} (24 hours) the longest wait may be: apply refuses it unless that wait is already in place.");
     }
 
     private static IEnumerable<string> Backoff(RetryBackoff? backoff)
@@ -256,8 +257,40 @@ internal static class ApplyCommand
     private static string FormatError(QueueyException? e)
         => e is null ? "failed" : $"{(e.StatusCode?.ToString() ?? "error")} {e.ErrorCode} {e.Message}".Replace("  ", " ").Trim();
 
+    /// <summary>
+    /// The dry run as JSON: one entry per queue, and the workspace last when the file declares one. Every
+    /// entry says what it is in <c>target</c>, in the words <c>queuey plan</c> uses.
+    /// </summary>
+    private static IEnumerable<object> ToJsonPlans(DeploymentFile file, IReadOnlyList<DeploymentQueuePlan> plans)
+    {
+        // Lista var bare køer, så en ventetid over taket på workspacet hadde ingen plass i JSON (re-review 2026-10-05).
+        // Workspacet kommer sist, så den som leser den første køen som [0], fortsatt treffer en kø.
+        foreach (DeploymentQueuePlan plan in plans)
+            yield return ToJsonPlan(plan);
+        if (file.Workspace is { } w)
+            yield return ToJsonWorkspace(w);
+    }
+
+    private static object ToJsonWorkspace(DeploymentWorkspace w) => new
+    {
+        target = "workspace",
+        name = (string?)null,
+        policy = new
+        {
+            w.Ordering,
+            w.DlqEnabled,
+            w.RetentionDays,
+            w.Idempotent,
+            backoff = w.Backoff is { } b ? new { b.BaseDelayMs, b.MaxDelayMs, b.Jitter } : null,
+        },
+        delivery = w.Delivery is null ? null : new { w.Delivery.BaseUrl, w.Delivery.AuthMode, w.Delivery.CredentialRef },
+        ingress = w.Ingress is null ? null : new { w.Ingress.AuthMode, eventType = w.Ingress.EventType?.Name, groupKey = w.Ingress.GroupKey?.Name },
+        notes = CeilingNotes(w.Backoff).ToArray(),
+    };
+
     private static object ToJsonPlan(DeploymentQueuePlan p) => new
     {
+        target = $"queues.{p.Definition.Name}",
         p.Definition.Name,
         // null: leave it, and a queue this file creates delivers when it has a destination.
         mode = p.Mode?.ToFileText(),

@@ -105,11 +105,13 @@ APPLY
 PLAN
   queuey plan [--file queuey.deploy.json] [--json]
                  Asks Queuey itself what apply would do: every write apply would send goes as
-                 a dry run (?dryRun=true), so it shows each value that would change and every
-                 refusal Queuey would give — retention caps, queue limits, bad values — with
-                 what to do about it. Writes nothing; exits non-zero if anything would be
-                 refused. Needs the key apply needs. A queue that does not exist yet shows as
-                 one that would be created. The first dry run also proves that Queuey answers
+                 a dry run (?dryRun=true), so it shows each value that would change and each
+                 refusal Queuey would give that write — retention caps, queue limits, bad
+                 values — with what to do about it. Each write is asked about on its own,
+                 against what is stored now: a refusal that depends on a workspace change in
+                 the same file shows only in apply. Writes nothing; exits non-zero if anything
+                 would be refused. Needs the key apply needs. A queue that does not exist yet
+                 shows as one that would be created, with its settings checked locally. The first dry run also proves that Queuey answers
                  dry runs; against an API that does not, planning stops there and says what
                  that one call may have changed — nothing, when a declared queue exists.
                  A verb and not an apply flag on purpose: a CLI too old to know it answers

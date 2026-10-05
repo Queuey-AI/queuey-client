@@ -96,6 +96,20 @@ public class DeploymentFileTests
         Assert.Equal("Remove maxAttempts and dlqAfterAttempts from the file. backoff and filter stay as they are.", ex.SuggestedAction);
     }
 
+    [Theory]
+    [InlineData("""{ "tenant": "ten_a", "Tenant": "ten_b", "queues": {} }""", "has both 'tenant' and 'Tenant', which name the same field, and only the last would count.")]
+    [InlineData("""{ "tenant": "ten_a", "queues": {}, "tenant": "ten_b" }""", "has 'tenant' twice and only the last would count.")]
+    [InlineData("""{ "queues": { "orders": {} }, "queues": { "invoices": {} } }""", "has 'queues' twice and only the last would count.")]
+    public void A_top_level_field_named_twice_is_refused(string json, string expected)
+    {
+        // Parseren tar den siste av to like navn, uten et ord (re-review 2026-10-05): to tenant-er ga apply ten_b og
+        // verify ten_a, og to queues-blokker droppet den første.
+        var ex = Assert.Throws<QueueyConfigurationException>(() => DeploymentFile.Parse(json));
+
+        Assert.Contains(expected, ex.Message);
+        Assert.EndsWith("Keep one.", ex.Message);
+    }
+
     [Fact]
     public void Every_attempts_field_in_the_file_is_named_at_once()
     {

@@ -45,7 +45,8 @@ public static class QueueCodeWriter
 
         if (!string.IsNullOrWhiteSpace(q.Ordering)) args.Add($"Ordering = \"{q.Ordering}\"");
         if (q.DlqEnabled is { } d) args.Add($"DlqEnabled = {(d ? "true" : "false")}");
-        if (q.RetentionDays is { } rd) args.Add($"RetentionDays = {rd}");
+        // C#-kode, så tallet skrives invariant: med nb-NO ble et negativt tall til «−5», som ikke kompilerer.
+        if (q.RetentionDays is { } rd) args.Add(FormattableString.Invariant($"RetentionDays = {rd}"));
         if (q.Idempotent is { } i) args.Add($"Idempotent = {(i ? "true" : "false")}");
 
         return $"[QueueyQueue({string.Join(", ", args)})]";

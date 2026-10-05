@@ -315,8 +315,10 @@ queuey apply
 
 `queuey plan` sends every write `apply` would make as a server-side dry run (`?dryRun=true`), so the
 answer comes from Queuey: each value that would change, and each refusal — a retention cap, a queue
-limit, a bad value — with what to do about it. Nothing is written, and it exits non-zero if anything
-would be refused. A queue that does not exist yet shows as one that would be created. The first dry
+limit, a bad value — with what to do about it. Each write is asked about on its own, against what is
+stored now, so a refusal that depends on a workspace change in the same file shows only in `apply`.
+Nothing is written, and it exits non-zero if anything would be refused. A queue that does not exist
+yet shows as one that would be created, and its settings are checked locally. The first dry
 run also proves that Queuey answers dry runs; against an API that does not, the plan stops there and
 says what that one call may have changed — nothing, when a declared queue already exists. It is a verb of
 its own rather than an `apply` flag, so a CLI too old to know it answers "Unknown command" instead of
@@ -451,13 +453,13 @@ anything is sent, naming every place it does, and `pull` never writes them.
 **A backoff waits at most an hour at first and a day at most.** `baseDelayMs` is at most 3600000 and
 `maxDelayMs` at most 86400000, both above 0. A longer wait that is already in place stays: Queuey
 refuses only a write that changes it. `apply` checks this before it writes anything, against the wait
-each declaration would replace. For a new queue, or one that inherits its policy, that is the
-workspace's wait once this apply has written the workspace. One case is left to Queuey: a queue that
-owns some of its policy and has the workspace's wait, when the same apply changes the workspace's wait.
-The queue may own that wait or inherit it, and Queuey decides when it writes the queue. The same goes
-for `baseDelayMs` above `maxDelayMs`: refused up front when one backoff declares both, and checked by
-Queuey when one of them comes from the workspace. `queuey plan` shows every such refusal without
-writing anything.
+each declaration would replace: a queue's own, or for a new queue and a queue that inherits its wait,
+the workspace's once this apply has written the workspace. When a queue's config cannot tell whether
+the queue owns its wait, `apply` reads what the queue stores; if that read is refused, Queuey decides
+when it writes the queue. `baseDelayMs` above `maxDelayMs` is refused up front when one backoff declares
+both; when one of them comes from the workspace, Queuey checks it when the queue is written.
+`queuey plan` asks Queuey about each write on its own, against what is stored now, so a refusal that
+depends on the workspace this apply changes, or on a queue it would create, shows only in `apply`.
 
 **A queue this file creates delivers when it has a destination** — its own `delivery.url`, or the
 workspace's `baseUrl` — and logs events until it has one. `mode` is `deliver` or `logOnly`; declare it
