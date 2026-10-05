@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -32,6 +33,49 @@ public sealed class DeploymentFile
     public const string DefaultFileName = "queuey.deploy.json";
 
     /// <summary>
+    /// The JSON Schema this file follows, for editors and agents: the published one, or a local copy
+    /// written by <c>queuey schema</c>. Ignored when the file is applied.
+    /// </summary>
+    [JsonPropertyName("$schema")]
+    public string? Schema { get; set; }
+
+    /// <summary>
+    /// Where the published JSON Schema for this file lives: the copy at the release tag of this library's version, so an
+    /// editor checks a file against the fields this version accepts. It exists once that release is tagged.
+    /// </summary>
+    // Review 2026-10-05: main endrer seg før en release, og et skjema derfra kan beskrive felt ingen sluppet CLI godtar.
+    // Versjonen er pakkens (<Version>, eller taggen ved release), så commiten som bumper den, skriver skjemaet på nytt.
+    public static string SchemaUrl { get; } =
+        $"https://raw.githubusercontent.com/Queuey-AI/queuey-client/v{PackageVersion()}/schema/queuey.deploy.schema.json";
+
+    private static string PackageVersion()
+    {
+        string version = typeof(DeploymentFile).Assembly
+            .GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? typeof(DeploymentFile).Assembly.GetName().Version?.ToString(3)
+            ?? "0.0.0";
+
+        // SDK-en henger på +<commit> etter versjonen; taggen har den ikke.
+        int plus = version.IndexOf('+');
+        return plus >= 0 ? version.Substring(0, plus) : version;
+    }
+
+    /// <summary>
+    /// The JSON Schema for a deployment file: every field, the values each one accepts, and what it
+    /// does. Generated from this model, so it cannot describe a field the parser would reject.
+    /// </summary>
+    public static string JsonSchema => LazySchema.Value;
+
+    private static readonly Lazy<string> LazySchema = new(() =>
+    {
+        using System.IO.Stream stream = typeof(DeploymentFile).Assembly
+            .GetManifestResourceStream("Queuey.Client.Waas.queuey.deploy.schema.json")
+            ?? throw new InvalidOperationException("The deployment file's JSON Schema is missing from this build.");
+        using var reader = new System.IO.StreamReader(stream);
+        return reader.ReadToEnd();
+    });
+
+    /// <summary>
     /// The workspace (<c>ten_…</c>) this file describes. Optional — the CLI falls back to the tenant
     /// in the connection config, so the same file can be applied to staging and production.
     /// </summary>
@@ -39,6 +83,14 @@ public sealed class DeploymentFile
 
     /// <summary>The workspace — the layer every queue inherits from when it says nothing itself.</summary>
     public DeploymentWorkspace? Workspace { get; set; }
+
+    /// <summary>
+    /// <see cref="Tenant"/> with its <c>${VAR}</c> expanded — the workspace an apply of this file
+    /// writes to, for a command that must reach the same one. Null when the file names none.
+    /// Only the tenant is expanded, so an unset variable elsewhere in the file does not matter here.
+    /// </summary>
+    public string? ResolveTenant(Func<string, string?>? lookup = null)
+        => DeploymentVariables.Expand(Tenant, lookup, "tenant");
 
     /// <summary>The queues to converge, keyed by queue name.</summary>
     public Dictionary<string, DeploymentQueue> Queues { get; set; } = new(StringComparer.Ordinal);
@@ -51,7 +103,11 @@ public sealed class DeploymentFile
 
         try
         {
-            return JsonSerializer.Deserialize<DeploymentFile>(json, ReadOptions) ?? new DeploymentFile();
+            DeploymentFile file = JsonSerializer.Deserialize<DeploymentFile>(json, ReadOptions) ?? new DeploymentFile();
+
+            // "queues": null leses som ingen køer, som et utelatt felt. Før 2026-10-05 ga det NullReferenceException.
+            file.Queues ??= new Dictionary<string, DeploymentQueue>(StringComparer.Ordinal);
+            return file;
         }
         catch (JsonException ex)
         {
@@ -69,6 +125,7 @@ public sealed class DeploymentFile
     {
         var expanded = new DeploymentFile
         {
+            Schema = Schema,
             Tenant = DeploymentVariables.Expand(Tenant, lookup, "tenant"),
             Workspace = Workspace is null ? null : new DeploymentWorkspace
             {
@@ -76,6 +133,9 @@ public sealed class DeploymentFile
                 DlqEnabled = Workspace.DlqEnabled,
                 RetentionDays = Workspace.RetentionDays,
                 Idempotent = Workspace.Idempotent,
+                MaxAttempts = Workspace.MaxAttempts,
+                DlqAfterAttempts = Workspace.DlqAfterAttempts,
+                Backoff = Workspace.Backoff,
                 Ingress = Workspace.Ingress,
                 Delivery = Workspace.Delivery is null ? null : new WorkspaceDelivery
                 {
@@ -96,10 +156,18 @@ public sealed class DeploymentFile
             DeploymentQueue q = entry.Value ?? new DeploymentQueue();
             expanded.Queues[entry.Key] = new DeploymentQueue
             {
+                Mode = q.Mode,
                 Ordering = q.Ordering,
                 DlqEnabled = q.DlqEnabled,
                 RetentionDays = q.RetentionDays,
                 Idempotent = q.Idempotent,
+                MaxAttempts = q.MaxAttempts,
+                DlqAfterAttempts = q.DlqAfterAttempts,
+                Backoff = q.Backoff,
+                Filter = q.Filter,
+                // Ingress på kø-nivå ble ikke kopiert her før (2026-09-23), så apply, check og
+                // dry-run droppet den stille: alle tre ekspanderer fila først.
+                Ingress = q.Ingress,
                 Delivery = q.Delivery is null ? null : new QueueDelivery
                 {
                     Url = DeploymentVariables.Expand(q.Delivery.Url, lookup, $"queues.{entry.Key}.delivery.url"),
@@ -146,12 +214,23 @@ public sealed class DeploymentFile
     {
         var plans = new List<DeploymentQueuePlan>();
 
+        // The workspace's retry declaration is checked like a queue's, so a typo there fails here too.
+        if (Workspace?.AsPolicy().Validate() is { } workspaceReason)
+            throw new QueueyConfigurationException($"The workspace has an invalid policy: {workspaceReason}");
+
+        // Ingress og levering sjekkes her, før noe sendes (2026-10-05). Backenden gjør en ukjent authMode for levering om til
+        // None og en ukjent method til POST uten å si fra, og en kilde uten navn fjernet den som var lagret.
+        Workspace?.Ingress?.Validate("workspace.ingress");
+        ValidateDelivery("workspace.delivery", Workspace?.Delivery?.AuthMode, Workspace?.Delivery?.Method);
+
         foreach (KeyValuePair<string, DeploymentQueue> entry in Queues)
         {
             DeploymentQueue declared = entry.Value ?? new DeploymentQueue();
 
             // The key is the queue name — validated as written, like every other name a caller chose.
             QueueyName.EnsureValid(entry.Key, "queue name");
+            declared.Ingress?.Validate($"queues.{entry.Key}.ingress");
+            ValidateDelivery($"queues.{entry.Key}.delivery", declared.Delivery?.AuthMode, method: null);
 
             var definition = QueueDefinitionFactory.FromName(entry.Key, new QueueOptions
             {
@@ -161,13 +240,29 @@ public sealed class DeploymentFile
                     DlqEnabled = declared.DlqEnabled,
                     RetentionDays = declared.RetentionDays,
                     Idempotent = declared.Idempotent,
+                    MaxAttempts = declared.MaxAttempts,
+                    DlqAfterAttempts = declared.DlqAfterAttempts,
+                    Backoff = declared.Backoff,
+                    Filter = declared.Filter,
                 },
             });
 
-            plans.Add(new DeploymentQueuePlan(definition, declared.Delivery, declared.Ingress));
+            plans.Add(new DeploymentQueuePlan(definition, declared.Delivery, declared.Ingress,
+                DeploymentQueueModes.Parse(declared.Mode, $"queues.{entry.Key}.mode")));
         }
 
         return plans;
+    }
+
+    private static void ValidateDelivery(string where, string? authMode, string? method)
+    {
+        if (authMode is not null && !WorkspaceDelivery.AuthModeValues.Contains(authMode.Trim(), StringComparer.OrdinalIgnoreCase))
+            throw new QueueyConfigurationException(
+                $"{where}.authMode must be one of {string.Join(", ", WorkspaceDelivery.AuthModeValues)}; got '{authMode}'.");
+
+        if (method is not null && !WorkspaceDelivery.MethodValues.Contains(method.Trim(), StringComparer.OrdinalIgnoreCase))
+            throw new QueueyConfigurationException(
+                $"{where}.method must be one of {string.Join(", ", WorkspaceDelivery.MethodValues)}; got '{method}'.");
     }
 
     /// <summary>
@@ -195,6 +290,25 @@ public sealed class DeploymentFile
 /// <summary>One queue's declaration: behaviour, and optionally its own destination.</summary>
 public sealed class DeploymentQueue
 {
+    /// <summary>
+    /// <c>deliver</c> or <c>logOnly</c>. Omit it and a queue this file creates delivers when it has a
+    /// destination (its own <c>delivery.url</c> or the workspace's base URL) and logs events until it
+    /// has one; an existing queue keeps its mode. Pausing is not a mode and never set by a deploy.
+    /// </summary>
+    public string? Mode { get; set; }
+
+    /// <summary>How many times an event is attempted before it gives up.</summary>
+    public int? MaxAttempts { get; set; }
+
+    /// <summary>After how many attempts an event goes to the DLQ. Must be below <c>maxAttempts</c>.</summary>
+    public int? DlqAfterAttempts { get; set; }
+
+    /// <summary>How long to wait between attempts.</summary>
+    public RetryBackoff? Backoff { get; set; }
+
+    /// <summary>Which events this queue delivers. Omit it to deliver every event.</summary>
+    public DeliveryFilter? Filter { get; set; }
+
     /// <summary>Delivery ordering: <c>fifo</c>, <c>bykey</c> or <c>besteffort</c>.</summary>
     public string? Ordering { get; set; }
 
@@ -204,7 +318,11 @@ public sealed class DeploymentQueue
     /// <summary>Days events are retained.</summary>
     public int? RetentionDays { get; set; }
 
-    /// <summary>Whether duplicate publishes are collapsed by idempotency key.</summary>
+    /// <summary>
+    /// Whether the receiver handles the same event twice safely. Then Queuey sends an event again after a timeout or a
+    /// conflict (409, 412, 423 or 428). Otherwise a timeout holds the queue until a person resumes it, and a conflict
+    /// stops the event. It does not deduplicate publishes.
+    /// </summary>
     public bool? Idempotent { get; set; }
 
     /// <summary>
@@ -235,8 +353,21 @@ public sealed class DeploymentWorkspace
     /// <summary>How many days events are retained.</summary>
     public int? RetentionDays { get; set; }
 
-    /// <summary>Whether duplicate publishes are collapsed by idempotency key.</summary>
+    /// <summary>
+    /// Whether the receiver handles the same event twice safely. Then Queuey sends an event again after a timeout or a
+    /// conflict (409, 412, 423 or 428). Otherwise a timeout holds the queue until a person resumes it, and a conflict
+    /// stops the event. It does not deduplicate publishes.
+    /// </summary>
     public bool? Idempotent { get; set; }
+
+    /// <summary>How many times an event is attempted, for every queue that does not say.</summary>
+    public int? MaxAttempts { get; set; }
+
+    /// <summary>After how many attempts an event goes to the DLQ. Must be below <c>maxAttempts</c>.</summary>
+    public int? DlqAfterAttempts { get; set; }
+
+    /// <summary>How long to wait between attempts, for every queue that does not say.</summary>
+    public RetryBackoff? Backoff { get; set; }
 
     /// <summary>Where events are delivered — the base every queue appends its path to.</summary>
     public WorkspaceDelivery? Delivery { get; set; }
@@ -245,18 +376,37 @@ public sealed class DeploymentWorkspace
     public DeploymentIngress? Ingress { get; set; }
 
     internal bool HasPolicy => Ordering is not null || DlqEnabled is not null
-                            || RetentionDays is not null || Idempotent is not null;
+                            || RetentionDays is not null || Idempotent is not null
+                            || MaxAttempts is not null || DlqAfterAttempts is not null
+                            || (Backoff is not null && !Backoff.IsEmpty);
+
+    /// <summary>The workspace's retry declaration as a policy, so it is validated like a queue's.</summary>
+    internal QueuePolicy AsPolicy() => new()
+    {
+        Ordering = Ordering,
+        DlqEnabled = DlqEnabled,
+        RetentionDays = RetentionDays,
+        Idempotent = Idempotent,
+        MaxAttempts = MaxAttempts,
+        DlqAfterAttempts = DlqAfterAttempts,
+        Backoff = Backoff,
+    };
 }
 
 /// <summary>One resolved queue from a deployment file: what to apply, and what to point it at.</summary>
 public sealed class DeploymentQueuePlan
 {
-    internal DeploymentQueuePlan(QueueDefinition definition, QueueDelivery? delivery, DeploymentIngress? ingress = null)
+    internal DeploymentQueuePlan(QueueDefinition definition, QueueDelivery? delivery, DeploymentIngress? ingress = null,
+        DeploymentQueueMode? mode = null)
     {
         Definition = definition;
         Delivery = delivery is null || delivery.IsEmpty ? null : delivery;
         Ingress = ingress is null || ingress.IsEmpty ? null : ingress;
+        Mode = mode;
     }
+
+    /// <summary>The mode the file declares, or <c>null</c> to leave it (see <see cref="DeploymentQueue.Mode"/>).</summary>
+    public DeploymentQueueMode? Mode { get; }
 
     /// <summary>The queue to converge (name + behaviour).</summary>
     public QueueDefinition Definition { get; }
@@ -266,4 +416,63 @@ public sealed class DeploymentQueuePlan
 
     /// <summary>Its ingress patch, or <c>null</c> when the queue reads events like the workspace does.</summary>
     public DeploymentIngress? Ingress { get; }
+}
+
+/// <summary>Whether a queue delivers events or only logs them.</summary>
+/// <remarks>
+/// Paused is not here on purpose: pausing is something an operator does to a running queue, and a
+/// deploy that set it would unpause whatever the operator paused. A deploy never touches it.
+/// </remarks>
+public enum DeploymentQueueMode
+{
+    /// <summary>Events are delivered to the queue's destination.</summary>
+    Deliver,
+
+    /// <summary>Events are stored as <c>Logged</c> and never delivered — for a queue with nowhere to deliver yet.</summary>
+    LogOnly,
+}
+
+/// <summary>The text and wire forms of <see cref="DeploymentQueueMode"/>.</summary>
+public static class DeploymentQueueModes
+{
+    /// <summary>The values a deployment file accepts for <c>mode</c>.</summary>
+    public static readonly IReadOnlyList<string> Values = new[] { "deliver", "logOnly" };
+
+    /// <summary>The file's text form: <c>deliver</c> or <c>logOnly</c>.</summary>
+    public static string ToFileText(this DeploymentQueueMode mode) => mode == DeploymentQueueMode.Deliver ? "deliver" : "logOnly";
+
+    // Enums er tall på ledningen (se CLAUDE.md): backendens QueueMode har LogOnly = 1, Deliver = 3.
+    internal static int ToWire(this DeploymentQueueMode mode) => mode == DeploymentQueueMode.Deliver ? 3 : 1;
+
+    /// <summary>
+    /// The mode a backend reports, or <c>null</c> when it is neither — Paused, or a value this
+    /// client does not know. Read as text or number, since the list endpoint reports text.
+    /// </summary>
+    internal static DeploymentQueueMode? FromBackend(string? text) => text?.Trim().ToLowerInvariant() switch
+    {
+        "deliver" or "3" => DeploymentQueueMode.Deliver,
+        "logonly" or "1" => DeploymentQueueMode.LogOnly,
+        _ => null,
+    };
+
+    /// <summary>
+    /// Parses a file's <c>mode</c>. Null stays null (leave the mode alone); anything but the two
+    /// values is a configuration error that names them, and <c>paused</c> says why it is not one.
+    /// </summary>
+    internal static DeploymentQueueMode? Parse(string? text, string where)
+    {
+        if (text is null) return null;
+        switch (text.Trim().ToLowerInvariant())
+        {
+            case "deliver": return DeploymentQueueMode.Deliver;
+            case "logonly": return DeploymentQueueMode.LogOnly;
+            case "paused":
+                throw new QueueyConfigurationException(
+                    $"{where}: 'paused' is not a mode a deployment file sets — pausing is an operator's decision about a " +
+                    "running queue, and a deploy that set it would undo theirs. Use deliver or logOnly.");
+            default:
+                throw new QueueyConfigurationException(
+                    $"{where} must be one of {string.Join(", ", Values)}; got '{text}'.");
+        }
+    }
 }

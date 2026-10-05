@@ -9,6 +9,7 @@ namespace Queuey.Client.Cli.Tests;
 /// the deletion rules: discard reaches only quarantined rows, reset demands
 /// the explicit acknowledgement, and both preserve the old file.
 /// </summary>
+[Collection(ConsoleCollection.Name)]
 public class EdgeCommandTests : IDisposable
 {
     private readonly string _dir;

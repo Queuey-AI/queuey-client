@@ -23,6 +23,12 @@
     <None Include="README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
+  <!-- The deployment file's JSON Schema, generated from this project's model by a test
+       (DeploymentSchemaTests) and served by DeploymentFile.JsonSchema and `queuey schema`. -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\schema\queuey.deploy.schema.json" LogicalName="Queuey.Client.Waas.queuey.deploy.schema.json" />
+  </ItemGroup>
+
   <ItemGroup>
     <InternalsVisibleTo Include="Queuey.Client.Waas.Tests" />
   </ItemGroup>

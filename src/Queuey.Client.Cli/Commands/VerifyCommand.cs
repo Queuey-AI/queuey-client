@@ -1,0 +1,195 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Text.Json;
+using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
+using Queuey.Client;
+using Queuey.Client.Waas;
+
+namespace Queuey.Client.Cli;
+
+/// <summary>
+/// <c>queuey verify</c> — proves a queue delivers: publishes one event and follows it until it is
+/// delivered, logged, filtered or failed. The step after <c>apply</c>, because an apply that exits 0
+/// says the configuration landed, not that events arrive.
+/// </summary>
+internal static class VerifyCommand
+{
+    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal) { "stdin", "json", "help", "h" };
+
+    public static async Task<int> RunAsync(string[] args)
+    {
+        ArgMap map = ArgMap.Parse(args, Flags);
+        if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
+
+        string? queue = map.FirstPositional ?? map.Get("queue");
+        if (string.IsNullOrWhiteSpace(queue))
+        {
+            Console.Error.WriteLine("verify requires <queue>: the queue name you publish to.");
+            return ExitCodes.Usage;
+        }
+
+        byte[]? body = ReadBody(map, out string? bodyError);
+        if (bodyError != null)
+        {
+            Console.Error.WriteLine(bodyError);
+            return ExitCodes.Usage;
+        }
+
+        int timeoutSeconds = 30;
+        if (map.Get("timeout") is { } rawTimeout && (!int.TryParse(rawTimeout, out timeoutSeconds) || timeoutSeconds < 1))
+        {
+            Console.Error.WriteLine($"--timeout takes whole seconds, at least 1; got '{rawTimeout}'.");
+            return ExitCodes.Usage;
+        }
+
+        // Workspacet apply skrev til, etter samme regel som apply: fila sin tenant, ellers den
+        // konfigurerte, og feil når --tenant eller QUEUEY_TENANT navngir et annet enn fila.
+        (string? fileTenant, string filePath) = DeploymentFileTenant(map);
+        ResolvedConfig config = CliHost.ResolveForDeployment(map, fileTenant, filePath);
+
+        using ServiceProvider provider = CliHost.BuildProvider(config);
+        var service = provider.GetRequiredService<IQueueyService>();
+
+        DeliveryVerification result = await service.VerifyDeliveryAsync(queue!, body!, new VerifyDeliveryOptions
+        {
+            Timeout = TimeSpan.FromSeconds(timeoutSeconds),
+            ContentType = map.Get("content-type") ?? "application/json",
+            EventType = map.Get("event-type"),
+        });
+
+        if (map.Has("json"))
+            Console.WriteLine(JsonSerializer.Serialize(ToJson(result), CliHost.JsonOut));
+        else
+            WriteHuman(result);
+
+        return result.Delivered ? ExitCodes.Success : ExitCodes.RuntimeError;
+    }
+
+    /// <summary>The deployment file's tenant, when there is a file — named by --deployment, or the default one here.</summary>
+    private static (string? Tenant, string Path) DeploymentFileTenant(ArgMap map)
+    {
+        string? named = map.Get("deployment");
+        string path = named ?? DeploymentFile.DefaultFileName;
+        if (!File.Exists(path))
+        {
+            if (named is not null)
+                throw new QueueyConfigurationException($"No deployment file at '{path}'.");
+            return (null, path);
+        }
+
+        return (DeploymentFile.Parse(File.ReadAllText(path)).ResolveTenant(), path);
+    }
+
+    private static void WriteHuman(DeliveryVerification r)
+    {
+        string mark = r.Delivered ? "✓" : "✗";
+        string verdict = r.Verdict switch
+        {
+            DeliveryVerdict.Delivered => "Delivered",
+            DeliveryVerdict.LoggedNotDelivered => "Logged, not delivered",
+            DeliveryVerdict.Filtered => "Filtered, not delivered",
+            DeliveryVerdict.Failed => "Delivery failed",
+            _ => "No outcome yet",
+        };
+
+        Console.WriteLine($"{mark} {verdict} — {r.Queue} ({r.QueuePublicId}) in {r.Tenant ?? "?"}, event {r.EventId}");
+        Console.WriteLine($"  {r.Summary}");
+        if (r.SuggestedAction is { } action)
+            Console.WriteLine($"  → {action}");
+    }
+
+    /// <summary>
+    /// The version of <c>verify --json</c>'s shape. A script that reads it checks this first, as it does in
+    /// <c>apply --dry-run --json</c> and <c>plan --json</c>.
+    /// </summary>
+    // Ny kontrakt med verify (review 2026-10-05): versjonert fra første utgave, og «action» som i alle andre utskrifter.
+    internal const int JsonSchemaVersion = 1;
+
+    private static object ToJson(DeliveryVerification r) => new
+    {
+        schemaVersion = JsonSchemaVersion,
+        tenant = r.Tenant,
+        queue = r.Queue,
+        queuePublicId = r.QueuePublicId,
+        eventId = r.EventId,
+        verdict = r.Verdict.ToText(),
+        delivered = r.Delivered,
+        status = r.Status,
+        attempts = r.Attempts,
+        target = r.Target,
+        responseCode = r.ResponseCode,
+        durationMs = r.DurationMs,
+        failureClass = r.FailureClass,
+        error = r.Error,
+        summary = r.Summary,
+        action = r.SuggestedAction,
+    };
+
+    private static byte[]? ReadBody(ArgMap map, out string? error)
+    {
+        error = null;
+
+        if (map.Has("stdin"))
+            return Encoding.UTF8.GetBytes(Console.In.ReadToEnd());
+
+        string? file = map.Get("file");
+        if (!string.IsNullOrWhiteSpace(file))
+        {
+            if (!File.Exists(file)) { error = $"File not found: {file}"; return null; }
+            byte[] bytes = File.ReadAllBytes(file);
+            if (IsDeploymentFile(bytes))
+            {
+                error = $"--file is the event to send, and {file} is a deployment file. Name the deployment file with --deployment, " +
+                        "and send the event with --data, --file or --stdin.";
+                return null;
+            }
+            return bytes;
+        }
+
+        string? data = map.Get("data");
+        if (data != null)
+            return Encoding.UTF8.GetBytes(data);
+
+        // Ingen standard-payload: eventen går til den ekte mottakeren, så hva den får, skal være et valg.
+        error = "verify requires the event to send: --data <json>, --file <path>, or --stdin. " +
+                "It is delivered to the real receiver like any other event, so send data it treats as harmless.";
+        return null;
+    }
+
+    /// <summary>
+    /// Whether the bytes are a deployment file rather than an event: a JSON object with only the file's top-level fields,
+    /// among them <c>workspace</c> or <c>queues</c>. <c>apply</c> and <c>plan</c> take the deployment file with
+    /// <c>--file</c>, so it is the mistake to expect.
+    /// </summary>
+    // Review 2026-10-05: verify --file er eventen, mens apply og plan --file er deploy-fila. Et feil valg sendte deploy-fila
+    // som event til den ekte mottakeren.
+    internal static bool IsDeploymentFile(byte[] bytes)
+    {
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(bytes, new JsonDocumentOptions
+            {
+                CommentHandling = JsonCommentHandling.Skip,
+                AllowTrailingCommas = true,
+            });
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                return false;
+
+            var names = new List<string>();
+            foreach (JsonProperty property in doc.RootElement.EnumerateObject())
+                names.Add(property.Name);
+
+            return names.Count > 0
+                   && names.All(n => n is "$schema" or "tenant" or "workspace" or "queues")
+                   && names.Any(n => n is "workspace" or "queues");
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+}

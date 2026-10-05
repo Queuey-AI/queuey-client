@@ -42,4 +42,18 @@ internal sealed class StubHttpMessageHandler : HttpMessageHandler
     }
 
     public static HttpResponseMessage Accepted(object body) => Json(HttpStatusCode.Accepted, body);
+
+    /// <summary>
+    /// What a deployment apply reads and writes around the queues themselves: the workspace's queue
+    /// listing (empty — every queue is new) and the mode change. Null for anything else.
+    /// </summary>
+    public static HttpResponseMessage? DeployDefaults(HttpRequestMessage req)
+    {
+        string path = req.RequestUri!.AbsolutePath;
+        if (req.Method == HttpMethod.Get && path.StartsWith("/tenants/", StringComparison.Ordinal) && path.EndsWith("/queues", StringComparison.Ordinal))
+            return Json(HttpStatusCode.OK, Array.Empty<object>());
+        if (path.EndsWith("/mode-change", StringComparison.Ordinal))
+            return new HttpResponseMessage(HttpStatusCode.NoContent);
+        return null;
+    }
 }

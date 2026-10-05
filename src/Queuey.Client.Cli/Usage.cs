@@ -13,6 +13,8 @@ COMMANDS
   sync           Apply every [QueueyModel] stream found in an assembly (PUT /waas/streams).
   queue          Declare queues from [QueueyQueue] types: queue plan | queue sync.
   apply          Converge Queuey from a declarative deployment file (queuey.deploy.json).
+  verify         Publish one event to a queue and follow it: delivered, or why not and what to change.
+  schema         Print the JSON Schema for queuey.deploy.json. Reads nothing, needs no credentials.
   pull           Read a workspace back into a deployment file (the inverse of apply).
   credentials    Store delivery secrets a deployment file refers to: credentials set | list.
   keys           Mint an ingress signing key for a queue: keys mint.
@@ -83,6 +85,49 @@ APPLY
                  workspace holding settings the file is silent about is not drift.
                  ${VAR} in a value is expanded from the environment; an unset one is an
                  error, never an empty string. Use ${VAR:-default} when a default is meant.
+                 A queue this file creates delivers when it has a destination (its own
+                 delivery.url or workspace.delivery.baseUrl) and logs events until it has one.
+                 Declare ""mode"": ""deliver"" or ""logOnly"" to own it; an existing queue keeps its
+                 mode otherwise. Pausing is an operator's lever: a deploy never resumes a queue.
+                 Retry (maxAttempts, dlqAfterAttempts, backoff) and a delivery filter are
+                 declared per workspace or queue; `queuey schema` lists every field and the
+                 values it accepts.
+                 The workspace is the file's ""tenant"" when it names one, else --tenant /
+                 QUEUEY_TENANT / queuey.json. When --tenant or QUEUEY_TENANT names another
+                 workspace than the file, apply fails and names both. verify uses the same rule.
+
+VERIFY
+  queuey verify <queue> (--data <json> | --file <path> | --stdin)
+                [--timeout <seconds>] [--event-type <t>] [--content-type <ct>]
+                [--deployment queuey.deploy.json] [--json]
+                 Publishes ONE event to <queue> and follows it until it is delivered, logged,
+                 filtered or failed, or --timeout passes (default 30). Exits 0 only when the
+                 receiver got it. Otherwise the verdict — logged_not_delivered, filtered,
+                 failed or timeout — names what to change: the mode, the filter, the
+                 credential the receiver rejected, held delivery, or the earlier event
+                 holding the queue. The advice follows what Queuey decided after the
+                 attempt. When Queuey holds the queue for a person (a rejected credential,
+                 a missing route, a TLS failure, or a timeout on a queue not marked
+                 idempotent), the advice ends with a person resuming it in the Queuey
+                 console. A delivery Queuey holds before sending (the send budget, a
+                 receiver it probes) is not a failure: verify keeps waiting. A failure is
+                 reported on its first attempt, not after every retry.
+                 --json prints an object with ""schemaVersion"": 1, the verdict and the action.
+                 The event is real and reaches the receiver like any other: send data it
+                 treats as harmless. The workspace follows apply's rule: the deployment file's
+                 ""tenant"" (--deployment, default ./queuey.deploy.json) when it names one, else
+                 --tenant / QUEUEY_TENANT / queuey.json; when --tenant or QUEUEY_TENANT names
+                 another workspace than the file, verify fails and names both. The output names
+                 the workspace. Needs a key that may publish and read events (event.read):
+                 verify reads one event first and publishes nothing without it. --file is the
+                 event; a deployment file there is refused (name that one with --deployment).
+
+SCHEMA
+  queuey schema
+                 Prints the JSON Schema for queuey.deploy.json — every field, the values it
+                 accepts and what it does. Save it, or point ""$schema"" at its ""$id"": the copy
+                 published at this version's release tag,
+                 https://raw.githubusercontent.com/Queuey-AI/queuey-client/v<version>/schema/queuey.deploy.schema.json
 
 PULL
   queuey pull [--file queuey.deploy.json] [--force] [--stdout]

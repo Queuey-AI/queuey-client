@@ -28,6 +28,8 @@ try
         "sync" => await SyncCommand.RunAsync(rest),
         "queue" => await QueueCommand.RunAsync(rest),
         "apply" => await ApplyCommand.RunAsync(rest),
+        "verify" => await VerifyCommand.RunAsync(rest),
+        "schema" => SchemaCommand.Run(rest),
         "pull" => await PullCommand.RunAsync(rest),
         "keys" => await KeysCommand.RunAsync(rest),
         "credentials" => await CredentialsCommand.RunAsync(rest),

@@ -27,6 +27,7 @@ Three jobs, in the order most people meet them:
 # 1. Converge Queuey from your code or a committed file — the deploy step
 queuey sync   --assembly bin/Release/net8.0/App.dll
 queuey apply  --file queuey.deploy.json --check     # the CI drift gate
+queuey verify orders --data '{"test":true}'         # did an event actually arrive?
 
 # 2. Receive real webhooks on your laptop, without exposing a port
 queuey listen --forward-to http://localhost:5000/hooks

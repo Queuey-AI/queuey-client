@@ -24,6 +24,12 @@ public sealed class QueueApplyResult
     /// <summary>Whether a policy patch was sent (false when the queue inherits everything).</summary>
     public bool PolicyApplied { get; init; }
 
+    /// <summary>
+    /// The queue's mode after the apply — <c>deliver</c> or <c>logOnly</c> (<c>paused</c> for the old
+    /// Paused mode) — or <c>null</c> when this run neither set nor read it.
+    /// </summary>
+    public string? Mode { get; init; }
+
     /// <summary>Non-fatal observations about this queue — see <see cref="ISyncRunResult.Warnings"/>.</summary>
     public IReadOnlyList<string> Warnings { get; init; } = Array.Empty<string>();
 

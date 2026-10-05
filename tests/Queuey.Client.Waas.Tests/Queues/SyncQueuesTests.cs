@@ -38,9 +38,9 @@ public class SyncQueuesTests
         Assert.True(result.AllSucceeded);
         Assert.Equal(2, result.Total);
 
-        // Three calls, not four: the all-inherit queue gets an apply but no policy patch. Sending an
-        // empty patch would risk pinning values the queue meant to keep inheriting.
-        Assert.Equal(3, api.Requests.Count);
+        // Three writes besides the mode, not four: the all-inherit queue gets an apply but no policy
+        // patch. Sending an empty patch would risk pinning values the queue meant to keep inheriting.
+        Assert.Equal(3, api.Requests.Count(r => !r.RequestUri!.AbsolutePath.EndsWith("/mode-change", StringComparison.Ordinal)));
         Assert.Equal(new[] { true, false }, result.Applied.Select(r => r.PolicyApplied).ToArray());
 
         HttpRequestMessage patch = api.Requests.Single(r => r.RequestUri!.AbsolutePath.EndsWith("/policy", StringComparison.Ordinal));
@@ -89,6 +89,36 @@ public class SyncQueuesTests
         Assert.Equal("ten_abc", doc.RootElement.GetProperty("tenantPublicId").GetString());
         Assert.Equal("orders", doc.RootElement.GetProperty("displayName").GetString());
         Assert.Equal(2, doc.RootElement.EnumerateObject().Count());
+    }
+
+    [Theory]
+    [InlineData(true, true, "deliver")]    // ny, og workspacet har en base-URL: leverer
+    [InlineData(true, false, "logOnly")]   // ny, uten mål: logger og sier fra
+    [InlineData(false, true, null)]        // fantes fra før: modusen er noen andres, og røres ikke
+    public async Task A_queue_this_sync_creates_delivers_when_it_has_somewhere_to_deliver(bool created, bool hasTarget, string? mode)
+    {
+        // Før 2026-09-23 ble en ny kø stående i LogOnly selv med workspacets base-URL å levere til,
+        // og hver event endte som Logged uten et ord, for advarselen gjaldt bare køer helt uten mål.
+        var api = new StubHttpMessageHandler((_, req, _) =>
+            req.RequestUri!.AbsolutePath.EndsWith("/mode-change", StringComparison.Ordinal)
+                ? new HttpResponseMessage(HttpStatusCode.NoContent)
+                : StubHttpMessageHandler.Json(HttpStatusCode.OK, ApplyBody("orders", created, hasTarget)));
+        QueueyService service = Build(api, QueueDefinitionFactory.FromName("orders", null));
+
+        QueueSyncResult result = await service.SyncQueuesAsync();
+
+        Assert.Equal(mode, result.Applied.Single().Mode);
+        int modeChange = api.Requests.ToList().FindIndex(r => r.RequestUri!.AbsolutePath.EndsWith("/queues/que_orders/mode-change", StringComparison.Ordinal));
+        if (mode == "deliver")
+        {
+            Assert.Equal("PATCH", api.Requests[modeChange].Method.Method);
+            using JsonDocument doc = JsonDocument.Parse(api.Bodies[modeChange]!);
+            Assert.Equal(3, doc.RootElement.GetProperty("mode").GetInt32());   // Deliver, som tall på ledningen
+        }
+        else
+        {
+            Assert.Equal(-1, modeChange);
+        }
     }
 
     [Fact]
@@ -176,8 +206,10 @@ public class SyncQueuesTests
 
         await service.SyncAsync();
 
-        // A stream is published on top of a queue, so the queue must land first.
-        Assert.EndsWith("/queues", api.Requests[0].RequestUri!.AbsolutePath);
-        Assert.EndsWith("/waas/streams", api.Requests[1].RequestUri!.AbsolutePath);
+        // A stream is published on top of a queue, so the queue must land first — mode included.
+        var paths = api.Requests.Select(r => r.RequestUri!.AbsolutePath).ToList();
+        Assert.EndsWith("/queues", paths[0]);
+        Assert.True(paths.FindIndex(p => p.EndsWith("/waas/streams", StringComparison.Ordinal))
+                    > paths.FindIndex(p => p.EndsWith("/mode-change", StringComparison.Ordinal)));
     }
 }

@@ -75,6 +75,20 @@ public class DeploymentFileTests
         Assert.Contains("maxAttemps", ex.Message);
     }
 
+    [Theory]
+    [InlineData("""{ "queues": { "orders": { "retryOnTimeouts": false } } }""", "retryOnTimeouts")]
+    [InlineData("""{ "queues": { "orders": { "retryOnNetworkErrors": true } } }""", "retryOnNetworkErrors")]
+    [InlineData("""{ "workspace": { "retryOnTimeouts": false }, "queues": {} }""", "retryOnTimeouts")]
+    [InlineData("""{ "workspace": { "retryOnNetworkErrors": true }, "queues": {} }""", "retryOnNetworkErrors")]
+    public void The_retry_flags_that_never_took_effect_are_unknown_fields(string json, string field)
+    {
+        // Serveren lagret dem, men workeren leste dem aldri (review 2026-09-24), og de ble aldri
+        // sluppet. En fil som har dem, lover noe som ikke skjer — den avvises som alle ukjente felt.
+        var ex = Assert.Throws<QueueyConfigurationException>(() => DeploymentFile.Parse(json));
+
+        Assert.Contains(field, ex.Message);
+    }
+
     [Fact]
     public void An_invalid_queue_name_fails_when_the_file_is_resolved()
     {
@@ -95,6 +109,9 @@ public class DeploymentFileTests
     /// <summary>Serves the credential listing (the file names one), then queue applies / patches.</summary>
     private static StubHttpMessageHandler ApplyStub() => new((_, req, _) =>
     {
+        if (StubHttpMessageHandler.DeployDefaults(req) is { } known)
+            return known;
+
         string path = req.RequestUri!.AbsolutePath;
 
         if (path.EndsWith("/credentials", StringComparison.Ordinal))
@@ -127,17 +144,22 @@ public class DeploymentFileTests
         int ingress = Array.FindIndex(paths, p => p.EndsWith("/tenants/ten_abc/ingress", StringComparison.Ordinal));
         int policy = Array.FindIndex(paths, p => p.EndsWith("/tenants/ten_abc/policy", StringComparison.Ordinal));
         int delivery = Array.FindIndex(paths, p => p.EndsWith("/tenants/ten_abc/delivery", StringComparison.Ordinal));
-        int firstQueue = Array.FindIndex(paths, p => p.EndsWith("/queues", StringComparison.Ordinal));
+        int firstQueue = Array.FindIndex(paths, p => p == "/queues");
+
+        // The workspace's queue listing is read before anything is written, so a key that cannot
+        // read the workspace fails before it has changed it.
+        int listing = Array.FindIndex(paths, p => p == "/tenants/ten_abc/queues");
+        Assert.Equal(0, listing);
 
         Assert.True(ingress >= 0 && policy > ingress && delivery > policy,
             $"expected workspace ingress → policy → delivery, got: {string.Join(", ", paths)}");
         Assert.True(delivery < firstQueue, "the workspace must be converged before the first queue");
         Assert.Equal("PATCH", api.Requests[ingress].Method.Method);
 
-        // The credential lookup is lazy — it happens when a name actually needs resolving, which is
-        // the delivery patch, not before.
+        // Credential-navnene slås opp før første skriving, så et navn som mangler, feiler før noe er
+        // endret (2026-09-24). Før ble de slått opp først når en patch trengte dem.
         int credentials = Array.FindIndex(paths, p => p.EndsWith("/credentials", StringComparison.Ordinal));
-        Assert.True(credentials >= 0 && credentials < delivery);
+        Assert.True(credentials > listing && credentials < ingress, string.Join(", ", paths));
 
         // Then per queue: apply, policy patch (when declared), delivery patch (when declared).
         Assert.Contains("/queues/que_orders/policy", paths);
@@ -163,9 +185,10 @@ public class DeploymentFileTests
     public async Task An_unknown_credential_name_fails_with_what_to_do_about_it()
     {
         var api = new StubHttpMessageHandler((_, req, _) =>
-            req.RequestUri!.AbsolutePath.EndsWith("/credentials", StringComparison.Ordinal)
+            StubHttpMessageHandler.DeployDefaults(req)
+            ?? (req.RequestUri!.AbsolutePath.EndsWith("/credentials", StringComparison.Ordinal)
                 ? StubHttpMessageHandler.Json(HttpStatusCode.OK, Array.Empty<object>())
-                : StubHttpMessageHandler.Json(HttpStatusCode.OK, ApplyBody("orders")));
+                : StubHttpMessageHandler.Json(HttpStatusCode.OK, ApplyBody("orders"))));
 
         QueueyService service = WaasTestHost.Build(apiStub: api);
 
@@ -174,6 +197,7 @@ public class DeploymentFileTests
 
         Assert.Contains("No credential named 'partner-key'", ex.Message);
         Assert.Contains("queuey credentials set --name partner-key", ex.Message);
+        Assert.All(api.Requests, r => Assert.Equal(HttpMethod.Get, r.Method));
     }
 
     [Fact]
@@ -200,12 +224,13 @@ public class DeploymentFileTests
         // The apply response answered readiness BEFORE the delivery patch was sent, so warning here
         // would report a state that no longer exists by the time the run ends.
         var api = new StubHttpMessageHandler((_, req, _) =>
-            req.RequestUri!.AbsolutePath.EndsWith("/delivery", StringComparison.Ordinal)
+            StubHttpMessageHandler.DeployDefaults(req)
+            ?? (req.RequestUri!.AbsolutePath.EndsWith("/delivery", StringComparison.Ordinal)
                 ? new HttpResponseMessage(HttpStatusCode.NoContent)
                 : StubHttpMessageHandler.Json(HttpStatusCode.OK, new
                 {
                     publicId = "que_orders", displayName = "orders", created = true, hasDeliveryTarget = false,
-                }));
+                })));
 
         QueueyService service = WaasTestHost.Build(apiStub: api);
 
@@ -215,6 +240,10 @@ public class DeploymentFileTests
 
         Assert.True(result.AllSucceeded);
         Assert.Empty(result.Warnings);
+
+        // Og den leverer: en ny kø med eget mål settes til Deliver, etter at målet er satt.
+        Assert.Equal("deliver", result.Applied.Single().Mode);
+        Assert.EndsWith("/queues/que_orders/mode-change", api.Requests[^1].RequestUri!.AbsolutePath);
     }
 
     [Fact]
@@ -222,9 +251,10 @@ public class DeploymentFileTests
     {
         // Otherwise the queue reports "applied" while pointing nowhere.
         var api = new StubHttpMessageHandler((_, req, _) =>
-            req.RequestUri!.AbsolutePath.EndsWith("/delivery", StringComparison.Ordinal)
+            StubHttpMessageHandler.DeployDefaults(req)
+            ?? (req.RequestUri!.AbsolutePath.EndsWith("/delivery", StringComparison.Ordinal)
                 ? StubHttpMessageHandler.Json(HttpStatusCode.BadRequest, new { error = new { code = "invalid_delivery", message = "bad url" } })
-                : StubHttpMessageHandler.Json(HttpStatusCode.OK, ApplyBody("orders")));
+                : StubHttpMessageHandler.Json(HttpStatusCode.OK, ApplyBody("orders"))));
 
         QueueyService service = WaasTestHost.Build(apiStub: api);
 

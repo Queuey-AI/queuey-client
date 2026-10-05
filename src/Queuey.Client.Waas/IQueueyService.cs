@@ -99,6 +99,18 @@ public interface IQueueyService
     Task<IReadOnlyList<DriftItem>> CheckDeploymentAsync(DeploymentFile file, string? tenantPublicId = null, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Proves a queue delivers: publishes <paramref name="payload"/> to <paramref name="queueName"/>
+    /// and follows that event until it is delivered, logged, filtered or failed, or the timeout
+    /// passes. A failure is reported on its first attempt, with the receiver's answer and what to
+    /// change — the retries can take hours, and the first answer is what says what to fix.
+    /// </summary>
+    /// <remarks>
+    /// The event is a real one: the receiver gets it like any other, so send data it treats as
+    /// harmless. Needs a key that may publish and read events — a deploy key can.
+    /// </remarks>
+    Task<DeliveryVerification> VerifyDeliveryAsync(string queueName, byte[] payload, VerifyDeliveryOptions? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Applies queues, then streams. Queues go first because a stream is published on top of one, so a
     /// queue failure stops the run before any stream is touched.
     /// </summary>
