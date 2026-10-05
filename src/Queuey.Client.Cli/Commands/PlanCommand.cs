@@ -20,6 +20,14 @@ internal static class PlanCommand
 {
     internal static readonly CommandOptions Options = new("plan", flags: new[] { "json" }, values: new[] { "file" });
 
+    /// <summary>
+    /// The version of <c>plan --json</c>'s shape: <c>{ schemaVersion, file, tenant, wouldSucceed, changeCount, steps }</c>.
+    /// A script that reads it checks this first, as it does in <c>apply --dry-run --json</c>.
+    /// </summary>
+    // Samme mønster som apply --dry-run --json, der Kenneth valgte et versjonert objekt (2026-10-05). Formen er ny med
+    // queuey plan, så den har en versjon fra første utgave, og ingen leser må gjette når den endres.
+    internal const int JsonSchemaVersion = 1;
+
     public static async Task<int> RunAsync(string[] args)
     {
         if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
@@ -38,6 +46,7 @@ internal static class PlanCommand
         {
             Console.WriteLine(JsonSerializer.Serialize(new
             {
+                schemaVersion = JsonSchemaVersion,
                 file = path,
                 tenant = plan.Tenant,
                 wouldSucceed = plan.WouldSucceed,

@@ -325,7 +325,10 @@ run also proves that Queuey answers dry runs; against an API that does not, the 
 says what that one call may have changed — nothing, when a declared queue already exists. It is a verb of
 its own rather than an `apply` flag, so a CLI too old to know it answers "Unknown command" instead of
 running the apply you meant to plan. For the same reason every command rejects an option it does not
-take — a typo like `--paln` fails with exit 2 and the options that command accepts.
+take — a typo like `--paln` fails with exit 2 and the options that command accepts. `queuey plan --json`
+prints the plan as an object a script can read: `schemaVersion` (1, so check it first), `file`, `tenant`,
+`wouldSucceed`, `changeCount`, and `steps`, each with its `target`, `aspect`, `creates`, `changes`, `notes`
+and `error`.
 
 `queuey apply --dry-run --json` prints what the file declares, checked locally, for a script or an
 agent to read:
