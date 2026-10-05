@@ -44,7 +44,7 @@ internal static class QueueCommand
 
     private static int Unknown(string sub, string[] rest)
         => CliErrors.Write(CliErrors.WantsJson(rest), "unknown_subcommand",
-            $"Unknown queue subcommand '{sub}'. Expected 'plan' or 'sync'.", action: null, status: null, ExitCodes.Usage);
+            $"Unknown queue subcommand '{CliErrors.Shown(sub)}'. Expected 'plan' or 'sync'.", action: null, status: null, ExitCodes.Usage);
 
     private static int Plan(string[] args)
     {

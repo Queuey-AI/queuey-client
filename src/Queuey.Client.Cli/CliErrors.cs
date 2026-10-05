@@ -20,6 +20,19 @@ internal static class CliErrors
     /// </summary>
     public static bool WantsJson(IEnumerable<string> args) => ArgMap.Parse(args, JsonSwitch).Has("json");
 
+    /// <summary>
+    /// A word from the command line as an error may show it: an option or command name as typed, and anything else cut at
+    /// the first character a name does not have. A word can be a secret pasted in the wrong place.
+    /// </summary>
+    // Review 2026-10-05: `whoami --api-key:qak_… --json` skrev nøkkelen tilbake i feilen, som «Unknown option --api-key:qak_…».
+    internal static string Shown(string word)
+    {
+        int safe = 0;
+        while (safe < word.Length && safe < 40 && (word[safe] is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '-'))
+            safe++;
+        return safe == word.Length ? word : word.Substring(0, safe) + "…";
+    }
+
     /// <summary>A usage error (exit 2): the command line itself is wrong, and nothing was sent.</summary>
     public static int Usage(ArgMap map, string code, string message, string? action = null, IReadOnlyDictionary<string, object?>? details = null)
         => Write(map.Has("json"), code, message, action, status: null, ExitCodes.Usage, label: null, details);

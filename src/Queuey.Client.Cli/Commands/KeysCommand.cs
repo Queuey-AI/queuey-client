@@ -29,7 +29,7 @@ internal static class KeysCommand
         if (sub is "" or "-h" or "--help" or "help") { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
         if (sub != "mint")
         {
-            return CliErrors.Write(CliErrors.WantsJson(rest), "unknown_subcommand", $"Unknown keys subcommand '{sub}'. Expected 'mint'.",
+            return CliErrors.Write(CliErrors.WantsJson(rest), "unknown_subcommand", $"Unknown keys subcommand '{CliErrors.Shown(sub)}'. Expected 'mint'.",
                 action: null, status: null, ExitCodes.Usage);
         }
 

@@ -46,7 +46,7 @@ internal static class CredentialsCommand
 
     private static int Unknown(string sub, string[] rest)
         => CliErrors.Write(CliErrors.WantsJson(rest), "unknown_subcommand",
-            $"Unknown credentials subcommand '{sub}'. Expected 'set' or 'list'.", action: null, status: null, ExitCodes.Usage);
+            $"Unknown credentials subcommand '{CliErrors.Shown(sub)}'. Expected 'set' or 'list'.", action: null, status: null, ExitCodes.Usage);
 
     private static async Task<int> SetAsync(string[] args)
     {
@@ -65,9 +65,15 @@ internal static class CredentialsCommand
                 "credentials set requires --from-env <ENV_VAR> — the secret is read from the environment, "
                 + "never passed as an argument (arguments land in shell history and CI logs).");
 
+        // Navnet vises bare når det ser ut som et miljøvariabelnavn. `--from-env sk_test_…` ble skrevet tilbake som et navn
+        // som ikke var satt, og hemmeligheten sto i feilen (review 2026-10-05).
         string? secret = Environment.GetEnvironmentVariable(fromEnv!);
         if (string.IsNullOrEmpty(secret))
-            return CliErrors.Configuration(map, "config_error", $"Environment variable '{fromEnv}' is not set or is empty.");
+            return CliErrors.Configuration(map, "config_error",
+                LooksLikeAVariableName(fromEnv!)
+                    ? $"Environment variable '{fromEnv}' is not set or is empty."
+                    : "The environment variable --from-env names is not set or is empty.",
+                "--from-env takes the name of an environment variable that holds the secret, such as PARTNER_KEY, never the secret itself.");
 
         ResolvedConfig config = CliHost.Resolve(map);
         string? tenant = config.TenantPublicId;
@@ -124,4 +130,9 @@ internal static class CredentialsCommand
 
         return ExitCodes.Success;
     }
+
+    /// <summary>An environment variable's name as it is usually written: capitals, digits and underscores.</summary>
+    private static bool LooksLikeAVariableName(string name)
+        => name.Length is > 0 and <= 64 && (name[0] is >= 'A' and <= 'Z' or '_')
+           && name.All(c => c is >= 'A' and <= 'Z' or >= '0' and <= '9' or '_');
 }

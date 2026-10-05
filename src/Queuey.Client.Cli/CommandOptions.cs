@@ -84,16 +84,16 @@ internal sealed class CommandOptions
         {
             string? hint = Hints.TryGetValue(unknown, out string? own) ? own : GlobalHints.TryGetValue(unknown, out string? global) ? global : null;
             exitCode = CliErrors.Usage(map, "unknown_option",
-                $"Unknown option --{unknown} for queuey {Command}.",
+                $"Unknown option --{CliErrors.Shown(unknown)} for queuey {Command}.",
                 (hint is null ? "" : hint + " ") + ValidOptionsSentence(),
-                new Dictionary<string, object?> { ["option"] = "--" + unknown, ["validOptions"] = Valid });
+                new Dictionary<string, object?> { ["option"] = "--" + CliErrors.Shown(unknown), ["validOptions"] = Valid });
             return false;
         }
 
         if (map.BadSwitches.FirstOrDefault() is { } badSwitch)
         {
             exitCode = CliErrors.Usage(map, "invalid_option_value",
-                $"--{badSwitch} is a switch for queuey {Command}: give it alone, or as --{badSwitch}=true or --{badSwitch}=false.");
+                $"--{CliErrors.Shown(badSwitch)} is a switch for queuey {Command}: give it alone, or as --{CliErrors.Shown(badSwitch)}=true or --{CliErrors.Shown(badSwitch)}=false.");
             return false;
         }
 
@@ -102,7 +102,7 @@ internal sealed class CommandOptions
             string extra = map.Positionals[Positionals];
             string? hint = Hints.TryGetValue(extra, out string? own) ? own : null;
             exitCode = CliErrors.Usage(map, "unexpected_argument",
-                $"Unexpected argument '{extra}' for queuey {Command}.",
+                $"Unexpected argument '{CliErrors.Shown(extra)}' for queuey {Command}.",
                 (hint is null ? "" : hint + " ") + (Positionals == 0
                     ? $"queuey {Command} takes options only. {ValidOptionsSentence()}"
                     : $"queuey {Command} takes {Positionals} argument{(Positionals == 1 ? "" : "s")} besides its options. See `queuey --help`."));

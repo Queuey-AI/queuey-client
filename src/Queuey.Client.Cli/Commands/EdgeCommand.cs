@@ -712,7 +712,7 @@ internal static class EdgeCommand
 
     private static int UnknownSub(string sub, string[] rest)
         => CliErrors.Write(CliErrors.WantsJson(rest), "unknown_subcommand",
-            $"Unknown edge subcommand '{sub}'. Expected: {string.Join(" | ", Verbs.Keys)}.", action: null, status: null, ExitCodes.Usage);
+            $"Unknown edge subcommand '{CliErrors.Shown(sub)}'. Expected: {string.Join(" | ", Verbs.Keys)}.", action: null, status: null, ExitCodes.Usage);
 
     private sealed class CliClock : IEdgeClock
     {
