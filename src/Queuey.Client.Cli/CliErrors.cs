@@ -20,17 +20,44 @@ internal static class CliErrors
     /// </summary>
     public static bool WantsJson(IEnumerable<string> args) => ArgMap.Parse(args, JsonSwitch).Has("json");
 
+    /// <summary>How many characters of a command, subcommand or argument an error shows, at most.</summary>
+    internal const int ShownCharacters = 3;
+
     /// <summary>
-    /// A word from the command line as an error may show it: an option or command name as typed, and anything else cut at
-    /// the first character a name does not have. A word can be a secret pasted in the wrong place.
+    /// A command, subcommand or argument as an error may show it: its first <see cref="ShownCharacters"/> characters, cut
+    /// sooner at a character a name does not have, and "…" for the rest. A word that starts with a dash and then looks like
+    /// an option name (<see cref="LooksLikeAnOptionName"/>) is shown whole. A word can be a secret pasted in the wrong place,
+    /// and a secret can be letters and digits only. A word the command knows, such as a hint's, is shown whole by the caller.
     /// </summary>
-    // Review 2026-10-05: `whoami --api-key:qak_… --json` skrev nøkkelen tilbake i feilen, som «Unknown option --api-key:qak_…».
+    // Review 2026-10-05: `whoami --api-key:qak_… --json` skrev nøkkelen tilbake i feilen. Re-review samme dag: å kutte ved
+    // første tegn et navn ikke har, var ikke nok. `edge run --mqtt-user bob FAKEpw123` viste passordet helt, og et heks-token
+    // etter `whoami --json` også. Nå vises tre tegn.
     internal static string Shown(string word)
     {
+        if (word.StartsWith("-", StringComparison.Ordinal) && LooksLikeAnOptionName(word.TrimStart('-')))
+            return word;
+
         int safe = 0;
-        while (safe < word.Length && safe < 40 && (word[safe] is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '-'))
+        while (safe < word.Length && safe < ShownCharacters && IsNameCharacter(word[safe]))
             safe++;
         return safe == word.Length ? word : word.Substring(0, safe) + "…";
+
+        static bool IsNameCharacter(char c) => c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '-';
+    }
+
+    /// <summary>
+    /// Whether an option name, without its dashes, is one an error may show: short lowercase kebab-case, as every option
+    /// of the CLI is (<c>^[a-z][a-z0-9-]{0,31}$</c>). Anything else may be a secret, and the error says "an unknown option".
+    /// </summary>
+    internal static bool LooksLikeAnOptionName(string name)
+    {
+        if (name.Length is 0 or > 32 || name[0] is not (>= 'a' and <= 'z'))
+            return false;
+
+        foreach (char c in name)
+            if (c is not (>= 'a' and <= 'z' or >= '0' and <= '9' or '-'))
+                return false;
+        return true;
     }
 
     /// <summary>A usage error (exit 2): the command line itself is wrong, and nothing was sent.</summary>

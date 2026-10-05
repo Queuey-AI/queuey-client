@@ -62,4 +62,24 @@ public class ArgMapTests
         Assert.True(map.Has("assembly"));
         Assert.Null(map.Get("assembly"));
     }
+
+    [Fact]
+    public void An_option_where_a_value_was_wanted_is_remembered_with_the_option_that_wanted_it()
+    {
+        // `--mqtt-password -Xy9…`: passordet ble lest som valget Xy9…, og en feil skal ikke vise det (re-review 2026-10-05).
+        ArgMap map = ArgMap.Parse(new[] { "--assembly", "-Xy9", "--json" }, Flags);
+
+        Assert.Null(map.Get("assembly"));
+        Assert.Equal("assembly", map.InPlaceOfAValue["Xy9"]);
+        Assert.False(map.InPlaceOfAValue.ContainsKey("assembly"));
+    }
+
+    [Fact]
+    public void A_value_that_starts_with_a_dash_is_a_value_after_an_equals_sign()
+    {
+        ArgMap map = ArgMap.Parse(new[] { "--assembly=-Xy9", "--json" }, Flags);
+
+        Assert.Equal("-Xy9", map.Get("assembly"));
+        Assert.Empty(map.InPlaceOfAValue);
+    }
 }
