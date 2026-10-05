@@ -83,6 +83,10 @@ public interface IQueueyManagement
     /// Replays an existing event to a connected <c>queuey listen</c> session for local debugging
     /// (<c>POST /queues/{q}/replay-to-listener/{e}</c>). Read-only: the event is not modified and the real
     /// endpoint is never contacted. Requires a listener connected on the queue's / tenant's scope.
+    /// Works only on a queue that forwards its deliveries to the listener and shares its payloads in full:
+    /// any other queue throws <see cref="QueueyConflictException"/> with the error code
+    /// <c>listener_replay_needs_local_forward</c> or <c>listener_replay_needs_full_payload_sharing</c>, and a
+    /// message that says what to change.
     /// </summary>
     Task<ReplayResult> ReplayToListenerAsync(string queuePublicId, string eventPublicId, CancellationToken cancellationToken = default);
 }
