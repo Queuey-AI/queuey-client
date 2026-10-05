@@ -13,12 +13,15 @@ internal sealed class ArgMap
     private readonly Dictionary<string, string?> _options;
     private readonly List<string> _positionals;
 
-    private ArgMap(Dictionary<string, string?> options, List<string> positionals, List<string> keys, List<string> badSwitches)
+    private ArgMap(
+        Dictionary<string, string?> options, List<string> positionals, List<string> keys, List<string> badSwitches,
+        Dictionary<string, string> inPlaceOfAValue)
     {
         _options = options;
         _positionals = positionals;
         Keys = keys;
         BadSwitches = badSwitches;
+        InPlaceOfAValue = inPlaceOfAValue;
     }
 
     /// <summary>Every option name as it appeared, in order, including one given twice or as <c>=false</c>.</summary>
@@ -26,6 +29,13 @@ internal sealed class ArgMap
 
     /// <summary>Boolean flags given a value other than <c>true</c> or <c>false</c>, e.g. <c>--json=yes</c>.</summary>
     internal IReadOnlyList<string> BadSwitches { get; }
+
+    /// <summary>
+    /// Options that came where the option before them wanted its value, with that option's name: in
+    /// <c>--mqtt-password -Xy9…</c>, <c>Xy9…</c> came in place of the value of <c>mqtt-password</c>. Such an option
+    /// may be that value, and an error does not show it.
+    /// </summary>
+    internal IReadOnlyDictionary<string, string> InPlaceOfAValue { get; }
 
     /// <summary>Positional arguments, in order.</summary>
     public IReadOnlyList<string> Positionals => _positionals;
@@ -45,11 +55,15 @@ internal sealed class ArgMap
         var positionals = new List<string>();
         var keys = new List<string>();
         var badSwitches = new List<string>();
+        var inPlaceOfAValue = new Dictionary<string, string>(StringComparer.Ordinal);
         var list = args as IList<string> ?? new List<string>(args);
+        string? wantsItsValue = null;
 
         for (int i = 0; i < list.Count; i++)
         {
             string token = list[i];
+            string? valueOf = wantsItsValue;
+            wantsItsValue = null;
 
             if (!IsOption(token))
             {
@@ -60,9 +74,12 @@ internal sealed class ArgMap
             string key = token.TrimStart('-');
 
             int eq = key.IndexOf('=');
+            string name = eq >= 0 ? key.Substring(0, eq) : key;
+            if (valueOf is not null && !inPlaceOfAValue.ContainsKey(name))
+                inPlaceOfAValue[name] = valueOf;
+
             if (eq >= 0)
             {
-                string name = key.Substring(0, eq);
                 string value = key.Substring(eq + 1);
                 keys.Add(name);
 
@@ -96,12 +113,17 @@ internal sealed class ArgMap
 
             // Value option: consume the next token unless it is itself an option.
             if (i + 1 < list.Count && !IsOption(list[i + 1]))
+            {
                 options[key] = list[++i];
+            }
             else
+            {
                 options[key] = null;
+                wantsItsValue = key;
+            }
         }
 
-        return new ArgMap(options, positionals, keys, badSwitches);
+        return new ArgMap(options, positionals, keys, badSwitches, inPlaceOfAValue);
     }
 
     // A leading '-' marks an option, except a bare "-" or a negative number.

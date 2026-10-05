@@ -48,6 +48,19 @@ public class DeploymentSchemaTests
     }
 
     [Fact]
+    public void The_committed_schema_id_names_the_version_this_is_built_as()
+    {
+        // Re-review 2026-10-05: $id pekte på v0.1.0-preview.8, en tag som finnes og aldri får fila. release.yml kjører testene
+        // med taggens versjon, så en tag som ikke er den committede versjonen, stopper her før noe pakkes.
+        string committedId = JsonNode.Parse(File.ReadAllText(SchemaPath))!["$id"]!.GetValue<string>();
+
+        Assert.True(committedId == DeploymentFile.SchemaUrl,
+            $"schema/queuey.deploy.schema.json names {committedId}, but this build is {DeploymentFile.SchemaUrl}. " +
+            "A release tag must be the committed version: set <Version> in Directory.Build.props to it, regenerate the schema " +
+            "(QUEUEY_UPDATE_SCHEMA=1 dotnet test --filter DeploymentSchemaTests), and tag that commit.");
+    }
+
+    [Fact]
     public void The_library_serves_the_committed_schema()
     {
         Assert.Equal(File.ReadAllText(SchemaPath).Replace("\r\n", "\n"), DeploymentFile.JsonSchema.Replace("\r\n", "\n"));

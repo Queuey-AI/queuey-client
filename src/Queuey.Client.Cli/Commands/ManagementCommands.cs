@@ -90,7 +90,7 @@ internal static class IssuesCommand
         if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
 
-        string? tenant = map.FirstPositional ?? map.Get("tenant");
+        string? tenant = map.FirstPositional is { } named ? CliConfig.WorkspaceId(named, "The argument to queuey issues") : map.Get("tenant");
         if (string.IsNullOrWhiteSpace(tenant)) return CliErrors.Usage(map, "missing_argument", "issues requires <ten_…>.");
 
         var query = new IssueQuery

@@ -57,6 +57,24 @@ internal static class CredentialsCommand
         if (string.IsNullOrWhiteSpace(name))
             return CliErrors.Usage(map, "missing_argument", "credentials set requires --name <name>.");
 
+        // ApiKeyHeader by default: it is the type that pairs with `authMode: "ApiKey"`, which is what
+        // a deployment file names most often. Checked here rather than at the server, because an
+        // unknown type came back as a bare 400 with the useful half of the sentence stripped.
+        // Typen vises bare når den er et typenavn med feil store og små bokstaver: `--type sk_live_…` skrev hemmeligheten
+        // tilbake, i den ene kommandoen der brukeren håndterer en (re-review 2026-10-05). Sjekket før miljøet og workspacet,
+        // som andre bruksfeil.
+        string type = map.Get("type") ?? "ApiKeyHeader";
+        if (Array.IndexOf(CredentialTypes, type) < 0)
+        {
+            string? spelled = CredentialTypes.FirstOrDefault(t => string.Equals(t, type, StringComparison.OrdinalIgnoreCase));
+            return CliErrors.Usage(map, "invalid_value",
+                spelled is not null
+                    ? $"Unknown credential type '{type}'. Did you mean {spelled}?"
+                    : "--type is not a credential type. Its value is not shown, since it may be a secret.",
+                $"Expected one of: {string.Join(", ", CredentialTypes)}. The secret itself is read from the environment " +
+                "variable --from-env names.");
+        }
+
         // The secret comes from an environment variable, never an argument: a command line lands in
         // shell history and in CI logs, and a delivery secret in either is a leak.
         string? fromEnv = map.Get("from-env");
@@ -82,13 +100,6 @@ internal static class CredentialsCommand
 
         using ServiceProvider provider = CliHost.BuildProvider(config);
         var service = provider.GetRequiredService<IQueueyService>();
-
-        // ApiKeyHeader by default: it is the type that pairs with `authMode: "ApiKey"`, which is what
-        // a deployment file names most often. Checked here rather than at the server, because an
-        // unknown type came back as a bare 400 with the useful half of the sentence stripped.
-        string type = map.Get("type") ?? "ApiKeyHeader";
-        if (Array.IndexOf(CredentialTypes, type) < 0)
-            return CliErrors.Usage(map, "invalid_value", $"Unknown credential type '{type}'. Expected one of: {string.Join(", ", CredentialTypes)}.");
 
         CredentialResult created = await service.Management.CreateCredentialAsync(
             tenant!, name!, type, secret,

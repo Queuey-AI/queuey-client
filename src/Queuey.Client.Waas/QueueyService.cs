@@ -948,16 +948,12 @@ public sealed class QueueyService : IQueueyService
     {
         string tenant = string.IsNullOrWhiteSpace(tenantPublicId) ? RequireTenant() : tenantPublicId!;
         if (string.IsNullOrWhiteSpace(_options.LicensePublicId))
-            throw new QueueyConfigurationException("LicensePublicId is required for SyncStreams. Set QueueyOptions.LicensePublicId.");
+            throw MissingSetting.License();
         if (string.IsNullOrWhiteSpace(_options.ApiKey))
-            throw new QueueyConfigurationException("An API key is required for SyncStreams. Set QueueyOptions.ApiKey.");
+            throw MissingSetting.ApiKey();
         return tenant;
     }
 
     private string RequireTenant()
-    {
-        if (string.IsNullOrWhiteSpace(_options.TenantPublicId))
-            throw new QueueyConfigurationException("TenantPublicId (the producer tenant) is required for SyncStreams. Set QueueyOptions.TenantPublicId.");
-        return _options.TenantPublicId!;
-    }
+        => string.IsNullOrWhiteSpace(_options.TenantPublicId) ? throw MissingSetting.Tenant() : _options.TenantPublicId!;
 }

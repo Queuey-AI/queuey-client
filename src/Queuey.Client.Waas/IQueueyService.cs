@@ -128,7 +128,8 @@ public interface IQueueyService
     /// </summary>
     /// <remarks>
     /// The event is a real one: the receiver gets it like any other, so send data it treats as
-    /// harmless. Needs a key that may publish and read events — a deploy key can.
+    /// harmless. Needs a key that may publish to the queue and read its events (<c>event.read</c>):
+    /// it reads one event from the queue first, and publishes nothing when the key cannot.
     /// </remarks>
     Task<DeliveryVerification> VerifyDeliveryAsync(string queueName, byte[] payload, VerifyDeliveryOptions? options = null, CancellationToken cancellationToken = default);
 
