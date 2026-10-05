@@ -91,9 +91,12 @@ APPLY
                  delivery.url or workspace.delivery.baseUrl) and logs events until it has one.
                  Declare ""mode"": ""deliver"" or ""logOnly"" to own it; an existing queue keeps its
                  mode otherwise. Pausing is an operator's lever: a deploy never resumes a queue.
-                 Retry (maxAttempts, dlqAfterAttempts, backoff) and a delivery filter are
-                 declared per workspace or queue; `queuey schema` lists every field and the
-                 values it accepts.
+                 Backoff (the wait between attempts: at most an hour at first and a day at
+                 most, unless a longer wait is already in place) and a delivery filter are
+                 declared per workspace or queue. The number of attempts is not a setting:
+                 a file that still declares maxAttempts or dlqAfterAttempts is refused
+                 before anything is sent. `queuey schema` lists every field and the values
+                 it accepts.
                  The workspace is the file's ""tenant"" when it names one, else --tenant /
                  QUEUEY_TENANT / queuey.json. When --tenant or QUEUEY_TENANT names another
                  workspace than the file, apply fails and names both. plan and verify use the

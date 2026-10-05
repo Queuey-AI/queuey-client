@@ -53,7 +53,7 @@ public sealed class DeploymentPlanStep
 /// <summary>One value that would change: a path into the config read-back, and the JSON on each side.</summary>
 public sealed class PlannedChange
 {
-    /// <summary>Where, e.g. <c>policy.maxAttempts</c>.</summary>
+    /// <summary>Where, e.g. <c>policy.retentionDays</c>.</summary>
     public string Path { get; init; } = default!;
 
     /// <summary>The value now, as JSON text (a string without quotes), or null.</summary>

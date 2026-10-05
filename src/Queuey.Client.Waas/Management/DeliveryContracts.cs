@@ -253,12 +253,13 @@ internal sealed class QueuePolicyResponse
     public int RetentionDays { get; set; }
     public string? Ordering { get; set; }
 
-    // Nullable on purpose: an API from before 2026-09-23 does not send the rest of the retry
-    // policy or the filter, and "not sent" must read as unknown rather than as a value.
-    public int? MaxAttempts { get; set; }
-    public int? DlqAfterAttempts { get; set; }
+    // Nullable on purpose: an API from before 2026-09-23 does not send the backoff or the filter,
+    // and "not sent" must read as unknown rather than as a value.
     public RetryBackoffWire? Backoff { get; set; }
     public DeliveryFilterWire? Filter { get; set; }
+
+    // Ingen maxAttempts eller dlqAfterAttempts: antall forsøk er ikke en innstilling (Queuey#391,
+    // 2026-10-04). Et API fra før det sender dem fortsatt; de leses ikke, så pull skriver dem aldri.
 }
 
 /// <summary>An ingress signing key minted for a queue. The secret is returned <b>once</b>.</summary>

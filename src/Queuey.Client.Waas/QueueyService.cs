@@ -657,6 +657,11 @@ public sealed class QueueyService : IQueueyService
             // here, with nothing sent, instead of halfway through it.
             deliveries = await new CredentialResolver(Management, tenant)
                 .ResolveAllAsync(file.Workspace?.Delivery, plans, cancellationToken).ConfigureAwait(false);
+
+            // Backoff-takene også før første skriving (2026-10-05). Før feilet en ventetid Queuey avviser, først på
+            // køen den sto på, etter at workspacet og køene foran allerede var skrevet.
+            await BackoffCeilings.EnsureAsync(_controlPlane, tenant, file,
+                plans.Where(p => options.QueueFilter?.Invoke(p.Definition) ?? true), existing, cancellationToken).ConfigureAwait(false);
         }
 
         // Workspace first: queues inherit from it, so converging it first means a queue that means to
@@ -745,8 +750,6 @@ public sealed class QueueyService : IQueueyService
         DlqEnabled = policy.DlqEnabled,
         RetentionDays = policy.RetentionDays,
         Idempotent = policy.Idempotent,
-        MaxAttempts = policy.MaxAttempts,
-        DlqAfterAttempts = policy.DlqAfterAttempts,
         Backoff = RetryBackoffWire.From(policy.Backoff),
         Filter = DeliveryFilterWire.From(policy.Filter),
     };

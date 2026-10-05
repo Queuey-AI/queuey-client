@@ -59,8 +59,6 @@ internal sealed class DeploymentPuller
             DlqEnabled = config.Policy?.DlqEnabled,
             RetentionDays = config.Policy?.RetentionDays,
             Idempotent = config.Policy?.Idempotent,
-            MaxAttempts = config.Policy?.MaxAttempts,
-            DlqAfterAttempts = config.Policy?.DlqAfterAttempts,
             Backoff = config.Policy?.Backoff?.ToModel(),
             Ingress = ToIngress(config.Ingress, effective),
         };
@@ -130,8 +128,6 @@ internal sealed class DeploymentPuller
             queue.DlqEnabled = p.DlqEnabled;
             queue.RetentionDays = p.RetentionDays;
             queue.Idempotent = p.Idempotent;
-            queue.MaxAttempts = p.MaxAttempts;
-            queue.DlqAfterAttempts = p.DlqAfterAttempts;
             queue.Backoff = p.Backoff?.ToModel();
             queue.Filter = p.Filter?.ToModel();
         }
@@ -157,8 +153,6 @@ internal sealed class DeploymentPuller
             declared.DlqEnabled = DifferentOrNull(p.DlqEnabled, baseline?.DlqEnabled);
             declared.RetentionDays = DifferentOrNull(p.RetentionDays, baseline?.RetentionDays);
             declared.Idempotent = DifferentOrNull(p.Idempotent, baseline?.Idempotent);
-            declared.MaxAttempts = DifferentOrNull(p.MaxAttempts, baseline?.MaxAttempts);
-            declared.DlqAfterAttempts = DifferentOrNull(p.DlqAfterAttempts, baseline?.DlqAfterAttempts);
 
             // Backoff and filter are small objects: written whole when they differ, left out when equal.
             if (p.Backoff is { } backoff && !SameBackoff(backoff, baseline?.Backoff))

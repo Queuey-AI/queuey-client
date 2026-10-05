@@ -143,7 +143,7 @@ internal static class ApplyCommand
             var parts = new List<string>();
             if (w.Ordering is not null) parts.Add($"ordering={w.Ordering}");
             if (w.RetentionDays is { } days) parts.Add($"retentionDays={days}");
-            parts.AddRange(Retry(w.MaxAttempts, w.DlqAfterAttempts, w.Backoff));
+            parts.AddRange(Backoff(w.Backoff));
             if (w.Ingress?.AuthMode is { } auth) parts.Add($"ingressAuth={auth}");
             if (w.Ingress?.EventType is { } et) parts.Add($"eventType={et.From}:{et.Name}");
             if (w.Ingress?.GroupKey is { } gk) parts.Add($"groupKey={gk.From}:{gk.Name}");
@@ -167,7 +167,7 @@ internal static class ApplyCommand
             };
             QueuePolicy policy = p.Definition.Policy;
             if (policy.Ordering is not null) parts.Add($"ordering={policy.Ordering}");
-            parts.AddRange(Retry(policy.MaxAttempts, policy.DlqAfterAttempts, policy.Backoff));
+            parts.AddRange(Backoff(policy.Backoff));
             if (policy.Filter is { } filter) parts.Add($"filter=({filter})");
 
             Console.WriteLine($"  • {p.Definition.Name}\t{string.Join(" ", parts)}");
@@ -176,10 +176,8 @@ internal static class ApplyCommand
         Console.WriteLine($"{plans.Count} queue(s) declared. Nothing was sent.");
     }
 
-    private static IEnumerable<string> Retry(int? maxAttempts, int? dlqAfterAttempts, RetryBackoff? backoff)
+    private static IEnumerable<string> Backoff(RetryBackoff? backoff)
     {
-        if (maxAttempts is { } max) yield return $"maxAttempts={max}";
-        if (dlqAfterAttempts is { } dlq) yield return $"dlqAfterAttempts={dlq}";
         if (backoff is { } b)
         {
             if (b.BaseDelayMs is { } baseMs) yield return $"backoff.baseDelayMs={baseMs}";
@@ -234,8 +232,6 @@ internal static class ApplyCommand
             p.Definition.Policy.DlqEnabled,
             p.Definition.Policy.RetentionDays,
             p.Definition.Policy.Idempotent,
-            p.Definition.Policy.MaxAttempts,
-            p.Definition.Policy.DlqAfterAttempts,
             backoff = p.Definition.Policy.Backoff is { } b ? new { b.BaseDelayMs, b.MaxDelayMs, b.Jitter } : null,
             filter = p.Definition.Policy.Filter is { } f
                 ? new { match = f.Match ?? "all", conditions = f.Conditions.Select(c => new { c.Field, c.Op, c.Value }) }

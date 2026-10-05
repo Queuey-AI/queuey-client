@@ -69,7 +69,7 @@ public class DeploymentPlanTests
 
         var ex = await Assert.ThrowsAsync<QueueyException>(() => PlanAsync(server, file == "the workspace only"
             ? """{ "tenant": "ten_abc", "workspace": { "retentionDays": 30 }, "queues": {} }"""
-            : """{ "tenant": "ten_abc", "workspace": { "retentionDays": 30 }, "queues": { "orders": { "maxAttempts": 5 } } }"""));
+            : """{ "tenant": "ten_abc", "workspace": { "retentionDays": 30 }, "queues": { "orders": { "retentionDays": 5 } } }"""));
 
         Assert.Equal("dry_run_unsupported", ex.ErrorCode);
         Assert.Contains("Nothing was changed either", ex.Message);
@@ -90,7 +90,7 @@ public class DeploymentPlanTests
             new { error = new { code = "forbidden", message = "Missing permission tenant.write." } });
 
         var ex = await Assert.ThrowsAsync<QueueyException>(() => PlanAsync(server, """
-        { "tenant": "ten_abc", "queues": { "orders": { "maxAttempts": 5 } } }
+        { "tenant": "ten_abc", "queues": { "orders": { "retentionDays": 5 } } }
         """));
 
         Assert.Equal("dry_run_probe_failed", ex.ErrorCode);
@@ -108,9 +108,9 @@ public class DeploymentPlanTests
         server.Routes["PATCH /tenants/ten_abc/policy"] = _ => StubHttpMessageHandler.Json(HttpStatusCode.Forbidden,
             new { error = new { code = "forbidden", message = "Missing permission tenant.write." } });
         server.Routes["PATCH /queues/que_orders/policy"] = _ =>
-            StubHttpMessageHandler.Json(HttpStatusCode.OK, Plan("queue que_orders", ("policy.maxAttempts", 8, 5)));
+            StubHttpMessageHandler.Json(HttpStatusCode.OK, Plan("queue que_orders", ("policy.retentionDays", 7, 5)));
 
-        DeploymentPlan plan = await PlanAsync(server, """{ "tenant": "ten_abc", "queues": { "orders": { "maxAttempts": 5 } } }""");
+        DeploymentPlan plan = await PlanAsync(server, """{ "tenant": "ten_abc", "queues": { "orders": { "retentionDays": 5 } } }""");
 
         Assert.True(plan.WouldSucceed);
         Assert.DoesNotContain(server.Stub.Requests, r => r.RequestUri!.AbsolutePath == "/tenants/ten_abc/policy");
@@ -129,7 +129,7 @@ public class DeploymentPlanTests
             new { error = new { code = "forbidden", message = "Missing permission queue.write.", action = "Use a key made with the Build profile." } });
 
         var ex = await Assert.ThrowsAsync<QueueyException>(() => PlanAsync(server, """
-        { "tenant": "ten_abc", "workspace": { "retentionDays": 30 }, "queues": { "orders": { "maxAttempts": 5 } } }
+        { "tenant": "ten_abc", "workspace": { "retentionDays": 30 }, "queues": { "orders": { "retentionDays": 5 } } }
         """));
 
         Assert.Equal("dry_run_probe_failed", ex.ErrorCode);
@@ -171,12 +171,12 @@ public class DeploymentPlanTests
             ? StubHttpMessageHandler.Json(HttpStatusCode.OK, new { dryRun = true, publicId = "que_orders", displayName = "orders", created = false, hasDeliveryTarget = true })
             : StubHttpMessageHandler.Json(HttpStatusCode.OK, new { dryRun = true, publicId = (string?)null, displayName = "invoices", created = true, hasDeliveryTarget = false });
         server.Routes["PATCH /queues/que_orders/policy"] = _ =>
-            StubHttpMessageHandler.Json(HttpStatusCode.OK, Plan("queue que_orders", ("policy.maxAttempts", 8, 5)));
+            StubHttpMessageHandler.Json(HttpStatusCode.OK, Plan("queue que_orders", ("policy.retentionDays", 7, 5)));
 
         DeploymentPlan plan = await PlanAsync(server, """
         { "tenant": "ten_abc",
           "workspace": { "retentionDays": 30 },
-          "queues": { "orders": { "maxAttempts": 5 }, "invoices": { "retentionDays": 3 } } }
+          "queues": { "orders": { "retentionDays": 5 }, "invoices": { "retentionDays": 3 } } }
         """);
 
         Assert.True(plan.WouldSucceed);
@@ -244,7 +244,7 @@ public class DeploymentPlanTests
         server.Routes["PATCH /queues/que_orders/policy"] = _ => Answer(kind);
 
         DryRunIgnoredException ex = await Assert.ThrowsAsync<DryRunIgnoredException>(() => PlanAsync(server, """
-        { "tenant": "ten_abc", "queues": { "orders": { "maxAttempts": 5 }, "invoices": {} } }
+        { "tenant": "ten_abc", "queues": { "orders": { "retentionDays": 5 }, "invoices": {} } }
         """));
 
         Assert.Equal("queues.orders", ex.Target);

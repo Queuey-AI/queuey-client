@@ -47,11 +47,11 @@ public sealed class DeployCommandTests : IDisposable
     }
 
     [Fact]
-    public async Task A_dry_run_shows_mode_retry_and_filter()
+    public async Task A_dry_run_shows_mode_backoff_and_filter()
     {
         string path = DeployFile("""
         { "queues": {
-            "orders": { "mode": "deliver", "maxAttempts": 5, "backoff": { "jitter": "full" },
+            "orders": { "mode": "deliver", "backoff": { "baseDelayMs": 2000, "jitter": "full" },
                         "filter": { "conditions": [ { "field": "type", "op": "eq", "value": "order.created" } ] } },
             "audit": {} } }
         """);
@@ -59,7 +59,7 @@ public sealed class DeployCommandTests : IDisposable
         CliRun run = await CliHarness.RunAsync(() => ApplyCommand.RunAsync(new[] { "--file", path, "--dry-run" }));
 
         Assert.Equal(ExitCodes.Success, run.Exit);
-        Assert.Contains("orders\tmode=deliver inherits the workspace maxAttempts=5 backoff.jitter=full filter=(all: type eq order.created)", run.Stdout);
+        Assert.Contains("orders\tmode=deliver inherits the workspace backoff.baseDelayMs=2000 backoff.jitter=full filter=(all: type eq order.created)", run.Stdout);
         Assert.Contains("audit\tmode=(deliver when it has a destination, if new)", run.Stdout);
     }
 
@@ -84,6 +84,86 @@ public sealed class DeployCommandTests : IDisposable
         var ex = await Assert.ThrowsAsync<Queuey.Client.QueueyConfigurationException>(
             () => ApplyCommand.RunAsync(new[] { "--file", path, "--dry-run" }));
         Assert.Contains("not a mode a deployment file sets", ex.Message);
+    }
+
+    // ── antall forsøk er ikke en innstilling (Queuey#391, 2026-10-04) ───────
+
+    [Theory]
+    [InlineData("apply", null)]
+    [InlineData("plan", null)]
+    [InlineData("apply", "--dry-run")]
+    public async Task A_file_that_still_declares_attempts_is_refused_before_anything_is_sent(string command, string? flag)
+    {
+        // En fil fra en pull mot et API fra før Queuey#391 har forsøkene. Apply ville fått 400 på første policy-patch,
+        // etter at workspacet var skrevet. Nå avvises fila før noe er sendt, med hva som skal bort.
+        string path = DeployFile("""{ "tenant": "ten_abc", "queues": { "orders": { "maxAttempts": 8, "dlqAfterAttempts": 6 } } }""");
+        var api = new RecordingHandler(_ => RecordingHandler.Error(HttpStatusCode.InternalServerError, "unexpected", "Nothing should reach the server."));
+        string[] args = new[] { command, "--file", path, "--json" }.Concat(flag is null ? Array.Empty<string>() : new[] { flag }).ToArray();
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With(args)), api);
+
+        Assert.Equal(ExitCodes.Configuration, run.Exit);
+        Assert.Empty(api.Requests);
+        JsonElement error = JsonDocument.Parse(run.Stdout).RootElement.GetProperty("error");
+        Assert.Equal("config_error", error.GetProperty("code").GetString());
+        Assert.Contains("declares queues.orders.maxAttempts, queues.orders.dlqAfterAttempts, but the number of attempts is not a setting",
+            error.GetProperty("message").GetString());
+        Assert.Equal("Remove maxAttempts and dlqAfterAttempts from the file. backoff and filter stay as they are.",
+            error.GetProperty("action").GetString());
+    }
+
+    [Fact]
+    public async Task Without_json_the_attempts_refusal_says_what_to_remove_on_stderr()
+    {
+        string path = DeployFile("""{ "tenant": "ten_abc", "workspace": { "maxAttempts": 8 }, "queues": {} }""");
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path)));
+
+        Assert.Equal(ExitCodes.Configuration, run.Exit);
+        Assert.Contains("Config error: The deployment file declares workspace.maxAttempts, but the number of attempts is not a setting.", run.Stderr);
+        Assert.Contains("→ Remove maxAttempts and dlqAfterAttempts from the file.", run.Stderr);
+    }
+
+    [Fact]
+    public async Task Pull_never_writes_attempts_and_apply_accepts_what_it_wrote()
+    {
+        // Et API fra før Queuey#391 sender fortsatt maxAttempts og dlqAfterAttempts i /config. Pull leser dem ikke,
+        // så fila den skriver, kan apply-es mot det nye API-et, som avviser en patch med dem.
+        object workspacePolicy = new
+        {
+            idempotent = false, dlqEnabled = true, retentionDays = 7, ordering = "fifo", maxAttempts = 8, dlqAfterAttempts = 6,
+            backoff = new { baseDelayMs = 1000, maxDelayMs = 60000, jitter = "full" },
+        };
+        var api = new RecordingHandler(req => req.Key switch
+        {
+            "GET /tenants/ten_abc/credentials" => RecordingHandler.Json(HttpStatusCode.OK, Array.Empty<object>()),
+            "GET /tenants/ten_abc/config" => RecordingHandler.Json(HttpStatusCode.OK, new { policy = workspacePolicy }),
+            "GET /tenants/ten_abc/queues" => RecordingHandler.Json(HttpStatusCode.OK, new[] { new { publicId = "que_orders", displayName = "orders", mode = "Deliver", hasDeliveryTarget = true } }),
+            "GET /queues/que_orders/config" => RecordingHandler.Json(HttpStatusCode.OK, new
+            {
+                policy = new
+                {
+                    idempotent = false, dlqEnabled = true, retentionDays = 30, ordering = "fifo", maxAttempts = 3, dlqAfterAttempts = 2,
+                    backoff = new { baseDelayMs = 1000, maxDelayMs = 60000, jitter = "full" },
+                },
+                inherited = new { destination = true, auth = true, signing = true, rateLimit = true, behavior = false },
+                tenantBaseline = new { policy = workspacePolicy },
+            }),
+            _ => throw new InvalidOperationException(req.Key),
+        });
+        string path = Path.Combine(_dir, "pulled.deploy.json");
+
+        CliRun pull = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("pull", "--file", path, "--tenant", "ten_abc")), api);
+
+        Assert.Equal(ExitCodes.Success, pull.Exit);
+        string written = File.ReadAllText(path);
+        Assert.DoesNotContain("attempts", written, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(30, JsonDocument.Parse(written).RootElement.GetProperty("queues").GetProperty("orders").GetProperty("retentionDays").GetInt32());
+
+        CliRun dryRun = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "apply", "--file", path, "--dry-run" }));
+
+        Assert.Equal(ExitCodes.Success, dryRun.Exit);
+        Assert.Contains("1 queue(s) declared. Nothing was sent.", dryRun.Stdout);
     }
 
     [Fact]

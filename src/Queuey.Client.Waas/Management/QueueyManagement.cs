@@ -157,8 +157,6 @@ internal sealed class QueueyManagement : IQueueyManagement
         DlqEnabled = policy.DlqEnabled,
         RetentionDays = policy.RetentionDays,
         Idempotent = policy.Idempotent,
-        MaxAttempts = policy.MaxAttempts,
-        DlqAfterAttempts = policy.DlqAfterAttempts,
         Backoff = RetryBackoffWire.From(policy.Backoff),
     };
 

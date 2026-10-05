@@ -424,14 +424,14 @@ success while quietly skipping what you wrote is worse than one that fails.
 ```jsonc
 {
   "workspace": {
-    "maxAttempts": 8,                                   // every queue retries this many times…
+    // every queue waits like this between attempts…
     "backoff": { "baseDelayMs": 1000, "maxDelayMs": 300000, "jitter": "full" },
     "delivery": { "baseUrl": "https://hooks.example.com" }
   },
   "queues": {
     "orders": {
       "delivery": { "url": "/orders" },
-      "dlqAfterAttempts": 5,                            // …and this one gives up to the DLQ sooner
+      "backoff": { "maxDelayMs": 60000 },               // …and this one never waits more than a minute
       "filter": { "match": "any", "conditions": [
         { "field": "type", "op": "eq", "value": "order.created" },
         { "field": "priority", "op": "exists" } ] }
@@ -440,6 +440,15 @@ success while quietly skipping what you wrote is worse than one that fails.
   }
 }
 ```
+
+**The number of attempts is not a setting.** Queuey makes the same number of attempts for every event
+and decides what a failure needs: a transient failure is retried, with the backoff you declare, until
+the receiver's probe takes over; an event the receiver rejects goes to the dead-letter queue; and a
+stuck queue locks until a person acts. A file that still declares `maxAttempts` or `dlqAfterAttempts`
+— one pulled from an older Queuey, say — is refused before anything is sent, with every place it
+declares them; `pull` never writes them. A backoff waits at most an hour at first (`baseDelayMs`) and
+a day at most (`maxDelayMs`). A longer wait that is already in place stays as it is, and `apply`
+refuses one that would change it before it writes anything.
 
 **A queue this file creates delivers when it has a destination** — its own `delivery.url`, or the
 workspace's `baseUrl` — and logs events until it has one. `mode` is `deliver` or `logOnly`; declare it
@@ -453,6 +462,9 @@ fails that queue instead of pretending.
 **A filter decides what is delivered.** Events that do not match are kept as `Filtered` and never
 sent. `op` is `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `contains` or `exists`, on a top-level field of
 the JSON body. An empty `conditions` list delivers everything — that is how a file removes a filter.
+`gt`, `gte`, `lt` and `lte` compare numbers, so their value is a plain number like `1.5`: no comma
+decimals, thousands separators, currency or parentheses. `exists` takes no value, and a field is
+looked up exactly as written, so whitespace around it is refused rather than trimmed.
 
 ### Prove it delivers: `queuey verify`
 

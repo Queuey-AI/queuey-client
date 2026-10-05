@@ -20,7 +20,7 @@ public class DeploymentPlanDryRunRatchetTests
     {
       "tenant": "ten_abc",
       "workspace": {
-        "ordering": "bykey", "retentionDays": 30, "maxAttempts": 8, "backoff": { "baseDelayMs": 1000 },
+        "ordering": "bykey", "retentionDays": 30, "backoff": { "baseDelayMs": 1000 },
         "ingress": { "authMode": "ApiKey", "eventType": { "from": "body", "name": "type" }, "groupKey": { "from": "body", "name": "customerId" } },
         "delivery": {
           "baseUrl": "https://hooks.example.com", "authMode": "ApiKey", "credentialRef": "partner-key", "authHeaderName": "X-Api-Key",
@@ -30,7 +30,7 @@ public class DeploymentPlanDryRunRatchetTests
       "queues": {
         "orders": {
           "mode": "deliver",
-          "maxAttempts": 5, "dlqAfterAttempts": 3,
+          "backoff": { "maxDelayMs": 30000 },
           "filter": { "match": "any", "conditions": [ { "field": "type", "op": "eq", "value": "order.created" } ] },
           "ingress": { "successStatusCode": 200 },
           "delivery": { "url": "/orders", "credentialRef": "orders-key" }

@@ -43,30 +43,12 @@
           "description": "Whether duplicate publishes are collapsed by idempotency key.",
           "type": "boolean"
         },
-        "maxAttempts": {
-          "description": "How many times an event is attempted, for every queue that does not say.",
-          "type": [
-            "string",
-            "integer",
-            "null"
-          ],
-          "pattern": "^-?(?:0|[1-9]\\d*)$"
-        },
-        "dlqAfterAttempts": {
-          "description": "After how many attempts an event goes to the DLQ. Must be below maxAttempts.",
-          "type": [
-            "string",
-            "integer",
-            "null"
-          ],
-          "pattern": "^-?(?:0|[1-9]\\d*)$"
-        },
         "backoff": {
-          "description": "How long to wait between attempts, for every queue that does not say.",
+          "description": "How long to wait between attempts, for every queue that does not say. The number of attempts is not a setting.",
           "type": "object",
           "properties": {
             "baseDelayMs": {
-              "description": "The first wait, in milliseconds. Each later wait doubles, up to MaxDelayMs.",
+              "description": "The first wait, in milliseconds. Each later wait doubles, up to MaxDelayMs. At most 3600000 (one hour), unless a longer wait is already in place.",
               "type": [
                 "string",
                 "integer",
@@ -75,7 +57,7 @@
               "pattern": "^-?(?:0|[1-9]\\d*)$"
             },
             "maxDelayMs": {
-              "description": "The longest wait between two attempts, in milliseconds.",
+              "description": "The longest wait between two attempts, in milliseconds. At most 86400000 (24 hours), unless a longer wait is already in place.",
               "type": [
                 "string",
                 "integer",
@@ -242,30 +224,12 @@
               "logOnly"
             ]
           },
-          "maxAttempts": {
-            "description": "How many times an event is attempted before it gives up.",
-            "type": [
-              "string",
-              "integer",
-              "null"
-            ],
-            "pattern": "^-?(?:0|[1-9]\\d*)$"
-          },
-          "dlqAfterAttempts": {
-            "description": "After how many attempts an event goes to the DLQ. Must be below maxAttempts.",
-            "type": [
-              "string",
-              "integer",
-              "null"
-            ],
-            "pattern": "^-?(?:0|[1-9]\\d*)$"
-          },
           "backoff": {
-            "description": "How long to wait between attempts.",
+            "description": "How long to wait between attempts. The number of attempts is not a setting: Queuey retries a transient failure until the receiver's probe takes over, sends an event the receiver rejects to the dead-letter queue, and locks the queue when a person must act.",
             "type": "object",
             "properties": {
               "baseDelayMs": {
-                "description": "The first wait, in milliseconds. Each later wait doubles, up to MaxDelayMs.",
+                "description": "The first wait, in milliseconds. Each later wait doubles, up to MaxDelayMs. At most 3600000 (one hour), unless a longer wait is already in place.",
                 "type": [
                   "string",
                   "integer",
@@ -274,7 +238,7 @@
                 "pattern": "^-?(?:0|[1-9]\\d*)$"
               },
               "maxDelayMs": {
-                "description": "The longest wait between two attempts, in milliseconds.",
+                "description": "The longest wait between two attempts, in milliseconds. At most 86400000 (24 hours), unless a longer wait is already in place.",
                 "type": [
                   "string",
                   "integer",
@@ -313,7 +277,7 @@
                   "type": "object",
                   "properties": {
                     "field": {
-                      "description": "The top-level field of the JSON body.",
+                      "description": "The top-level field of the JSON body, exactly as it is written there: no whitespace around it.",
                       "type": "string"
                     },
                     "op": {
@@ -331,7 +295,7 @@
                       ]
                     },
                     "value": {
-                      "description": "The value to compare with. Not used by exists.",
+                      "description": "The value to compare with. gt, gte, lt and lte take a plain number written like 1.5. exists takes no value.",
                       "type": "string"
                     }
                   },
@@ -351,7 +315,7 @@
             ]
           },
           "dlqEnabled": {
-            "description": "Whether a dead-letter queue collects exhausted events.",
+            "description": "Whether a dead-letter queue collects events the receiver rejected.",
             "type": "boolean"
           },
           "retentionDays": {

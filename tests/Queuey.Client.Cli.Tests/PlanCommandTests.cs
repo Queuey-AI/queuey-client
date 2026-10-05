@@ -20,7 +20,7 @@ public sealed class PlanCommandTests : IDisposable
     private string DeployFile()
     {
         string path = Path.Combine(_dir, "queuey.deploy.json");
-        File.WriteAllText(path, """{ "tenant": "ten_abc", "queues": { "orders": { "maxAttempts": 5 } } }""");
+        File.WriteAllText(path, """{ "tenant": "ten_abc", "queues": { "orders": { "retentionDays": 5 } } }""");
         return path;
     }
 

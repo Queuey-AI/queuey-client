@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 
 namespace Queuey.Client.Waas;
@@ -29,13 +30,11 @@ public sealed class QueuePolicy
     /// <summary>Whether duplicate publishes are collapsed by idempotency key.</summary>
     public bool? Idempotent { get; set; }
 
-    /// <summary>How many times an event is attempted before it gives up.</summary>
-    public int? MaxAttempts { get; set; }
-
-    /// <summary>After how many attempts an event goes to the dead-letter queue. Must be below <see cref="MaxAttempts"/>.</summary>
-    public int? DlqAfterAttempts { get; set; }
-
-    /// <summary>How long to wait between attempts.</summary>
+    /// <summary>
+    /// How long to wait between attempts. The number of attempts is not a setting: Queuey retries a
+    /// transient failure until the receiver's probe takes over, sends an event the receiver rejects
+    /// to the dead-letter queue, and locks the queue when a person must act.
+    /// </summary>
     public RetryBackoff? Backoff { get; set; }
 
     /// <summary>
@@ -47,8 +46,7 @@ public sealed class QueuePolicy
     /// <summary>True when nothing is declared — the queue inherits its whole behaviour.</summary>
     public bool IsEmpty =>
         Ordering is null && DlqEnabled is null && RetentionDays is null && Idempotent is null
-        && MaxAttempts is null && DlqAfterAttempts is null && (Backoff is null || Backoff.IsEmpty)
-        && Filter is null;
+        && (Backoff is null || Backoff.IsEmpty) && Filter is null;
 
     /// <summary>The ordering values the backend accepts.</summary>
     internal static readonly string[] OrderingValues = { "fifo", "bykey", "besteffort" };
@@ -60,8 +58,6 @@ public sealed class QueuePolicy
         DlqEnabled = overrides.DlqEnabled ?? DlqEnabled,
         RetentionDays = overrides.RetentionDays ?? RetentionDays,
         Idempotent = overrides.Idempotent ?? Idempotent,
-        MaxAttempts = overrides.MaxAttempts ?? MaxAttempts,
-        DlqAfterAttempts = overrides.DlqAfterAttempts ?? DlqAfterAttempts,
         Backoff = overrides.Backoff ?? Backoff,
         Filter = overrides.Filter ?? Filter,
     };
@@ -72,8 +68,6 @@ public sealed class QueuePolicy
         DlqEnabled = DlqEnabled,
         RetentionDays = RetentionDays,
         Idempotent = Idempotent,
-        MaxAttempts = MaxAttempts,
-        DlqAfterAttempts = DlqAfterAttempts,
         Backoff = Backoff,
         Filter = Filter,
     };
@@ -90,15 +84,6 @@ public sealed class QueuePolicy
         if (RetentionDays is { } days and < 0)
             return $"RetentionDays cannot be negative; got {days}.";
 
-        if (MaxAttempts is { } max and < 1)
-            return $"MaxAttempts must be at least 1; got {max}.";
-
-        if (DlqAfterAttempts is { } after and < 1)
-            return $"DlqAfterAttempts must be at least 1; got {after}.";
-
-        if (MaxAttempts is { } m && DlqAfterAttempts is { } a && a >= m)
-            return $"DlqAfterAttempts ({a}) must be below MaxAttempts ({m}), so some retries happen before an event goes to the DLQ.";
-
         return Backoff?.Validate() ?? Filter?.Validate();
     }
 }
@@ -106,10 +91,16 @@ public sealed class QueuePolicy
 /// <summary>How long a queue waits between attempts. Null fields inherit.</summary>
 public sealed class RetryBackoff
 {
-    /// <summary>The first wait, in milliseconds. Each later wait doubles, up to <see cref="MaxDelayMs"/>.</summary>
+    /// <summary>
+    /// The first wait, in milliseconds. Each later wait doubles, up to <see cref="MaxDelayMs"/>. At most
+    /// 3600000 (one hour), unless a longer wait is already in place.
+    /// </summary>
     public int? BaseDelayMs { get; set; }
 
-    /// <summary>The longest wait between two attempts, in milliseconds.</summary>
+    /// <summary>
+    /// The longest wait between two attempts, in milliseconds. At most 86400000 (24 hours), unless a
+    /// longer wait is already in place.
+    /// </summary>
     public int? MaxDelayMs { get; set; }
 
     /// <summary><c>full</c> spreads the waits randomly so retries do not arrive in step; <c>none</c> does not.</summary>
@@ -118,6 +109,12 @@ public sealed class RetryBackoff
     internal bool IsEmpty => BaseDelayMs is null && MaxDelayMs is null && Jitter is null;
 
     internal static readonly string[] JitterValues = { "none", "full" };
+
+    // Samme tak som backenden (PolicyValidation, Queuey#391, 2026-10-04). De gjelder bare en skriving som
+    // endrer ventetiden, så de sjekkes mot det workspacet har før apply skriver (BackoffCeilings), ikke her:
+    // en lengre ventetid fra før taket skal kunne stå uendret i fila.
+    internal const int MaxBaseDelayMs = 3_600_000;
+    internal const int MaxMaxDelayMs = 86_400_000;
 
     internal string? Validate()
     {
@@ -166,16 +163,53 @@ public sealed class DeliveryFilter
                 return "Every filter condition needs a field.";
             if (c.Field.Length > MaxFieldLength)
                 return $"Filter field '{c.Field.Substring(0, 40)}…' is longer than {MaxFieldLength} characters.";
+
+            // Workeren slår opp feltet nøyaktig slik det står, så "amount " treffer aldri. Backenden avviser det i
+            // stedet for å trimme (Queuey#391, 2026-10-04); her avvises det før noe er sendt.
+            if (c.Field != c.Field.Trim())
+                return $"Filter field '{c.Field}' has whitespace around it, so it never matches: Queuey looks a field up exactly as written. Write it as '{c.Field.Trim()}'.";
+
             if (Array.IndexOf(DeliveryFilterCondition.OpValues, c.Op) < 0)
                 return $"Filter op on field '{c.Field}' must be one of {string.Join(", ", DeliveryFilterCondition.OpValues)}; got '{c.Op}'.";
+
+            // exists leser aldri verdien, så "exists" med "false", ment som «feltet skal mangle», leverte bare events
+            // som har feltet. Backenden avviser en verdi på exists (Queuey#391, 2026-10-04).
+            if (c.Op == "exists" && c.Value is not null)
+                return $"Filter condition '{c.Field} exists' takes no value: it matches every event that has the field, whatever the value. Leave the value out.";
             if (c.Op != "exists" && c.Value is null)
                 return $"Filter condition '{c.Field} {c.Op}' needs a value.";
             if (c.Value is { Length: > MaxValueLength })
                 return $"Filter value for field '{c.Field}' is longer than {MaxValueLength} characters.";
+
+            if (Array.IndexOf(NumberOps, c.Op) >= 0 && NumberRefusal(c.Value!) is { } refusal)
+                return $"Filter condition '{c.Field} {c.Op}' compares numbers, and {refusal}";
         }
 
         return null;
     }
+
+    /// <summary>The ops that compare numbers; their value must be one.</summary>
+    internal static readonly string[] NumberOps = { "gt", "gte", "lt", "lte" };
+
+    // Lest som backendens deploy-kontrakt leser tallet (Queuey#391, 2026-10-04): NumberStyles.Float og invariant
+    // kultur. Workeren leser med NumberStyles.Any, der komma er tusenskilletegn, så "1,5" ble lagret og sammenlignet
+    // som 15; "(5)", "5-" og "¤5" gikk også gjennom. Alt Float godtar, leser workeren som det samme tallet.
+    private static string? NumberRefusal(string value)
+    {
+        bool parsed = double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out double number);
+
+        // Et tall som renner over, blir uendelig; "Infinity" og "NaN" er ord, ikke tall. På .NET Framework gir
+        // overløp false fra TryParse, så der står det «not a number» i stedet for «out of range». Avvist blir det likt.
+        if (parsed && double.IsInfinity(number) && value.Any(ch => ch >= '0' && ch <= '9'))
+            return $"'{Quote(value)}' is out of range.";
+
+        return parsed && !double.IsInfinity(number) && !double.IsNaN(number)
+            ? null
+            : $"'{Quote(value)}' is not a number. Write it like 1.5: a point for decimals, and no thousands separators, currency or parentheses.";
+    }
+
+    /// <summary>A value as an error message quotes it: at most 40 characters, as the backend quotes it.</summary>
+    private static string Quote(string value) => value.Length <= 40 ? value : value.Substring(0, 40) + "…";
 
     /// <summary>The filter on one line — <c>any: type eq order.created; priority exists</c>.</summary>
     public override string ToString() => Conditions.Count == 0 ? "(delivers every event)" : Describe();
@@ -189,13 +223,16 @@ public sealed class DeliveryFilter
 /// <summary>One condition on a top-level JSON body field.</summary>
 public sealed class DeliveryFilterCondition
 {
-    /// <summary>The top-level field of the JSON body.</summary>
+    /// <summary>The top-level field of the JSON body, exactly as it is written there: no whitespace around it.</summary>
     public string Field { get; set; } = default!;
 
     /// <summary><c>eq</c>, <c>ne</c>, <c>gt</c>, <c>gte</c>, <c>lt</c>, <c>lte</c>, <c>contains</c> or <c>exists</c>.</summary>
     public string Op { get; set; } = default!;
 
-    /// <summary>The value to compare with. Not used by <c>exists</c>.</summary>
+    /// <summary>
+    /// The value to compare with. <c>gt</c>, <c>gte</c>, <c>lt</c> and <c>lte</c> take a plain number written
+    /// like <c>1.5</c>. <c>exists</c> takes no value.
+    /// </summary>
     public string? Value { get; set; }
 
     internal static readonly string[] OpValues = { "eq", "ne", "gt", "gte", "lt", "lte", "contains", "exists" };

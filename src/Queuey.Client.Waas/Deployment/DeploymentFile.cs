@@ -76,11 +76,20 @@ public sealed class DeploymentFile
     /// <summary>The queues to converge, keyed by queue name.</summary>
     public Dictionary<string, DeploymentQueue> Queues { get; set; } = new(StringComparer.Ordinal);
 
-    /// <summary>Parses a deployment file. Throws <see cref="QueueyConfigurationException"/> on malformed JSON.</summary>
+    /// <summary>
+    /// Parses a deployment file. Throws <see cref="QueueyConfigurationException"/> on malformed JSON, on
+    /// a field the file does not have, and on <c>maxAttempts</c> or <c>dlqAfterAttempts</c>, which it no
+    /// longer has: the number of attempts is not a setting.
+    /// </summary>
     public static DeploymentFile Parse(string json)
     {
         if (string.IsNullOrWhiteSpace(json))
             return new DeploymentFile();
+
+        // Før parseren, som ville sagt «could not be mapped» om det første feltet den møtte: en fil fra en eldre
+        // pull bærer forsøksfeltene, og den trenger grunnen og hva som skal bort, for alle feltene på én gang.
+        if (RetiredAttemptFields(json) is { Count: > 0 } retired)
+            throw AttemptsAreNotASetting(retired);
 
         try
         {
@@ -91,6 +100,78 @@ public sealed class DeploymentFile
             throw new QueueyConfigurationException($"Could not parse the deployment file: {ex.Message}");
         }
     }
+
+    // Antall forsøk er ikke en innstilling (vedtatt 2026-10-04, Queuey#391): backenden gjør like mange forsøk for
+    // hvert event, og en policy-patch som bærer feltene, avvises med 400. En fil som fortsatt har dem, avvises her,
+    // før noe er sendt, slik ethvert felt fila ikke har avvises. Ikke fjernet i stillhet: en deklarativ fil skal
+    // aldri melde suksess for noe den ikke gjorde.
+    private static readonly string[] RetiredAttempts = { "maxAttempts", "dlqAfterAttempts" };
+
+    /// <summary>
+    /// Every place the file still declares the number of attempts, as written there:
+    /// <c>queues.orders.maxAttempts</c>. Empty when it declares none, and when the JSON is malformed,
+    /// which the parser then reports in its own words.
+    /// </summary>
+    private static List<string> RetiredAttemptFields(string json)
+    {
+        var found = new List<string>();
+
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(json, new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
+        }
+        catch (JsonException)
+        {
+            return found;
+        }
+
+        using (document)
+        {
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+                return found;
+
+            // Store og små bokstaver teller ikke, som når parseren leser navnene.
+            foreach (JsonProperty section in document.RootElement.EnumerateObject())
+            {
+                if (section.Value.ValueKind != JsonValueKind.Object)
+                    continue;
+
+                if (string.Equals(section.Name, "workspace", StringComparison.OrdinalIgnoreCase))
+                {
+                    Collect(section.Name, section.Value);
+                }
+                else if (string.Equals(section.Name, "queues", StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (JsonProperty queue in section.Value.EnumerateObject())
+                    {
+                        if (queue.Value.ValueKind == JsonValueKind.Object)
+                            Collect($"{section.Name}.{queue.Name}", queue.Value);
+                    }
+                }
+            }
+        }
+
+        return found;
+
+        void Collect(string path, JsonElement declaration)
+        {
+            foreach (JsonProperty field in declaration.EnumerateObject())
+            {
+                if (RetiredAttempts.Any(r => string.Equals(field.Name, r, StringComparison.OrdinalIgnoreCase)))
+                    found.Add($"{path}.{field.Name}");
+            }
+        }
+    }
+
+    private static QueueyConfigurationException AttemptsAreNotASetting(IReadOnlyList<string> where) => new(
+        $"The deployment file declares {string.Join(", ", where)}, but the number of attempts is not a setting. " +
+        "Queuey makes the same number of attempts for every event and decides what a failure needs: a transient " +
+        "failure is retried until the receiver's probe takes over, an event the receiver rejects goes to the " +
+        "dead-letter queue, and a stuck queue locks until a person acts.")
+    {
+        SuggestedAction = "Remove maxAttempts and dlqAfterAttempts from the file. backoff and filter stay as they are.",
+    };
 
     /// <summary>
     /// Expands every <c>${VAR}</c> in the file against the environment, returning the file with the
@@ -110,8 +191,6 @@ public sealed class DeploymentFile
                 DlqEnabled = Workspace.DlqEnabled,
                 RetentionDays = Workspace.RetentionDays,
                 Idempotent = Workspace.Idempotent,
-                MaxAttempts = Workspace.MaxAttempts,
-                DlqAfterAttempts = Workspace.DlqAfterAttempts,
                 Backoff = Workspace.Backoff,
                 Ingress = Workspace.Ingress,
                 Delivery = Workspace.Delivery is null ? null : new WorkspaceDelivery
@@ -138,8 +217,6 @@ public sealed class DeploymentFile
                 DlqEnabled = q.DlqEnabled,
                 RetentionDays = q.RetentionDays,
                 Idempotent = q.Idempotent,
-                MaxAttempts = q.MaxAttempts,
-                DlqAfterAttempts = q.DlqAfterAttempts,
                 Backoff = q.Backoff,
                 Filter = q.Filter,
                 // Ingress på kø-nivå ble ikke kopiert her før (2026-09-23), så apply, check og
@@ -191,7 +268,7 @@ public sealed class DeploymentFile
     {
         var plans = new List<DeploymentQueuePlan>();
 
-        // The workspace's retry declaration is checked like a queue's, so a typo there fails here too.
+        // The workspace's behaviour is checked like a queue's, so a typo there fails here too.
         if (Workspace?.AsPolicy().Validate() is { } workspaceReason)
             throw new QueueyConfigurationException($"The workspace has an invalid policy: {workspaceReason}");
 
@@ -210,8 +287,6 @@ public sealed class DeploymentFile
                     DlqEnabled = declared.DlqEnabled,
                     RetentionDays = declared.RetentionDays,
                     Idempotent = declared.Idempotent,
-                    MaxAttempts = declared.MaxAttempts,
-                    DlqAfterAttempts = declared.DlqAfterAttempts,
                     Backoff = declared.Backoff,
                     Filter = declared.Filter,
                 },
@@ -256,13 +331,11 @@ public sealed class DeploymentQueue
     /// </summary>
     public string? Mode { get; set; }
 
-    /// <summary>How many times an event is attempted before it gives up.</summary>
-    public int? MaxAttempts { get; set; }
-
-    /// <summary>After how many attempts an event goes to the DLQ. Must be below <c>maxAttempts</c>.</summary>
-    public int? DlqAfterAttempts { get; set; }
-
-    /// <summary>How long to wait between attempts.</summary>
+    /// <summary>
+    /// How long to wait between attempts. The number of attempts is not a setting: Queuey retries a
+    /// transient failure until the receiver's probe takes over, sends an event the receiver rejects
+    /// to the dead-letter queue, and locks the queue when a person must act.
+    /// </summary>
     public RetryBackoff? Backoff { get; set; }
 
     /// <summary>Which events this queue delivers. Omit it to deliver every event.</summary>
@@ -271,7 +344,7 @@ public sealed class DeploymentQueue
     /// <summary>Delivery ordering: <c>fifo</c>, <c>bykey</c> or <c>besteffort</c>.</summary>
     public string? Ordering { get; set; }
 
-    /// <summary>Whether a dead-letter queue collects exhausted events.</summary>
+    /// <summary>Whether a dead-letter queue collects events the receiver rejected.</summary>
     public bool? DlqEnabled { get; set; }
 
     /// <summary>Days events are retained.</summary>
@@ -311,13 +384,10 @@ public sealed class DeploymentWorkspace
     /// <summary>Whether duplicate publishes are collapsed by idempotency key.</summary>
     public bool? Idempotent { get; set; }
 
-    /// <summary>How many times an event is attempted, for every queue that does not say.</summary>
-    public int? MaxAttempts { get; set; }
-
-    /// <summary>After how many attempts an event goes to the DLQ. Must be below <c>maxAttempts</c>.</summary>
-    public int? DlqAfterAttempts { get; set; }
-
-    /// <summary>How long to wait between attempts, for every queue that does not say.</summary>
+    /// <summary>
+    /// How long to wait between attempts, for every queue that does not say. The number of attempts
+    /// is not a setting.
+    /// </summary>
     public RetryBackoff? Backoff { get; set; }
 
     /// <summary>Where events are delivered — the base every queue appends its path to.</summary>
@@ -328,18 +398,15 @@ public sealed class DeploymentWorkspace
 
     internal bool HasPolicy => Ordering is not null || DlqEnabled is not null
                             || RetentionDays is not null || Idempotent is not null
-                            || MaxAttempts is not null || DlqAfterAttempts is not null
                             || (Backoff is not null && !Backoff.IsEmpty);
 
-    /// <summary>The workspace's retry declaration as a policy, so it is validated like a queue's.</summary>
+    /// <summary>The workspace's behaviour as a policy, so it is validated like a queue's.</summary>
     internal QueuePolicy AsPolicy() => new()
     {
         Ordering = Ordering,
         DlqEnabled = DlqEnabled,
         RetentionDays = RetentionDays,
         Idempotent = Idempotent,
-        MaxAttempts = MaxAttempts,
-        DlqAfterAttempts = DlqAfterAttempts,
         Backoff = Backoff,
     };
 }

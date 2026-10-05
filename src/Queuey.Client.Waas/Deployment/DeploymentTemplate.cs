@@ -52,8 +52,6 @@ public static class DeploymentTemplate
                 DlqEnabled = file.Workspace.DlqEnabled,
                 RetentionDays = file.Workspace.RetentionDays,
                 Idempotent = file.Workspace.Idempotent,
-                MaxAttempts = file.Workspace.MaxAttempts,
-                DlqAfterAttempts = file.Workspace.DlqAfterAttempts,
                 Backoff = file.Workspace.Backoff,
                 Ingress = file.Workspace.Ingress,
                 Delivery = file.Workspace.Delivery is null ? null : new WorkspaceDelivery
@@ -81,8 +79,6 @@ public static class DeploymentTemplate
                 DlqEnabled = q.DlqEnabled,
                 RetentionDays = q.RetentionDays,
                 Idempotent = q.Idempotent,
-                MaxAttempts = q.MaxAttempts,
-                DlqAfterAttempts = q.DlqAfterAttempts,
                 Backoff = q.Backoff,
                 Filter = q.Filter,
                 Ingress = q.Ingress,

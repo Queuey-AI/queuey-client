@@ -22,7 +22,7 @@ public sealed class CommandOptionsTests : IDisposable
         try { Directory.Delete(_dir, recursive: true); } catch { }
     }
 
-    private string DeployFile(string json = """{ "tenant": "ten_abc", "workspace": { "retentionDays": 30 }, "queues": { "orders": { "maxAttempts": 5 } } }""")
+    private string DeployFile(string json = """{ "tenant": "ten_abc", "workspace": { "retentionDays": 30 }, "queues": { "orders": { "retentionDays": 5 } } }""")
     {
         string path = Path.Combine(_dir, "queuey.deploy.json");
         File.WriteAllText(path, json);

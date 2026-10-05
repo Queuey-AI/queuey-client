@@ -209,14 +209,14 @@ public class PullTests
 /// <summary>What a pull writes for the fields a deployment file gained 2026-09-23.</summary>
 public class PullDesiredStateTests
 {
-    private static StubHttpMessageHandler Api(string mode, bool hasTarget, object queuePolicy, int successStatusCode = 202)
+    private static StubHttpMessageHandler Api(string mode, bool hasTarget, object queuePolicy, int successStatusCode = 202, object? workspacePolicy = null)
         => new(req =>
         {
             string path = req.RequestUri!.AbsolutePath;
             if (path.EndsWith("/credentials", StringComparison.Ordinal))
                 return StubHttpMessageHandler.Json(HttpStatusCode.OK, Array.Empty<object>());
             if (path.EndsWith("/tenants/ten_abc/config", StringComparison.Ordinal))
-                return StubHttpMessageHandler.Json(HttpStatusCode.OK, new { policy = Baseline });
+                return StubHttpMessageHandler.Json(HttpStatusCode.OK, new { policy = workspacePolicy ?? Baseline });
             if (path.EndsWith("/tenants/ten_abc/queues", StringComparison.Ordinal))
                 return StubHttpMessageHandler.Json(HttpStatusCode.OK, new[] { new { publicId = "que_orders", displayName = "orders", mode, hasDeliveryTarget = hasTarget } });
             return StubHttpMessageHandler.Json(HttpStatusCode.OK, new
@@ -230,7 +230,7 @@ public class PullDesiredStateTests
 
     private static object Baseline => new
     {
-        idempotent = false, dlqEnabled = true, retentionDays = 7, ordering = "fifo", maxAttempts = 8, dlqAfterAttempts = (int?)null,
+        idempotent = false, dlqEnabled = true, retentionDays = 7, ordering = "fifo",
         backoff = new { baseDelayMs = 1000, maxDelayMs = 60000, jitter = "full" },
     };
 
@@ -249,12 +249,12 @@ public class PullDesiredStateTests
     }
 
     [Fact]
-    public async Task Retry_and_filter_are_written_when_they_differ_from_the_workspace()
+    public async Task Backoff_and_filter_are_written_when_they_differ_from_the_workspace()
     {
         object policy = new
         {
-            idempotent = false, dlqEnabled = true, retentionDays = 7, ordering = "fifo", maxAttempts = 3, dlqAfterAttempts = 2,
-            backoff = new { baseDelayMs = 1000, maxDelayMs = 60000, jitter = "full" },
+            idempotent = false, dlqEnabled = true, retentionDays = 7, ordering = "fifo",
+            backoff = new { baseDelayMs = 2000, maxDelayMs = 60000, jitter = "full" },
             filter = new { match = "any", conditions = new[] { new { field = "type", op = "eq", value = "order.created" } } },
             // En server fra før Queuey#345 lagret disse, men workeren leste dem aldri. Pull skriver dem
             // ikke: en fil med dem avvises som ukjent felt.
@@ -264,17 +264,47 @@ public class PullDesiredStateTests
         DeploymentFile pulled = await Pull(Api("Deliver", true, policy));
         DeploymentQueue orders = pulled.Queues["orders"];
 
-        Assert.Equal(3, orders.MaxAttempts);
-        Assert.Equal(2, orders.DlqAfterAttempts);
+        // Backoff skrives hel når den skiller seg fra workspacet, så fila sier hele ventetiden køen eier.
+        Assert.Equal(2000, orders.Backoff!.BaseDelayMs);
+        Assert.Equal(60000, orders.Backoff.MaxDelayMs);
         Assert.Equal("any: type eq order.created", orders.Filter!.ToString());
 
         // Likt workspacet: utelatt, så det fortsetter å arve.
-        Assert.Null(orders.Backoff);
+        Assert.Null(orders.Ordering);
 
         // Og det pull skriver, godtar apply.
         string json = pulled.ToJson();
         Assert.DoesNotContain("retryOn", json, StringComparison.Ordinal);
         Assert.Single(DeploymentFile.Parse(json).Resolve());
+    }
+
+    [Fact]
+    public async Task Attempts_an_older_backend_still_reports_are_never_written()
+    {
+        // Et API fra før Queuey#391 sender fortsatt maxAttempts og dlqAfterAttempts, for workspacet og køen, og
+        // her ulike, så en pull som leste dem, ville skrevet dem ut. En fil med dem avvises av apply (2026-10-05),
+        // så pull må aldri skrive dem: det pull skriver, skal apply godta.
+        object workspace = new
+        {
+            idempotent = false, dlqEnabled = true, retentionDays = 7, ordering = "fifo", maxAttempts = 8, dlqAfterAttempts = 6,
+            backoff = new { baseDelayMs = 1000, maxDelayMs = 60000, jitter = "full" },
+        };
+        object queue = new
+        {
+            idempotent = false, dlqEnabled = true, retentionDays = 30, ordering = "fifo", maxAttempts = 3, dlqAfterAttempts = 2,
+            backoff = new { baseDelayMs = 1000, maxDelayMs = 60000, jitter = "full" },
+        };
+
+        DeploymentFile pulled = await Pull(Api("Deliver", true, queue, workspacePolicy: workspace));
+        string json = pulled.ToJson();
+
+        Assert.DoesNotContain("attempts", json, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(30, pulled.Queues["orders"].RetentionDays);   // det køen faktisk eier, kommer med
+        Assert.Single(DeploymentFile.Parse(json).Resolve());
+
+        // Det samme for den effektive lesingen drift-sjekken sammenligner med.
+        Assert.Empty(await WaasTestHost.Build(apiStub: Api("Deliver", true, queue, workspacePolicy: workspace))
+            .CheckDeploymentAsync(DeploymentFile.Parse("""{ "tenant": "ten_abc", "queues": { "orders": { "retentionDays": 30 } } }""")));
     }
 
     [Theory]

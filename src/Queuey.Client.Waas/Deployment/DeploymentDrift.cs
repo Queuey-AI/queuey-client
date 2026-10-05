@@ -71,8 +71,7 @@ public static class DeploymentDrift
             Compare(prefix + ".dlqEnabled", want.DlqEnabled, have.DlqEnabled, drift);
             Compare(prefix + ".retentionDays", want.RetentionDays, have.RetentionDays, drift);
             Compare(prefix + ".idempotent", want.Idempotent, have.Idempotent, drift);
-            CompareRetry(prefix, want.MaxAttempts, want.DlqAfterAttempts, want.Backoff,
-                have.MaxAttempts, have.DlqAfterAttempts, have.Backoff, drift);
+            CompareBackoff(prefix, want.Backoff, have.Backoff, drift);
 
             if (want.Filter is { } wf)
             {
@@ -105,8 +104,7 @@ public static class DeploymentDrift
         Compare("workspace.dlqEnabled", want.DlqEnabled, actual.DlqEnabled, drift);
         Compare("workspace.retentionDays", want.RetentionDays, actual.RetentionDays, drift);
         Compare("workspace.idempotent", want.Idempotent, actual.Idempotent, drift);
-        CompareRetry("workspace", want.MaxAttempts, want.DlqAfterAttempts, want.Backoff,
-            actual.MaxAttempts, actual.DlqAfterAttempts, actual.Backoff, drift);
+        CompareBackoff("workspace", want.Backoff, actual.Backoff, drift);
 
         CompareIngress("workspace.ingress", want.Ingress, actual.Ingress, drift);
 
@@ -122,15 +120,8 @@ public static class DeploymentDrift
         }
     }
 
-    private static void CompareRetry(
-        string prefix,
-        int? maxAttempts, int? dlqAfterAttempts, RetryBackoff? backoff,
-        int? haveMaxAttempts, int? haveDlqAfterAttempts, RetryBackoff? haveBackoff,
-        List<DriftItem> drift)
+    private static void CompareBackoff(string prefix, RetryBackoff? backoff, RetryBackoff? haveBackoff, List<DriftItem> drift)
     {
-        Compare(prefix + ".maxAttempts", maxAttempts, haveMaxAttempts, drift);
-        Compare(prefix + ".dlqAfterAttempts", dlqAfterAttempts, haveDlqAfterAttempts, drift);
-
         // Backoff per field, like everything else: a file may own the base delay and leave the rest.
         if (backoff is not null)
         {
