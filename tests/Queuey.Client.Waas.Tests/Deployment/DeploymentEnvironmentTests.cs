@@ -93,7 +93,7 @@ public class DeploymentEnvironmentTests
             ?? (req.Method == HttpMethod.Patch && req.RequestUri!.AbsolutePath == "/tenants/ten_abc"
                 ? Envelope(HttpStatusCode.Forbidden, "environment_lowering_needs_a_person",
                     "Only a person can lower a workspace's environment, and this would lower workspace ten_abc from prod to dev.",
-                    "Ask a person to change it on the workspace's page in the Queuey console: https://app.queuey.ai/console/t/ten_abc")
+                    "Ask a person to change it with Set environment… on the workspace's page in the Queuey console: https://app.queuey.ai/console/t/ten_abc?set=environment")
                 : new HttpResponseMessage(HttpStatusCode.NoContent)));
 
         var refusal = await Assert.ThrowsAnyAsync<QueueyException>(() => WaasTestHost.Build(apiStub: api).ApplyDeploymentAsync(

@@ -416,7 +416,7 @@ public sealed class DeployCommandTests : IDisposable
         "PATCH /tenants/ten_abc" => RecordingHandler.Error(HttpStatusCode.Forbidden, "environment_lowering_needs_a_person",
             "Only a person can lower a workspace's environment, and this would lower workspace ten_abc from prod to dev. "
             + "An API key can set the environment when it creates a workspace, and can raise it towards prod.",
-            "Ask a person to change it on the workspace's page in the Queuey console: https://app.queuey.ai/console/t/ten_abc"),
+            "Ask a person to change it with Set environment… on the workspace's page in the Queuey console: https://app.queuey.ai/console/t/ten_abc?set=environment"),
         _ => throw new InvalidOperationException(req.Key),
     });
 
@@ -430,7 +430,7 @@ public sealed class DeployCommandTests : IDisposable
 
         Assert.Equal(ExitCodes.RuntimeError, human.Exit);
         Assert.Contains("Queuey error: Only a person can lower a workspace's environment, and this would lower workspace ten_abc from prod to dev.", human.Stderr);
-        Assert.Contains("→ Ask a person to change it on the workspace's page in the Queuey console: https://app.queuey.ai/console/t/ten_abc", human.Stderr);
+        Assert.Contains("→ Ask a person to change it with Set environment… on the workspace's page in the Queuey console: https://app.queuey.ai/console/t/ten_abc?set=environment", human.Stderr);
         Assert.Equal(new[] { "PATCH /tenants/ten_abc" }, api.Writes.Select(w => w.Key).ToArray());
         Assert.Equal("dev", api.Writes.Single().Json.GetProperty("environment").GetString());
 
