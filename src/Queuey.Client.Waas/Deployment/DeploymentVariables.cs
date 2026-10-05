@@ -26,7 +26,7 @@ public static class DeploymentVariables
     /// <summary>Expands every <c>${VAR}</c> in <paramref name="value"/>. Null and literal text pass through.</summary>
     /// <param name="value">The text to expand.</param>
     /// <param name="lookup">Variable resolver; defaults to the process environment.</param>
-    /// <param name="context">What is being expanded, for the error message (e.g. <c>workspace.baseUrl</c>).</param>
+    /// <param name="context">What is being expanded, for the error message (e.g. <c>workspace.delivery.baseUrl</c>).</param>
     public static string? Expand(string? value, Func<string, string?>? lookup = null, string? context = null)
     {
         if (string.IsNullOrEmpty(value) || value!.IndexOf("${", StringComparison.Ordinal) < 0)

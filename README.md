@@ -294,10 +294,12 @@ its path:
 ```jsonc
 {
   "workspace": {
-    "baseUrl": "https://hooks.example.com",
-    "authMode": "ApiKey",
-    "credentialRef": "partner-key",     // a name, never the secret
-    "authHeaderName": "X-Api-Key"
+    "delivery": {
+      "baseUrl": "https://hooks.example.com",
+      "authMode": "ApiKey",
+      "credentialRef": "partner-key",   // a name, never the secret
+      "authHeaderName": "X-Api-Key"
+    }
   },
   "queues": {
     "orders":   { "ordering": "bykey", "retentionDays": 30, "delivery": { "url": "/orders" } },
