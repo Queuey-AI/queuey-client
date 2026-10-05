@@ -94,8 +94,8 @@ public sealed class DeployCommandTests : IDisposable
     [InlineData("apply", "--dry-run")]
     public async Task A_file_that_still_declares_attempts_is_refused_before_anything_is_sent(string command, string? flag)
     {
-        // En fil fra en pull mot et API fra før Queuey#391 har forsøkene. Apply ville fått 400 på første policy-patch,
-        // etter at workspacet var skrevet. Nå avvises fila før noe er sendt, med hva som skal bort.
+        // En fil skrevet for hånd, eller med en build av #40 fra før dette, kan ha forsøkene. Apply ville fått 400 på
+        // første policy-patch, etter at workspacet var skrevet. Nå avvises fila før noe er sendt, med hva som skal bort.
         string path = DeployFile("""{ "tenant": "ten_abc", "queues": { "orders": { "maxAttempts": 8, "dlqAfterAttempts": 6 } } }""");
         var api = new RecordingHandler(_ => RecordingHandler.Error(HttpStatusCode.InternalServerError, "unexpected", "Nothing should reach the server."));
         string[] args = new[] { command, "--file", path, "--json" }.Concat(flag is null ? Array.Empty<string>() : new[] { flag }).ToArray();
@@ -106,8 +106,8 @@ public sealed class DeployCommandTests : IDisposable
         Assert.Empty(api.Requests);
         JsonElement error = JsonDocument.Parse(run.Stdout).RootElement.GetProperty("error");
         Assert.Equal("config_error", error.GetProperty("code").GetString());
-        Assert.Contains("declares queues.orders.maxAttempts, queues.orders.dlqAfterAttempts, but the number of attempts is not a setting",
-            error.GetProperty("message").GetString());
+        Assert.StartsWith($"{path}: The deployment file declares queues.orders.maxAttempts, queues.orders.dlqAfterAttempts, "
+                          + "but the number of attempts is not a setting", error.GetProperty("message").GetString());
         Assert.Equal("Remove maxAttempts and dlqAfterAttempts from the file. backoff and filter stay as they are.",
             error.GetProperty("action").GetString());
     }
@@ -120,7 +120,7 @@ public sealed class DeployCommandTests : IDisposable
         CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path)));
 
         Assert.Equal(ExitCodes.Configuration, run.Exit);
-        Assert.Contains("Config error: The deployment file declares workspace.maxAttempts, but the number of attempts is not a setting.", run.Stderr);
+        Assert.Contains($"Config error: {path}: The deployment file declares workspace.maxAttempts, but the number of attempts is not a setting.", run.Stderr);
         Assert.Contains("→ Remove maxAttempts and dlqAfterAttempts from the file.", run.Stderr);
     }
 
@@ -128,7 +128,8 @@ public sealed class DeployCommandTests : IDisposable
     public async Task Pull_never_writes_attempts_and_apply_accepts_what_it_wrote()
     {
         // Et API fra før Queuey#391 sender fortsatt maxAttempts og dlqAfterAttempts i /config. Pull leser dem ikke,
-        // så fila den skriver, kan apply-es mot det nye API-et, som avviser en patch med dem.
+        // så fila den skriver, kan apply-es mot det nye API-et, som avviser en patch med dem. Filteret er gyldig, så
+        // pull advarer ikke.
         object workspacePolicy = new
         {
             idempotent = false, dlqEnabled = true, retentionDays = 7, ordering = "fifo", maxAttempts = 8, dlqAfterAttempts = 6,
@@ -156,6 +157,7 @@ public sealed class DeployCommandTests : IDisposable
         CliRun pull = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("pull", "--file", path, "--tenant", "ten_abc")), api);
 
         Assert.Equal(ExitCodes.Success, pull.Exit);
+        Assert.Equal(string.Empty, pull.Stderr);
         string written = File.ReadAllText(path);
         Assert.DoesNotContain("attempts", written, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(30, JsonDocument.Parse(written).RootElement.GetProperty("queues").GetProperty("orders").GetProperty("retentionDays").GetInt32());
@@ -164,6 +166,99 @@ public sealed class DeployCommandTests : IDisposable
 
         Assert.Equal(ExitCodes.Success, dryRun.Exit);
         Assert.Contains("1 queue(s) declared. Nothing was sent.", dryRun.Stdout);
+    }
+
+    // ── filter og ventetid (review 2026-10-05) ──────────────────────────────
+
+    [Theory]
+    [InlineData("""{ "conditions": null }""", "A filter needs its conditions. To remove the filter, write \"conditions\": [].")]
+    [InlineData("""{ "conditions": [ null ] }""", "A filter condition cannot be null.")]
+    public async Task A_filter_without_usable_conditions_is_a_config_error_and_not_a_crash(string filter, string expected)
+    {
+        // "conditions": null og [null] ga NullReferenceException, stack trace og exit 134, uten JSON.
+        string path = DeployFile($$"""{ "tenant": "ten_abc", "queues": { "orders": { "filter": {{filter}} } } }""");
+        var api = new RecordingHandler(_ => RecordingHandler.Error(HttpStatusCode.InternalServerError, "unexpected", "Nothing should reach the server."));
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path, "--json")), api);
+
+        Assert.Equal(ExitCodes.Configuration, run.Exit);
+        Assert.Empty(api.Requests);
+        Assert.Equal(string.Empty, run.Stderr);
+        JsonElement error = JsonDocument.Parse(run.Stdout).RootElement.GetProperty("error");
+        Assert.Equal("config_error", error.GetProperty("code").GetString());
+        Assert.Contains(expected, error.GetProperty("message").GetString());
+    }
+
+    [Fact]
+    public async Task Pull_warns_about_each_filter_condition_apply_will_refuse()
+    {
+        // Rå overrides eller en deploy fra før Queuey#391 kan ha lagret "gt": "1,000" og exists med en verdi. Pull
+        // skriver dem som de står, men sier fra per betingelse: apply, plan og --check avviser fila til de er rettet.
+        object policy = new
+        {
+            idempotent = false, dlqEnabled = true, retentionDays = 7, ordering = "fifo",
+            filter = new
+            {
+                match = "all",
+                conditions = new object[]
+                {
+                    new { field = "amount", op = "gt", value = "1,000" },
+                    new { field = "type", op = "eq", value = "order.created" },
+                    new { field = "priority", op = "exists", value = "false" },
+                },
+            },
+        };
+        var api = new RecordingHandler(req => req.Key switch
+        {
+            "GET /tenants/ten_abc/credentials" => RecordingHandler.Json(HttpStatusCode.OK, Array.Empty<object>()),
+            "GET /tenants/ten_abc/config" => RecordingHandler.Json(HttpStatusCode.OK, new { policy = new { idempotent = false, dlqEnabled = true, retentionDays = 7, ordering = "fifo" } }),
+            "GET /tenants/ten_abc/queues" => RecordingHandler.Json(HttpStatusCode.OK, new[] { new { publicId = "que_orders", displayName = "orders", mode = "Deliver", hasDeliveryTarget = true } }),
+            "GET /queues/que_orders/config" => RecordingHandler.Json(HttpStatusCode.OK, new
+            {
+                policy,
+                inherited = new { destination = true, auth = true, signing = true, rateLimit = true, behavior = false },
+                tenantBaseline = new { policy = new { idempotent = false, dlqEnabled = true, retentionDays = 7, ordering = "fifo" } },
+            }),
+            _ => throw new InvalidOperationException(req.Key),
+        });
+
+        CliRun pull = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("pull", "--stdout", "--tenant", "ten_abc")), api);
+
+        Assert.Equal(ExitCodes.Success, pull.Exit);
+        Assert.Contains("\"value\": \"1,000\"", pull.Stdout);   // fila viser det Queuey har
+        string[] warnings = pull.Stderr.Replace("\r\n", "\n").Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal(new[]
+        {
+            "Warning: queues.orders.filter.conditions[0] (amount gt 1,000): Filter condition 'amount gt' compares numbers, and '1,000' is not a number. "
+                + "Write it like 1.5: a point for decimals, and no thousands separators, currency or parentheses.",
+            "Warning: queues.orders.filter.conditions[2] (priority exists false): Filter condition 'priority exists' takes no value: it matches every "
+                + "event that has the field, whatever the value. Leave the value out.",
+            "apply, plan and apply --check refuse the file until these conditions are fixed in it.",
+        }, warnings);
+    }
+
+    [Fact]
+    public async Task A_dry_run_notes_a_wait_above_the_ceiling()
+    {
+        // En dry run sender ingenting, så den kan ikke vite om ventetiden allerede gjelder. Den sier hva apply gjør.
+        string path = DeployFile("""
+        { "workspace": { "backoff": { "maxDelayMs": 172800000 } },
+          "queues": { "orders": { "backoff": { "baseDelayMs": 7200000 } }, "audit": { "backoff": { "baseDelayMs": 1000 } } } }
+        """);
+
+        CliRun run = await CliHarness.RunAsync(() => ApplyCommand.RunAsync(new[] { "--file", path, "--dry-run" }));
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        string stdout = run.Stdout.Replace("\r\n", "\n");
+        Assert.Contains("\n    ! backoff.maxDelayMs=172800000 is above the 86400000 (24 hours) the longest wait may be: apply refuses it unless that wait is already in place.", stdout);
+        Assert.Contains("orders\tmode=(deliver when it has a destination, if new) inherits the workspace backoff.baseDelayMs=7200000\n"
+                        + "    ! backoff.baseDelayMs=7200000 is above the 3600000 (one hour) a first wait may be: apply refuses it unless that wait is already in place.", stdout);
+        Assert.Equal(2, stdout.Split("    ! ").Length - 1);   // ingen merknad for audit
+
+        CliRun json = await CliHarness.RunAsync(() => ApplyCommand.RunAsync(new[] { "--file", path, "--dry-run", "--json" }));
+
+        JsonElement orders = JsonDocument.Parse(json.Stdout).RootElement.EnumerateArray().Single(q => q.GetProperty("name").GetString() == "orders");
+        Assert.Contains("apply refuses it unless that wait is already in place", Assert.Single(orders.GetProperty("notes").EnumerateArray()).GetString());
     }
 
     [Fact]

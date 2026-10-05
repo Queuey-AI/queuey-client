@@ -147,7 +147,8 @@ PULL
                  nothing for it, so the file says what is actually owned rather than freezing
                  today's defaults as permanent overrides. No secrets: credentials appear by
                  name. Refuses to overwrite an existing file without --force; use --stdout to
-                 diff first.
+                 diff first. A filter condition Queuey stored before it checked it is written
+                 as it is, with a warning on stderr: apply refuses the file until it is fixed.
                  --as <env> rewrites the values that do not travel between workspaces (the
                  workspace binding, the base URL, absolute queue URLs) into ${VAR} references,
                  so one file converges every environment. Paths and credential names travel

@@ -71,18 +71,20 @@ internal sealed class RetryBackoffWire
 
 /// <summary>
 /// Wire shape of a delivery filter. An empty condition list is sent as it is: that is how a file
-/// that stops declaring conditions removes the filter it had.
+/// removes the filter it had, by writing <c>"conditions": []</c>.
 /// </summary>
 internal sealed class DeliveryFilterWire
 {
     public string? Match { get; set; }
     public List<FilterConditionWire>? Conditions { get; set; }
 
+    // Validert før den sendes (QueuePolicy.Validate), så listen finnes og har ingen null. Uten listen ville den
+    // blitt utelatt, og serveren avvist patchen, i stedet for at en tom liste fjernet filteret.
     internal static DeliveryFilterWire? From(DeliveryFilter? f)
         => f is null ? null : new DeliveryFilterWire
         {
             Match = f.Match,
-            Conditions = f.Conditions.Select(c => new FilterConditionWire { Field = c.Field, Op = c.Op, Value = c.Value }).ToList(),
+            Conditions = f.Conditions?.Select(c => new FilterConditionWire { Field = c.Field, Op = c.Op, Value = c.Value }).ToList(),
         };
 
     internal DeliveryFilter ToModel() => new()

@@ -49,6 +49,7 @@ internal static class PullCommand
         if (map.Has("stdout"))
         {
             Console.WriteLine(json);
+            WarnAboutRefusedFilters(file);
             return ExitCodes.Success;
         }
 
@@ -76,6 +77,24 @@ internal static class PullCommand
                               + "same thing in every environment.");
         }
 
+        WarnAboutRefusedFilters(file);
         return ExitCodes.Success;
+    }
+
+    /// <summary>
+    /// One warning per filter condition apply would refuse, on stderr so <c>--stdout</c> stays a clean file.
+    /// Pull writes the condition as Queuey stored it; the warning says it has to be fixed before the file applies.
+    /// </summary>
+    private static void WarnAboutRefusedFilters(DeploymentFile file)
+    {
+        // Rå overrides eller en deploy fra før Queuey#391 kan ha lagret "gt": "1,000" eller exists med en verdi. Pull
+        // skriver det som det står, og da avviste apply, plan og --check fila uten at pull hadde sagt noe (review
+        // 2026-10-05). Fila skrives fortsatt: den viser hva Queuey har.
+        IReadOnlyList<string> problems = file.FilterConditionProblems();
+        foreach (string problem in problems)
+            Console.Error.WriteLine($"Warning: {problem}");
+        if (problems.Count > 0)
+            Console.Error.WriteLine("apply, plan and apply --check refuse the file until "
+                                    + (problems.Count == 1 ? "this condition is" : "these conditions are") + " fixed in it.");
     }
 }

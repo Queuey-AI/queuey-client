@@ -359,6 +359,8 @@ public class DeploymentModeTests
     [InlineData("""{ "filter": { "match": "most", "conditions": [] } }""", "Match must be one of all, any")]
     [InlineData("""{ "filter": { "conditions": [ { "field": "type", "op": "like", "value": "x" } ] } }""", "must be one of eq, ne")]
     [InlineData("""{ "filter": { "conditions": [ { "field": "type", "op": "eq" } ] } }""", "needs a value")]
+    [InlineData("""{ "backoff": { "baseDelayMs": 0 } }""", "Backoff.BaseDelayMs must be above 0; got 0.")]
+    [InlineData("""{ "backoff": { "maxDelayMs": 0 } }""", "Backoff.MaxDelayMs must be above 0; got 0.")]
     public void A_backoff_or_filter_mistake_fails_locally_and_names_what_works(string queue, string expected)
     {
         DeploymentFile file = DeploymentFile.Parse($$"""{ "queues": { "orders": {{queue}} } }""");
@@ -423,7 +425,40 @@ public class DeploymentModeTests
 
         var ex = Assert.Throws<QueueyConfigurationException>(() => file.Resolve());
         Assert.Contains("workspace", ex.Message);
-        Assert.Contains("Backoff.BaseDelayMs cannot be negative", ex.Message);
+        Assert.Contains("Backoff.BaseDelayMs must be above 0; got ", ex.Message);   // -1 skrives med kulturens minustegn
+    }
+
+    private const string NeedsConditions = "A filter needs its conditions. To remove the filter, write \"conditions\": [].";
+
+    // En manglende liste ble lest som tom, og en tom liste fjerner filteret (review 2026-10-05): "filter": {"match":
+    // "any"} sendte "conditions": [], og køen leverte hvert event. null og [null] krasjet CLI-en.
+    [Theory]
+    [InlineData("""{ }""", NeedsConditions)]
+    [InlineData("""{ "match": "any" }""", NeedsConditions)]
+    [InlineData("""{ "match": "all", "conditions": null }""", NeedsConditions)]
+    [InlineData("""{ "conditions": [ null ] }""", "A filter condition cannot be null.")]
+    [InlineData("""{ "conditions": [ { "field": "type", "op": "eq", "value": "order.created" }, null ] }""", "A filter condition cannot be null.")]
+    public async Task A_filter_without_its_conditions_is_refused_and_nothing_is_sent(string filter, string expected)
+    {
+        var api = new Api();
+
+        var ex = await Assert.ThrowsAsync<QueueyConfigurationException>(
+            () => Apply(api, $$"""{ "queues": { "orders": { "filter": {{filter}} } } }"""));
+
+        Assert.Contains(expected, ex.Message);
+        Assert.Empty(api.Paths);
+    }
+
+    [Fact]
+    public void A_filter_declared_in_code_needs_its_conditions_too()
+    {
+        // Samme regel kode-først: et filter uten liste ville fjernet køens filter ved neste sync.
+        var ex = Assert.Throws<QueueyConfigurationException>(() => QueueDefinitionFactory.FromName("orders", new QueueOptions
+        {
+            Policy = { Filter = new DeliveryFilter { Match = "any" } },
+        }));
+
+        Assert.Contains(NeedsConditions, ex.Message);
     }
 
     [Fact]

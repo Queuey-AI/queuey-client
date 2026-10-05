@@ -307,6 +307,43 @@ public class PullDesiredStateTests
             .CheckDeploymentAsync(DeploymentFile.Parse("""{ "tenant": "ten_abc", "queues": { "orders": { "retentionDays": 30 } } }""")));
     }
 
+    [Fact]
+    public async Task A_stored_filter_apply_would_refuse_is_pulled_as_it_is_and_named()
+    {
+        // Queuey sjekker en betingelse når den skrives, så rå overrides eller en deploy fra før Queuey#391 kan ha lagret
+        // en den nå avviser. Pull skriver den som den står, for fila skal vise hva Queuey har, og navngir den, så
+        // CLI-en kan advare før apply, plan og --check avviser fila (review 2026-10-05).
+        object policy = new
+        {
+            idempotent = false, dlqEnabled = true, retentionDays = 7, ordering = "fifo",
+            backoff = new { baseDelayMs = 1000, maxDelayMs = 60000, jitter = "full" },
+            filter = new
+            {
+                match = "any",
+                conditions = new object[]
+                {
+                    new { field = "amount ", op = "eq", value = "5" },
+                    new { field = "type", op = "eq", value = "order.created" },
+                    new { field = "total", op = "lte", value = "(5)" },
+                },
+            },
+        };
+
+        DeploymentFile pulled = await Pull(Api("Deliver", true, policy));
+
+        Assert.Equal(3, pulled.Queues["orders"].Filter!.Conditions!.Count);
+        Assert.Equal(new[]
+        {
+            "queues.orders.filter.conditions[0] (amount  eq 5): Filter field 'amount ' has whitespace around it, so it never matches: "
+                + "Queuey looks a field up exactly as written. Write it as 'amount'.",
+            "queues.orders.filter.conditions[2] (total lte (5)): Filter condition 'total lte' compares numbers, and '(5)' is not a number. "
+                + "Write it like 1.5: a point for decimals, and no thousands separators, currency or parentheses.",
+        }, pulled.FilterConditionProblems());
+
+        var ex = Assert.Throws<QueueyConfigurationException>(() => DeploymentFile.Parse(pulled.ToJson()).Resolve());
+        Assert.Contains("has whitespace around it", ex.Message);
+    }
+
     [Theory]
     [InlineData(200, 200)]
     [InlineData(202, null)]

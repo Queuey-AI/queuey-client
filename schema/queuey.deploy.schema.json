@@ -48,7 +48,7 @@
           "type": "object",
           "properties": {
             "baseDelayMs": {
-              "description": "The first wait, in milliseconds. Each later wait doubles, up to MaxDelayMs. At most 3600000 (one hour), unless a longer wait is already in place.",
+              "description": "The first wait, in milliseconds: above 0, and at most 3600000 (one hour) unless a longer wait is already in place. Each later wait doubles, up to MaxDelayMs.",
               "type": [
                 "string",
                 "integer",
@@ -57,7 +57,7 @@
               "pattern": "^-?(?:0|[1-9]\\d*)$"
             },
             "maxDelayMs": {
-              "description": "The longest wait between two attempts, in milliseconds. At most 86400000 (24 hours), unless a longer wait is already in place.",
+              "description": "The longest wait between two attempts, in milliseconds: above 0, not below the first wait, and at most 86400000 (24 hours) unless a longer wait is already in place.",
               "type": [
                 "string",
                 "integer",
@@ -225,11 +225,11 @@
             ]
           },
           "backoff": {
-            "description": "How long to wait between attempts. The number of attempts is not a setting: Queuey retries a transient failure until the receiver's probe takes over, sends an event the receiver rejects to the dead-letter queue, and locks the queue when a person must act.",
+            "description": "How long to wait between attempts. The number of attempts is not a setting: Queuey decides what each failure needs.",
             "type": "object",
             "properties": {
               "baseDelayMs": {
-                "description": "The first wait, in milliseconds. Each later wait doubles, up to MaxDelayMs. At most 3600000 (one hour), unless a longer wait is already in place.",
+                "description": "The first wait, in milliseconds: above 0, and at most 3600000 (one hour) unless a longer wait is already in place. Each later wait doubles, up to MaxDelayMs.",
                 "type": [
                   "string",
                   "integer",
@@ -238,7 +238,7 @@
                 "pattern": "^-?(?:0|[1-9]\\d*)$"
               },
               "maxDelayMs": {
-                "description": "The longest wait between two attempts, in milliseconds. At most 86400000 (24 hours), unless a longer wait is already in place.",
+                "description": "The longest wait between two attempts, in milliseconds: above 0, not below the first wait, and at most 86400000 (24 hours) unless a longer wait is already in place.",
                 "type": [
                   "string",
                   "integer",
@@ -258,7 +258,7 @@
             "additionalProperties": false
           },
           "filter": {
-            "description": "Which events this queue delivers. Omit it to deliver every event.",
+            "description": "Which events this queue delivers. Omit it to leave the queue's filter as it is; declare it with \"conditions\": [] to remove the filter, so the queue delivers every event.",
             "type": "object",
             "properties": {
               "match": {
@@ -270,7 +270,7 @@
                 ]
               },
               "conditions": {
-                "description": "The conditions. Empty delivers everything.",
+                "description": "The conditions, required whenever a filter is declared. An empty list delivers every event, which is how a filter is removed, so a filter without the list is refused rather than read as empty.",
                 "type": "array",
                 "items": {
                   "description": "One condition on a top-level JSON body field.",
@@ -303,7 +303,10 @@
                 }
               }
             },
-            "additionalProperties": false
+            "additionalProperties": false,
+            "required": [
+              "conditions"
+            ]
           },
           "ordering": {
             "description": "Delivery ordering: fifo, bykey or besteffort.",

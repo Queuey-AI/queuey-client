@@ -31,9 +31,8 @@ public sealed class QueuePolicy
     public bool? Idempotent { get; set; }
 
     /// <summary>
-    /// How long to wait between attempts. The number of attempts is not a setting: Queuey retries a
-    /// transient failure until the receiver's probe takes over, sends an event the receiver rejects
-    /// to the dead-letter queue, and locks the queue when a person must act.
+    /// How long to wait between attempts. The number of attempts is not a setting: Queuey decides what
+    /// each failure needs.
     /// </summary>
     public RetryBackoff? Backoff { get; set; }
 
@@ -92,14 +91,14 @@ public sealed class QueuePolicy
 public sealed class RetryBackoff
 {
     /// <summary>
-    /// The first wait, in milliseconds. Each later wait doubles, up to <see cref="MaxDelayMs"/>. At most
-    /// 3600000 (one hour), unless a longer wait is already in place.
+    /// The first wait, in milliseconds: above 0, and at most 3600000 (one hour) unless a longer wait is
+    /// already in place. Each later wait doubles, up to <see cref="MaxDelayMs"/>.
     /// </summary>
     public int? BaseDelayMs { get; set; }
 
     /// <summary>
-    /// The longest wait between two attempts, in milliseconds. At most 86400000 (24 hours), unless a
-    /// longer wait is already in place.
+    /// The longest wait between two attempts, in milliseconds: above 0, not below the first wait, and at
+    /// most 86400000 (24 hours) unless a longer wait is already in place.
     /// </summary>
     public int? MaxDelayMs { get; set; }
 
@@ -113,15 +112,27 @@ public sealed class RetryBackoff
     // Samme tak som backenden (PolicyValidation, Queuey#391, 2026-10-04). De gjelder bare en skriving som
     // endrer ventetiden, så de sjekkes mot det workspacet har før apply skriver (BackoffCeilings), ikke her:
     // en lengre ventetid fra før taket skal kunne stå uendret i fila.
-    internal const int MaxBaseDelayMs = 3_600_000;
-    internal const int MaxMaxDelayMs = 86_400_000;
+
+    /// <summary>
+    /// The longest first wait a write may set: 3600000 ms, one hour. A longer wait that is already in
+    /// place stays; Queuey refuses only a write that changes it.
+    /// </summary>
+    public const int BaseDelayCeilingMs = 3_600_000;
+
+    /// <summary>
+    /// The longest wait a write may set: 86400000 ms, 24 hours. A longer wait that is already in place
+    /// stays; Queuey refuses only a write that changes it.
+    /// </summary>
+    public const int MaxDelayCeilingMs = 86_400_000;
 
     internal string? Validate()
     {
-        if (BaseDelayMs is { } b and < 0)
-            return $"Backoff.BaseDelayMs cannot be negative; got {b}.";
-        if (MaxDelayMs is { } m and < 0)
-            return $"Backoff.MaxDelayMs cannot be negative; got {m}.";
+        // Over 0, som backenden krever av den effektive ventetiden (PolicyValidation.ValidateBackoff). 0 gikk gjennom
+        // her og ble avvist der (review 2026-10-05).
+        if (BaseDelayMs is { } b and <= 0)
+            return $"Backoff.BaseDelayMs must be above 0; got {b}.";
+        if (MaxDelayMs is { } m and <= 0)
+            return $"Backoff.MaxDelayMs must be above 0; got {m}.";
         if (BaseDelayMs is { } bb && MaxDelayMs is { } mm && mm < bb)
             return $"Backoff.MaxDelayMs ({mm}) cannot be below BaseDelayMs ({bb}).";
         if (Jitter != null && Array.IndexOf(JitterValues, Jitter) < 0)
@@ -139,8 +150,11 @@ public sealed class DeliveryFilter
     /// <summary><c>all</c> or <c>any</c>.</summary>
     public string? Match { get; set; }
 
-    /// <summary>The conditions. Empty delivers everything.</summary>
-    public List<DeliveryFilterCondition> Conditions { get; set; } = new();
+    /// <summary>
+    /// The conditions, required whenever a filter is declared. An empty list delivers every event, which
+    /// is how a filter is removed, so a filter without the list is refused rather than read as empty.
+    /// </summary>
+    public List<DeliveryFilterCondition>? Conditions { get; set; }
 
     internal static readonly string[] MatchValues = { "all", "any" };
 
@@ -154,36 +168,54 @@ public sealed class DeliveryFilter
         if (Match != null && Array.IndexOf(MatchValues, Match) < 0)
             return $"Filter.Match must be one of {string.Join(", ", MatchValues)}; got '{Match}'.";
 
+        // En manglende liste ble lest som tom, og en tom liste leverer alt: "filter": {"match": "any"} fjernet det
+        // lagrede filteret, og køen leverte hvert event (review 2026-10-05). Backenden avviser det samme (Queuey#391).
+        if (Conditions is null)
+            return "A filter needs its conditions. To remove the filter, write \"conditions\": [].";
+
         if (Conditions.Count > MaxConditions)
             return $"A filter supports at most {MaxConditions} conditions; got {Conditions.Count}.";
 
-        foreach (DeliveryFilterCondition c in Conditions)
+        foreach (DeliveryFilterCondition? c in Conditions)
         {
-            if (string.IsNullOrWhiteSpace(c.Field))
-                return "Every filter condition needs a field.";
-            if (c.Field.Length > MaxFieldLength)
-                return $"Filter field '{c.Field.Substring(0, 40)}…' is longer than {MaxFieldLength} characters.";
-
-            // Workeren slår opp feltet nøyaktig slik det står, så "amount " treffer aldri. Backenden avviser det i
-            // stedet for å trimme (Queuey#391, 2026-10-04); her avvises det før noe er sendt.
-            if (c.Field != c.Field.Trim())
-                return $"Filter field '{c.Field}' has whitespace around it, so it never matches: Queuey looks a field up exactly as written. Write it as '{c.Field.Trim()}'.";
-
-            if (Array.IndexOf(DeliveryFilterCondition.OpValues, c.Op) < 0)
-                return $"Filter op on field '{c.Field}' must be one of {string.Join(", ", DeliveryFilterCondition.OpValues)}; got '{c.Op}'.";
-
-            // exists leser aldri verdien, så "exists" med "false", ment som «feltet skal mangle», leverte bare events
-            // som har feltet. Backenden avviser en verdi på exists (Queuey#391, 2026-10-04).
-            if (c.Op == "exists" && c.Value is not null)
-                return $"Filter condition '{c.Field} exists' takes no value: it matches every event that has the field, whatever the value. Leave the value out.";
-            if (c.Op != "exists" && c.Value is null)
-                return $"Filter condition '{c.Field} {c.Op}' needs a value.";
-            if (c.Value is { Length: > MaxValueLength })
-                return $"Filter value for field '{c.Field}' is longer than {MaxValueLength} characters.";
-
-            if (Array.IndexOf(NumberOps, c.Op) >= 0 && NumberRefusal(c.Value!) is { } refusal)
-                return $"Filter condition '{c.Field} {c.Op}' compares numbers, and {refusal}";
+            if (ConditionProblem(c) is { } problem)
+                return problem;
         }
+
+        return null;
+    }
+
+    /// <summary>What Queuey would refuse in one condition, or null when it would take it as written.</summary>
+    internal static string? ConditionProblem(DeliveryFilterCondition? c)
+    {
+        // "conditions": [null] krasjet CLI-en med NullReferenceException og stack trace (review 2026-10-05).
+        if (c is null)
+            return "A filter condition cannot be null.";
+
+        if (string.IsNullOrWhiteSpace(c.Field))
+            return "Every filter condition needs a field.";
+        if (c.Field.Length > MaxFieldLength)
+            return $"Filter field '{c.Field.Substring(0, 40)}…' is longer than {MaxFieldLength} characters.";
+
+        // Workeren slår opp feltet nøyaktig slik det står, så "amount " treffer aldri. Backenden avviser det i
+        // stedet for å trimme (Queuey#391, 2026-10-04); her avvises det før noe er sendt.
+        if (c.Field != c.Field.Trim())
+            return $"Filter field '{c.Field}' has whitespace around it, so it never matches: Queuey looks a field up exactly as written. Write it as '{c.Field.Trim()}'.";
+
+        if (Array.IndexOf(DeliveryFilterCondition.OpValues, c.Op) < 0)
+            return $"Filter op on field '{c.Field}' must be one of {string.Join(", ", DeliveryFilterCondition.OpValues)}; got '{c.Op}'.";
+
+        // exists leser aldri verdien, så "exists" med "false", ment som «feltet skal mangle», leverte bare events
+        // som har feltet. Backenden avviser en verdi på exists (Queuey#391, 2026-10-04).
+        if (c.Op == "exists" && c.Value is not null)
+            return $"Filter condition '{c.Field} exists' takes no value: it matches every event that has the field, whatever the value. Leave the value out.";
+        if (c.Op != "exists" && c.Value is null)
+            return $"Filter condition '{c.Field} {c.Op}' needs a value.";
+        if (c.Value is { Length: > MaxValueLength })
+            return $"Filter value for field '{c.Field}' is longer than {MaxValueLength} characters.";
+
+        if (Array.IndexOf(NumberOps, c.Op) >= 0 && NumberRefusal(c.Value!) is { } refusal)
+            return $"Filter condition '{c.Field} {c.Op}' compares numbers, and {refusal}";
 
         return null;
     }
@@ -212,12 +244,17 @@ public sealed class DeliveryFilter
     private static string Quote(string value) => value.Length <= 40 ? value : value.Substring(0, 40) + "…";
 
     /// <summary>The filter on one line — <c>any: type eq order.created; priority exists</c>.</summary>
-    public override string ToString() => Conditions.Count == 0 ? "(delivers every event)" : Describe();
+    public override string ToString()
+        => Conditions is null ? "(no conditions)" : Conditions.Count == 0 ? "(delivers every event)" : Describe();
 
     /// <summary>A stable text form, for drift reports: <c>any: type eq order.created; priority exists</c>.</summary>
     internal string Describe()
         => $"{(Match ?? "all").ToLowerInvariant()}: "
-           + string.Join("; ", Conditions.Select(c => c.Value is null ? $"{c.Field} {c.Op}" : $"{c.Field} {c.Op} {c.Value}"));
+           + string.Join("; ", (Conditions ?? new List<DeliveryFilterCondition>()).Select(Describe));
+
+    /// <summary>One condition as a filter line writes it: <c>priority exists</c>, <c>amount gt 5</c>.</summary>
+    internal static string Describe(DeliveryFilterCondition? c)
+        => c is null ? "(null)" : c.Value is null ? $"{c.Field} {c.Op}" : $"{c.Field} {c.Op} {c.Value}";
 }
 
 /// <summary>One condition on a top-level JSON body field.</summary>

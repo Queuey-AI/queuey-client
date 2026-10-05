@@ -83,15 +83,16 @@ public class DeploymentFileTests
     [InlineData("""{ "queues": { "orders": { "MaxAttempts": 8 } } }""", "queues.orders.MaxAttempts")]
     public void A_file_that_declares_attempts_is_refused_with_why_and_what_to_remove(string json, string where)
     {
-        // Antall forsøk er ikke en innstilling (Queuey#391, 2026-10-04), og en policy-patch med feltene får 400. En
-        // fil fra en eldre pull har dem. Den avvises før noe er sendt, med grunnen og hva som skal bort.
+        // Antall forsøk er ikke en innstilling (Queuey#391, 2026-10-04), og en policy-patch med feltene får 400. En fil
+        // skrevet for hånd, eller med en build av #40 fra før dette, kan ha dem. Den avvises før noe er sendt, med
+        // grunnen og hva som skal bort.
         var ex = Assert.Throws<QueueyConfigurationException>(() => DeploymentFile.Parse(json));
 
         Assert.Contains(where, ex.Message);
         Assert.Contains("the number of attempts is not a setting", ex.Message);
         Assert.Contains("a transient failure is retried until the receiver's probe takes over", ex.Message);
         Assert.Contains("an event the receiver rejects goes to the dead-letter queue", ex.Message);
-        Assert.Contains("a stuck queue locks until a person acts", ex.Message);
+        Assert.Contains("With the dead-letter queue off, that event locks its queue instead, or holds just its key on a bykey queue, until a person acts.", ex.Message);
         Assert.Equal("Remove maxAttempts and dlqAfterAttempts from the file. backoff and filter stay as they are.", ex.SuggestedAction);
     }
 
@@ -101,7 +102,7 @@ public class DeploymentFileTests
         // Parseren alene ville stoppet på det første feltet; da måtte en fil med fem av dem kjøres fem ganger.
         var ex = Assert.Throws<QueueyConfigurationException>(() => DeploymentFile.Parse("""
         {
-          // skrevet av en eldre pull, med kommentarer og komma til slutt, som parseren godtar
+          // med kommentarer og komma til slutt, som parseren godtar
           "workspace": { "maxAttempts": 8, "dlqAfterAttempts": 6, "backoff": { "baseDelayMs": 1000 } },
           "queues": { "orders": { "maxAttempts": 3 }, "invoices": {}, },
         }

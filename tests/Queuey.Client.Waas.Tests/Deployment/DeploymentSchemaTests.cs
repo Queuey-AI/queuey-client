@@ -53,6 +53,10 @@ public class DeploymentSchemaTests
 
         JsonNode filter = Defs(schema, queue["properties"]!["filter"]!);
         Assert.Equal(new[] { "all", "any" }, Values(filter["properties"]!["match"]!));
+
+        // Et filter uten conditions avvises, som parseren gjør (review 2026-10-05): en tom liste fjerner filteret, så en
+        // manglende liste kan ikke leses som tom.
+        Assert.Equal(new[] { "conditions" }, filter["required"]!.AsArray().Select(r => r!.GetValue<string>()).ToArray());
         JsonNode condition = Defs(schema, filter["properties"]!["conditions"]!["items"]!);
         Assert.Equal(new[] { "eq", "ne", "gt", "gte", "lt", "lte", "contains", "exists" }, Values(condition["properties"]!["op"]!));
 
@@ -88,6 +92,12 @@ public class DeploymentSchemaTests
         [(typeof(DeliveryFilterCondition), nameof(DeliveryFilterCondition.Op))] = DeliveryFilterCondition.OpValues,
     };
 
+    // Felt som må stå når typen er deklarert: de samme som valideringen krever (DeliveryFilter.Validate).
+    private static readonly Dictionary<Type, string[]> RequiredWhenDeclared = new()
+    {
+        [typeof(DeliveryFilter)] = new[] { "conditions" },
+    };
+
     private static string Generate()
     {
         Dictionary<string, string> docs = LoadXmlDocs();
@@ -109,6 +119,9 @@ public class DeploymentSchemaTests
                 // Uten null blir typene enkle, og enum-listene gjelder uten unntak.
                 if (obj["type"] is JsonArray types && types.Count == 2 && types.Any(t => t?.GetValue<string>() == "null"))
                     obj["type"] = types.First(t => t?.GetValue<string>() != "null")!.GetValue<string>();
+
+                if (RequiredWhenDeclared.TryGetValue(context.TypeInfo.Type, out string[]? required) && obj.ContainsKey("properties"))
+                    obj["required"] = new JsonArray(required.Select(r => (JsonNode?)JsonValue.Create(r)).ToArray());
 
                 if (context.PropertyInfo is { } property && property.AttributeProvider is MemberInfo member)
                 {

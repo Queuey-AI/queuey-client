@@ -75,7 +75,7 @@ internal static class VerifyCommand
             return (null, path);
         }
 
-        return (DeploymentFile.Parse(File.ReadAllText(path)).ResolveTenant(), path);
+        return (DeploymentTenant.ReadFromFile(File.ReadAllText(path), path), path);
     }
 
     private static void WriteHuman(DeliveryVerification r)

@@ -443,12 +443,21 @@ success while quietly skipping what you wrote is worse than one that fails.
 
 **The number of attempts is not a setting.** Queuey makes the same number of attempts for every event
 and decides what a failure needs: a transient failure is retried, with the backoff you declare, until
-the receiver's probe takes over; an event the receiver rejects goes to the dead-letter queue; and a
-stuck queue locks until a person acts. A file that still declares `maxAttempts` or `dlqAfterAttempts`
-— one pulled from an older Queuey, say — is refused before anything is sent, with every place it
-declares them; `pull` never writes them. A backoff waits at most an hour at first (`baseDelayMs`) and
-a day at most (`maxDelayMs`). A longer wait that is already in place stays as it is, and `apply`
-refuses one that would change it before it writes anything.
+the receiver's probe takes over, and an event the receiver rejects goes to the dead-letter queue. With
+the dead-letter queue off, that event locks its queue instead, or holds just its key on a `bykey`
+queue, until a person acts. A file that declares `maxAttempts` or `dlqAfterAttempts` is refused before
+anything is sent, naming every place it does, and `pull` never writes them.
+
+**A backoff waits at most an hour at first and a day at most.** `baseDelayMs` is at most 3600000 and
+`maxDelayMs` at most 86400000, both above 0. A longer wait that is already in place stays: Queuey
+refuses only a write that changes it. `apply` checks this before it writes anything, against the wait
+each declaration would replace. For a new queue, or one that inherits its policy, that is the
+workspace's wait once this apply has written the workspace. One case is left to Queuey: a queue that
+owns some of its policy and has the workspace's wait, when the same apply changes the workspace's wait.
+The queue may own that wait or inherit it, and Queuey decides when it writes the queue. The same goes
+for `baseDelayMs` above `maxDelayMs`: refused up front when one backoff declares both, and checked by
+Queuey when one of them comes from the workspace. `queuey plan` shows every such refusal without
+writing anything.
 
 **A queue this file creates delivers when it has a destination** — its own `delivery.url`, or the
 workspace's `baseUrl` — and logs events until it has one. `mode` is `deliver` or `logOnly`; declare it
@@ -461,10 +470,13 @@ fails that queue instead of pretending.
 
 **A filter decides what is delivered.** Events that do not match are kept as `Filtered` and never
 sent. `op` is `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `contains` or `exists`, on a top-level field of
-the JSON body. An empty `conditions` list delivers everything — that is how a file removes a filter.
-`gt`, `gte`, `lt` and `lte` compare numbers, so their value is a plain number like `1.5`: no comma
-decimals, thousands separators, currency or parentheses. `exists` takes no value, and a field is
-looked up exactly as written, so whitespace around it is refused rather than trimmed.
+the JSON body. A filter needs its `conditions`. An empty list delivers everything, which is how a file
+removes a filter, so a filter without the list is refused rather than read as empty; leave `filter`
+out to keep the queue's filter as it is. `gt`, `gte`, `lt` and `lte` compare numbers, so their value
+is a plain number like `1.5`: no comma decimals, thousands separators, currency or parentheses.
+`exists` takes no value, and a field is looked up exactly as written, so whitespace around it is
+refused rather than trimmed. A condition Queuey stored before it checked these is pulled as it is,
+with a warning, and `apply` refuses the file until it is fixed.
 
 ### Prove it delivers: `queuey verify`
 

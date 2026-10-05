@@ -86,8 +86,9 @@ public sealed class DeploymentFile
         if (string.IsNullOrWhiteSpace(json))
             return new DeploymentFile();
 
-        // Før parseren, som ville sagt «could not be mapped» om det første feltet den møtte: en fil fra en eldre
-        // pull bærer forsøksfeltene, og den trenger grunnen og hva som skal bort, for alle feltene på én gang.
+        // Før parseren, som ville sagt «could not be mapped» om det første feltet den møtte. En fil som har
+        // forsøksfeltene (skrevet for hånd, eller med en build av #40 fra før dette), trenger grunnen og hva som skal
+        // bort, for alle feltene på én gang. Ingen sluppet CLI har skrevet dem.
         if (RetiredAttemptFields(json) is { Count: > 0 } retired)
             throw AttemptsAreNotASetting(retired);
 
@@ -164,11 +165,14 @@ public sealed class DeploymentFile
         }
     }
 
+    // Med DLQ av går et avvist event ikke til DLQ: backenden låser køen (HoldQueue), eller holder bare nøkkelen på en
+    // bykey-kø (HoldKey). Meldingen gjelder begge (review 2026-10-05).
     private static QueueyConfigurationException AttemptsAreNotASetting(IReadOnlyList<string> where) => new(
         $"The deployment file declares {string.Join(", ", where)}, but the number of attempts is not a setting. " +
         "Queuey makes the same number of attempts for every event and decides what a failure needs: a transient " +
-        "failure is retried until the receiver's probe takes over, an event the receiver rejects goes to the " +
-        "dead-letter queue, and a stuck queue locks until a person acts.")
+        "failure is retried until the receiver's probe takes over, and an event the receiver rejects goes to the " +
+        "dead-letter queue. With the dead-letter queue off, that event locks its queue instead, or holds just its " +
+        "key on a bykey queue, until a person acts.")
     {
         SuggestedAction = "Remove maxAttempts and dlqAfterAttempts from the file. backoff and filter stay as they are.",
     };
@@ -300,6 +304,30 @@ public sealed class DeploymentFile
     }
 
     /// <summary>
+    /// Every filter condition apply would refuse as written, with where it is and why:
+    /// <c>queues.orders.filter.conditions[1] (amount gt 1,000): …</c>. A pulled file can hold one, because
+    /// Queuey checks a condition when it is written and stored ones from before a check are read back as
+    /// they are. Empty when there is none.
+    /// </summary>
+    public IReadOnlyList<string> FilterConditionProblems()
+    {
+        var problems = new List<string>();
+        foreach (KeyValuePair<string, DeploymentQueue> entry in Queues)
+        {
+            if (entry.Value?.Filter?.Conditions is not { } conditions)
+                continue;
+
+            for (int i = 0; i < conditions.Count; i++)
+            {
+                if (DeliveryFilter.ConditionProblem(conditions[i]) is { } problem)
+                    problems.Add($"queues.{entry.Key}.filter.conditions[{i}] ({DeliveryFilter.Describe(conditions[i])}): {problem}");
+            }
+        }
+
+        return problems;
+    }
+
+    /// <summary>
     /// Renders the file as JSON — what <c>queuey pull</c> writes. Null properties are omitted, so the
     /// output says only what the workspace actually owns and stays diffable against a hand-written file.
     /// </summary>
@@ -332,13 +360,15 @@ public sealed class DeploymentQueue
     public string? Mode { get; set; }
 
     /// <summary>
-    /// How long to wait between attempts. The number of attempts is not a setting: Queuey retries a
-    /// transient failure until the receiver's probe takes over, sends an event the receiver rejects
-    /// to the dead-letter queue, and locks the queue when a person must act.
+    /// How long to wait between attempts. The number of attempts is not a setting: Queuey decides what
+    /// each failure needs.
     /// </summary>
     public RetryBackoff? Backoff { get; set; }
 
-    /// <summary>Which events this queue delivers. Omit it to deliver every event.</summary>
+    /// <summary>
+    /// Which events this queue delivers. Omit it to leave the queue's filter as it is; declare it with
+    /// <c>"conditions": []</c> to remove the filter, so the queue delivers every event.
+    /// </summary>
     public DeliveryFilter? Filter { get; set; }
 
     /// <summary>Delivery ordering: <c>fifo</c>, <c>bykey</c> or <c>besteffort</c>.</summary>

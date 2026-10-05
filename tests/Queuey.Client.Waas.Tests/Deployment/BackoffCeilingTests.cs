@@ -25,7 +25,14 @@ public class BackoffCeilingTests
         public object[] Rows { get; init; } = Array.Empty<object>();
         public object WorkspaceBackoff { get; init; } = new { baseDelayMs = 500, maxDelayMs = 60000, jitter = "full" };
         public object QueueBackoff { get; init; } = new { baseDelayMs = 500, maxDelayMs = 60000, jitter = "full" };
+
+        /// <summary>Om køen eier noe av policyen: <c>inherited.behavior</c> er det motsatte. Null sender ingen flagg.</summary>
+        public bool? QueueOwnsPolicy { get; init; } = true;
+
         public HttpStatusCode ConfigStatus { get; init; } = HttpStatusCode.OK;
+
+        /// <summary>Et API fra før 2026-09-23 sender ikke backoff i config.</summary>
+        public bool ConfigWithoutBackoff { get; init; }
 
         public StubHttpMessageHandler Stub { get; }
 
@@ -33,16 +40,22 @@ public class BackoffCeilingTests
         {
             string key = $"{req.Method.Method} {req.RequestUri!.AbsolutePath}";
             if (key.EndsWith("/config", StringComparison.Ordinal) && ConfigStatus != HttpStatusCode.OK)
-                return StubHttpMessageHandler.Json(ConfigStatus, new { error = new { code = "forbidden", message = "Missing permission." } });
+                return StubHttpMessageHandler.Json(ConfigStatus, new { error = new { code = "refused", message = "Not here." } });
 
+            object workspacePolicy = ConfigWithoutBackoff ? new { ordering = "fifo" } : new { ordering = "fifo", backoff = WorkspaceBackoff };
             switch (key)
             {
                 case "GET /tenants/ten_abc/queues":
                     return StubHttpMessageHandler.Json(HttpStatusCode.OK, Rows);
                 case "GET /tenants/ten_abc/config":
-                    return StubHttpMessageHandler.Json(HttpStatusCode.OK, new { policy = new { backoff = WorkspaceBackoff } });
+                    return StubHttpMessageHandler.Json(HttpStatusCode.OK, new { policy = workspacePolicy });
                 case "GET /queues/que_orders/config":
-                    return StubHttpMessageHandler.Json(HttpStatusCode.OK, new { policy = new { backoff = QueueBackoff } });
+                    return StubHttpMessageHandler.Json(HttpStatusCode.OK, new
+                    {
+                        policy = ConfigWithoutBackoff ? new { ordering = "fifo" } : (object)new { ordering = "fifo", backoff = QueueBackoff },
+                        inherited = QueueOwnsPolicy is { } owns ? new { destination = true, auth = true, signing = true, rateLimit = true, behavior = !owns } : null,
+                        tenantBaseline = new { policy = workspacePolicy },
+                    });
                 case "PUT /queues":
                     string name = JsonDocument.Parse(body!).RootElement.GetProperty("displayName").GetString()!;
                     return StubHttpMessageHandler.Json(HttpStatusCode.OK, new { publicId = "que_" + name, displayName = name, created = Rows.Length == 0, hasDeliveryTarget = true });
@@ -83,8 +96,8 @@ public class BackoffCeilingTests
     [Fact]
     public async Task A_longer_wait_already_in_place_is_applied_unchanged()
     {
-        // Køen arver to timer fra et workspace som fikk dem før taket, og pull skriver backoff hel inn i fila. En
-        // uendret apply av den fila endrer ingenting, og serveren godtar den (Queuey#391), så klienten gjør det også.
+        // Køen har to timer selv, satt før taket, og pull skriver backoff hel inn i fila. En uendret apply av den
+        // fila endrer ingenting, og serveren godtar den (Queuey#391), så klienten gjør det også.
         var api = new Api
         {
             Rows = OrdersExists,
@@ -97,6 +110,18 @@ public class BackoffCeilingTests
 
         Assert.True(result.AllSucceeded);
         Assert.Contains("PATCH /queues/que_orders/policy", api.Writes);
+    }
+
+    [Fact]
+    public async Task An_unchanged_longer_wait_on_the_workspace_is_applied()
+    {
+        // Workspacet fikk to timer før taket. En pull skriver dem i workspace-delen, og en uendret apply godtas.
+        var api = new Api { WorkspaceBackoff = new { baseDelayMs = 2 * Hour, maxDelayMs = Day, jitter = "full" } };
+
+        QueueSyncResult result = await Apply(api, $$"""{ "workspace": { "backoff": { "baseDelayMs": {{2 * Hour}} } }, "queues": {} }""");
+
+        Assert.True(result.AllSucceeded);
+        Assert.Contains("PATCH /tenants/ten_abc/policy", api.Writes);
     }
 
     [Theory]
@@ -119,9 +144,88 @@ public class BackoffCeilingTests
         {
             var ex = await Assert.ThrowsAsync<QueueyConfigurationException>(() => apply);
             Assert.Contains($"queues.invoices.backoff.baseDelayMs is {2 * Hour}", ex.Message);
-            Assert.Contains($"would change it from {fileWorkspace ?? workspaceNow}", ex.Message);
+            Assert.Contains($"would change it from the {fileWorkspace ?? workspaceNow} the queue inherits from the workspace", ex.Message);
             Assert.Empty(api.Writes);
         }
+    }
+
+    [Fact]
+    public async Task A_queue_that_inherits_the_wait_is_compared_with_the_workspace_this_apply_leaves()
+    {
+        // Review 2026-10-05: workspacet har to timer fra før taket, og køen eier ingen policy, så den arver dem. Fila
+        // senker workspacet til en halvtime og gir køen to timer. Serveren sjekker køen etter at workspacet er skrevet:
+        // før er en halvtime, etter to timer, og køen avvises. Før ble det oppdaget først der, midt i kjøringen.
+        var api = new Api
+        {
+            Rows = OrdersExists,
+            QueueOwnsPolicy = false,
+            WorkspaceBackoff = new { baseDelayMs = 2 * Hour, maxDelayMs = Day, jitter = "full" },
+            QueueBackoff = new { baseDelayMs = 2 * Hour, maxDelayMs = Day, jitter = "full" },
+        };
+
+        var ex = await Assert.ThrowsAsync<QueueyConfigurationException>(() => Apply(api, $$"""
+        { "workspace": { "backoff": { "baseDelayMs": 1800000 } },
+          "queues": { "orders": { "backoff": { "baseDelayMs": {{2 * Hour}} } } } }
+        """));
+
+        Assert.Contains($"queues.orders.backoff.baseDelayMs is {2 * Hour}, above the {Hour} (one hour) a first wait may be, "
+                        + "and would change it from the 1800000 the queue inherits from the workspace", ex.Message);
+        Assert.Empty(api.Writes);
+    }
+
+    [Theory]
+    [InlineData(2 * Hour, true)]    // det køen har: uendret, selv om fila endrer workspacet
+    [InlineData(3 * Hour, false)]   // en annen lang ventetid: endrer køens egen
+    public async Task A_queue_that_owns_its_wait_is_compared_with_its_own_when_the_workspace_changes(int declared, bool applies)
+    {
+        // Ulik workspacets er ventetiden køens egen, for en arvet verdi er workspacets. Det fila gjør med workspacet,
+        // endrer den ikke, så den er det en deklarert ventetid erstatter.
+        var api = new Api
+        {
+            Rows = OrdersExists,
+            WorkspaceBackoff = new { baseDelayMs = 1_000, maxDelayMs = Day, jitter = "full" },
+            QueueBackoff = new { baseDelayMs = 2 * Hour, maxDelayMs = Day, jitter = "full" },
+        };
+
+        Task<QueueSyncResult> apply = Apply(api, $$"""
+        { "workspace": { "backoff": { "baseDelayMs": 2000 } },
+          "queues": { "orders": { "backoff": { "baseDelayMs": {{declared}} } } } }
+        """);
+
+        if (applies)
+        {
+            Assert.True((await apply).AllSucceeded);
+        }
+        else
+        {
+            var ex = await Assert.ThrowsAsync<QueueyConfigurationException>(() => apply);
+            Assert.Contains($"queues.orders.backoff.baseDelayMs is {declared}, above the {Hour} (one hour) a first wait may be, and would change it from {2 * Hour}", ex.Message);
+            Assert.Empty(api.Writes);
+        }
+    }
+
+    [Fact]
+    public async Task A_queue_that_may_own_or_inherit_the_wait_is_left_to_Queuey_when_the_workspace_changes()
+    {
+        // Saken fra review 2026-10-05, der lesingen ikke kan avgjøre: køen eier en annen del av policyen
+        // (inherited.behavior er false), og ventetiden er lik workspacets. Den kan være køens egen, og da godtar
+        // serveren en uendret apply, eller arvet, og da avviser serveren køen etter at workspacet er skrevet. Klienten
+        // avviser ikke det serveren kan godta, så her avgjør serveren.
+        var api = new Api
+        {
+            Rows = OrdersExists,
+            QueueOwnsPolicy = true,
+            WorkspaceBackoff = new { baseDelayMs = 2 * Hour, maxDelayMs = Day, jitter = "full" },
+            QueueBackoff = new { baseDelayMs = 2 * Hour, maxDelayMs = Day, jitter = "none" },
+        };
+
+        QueueSyncResult result = await Apply(api, $$"""
+        { "workspace": { "backoff": { "baseDelayMs": 1800000 } },
+          "queues": { "orders": { "backoff": { "baseDelayMs": {{2 * Hour}}, "maxDelayMs": {{Day}}, "jitter": "none" } } } }
+        """);
+
+        Assert.True(result.AllSucceeded);
+        Assert.True(api.Writes.IndexOf("PATCH /tenants/ten_abc/policy") < api.Writes.IndexOf("PATCH /queues/que_orders/policy"));
     }
 
     [Fact]
@@ -152,12 +256,15 @@ public class BackoffCeilingTests
         Assert.Contains("PATCH /tenants/ten_abc/policy", api.Writes);
     }
 
-    [Fact]
-    public async Task A_key_that_cannot_read_the_config_leaves_the_ceiling_to_Queuey()
+    // Sjekken er en forhåndsvisning av serverens regel. Kan den ikke lese det som gjelder nå, avgjør serveren, som den
+    // alltid gjør: en apply skal ikke feile fordi forhåndsvisningen manglet en tillatelse, en kø eller et felt.
+    [Theory]
+    [InlineData(HttpStatusCode.Forbidden, false)]   // nøkkelen kan ikke lese config
+    [InlineData(HttpStatusCode.NotFound, false)]    // køen er borte siden den ble listet
+    [InlineData(HttpStatusCode.OK, true)]           // et API fra før 2026-09-23, uten backoff i config
+    public async Task What_the_preflight_cannot_read_is_left_to_Queuey(HttpStatusCode configStatus, bool configWithoutBackoff)
     {
-        // Sjekken er en forhåndsvisning av serverens regel. Kan den ikke lese det som gjelder nå, avgjør serveren,
-        // som den alltid gjør; en apply skal ikke feile på at forhåndsvisningen manglet en tillatelse.
-        var api = new Api { Rows = OrdersExists, ConfigStatus = HttpStatusCode.Forbidden };
+        var api = new Api { Rows = OrdersExists, ConfigStatus = configStatus, ConfigWithoutBackoff = configWithoutBackoff };
 
         QueueSyncResult result = await Apply(api, $$"""{ "queues": { "orders": { "backoff": { "baseDelayMs": {{2 * Hour}} } } } }""");
 

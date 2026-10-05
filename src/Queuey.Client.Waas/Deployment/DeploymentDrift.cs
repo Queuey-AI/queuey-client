@@ -137,7 +137,7 @@ public static class DeploymentDrift
     /// event, so they read the same — that is how a file removes the filter it had.
     /// </summary>
     internal static string DescribeFilter(DeliveryFilter? filter)
-        => filter is null || filter.Conditions.Count == 0 ? "(delivers every event)" : filter.Describe();
+        => filter?.Conditions is not { Count: > 0 } ? "(delivers every event)" : filter.Describe();
 
     /// <summary>Ingress differs per field like everything else — a source is its kind plus its name.</summary>
     private static void CompareIngress(string prefix, DeploymentIngress? want, DeploymentIngress? have, List<DriftItem> drift)

@@ -98,8 +98,25 @@ internal static class ApplyCommand
             return false;
         }
 
-        file = DeploymentFile.Parse(File.ReadAllText(path));
+        file = ParseNamed(path);
         return true;
+    }
+
+    /// <summary>
+    /// The deployment file at <paramref name="path"/>, parsed, with the path in front of the error when it
+    /// cannot be: the parser speaks of "the deployment file", and a command can read more than one file.
+    /// </summary>
+    internal static DeploymentFile ParseNamed(string path)
+    {
+        try
+        {
+            return DeploymentFile.Parse(File.ReadAllText(path));
+        }
+        catch (QueueyConfigurationException ex)
+        {
+            // Parseren sier «the deployment file», ikke hvilken (review 2026-10-05).
+            throw new QueueyConfigurationException($"{path}: {ex.Message}") { SuggestedAction = ex.SuggestedAction };
+        }
     }
 
     /// <summary>
@@ -151,6 +168,8 @@ internal static class ApplyCommand
 
             if (parts.Count > 0)
                 Console.WriteLine($"  workspace\t{string.Join(" ", parts)}");
+            foreach (string note in CeilingNotes(w.Backoff))
+                Console.WriteLine($"    ! {note}");
         }
 
         foreach (DeploymentQueuePlan p in plans)
@@ -171,9 +190,25 @@ internal static class ApplyCommand
             if (policy.Filter is { } filter) parts.Add($"filter=({filter})");
 
             Console.WriteLine($"  • {p.Definition.Name}\t{string.Join(" ", parts)}");
+            foreach (string note in CeilingNotes(policy.Backoff))
+                Console.WriteLine($"    ! {note}");
         }
 
         Console.WriteLine($"{plans.Count} queue(s) declared. Nothing was sent.");
+    }
+
+    /// <summary>
+    /// What a dry run says about a wait above Queuey's ceilings. It cannot say more without asking Queuey:
+    /// apply refuses the wait only when it would change what is in place, which is what it reads first.
+    /// </summary>
+    internal static IEnumerable<string> CeilingNotes(RetryBackoff? backoff)
+    {
+        if (backoff?.BaseDelayMs is { } baseMs && baseMs > RetryBackoff.BaseDelayCeilingMs)
+            yield return $"backoff.baseDelayMs={baseMs} is above the {RetryBackoff.BaseDelayCeilingMs} (one hour) a first wait may be: "
+                         + "apply refuses it unless that wait is already in place.";
+        if (backoff?.MaxDelayMs is { } maxMs && maxMs > RetryBackoff.MaxDelayCeilingMs)
+            yield return $"backoff.maxDelayMs={maxMs} is above the {RetryBackoff.MaxDelayCeilingMs} (24 hours) the longest wait may be: "
+                         + "apply refuses it unless that wait is already in place.";
     }
 
     private static IEnumerable<string> Backoff(RetryBackoff? backoff)
@@ -234,11 +269,12 @@ internal static class ApplyCommand
             p.Definition.Policy.Idempotent,
             backoff = p.Definition.Policy.Backoff is { } b ? new { b.BaseDelayMs, b.MaxDelayMs, b.Jitter } : null,
             filter = p.Definition.Policy.Filter is { } f
-                ? new { match = f.Match ?? "all", conditions = f.Conditions.Select(c => new { c.Field, c.Op, c.Value }) }
+                ? new { match = f.Match ?? "all", conditions = f.Conditions?.Select(c => new { c.Field, c.Op, c.Value }) }
                 : null,
         },
         delivery = p.Delivery is null ? null : new { p.Delivery.Url, p.Delivery.Inherit, p.Delivery.AuthMode, p.Delivery.CredentialRef },
         ingress = p.Ingress is null ? null : new { p.Ingress.AuthMode, eventType = p.Ingress.EventType?.Name, groupKey = p.Ingress.GroupKey?.Name },
+        notes = CeilingNotes(p.Definition.Policy.Backoff).ToArray(),
     };
 
     private static object ToJsonResult(QueueSyncResult result, string path, ResolvedConfig config, string? tenant) => new
