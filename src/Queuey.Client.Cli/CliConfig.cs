@@ -65,7 +65,10 @@ internal static class CliConfig
             ApiBaseOverride = ParseUri(First(args.Get("api-base"), getEnv("QUEUEY_API_BASE"), file.ApiBase)),
             IngressBaseOverride = ParseUri(First(args.Get("ingress-base"), getEnv("QUEUEY_INGRESS_BASE"), file.IngressBase)),
             ApiKey = First(args.Get("api-key"), getEnv("QUEUEY_API_KEY"), file.ApiKey),
-            TenantPublicId = First(args.Get("tenant"), getEnv("QUEUEY_TENANT"), file.Tenant),
+            TenantPublicId = Workspace(
+                (args.Get("tenant"), "--tenant"),
+                (getEnv("QUEUEY_TENANT"), "QUEUEY_TENANT"),
+                (file.Tenant, $"tenant in {args.Get("config") ?? "queuey.json"}")),
             LicensePublicId = First(args.Get("license"), getEnv("QUEUEY_LICENSE"), file.License),
             Source = First(args.Get("source"), getEnv("QUEUEY_SOURCE"), file.Source),
         };
@@ -73,6 +76,33 @@ internal static class CliConfig
 
     private static string? First(params string?[] values)
         => values.FirstOrDefault(v => !string.IsNullOrWhiteSpace(v));
+
+    /// <summary>The first tenant that is set, by precedence, which has to be a workspace id (<see cref="WorkspaceId"/>).</summary>
+    private static string? Workspace(params (string? Value, string Source)[] candidates)
+    {
+        foreach ((string? value, string source) in candidates)
+            if (!string.IsNullOrWhiteSpace(value))
+                return WorkspaceId(value!, source);
+        return null;
+    }
+
+    /// <summary>
+    /// <paramref name="value"/>, trimmed, when it is a workspace id (<c>ten_…</c>). Anything else is a usage error that
+    /// names <paramref name="source"/> and never the value: an API key put there by mistake was sent in request URLs
+    /// (<c>/tenants/&lt;value&gt;/…</c>) and printed by whoami.
+    /// </summary>
+    // Re-review 2026-10-05: en API-nøkkel i QUEUEY_TENANT, en forveksling i CI, ble brukt som workspace og skrevet ut. Sjekket
+    // der en tenant leses fra kommandolinjen, miljøet eller queuey.json, ikke først når den brukes.
+    internal static string WorkspaceId(string value, string source)
+    {
+        string trimmed = value.Trim();
+        if (CliErrors.LooksLikeAWorkspaceId(trimmed))
+            return trimmed;
+
+        throw new CliUsageException("invalid_value",
+            $"{source} is not a workspace id. Its value is not shown, since it may be a secret.",
+            "A workspace id starts with ten_. An API key belongs in --api-key or QUEUEY_API_KEY.");
+    }
 
     // Only Production is a built-in environment; point at a locally-running instance with
     // --api-base / --ingress-base (QUEUEY_API_BASE / QUEUEY_INGRESS_BASE) — e.g. for testing.

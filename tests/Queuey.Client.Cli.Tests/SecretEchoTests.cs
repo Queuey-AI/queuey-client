@@ -161,31 +161,107 @@ public sealed class SecretEchoTests : IDisposable
             JsonDocument.Parse(run.Stdout).RootElement.GetProperty("error").GetProperty("message").GetString());
     }
 
+    private const string Key = "qak_FAKEkid.FAKEsecret";
+
+    private static readonly Dictionary<string, string> KeyInTheEnvironment = new() { ["QUEUEY_TENANT"] = Key };
+
+    private static readonly Dictionary<string, string> NoEnvironment = new();
+
+    /// <summary>
+    /// Kommandoer med en API-nøkkel der workspacet skal stå, fra flagget eller miljøet, med og uten et workspace i
+    /// deploy-fila. {file} er en deploy-fil med workspace, {bare} en uten.
+    /// </summary>
     public static TheoryData<string[], Dictionary<string, string>, string> KeysGivenAsTheWorkspace => new()
     {
-        { new[] { "apply", "--tenant", "qak_FAKEkid.FAKEsecret" }, new Dictionary<string, string>(), "--tenant" },
-        { new[] { "apply", "--dry-run" }, new Dictionary<string, string> { ["QUEUEY_TENANT"] = "qak_FAKEkid.FAKEsecret" }, "QUEUEY_TENANT" },
-        { new[] { "verify", "orders", "--data", "{}" }, new Dictionary<string, string> { ["QUEUEY_TENANT"] = "qak_FAKEkid.FAKEsecret" }, "QUEUEY_TENANT" },
+        { new[] { "apply", "--file", "{file}", "--tenant", Key }, NoEnvironment, "--tenant" },
+        { new[] { "apply", "--file", "{file}", "--dry-run" }, KeyInTheEnvironment, "QUEUEY_TENANT" },
+        { new[] { "verify", "orders", "--data", "{}", "--deployment", "{file}" }, KeyInTheEnvironment, "QUEUEY_TENANT" },
+        // Re-review 2026-10-05: uten workspace i fila var det ingen konflikt, og nøkkelen ble workspacet i URL-ene.
+        { new[] { "apply", "--file", "{bare}" }, KeyInTheEnvironment, "QUEUEY_TENANT" },
+        { new[] { "plan", "--file", "{bare}" }, KeyInTheEnvironment, "QUEUEY_TENANT" },
+        { new[] { "verify", "orders", "--data", "{}", "--deployment", "{bare}" }, KeyInTheEnvironment, "QUEUEY_TENANT" },
+        { new[] { "credentials", "list", "--tenant", Key }, NoEnvironment, "--tenant" },
+        { new[] { "whoami" }, KeyInTheEnvironment, "QUEUEY_TENANT" },
+        { new[] { "whoami", "--tenant", Key }, NoEnvironment, "--tenant" },
+        { new[] { "issues", Key }, NoEnvironment, "The argument to queuey issues" },
+        { new[] { "edge", "publish", "orders", "--spool", "{spool}", "--data", "{}", "--tenant", Key }, NoEnvironment, "--tenant" },
     };
 
     [Theory]
     [MemberData(nameof(KeysGivenAsTheWorkspace))]
-    public async Task A_tenant_that_is_not_a_workspace_id_is_not_shown(string[] command, Dictionary<string, string> env, string source)
+    public async Task A_tenant_that_is_not_a_workspace_id_is_a_usage_error_that_does_not_show_it(
+        string[] command, Dictionary<string, string> env, string source)
     {
         // Re-review 2026-10-05: en API-nøkkel i QUEUEY_TENANT, en forveksling i CI, ble skrevet ut ved hver apply og verify,
-        // som «…but QUEUEY_TENANT names qak_…».
-        string path = DeployFile("ten_file");
-        string[] args = command.Concat(new[] { command[0] == "verify" ? "--deployment" : "--file", path, "--json" }).ToArray();
+        // brukt som workspace i URL-ene og vist av whoami. Testserveren feiler testen om noe sendes.
+        string withTenant = DeployFile("ten_file");
+        string bare = Path.Combine(_dir, "bare.deploy.json");
+        File.WriteAllText(bare, """{ "queues": { "orders": {} } }""");
+        string spool = Path.Combine(_dir, "spool.db");
+        string[] args = command
+            .Select(a => a switch { "{file}" => withTenant, "{bare}" => bare, "{spool}" => spool, _ => a })
+            .Append("--json").ToArray();
 
         CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With(args)), env: env);
 
-        Assert.Equal(ExitCodes.Configuration, run.Exit);
+        Assert.Equal(ExitCodes.Usage, run.Exit);
+        Assert.Equal(string.Empty, run.Stderr);
         JsonElement error = JsonDocument.Parse(run.Stdout).RootElement.GetProperty("error");
-        Assert.Equal($"{path} names workspace ten_file, but {source} names something that is not a workspace id. " +
-                     "A deploy and its verification have to reach the same workspace, so neither is picked: remove one of them, " +
-                     "or make them name the same workspace.", error.GetProperty("message").GetString());
-        Assert.Contains("An API key belongs in --api-key or QUEUEY_API_KEY.", error.GetProperty("action").GetString());
+        Assert.Equal("invalid_value", error.GetProperty("code").GetString());
+        Assert.Equal($"{source} is not a workspace id. Its value is not shown, since it may be a secret.", error.GetProperty("message").GetString());
+        Assert.Equal("A workspace id starts with ten_. An API key belongs in --api-key or QUEUEY_API_KEY.", error.GetProperty("action").GetString());
+        Assert.DoesNotContain("FAKE", run.Stdout);
+        Assert.False(File.Exists(spool));
+    }
+
+    [Fact]
+    public async Task Whoami_without_json_does_not_print_a_tenant_that_is_not_a_workspace_id()
+    {
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("whoami")), env: KeyInTheEnvironment);
+
+        Assert.Equal(ExitCodes.Usage, run.Exit);
+        Assert.Contains("QUEUEY_TENANT is not a workspace id.", run.Stderr);
+        Assert.Contains("→ A workspace id starts with ten_. An API key belongs in --api-key or QUEUEY_API_KEY.", run.Stderr);
         Assert.DoesNotContain("FAKE", run.Stdout + run.Stderr);
+    }
+
+    [Fact]
+    public async Task A_tenant_in_the_config_file_that_is_not_a_workspace_id_is_named_by_the_file_not_shown()
+    {
+        string config = Path.Combine(_dir, "queuey.json");
+        File.WriteAllText(config, $$"""{ "tenant": "{{Key}}" }""");
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "whoami", "--config", config, "--json" }));
+
+        Assert.Equal(ExitCodes.Usage, run.Exit);
+        Assert.Equal($"tenant in {config} is not a workspace id. Its value is not shown, since it may be a secret.",
+            JsonDocument.Parse(run.Stdout).RootElement.GetProperty("error").GetProperty("message").GetString());
+        Assert.DoesNotContain("FAKE", run.Stdout + run.Stderr);
+    }
+
+    [Fact]
+    public async Task Edge_run_refuses_a_tenant_that_is_not_a_workspace_id_before_it_opens_the_spool()
+    {
+        string spool = Path.Combine(_dir, "edge-run.db");
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "edge", "run", "--spool", spool, "--tenant", Key, "--api-key", "qak_kid.secret" }));
+
+        Assert.Equal(ExitCodes.Usage, run.Exit);
+        Assert.Contains("--tenant is not a workspace id.", run.Stderr);
+        Assert.DoesNotContain("FAKE", run.Stdout + run.Stderr);
+        Assert.False(File.Exists(spool));
+    }
+
+    [Theory]
+    [InlineData("ten_abc")]
+    [InlineData(" ten_abc\n")]
+    public async Task A_workspace_id_is_still_taken_and_trimmed(string tenant)
+    {
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("whoami", "--json")),
+            env: new Dictionary<string, string> { ["QUEUEY_TENANT"] = tenant });
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.Equal("ten_abc", JsonDocument.Parse(run.Stdout).RootElement.GetProperty("tenant").GetString());
     }
 
     [Fact]

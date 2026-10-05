@@ -109,7 +109,7 @@ internal static class EdgeCommand
             return CliErrors.Usage(map, "missing_argument",
                 "Usage: queuey edge publish <queue> --spool <path> --tenant <ten_...> (--data <json> | --file <path>)");
 
-        var tenant = map.Get("tenant") ?? Environment.GetEnvironmentVariable("QUEUEY_TENANT");
+        var tenant = EdgeTenant(map);
         if (string.IsNullOrWhiteSpace(tenant))
             return CliErrors.Usage(map, "missing_argument", "Missing --tenant <ten_...> (or QUEUEY_TENANT).");
 
@@ -202,7 +202,7 @@ internal static class EdgeCommand
     /// </summary>
     private static async Task<int> RunHostAsync(string spoolPath, ArgMap map)
     {
-        var tenant = map.Get("tenant") ?? Environment.GetEnvironmentVariable("QUEUEY_TENANT");
+        var tenant = EdgeTenant(map);
         var apiKey = map.Get("api-key") ?? Environment.GetEnvironmentVariable("QUEUEY_API_KEY");
         if (string.IsNullOrWhiteSpace(tenant) || string.IsNullOrWhiteSpace(apiKey))
         {
@@ -709,6 +709,19 @@ internal static class EdgeCommand
         { TotalMinutes: >= 1 } => $"{(int)age.TotalMinutes}m {age.Seconds}s",
         _ => $"{(int)age.TotalSeconds}s"
     };
+
+    /// <summary>
+    /// The workspace from --tenant or QUEUEY_TENANT, which edge reads itself rather than through queuey.json. A value that
+    /// is not a workspace id fails as it does everywhere else (<see cref="CliConfig.WorkspaceId"/>), without being shown.
+    /// </summary>
+    private static string? EdgeTenant(ArgMap map)
+    {
+        if (map.Get("tenant") is { } flag && !string.IsNullOrWhiteSpace(flag))
+            return CliConfig.WorkspaceId(flag, "--tenant");
+        if (Environment.GetEnvironmentVariable("QUEUEY_TENANT") is { } env && !string.IsNullOrWhiteSpace(env))
+            return CliConfig.WorkspaceId(env, "QUEUEY_TENANT");
+        return null;
+    }
 
     private static int UnknownSub(string sub, string[] rest)
         => CliErrors.Write(CliErrors.WantsJson(rest), "unknown_subcommand",

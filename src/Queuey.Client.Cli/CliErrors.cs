@@ -113,3 +113,23 @@ internal static class CliErrors
         return exitCode;
     }
 }
+
+/// <summary>
+/// A usage error found after the options were parsed — a value that cannot be what its option is for — thrown where the
+/// value is read and written by <see cref="CliEntry"/> with exit 2, as <see cref="CliErrors.Usage"/> writes one.
+/// </summary>
+internal sealed class CliUsageException : Exception
+{
+    public CliUsageException(string code, string message, string? action)
+        : base(message)
+    {
+        Code = code;
+        Action = action;
+    }
+
+    /// <summary>The error code, such as <c>invalid_value</c>.</summary>
+    public string Code { get; }
+
+    /// <summary>What to do instead.</summary>
+    public string? Action { get; }
+}

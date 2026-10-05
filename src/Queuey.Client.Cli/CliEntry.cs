@@ -63,6 +63,10 @@ internal static class CliEntry
                 _ => Unknown(command, json),
             };
         }
+        catch (CliUsageException ex)
+        {
+            return CliErrors.Write(json, ex.Code, ex.Message, ex.Action, status: null, ExitCodes.Usage);
+        }
         catch (QueueyConfigurationException ex)
         {
             return CliErrors.Write(json, "config_error", ex.Message, ex.SuggestedAction, status: null, ExitCodes.Configuration, "Config error");
