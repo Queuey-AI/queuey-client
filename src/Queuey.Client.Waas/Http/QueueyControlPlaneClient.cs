@@ -558,34 +558,11 @@ internal sealed class QueueyControlPlaneClient
     // «(SyncStreams)» sto i meldingene for alle kall, også apply og verify, og ingen sa hvor verdien settes (review
     // 2026-10-05). Handlingen nevner både SDK-en og CLI-en, fordi begge ender her.
     private string RequireTenant()
-    {
-        if (string.IsNullOrWhiteSpace(_options.TenantPublicId))
-            throw new QueueyConfigurationException("A workspace (ten_…) is required for this call, and none is set.")
-            {
-                SuggestedAction = "Set QueueyOptions.TenantPublicId. In the CLI: --tenant, QUEUEY_TENANT, or tenant in queuey.json.",
-            };
-        return _options.TenantPublicId!;
-    }
+        => string.IsNullOrWhiteSpace(_options.TenantPublicId) ? throw MissingSetting.Tenant() : _options.TenantPublicId!;
 
     private string RequireApiKey()
-    {
-        if (string.IsNullOrWhiteSpace(_options.ApiKey))
-            throw new QueueyConfigurationException("An API key is required for this call, and none is set.")
-            {
-                SuggestedAction = "Set QueueyOptions.ApiKey. In the CLI: --api-key, QUEUEY_API_KEY, or apiKey in queuey.json. " +
-                                  "Keys are made in the Queuey console.",
-            };
-        return _options.ApiKey!;
-    }
+        => string.IsNullOrWhiteSpace(_options.ApiKey) ? throw MissingSetting.ApiKey() : _options.ApiKey!;
 
     private string RequireLicense()
-    {
-        if (string.IsNullOrWhiteSpace(_options.LicensePublicId))
-            throw new QueueyConfigurationException("A license id (lic_…) is required for this call, and none is set.")
-            {
-                SuggestedAction = "Set QueueyOptions.LicensePublicId. In the CLI: --license, QUEUEY_LICENSE, or license in queuey.json. " +
-                                  "The Queuey console shows it with your keys.",
-            };
-        return _options.LicensePublicId!;
-    }
+        => string.IsNullOrWhiteSpace(_options.LicensePublicId) ? throw MissingSetting.License() : _options.LicensePublicId!;
 }

@@ -43,6 +43,31 @@ public class SyncStreamsTests
         Assert.Equal(new[] { "order.created", "order.paid" }, root.GetProperty("eventTypes").EnumerateArray().Select(e => e.GetString()).ToArray());
     }
 
+    [Theory]
+    [InlineData("tenant", "A workspace (ten_…) is required for this call, and none is set.", "--tenant, QUEUEY_TENANT, or tenant in queuey.json")]
+    [InlineData("license", "A license id (lic_…) is required for this call, and none is set.", "--license, QUEUEY_LICENSE, or license in queuey.json")]
+    [InlineData("key", "An API key is required for this call, and none is set.", "--api-key, QUEUEY_API_KEY, or apiKey in queuey.json")]
+    public async Task A_missing_setting_says_where_to_set_it_and_nothing_is_sent(string missing, string message, string where)
+    {
+        // Re-review 2026-10-05: tjenesten sa «required for SyncStreams» også for apply og pull, og uten handling.
+        var api = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(HttpStatusCode.OK, WaasTestHost.DefaultApplyBody()));
+        QueueyService service = WaasTestHost.Build(apiStub: api, streams: new[] { StreamDefinitionFactory.FromName("invoice-events", null) },
+            configure: o =>
+            {
+                if (missing == "tenant") o.TenantPublicId = null;
+                if (missing == "license") o.LicensePublicId = null;
+                if (missing != "key") return;
+                o.ApiKey = null;
+                (o.SigningKeyId, o.SigningSecret) = ("kid", "sekret"); // en signert ingress-klient, uten nøkkel for kontrollplanet
+            });
+
+        var ex = await Assert.ThrowsAsync<QueueyConfigurationException>(() => service.SyncStreamsAsync());
+
+        Assert.Equal(message, ex.Message);
+        Assert.Contains(where, ex.SuggestedAction);
+        Assert.Null(api.LastRequest);
+    }
+
     [Fact]
     public async Task Empty_event_types_are_omitted_from_the_body()
     {
