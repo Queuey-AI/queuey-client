@@ -70,20 +70,82 @@ public class DeliveryVerificationTests
     }
 
     [Theory]
-    [InlineData(401, "AuthenticationFailed", "delivery.credentialRef")]
-    [InlineData(403, "AuthorizationFailed", "allowlist")]
-    [InlineData(404, "RouteOrConfigError", "Check the delivery URL: https://hooks.example.com/orders")]
-    [InlineData(422, "BadPayload", "accepts this body and content type")]
-    [InlineData(500, "TargetServerError", "its logs")]
-    [InlineData(null, "TargetUnavailable", "reachable from the internet")]
-    public void A_failure_says_what_to_fix_for_its_class(int? code, string failureClass, string advice)
+    [InlineData(401, "AuthenticationFailed", "delivery.credentialRef", "holds the queue's deliveries")]
+    [InlineData(403, "AuthorizationFailed", "allowlist", "holds the queue's deliveries")]
+    [InlineData(404, "RouteOrConfigError", "Check the delivery URL: https://hooks.example.com/orders", "holds the queue's deliveries")]
+    [InlineData(422, "BadPayload", "accepts this body and content type", null)]
+    [InlineData(500, "TargetServerError", "its logs", "probes it")]
+    [InlineData(null, "TargetUnavailable", "reachable from the internet", "probes it")]
+    [InlineData(429, "RateLimited", "rate-limiting", "after the wait the receiver asked for")]
+    public void A_failure_says_what_to_fix_and_what_Queuey_does_next_for_its_class(int? code, string failureClass, string advice, string? next)
     {
         DeliveryVerification v = Judge(Event(4, Attempt(code, failureClass, code is null ? "Connection refused" : null)));
 
         Assert.Equal(DeliveryVerdict.Failed, v.Verdict);
         Assert.Equal(failureClass, v.FailureClass);
         Assert.Contains(advice, v.SuggestedAction);
-        Assert.Contains("retries it", v.Summary);
+
+        // Før 2026-10-05 lovte hver feil «Queuey retries it on the queue's schedule», også en 401, der backenden
+        // parkerer målet og holder køen. En klasse der neste steg avhenger av DLQ-en, får ingen spådom.
+        Assert.DoesNotContain("on the queue's schedule", v.Summary);
+        if (next is null)
+            Assert.EndsWith($"[{failureClass}].", v.Summary);
+        else
+            Assert.Contains(next, v.Summary);
+    }
+
+    [Theory]
+    [InlineData(401, "AuthenticationFailed", "delivery.credentialRef")]
+    [InlineData(403, "AuthorizationFailed", "allowlist")]
+    [InlineData(404, "RouteOrConfigError", "Check the delivery URL")]
+    [InlineData(null, "ProtocolOrSecurityIssue", "certificate")]
+    [InlineData(501, "PermanentTargetError", "will never succeed as it is")]
+    [InlineData(null, "TransformFailed", "payload mutations")]
+    [InlineData(null, "SignatureRecalculationFailed", "Stripe verification back on")]
+    public void A_failure_that_holds_the_queue_says_to_resume_it_after_the_fix(int? code, string failureClass, string advice)
+    {
+        // Funnet mot backenden 2026-10-05: disse parkerer målet eller køen, og Queuey holder køens leveringer til noen
+        // gjenopptar den. Rådet sa bare hva som skulle rettes, så neste verify ventet bak den holdte køen. TLS og
+        // permanente feil fikk før rådet om en URL som ikke var nåbar.
+        DeliveryVerification v = Judge(Event(4, Attempt(code, failureClass)));
+
+        Assert.Contains("holds the queue's deliveries until this is fixed and the queue is resumed", v.Summary);
+        Assert.Contains(advice, v.SuggestedAction);
+        Assert.EndsWith("Then resume the queue with Verify & resume, in the Queuey console or over MCP: until then Queuey " +
+                        "holds its deliveries, so verifying again waits.", v.SuggestedAction);
+    }
+
+    [Theory]
+    [InlineData(422, "BadPayload")]
+    [InlineData(500, "TargetServerError")]
+    [InlineData(null, "TargetUnavailable")]
+    [InlineData(429, "RateLimited")]
+    [InlineData(null, "OriginNotVerified")]
+    public void A_failure_that_leaves_the_queue_running_asks_for_no_resume(int? code, string failureClass)
+    {
+        DeliveryVerification v = Judge(Event(4, Attempt(code, failureClass)));
+
+        Assert.DoesNotContain("Verify & resume", v.SuggestedAction);
+        Assert.DoesNotContain("holds the queue", v.Summary);
+    }
+
+    [Theory]
+    [InlineData("SignatureRecalculationFailed", "turn the queue's Stripe verification back on")]
+    [InlineData("OriginNotVerified", "`stripe events resend`")]
+    [InlineData("TransformFailed", "payload mutations")]
+    public void A_failure_before_sending_says_the_receiver_was_never_contacted(string failureClass, string advice)
+    {
+        // Queuey stoppet eventen selv. Før 2026-10-05 sa verify «it did not answer» om mottakeren, og to av klassene
+        // (fra backenden 2026-09-24 og -25) fikk rådet om en URL som ikke var nåbar.
+        DeliveryVerification v = Judge(Event(4, Attempt(null, failureClass, "The queue's ingress no longer verifies Stripe.")));
+
+        Assert.Equal(DeliveryVerdict.Failed, v.Verdict);
+        Assert.StartsWith(
+            $"Queuey did not send the event to https://hooks.example.com/orders [{failureClass}]: The queue's ingress no longer " +
+            "verifies Stripe. The receiver was never contacted.", v.Summary);
+        Assert.DoesNotContain("did not answer", v.Summary);
+        Assert.Contains(advice, v.SuggestedAction);
+        Assert.DoesNotContain("reachable from the internet", v.SuggestedAction);
     }
 
     [Fact]
@@ -118,7 +180,9 @@ public class DeliveryVerificationTests
 
         Assert.Equal(DeliveryVerdict.Timeout, v.Verdict);
         Assert.Contains("evt_head, is failing — https://hooks.example.com/orders answered 401 [AuthenticationFailed]", v.Summary);
+        Assert.Contains("Queuey holds the queue's deliveries until that is fixed and the queue is resumed", v.Summary);
         Assert.Contains("delivery.credentialRef", v.SuggestedAction);
+        Assert.Contains("Verify & resume", v.SuggestedAction);
         Assert.Contains("the events behind it go out", v.SuggestedAction);
     }
 
@@ -214,7 +278,8 @@ public class DeliveryVerificationTests
     /// egen rute: før svarte stuben med eventen på alt, også på listen over feilende events — den ble
     /// lest som en side uten elementer, så testen besto uten at det fantes noen feilende event.
     /// </summary>
-    private static StubHttpMessageHandler Waiting(string? ordering, bool held = false) => new(req => req.RequestUri!.AbsolutePath switch
+    private static StubHttpMessageHandler Waiting(
+        string? ordering, bool held = false, int aheadCode = 401, string aheadClass = "AuthenticationFailed") => new(req => req.RequestUri!.AbsolutePath switch
     {
         "/tenants/ten_abc/queues" => StubHttpMessageHandler.Json(HttpStatusCode.OK, new[]
         {
@@ -227,7 +292,7 @@ public class DeliveryVerificationTests
         "/events/que_1/evt_head" => StubHttpMessageHandler.Json(HttpStatusCode.OK, new
         {
             publicId = "evt_head", status = 4, attemptCount = 3,
-            attempts = new[] { new { attemptNumber = 3, targetEndpoint = "https://hooks.example.com/orders", responseCode = 401, failureClass = "AuthenticationFailed" } },
+            attempts = new[] { new { attemptNumber = 3, targetEndpoint = "https://hooks.example.com/orders", responseCode = aheadCode, failureClass = aheadClass } },
         }),
         "/events/que_1/evt_1" => StubHttpMessageHandler.Json(HttpStatusCode.OK, new { publicId = "evt_1", status = 0, attemptCount = 0 }),
         string other => throw new InvalidOperationException(other),
@@ -257,20 +322,44 @@ public class DeliveryVerificationTests
     [InlineData("bykey", false)]       // den holder bare sin egen nøkkel
     [InlineData("besteffort", false)]  // ingen rekkefølge, ingen holder noen
     [InlineData(null, false)]          // rekkefølgen kunne ikke leses: ikke gjett
-    public async Task A_failing_event_ahead_is_named_only_when_the_queue_is_one_fifo_lane(string? ordering, bool named)
+    public async Task A_rejected_event_ahead_is_named_only_when_the_queue_is_one_fifo_lane(string? ordering, bool named)
     {
-        DeliveryVerification v = await VerifyUntilTimeout(Waiting(ordering));
+        // En 422 gjelder eventen, ikke mottakeren: den holder bare eventene bak seg i sin egen rekke.
+        DeliveryVerification v = await VerifyUntilTimeout(Waiting(ordering, aheadCode: 422, aheadClass: "BadPayload"));
 
         Assert.Equal(DeliveryVerdict.Timeout, v.Verdict);
         if (named)
         {
             Assert.Contains("evt_head, is failing", v.Summary);
-            Assert.Contains("delivery.credentialRef", v.SuggestedAction);
+            Assert.Contains("with fifo ordering the events behind it wait for it", v.Summary);
+            Assert.Contains("accepts this body and content type", v.SuggestedAction);
         }
         else
         {
             Assert.DoesNotContain("evt_head", v.Summary);
             Assert.Contains("queuey metrics que_1", v.SuggestedAction);
         }
+    }
+
+    [Theory]
+    [InlineData("fifo")]
+    [InlineData("bykey")]
+    [InlineData("besteffort")]
+    [InlineData(null)]
+    public async Task A_failure_ahead_that_holds_the_queue_is_named_whatever_the_ordering(string? ordering)
+    {
+        // Backenden parkerer målet på en 401, og da står hele køen, også med bykey og besteffort. Fra 2026-09-24 til
+        // 2026-10-05 ble eventen bare navngitt på fifo, og verify gjettet ellers på en backlog.
+        StubHttpMessageHandler api = Waiting(ordering);
+
+        DeliveryVerification v = await VerifyUntilTimeout(api);
+
+        Assert.Equal(DeliveryVerdict.Timeout, v.Verdict);
+        Assert.Contains("evt_head, is failing — https://hooks.example.com/orders answered 401 [AuthenticationFailed]", v.Summary);
+        Assert.Contains("Queuey holds the queue's deliveries until that is fixed and the queue is resumed", v.Summary);
+        Assert.Contains("Verify & resume", v.SuggestedAction);
+
+        // Klassen avgjør alene, så rekkefølgen trengs ikke.
+        Assert.DoesNotContain(api.Requests, r => r.RequestUri!.AbsolutePath == "/queues/que_1/config");
     }
 }

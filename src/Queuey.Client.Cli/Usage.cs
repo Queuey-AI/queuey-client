@@ -105,8 +105,10 @@ VERIFY
                  receiver got it. Otherwise the verdict — logged_not_delivered, filtered,
                  failed or timeout — names what to change: the mode, the filter, the
                  credential the receiver rejected, held delivery, or the earlier event
-                 holding a fifo queue. A failure is reported on its first attempt, not after
-                 every retry.
+                 holding the queue. A rejected credential, a missing route or a TLS failure
+                 holds the whole queue until it is fixed and resumed with Verify & resume,
+                 and the advice ends with that step. A failure is reported on its first
+                 attempt, not after every retry.
                  The event is real and reaches the receiver like any other: send data it
                  treats as harmless. The workspace follows apply's rule: the deployment file's
                  ""tenant"" (--deployment, default ./queuey.deploy.json) when it names one, else
