@@ -160,6 +160,14 @@ internal sealed class QueueyManagement : IQueueyManagement
         Backoff = RetryBackoffWire.From(policy.Backoff),
     };
 
+    // Samme body for apply og for planen (?dryRun=true), og med små bokstaver, slik Queuey lagrer merket. Bare en intern
+    // hjelper: IQueueyManagement er offentlig i den taggede v0.1.0-preview.8, og et nytt medlem der ville brutt dem som
+    // implementerer det (review av #45, 2026-10-06). apply og plan sender PATCH /tenants/{ten} selv.
+    internal static PatchWorkspaceWireRequest WireOfEnvironment(string environment) => new()
+    {
+        Environment = environment.Trim().ToLowerInvariant(),
+    };
+
     public Task SetIngressAsync(string publicId, bool isQueue, DeploymentIngress ingress, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(publicId)) throw new ArgumentException("A public id is required.", nameof(publicId));

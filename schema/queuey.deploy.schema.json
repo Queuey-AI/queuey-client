@@ -17,6 +17,23 @@
       "description": "The workspace — the layer every queue inherits from when it says nothing itself.",
       "type": "object",
       "properties": {
+        "environment": {
+          "description": "The workspace's environment: dev, test, staging or prod, lowest first. Queuey treats a workspace without one as prod. An API key may raise it towards prod, but only a person lowers it, in the Queuey console, so apply is refused when the file names a lower environment than the workspace has. A file applied to several workspaces takes it from a variable, such as ${QUEUEY_WORKSPACE_ENVIRONMENT}.",
+          "type": "string",
+          "anyOf": [
+            {
+              "enum": [
+                "dev",
+                "test",
+                "staging",
+                "prod"
+              ]
+            },
+            {
+              "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(:-[^}]*)?\\}$"
+            }
+          ]
+        },
         "ordering": {
           "description": "Lane strategy for every queue that does not override it: fifo, bykey, besteffort.",
           "type": "string",

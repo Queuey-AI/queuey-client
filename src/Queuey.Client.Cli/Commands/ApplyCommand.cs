@@ -164,6 +164,7 @@ internal static class ApplyCommand
         if (file.Workspace is { } w)
         {
             var parts = new List<string>();
+            if (w.Environment is not null) parts.Add($"environment={w.Environment}");
             if (w.Ordering is not null) parts.Add($"ordering={w.Ordering}");
             if (w.RetentionDays is { } days) parts.Add($"retentionDays={days}");
             parts.AddRange(Backoff(w.Backoff));
@@ -271,7 +272,8 @@ internal static class ApplyCommand
 
     /// <summary>
     /// The dry run as JSON: <c>{ schemaVersion, workspace, queues }</c>. The workspace is null when the
-    /// file declares none; each queue carries the notes the dry run has about it.
+    /// file declares none, and carries its <c>environment</c>, <c>policy</c>, <c>delivery</c>, <c>ingress</c> and
+    /// <c>notes</c>; each queue carries the notes the dry run has about it.
     /// </summary>
     private static object ToJsonDryRun(DeploymentFile file, IReadOnlyList<DeploymentQueuePlan> plans)
     {
@@ -286,8 +288,10 @@ internal static class ApplyCommand
         };
     }
 
+    // Miljø-merket står som fila skriver det (Queuey F2.2, 2026-10-05). Lagt til i versjon 2, som ikke er sluppet ennå.
     private static object ToJsonWorkspace(DeploymentWorkspace w) => new
     {
+        environment = w.Environment,
         policy = new
         {
             w.Ordering,

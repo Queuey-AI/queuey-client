@@ -290,6 +290,10 @@ internal sealed class QueueyControlPlaneClient
             HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Patches the workspace itself, today its environment (<c>PATCH /tenants/{ten}</c>). Returns 204.</summary>
+    public Task PatchTenantAsync(string tenantPublicId, PatchWorkspaceWireRequest request, CancellationToken cancellationToken)
+        => PatchAsync(request, cancellationToken, "tenants", tenantPublicId);
+
     /// <summary>Patches the workspace's behaviour (<c>PATCH /tenants/{ten}/policy</c>). Returns 204.</summary>
     public Task PatchTenantPolicyAsync(string tenantPublicId, PatchTenantPolicyWireRequest request, CancellationToken cancellationToken)
         => PatchAsync(request, cancellationToken, "tenants", tenantPublicId, "policy");

@@ -10,7 +10,7 @@ namespace Queuey.Client.Waas.Tests;
 
 /// <summary>
 /// Sperrehake (review 2026-09-24): en plan skal aldri sende en skriving uten <c>?dryRun=true</c>. Fila
-/// bruker hvert aspekt en plan kan skrive — workspace policy, delivery og ingress, og kø policy,
+/// bruker hvert aspekt en plan kan skrive — workspacets miljø-merke, policy, delivery og ingress, og kø policy,
 /// delivery, ingress, modus og filter — mot en server som nekter enhver skriving som ikke er dry-run.
 /// Kommer det et nytt slags kall, feiler testen til det står i lista over det planen sender.
 /// </summary>
@@ -20,6 +20,7 @@ public class DeploymentPlanDryRunRatchetTests
     {
       "tenant": "ten_abc",
       "workspace": {
+        "environment": "staging",
         "ordering": "bykey", "retentionDays": 30, "backoff": { "baseDelayMs": 1000 },
         "ingress": { "authMode": "ApiKey", "eventType": { "from": "body", "name": "type" }, "groupKey": { "from": "body", "name": "customerId" } },
         "delivery": {
@@ -41,6 +42,7 @@ public class DeploymentPlanDryRunRatchetTests
 
     private static readonly string[] Writes =
     {
+        "PATCH /tenants/ten_abc",
         "PATCH /tenants/ten_abc/ingress",
         "PATCH /tenants/ten_abc/policy",
         "PATCH /tenants/ten_abc/delivery",

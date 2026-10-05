@@ -360,7 +360,7 @@ public sealed class DeployCommandTests : IDisposable
         Assert.Empty(queues[1].GetProperty("notes").EnumerateArray());
 
         JsonElement workspace = root.GetProperty("workspace");
-        Assert.Equal(new[] { "policy", "delivery", "ingress", "notes" }, workspace.EnumerateObject().Select(p => p.Name).ToArray());
+        Assert.Equal(new[] { "environment", "policy", "delivery", "ingress", "notes" }, workspace.EnumerateObject().Select(p => p.Name).ToArray());
         Assert.Equal(172800000, workspace.GetProperty("policy").GetProperty("backoff").GetProperty("maxDelayMs").GetInt32());
         Assert.StartsWith("backoff.maxDelayMs=172800000 is above the 86400000 (24 hours)", Assert.Single(workspace.GetProperty("notes").EnumerateArray()).GetString());
     }
@@ -405,6 +405,63 @@ public sealed class DeployCommandTests : IDisposable
         Assert.Equal("missing_permission", error.GetProperty("code").GetString());
         Assert.Equal("Use a key made with the Build profile.", error.GetProperty("action").GetString());
         Assert.Equal(403, error.GetProperty("status").GetInt32());
+    }
+
+    // ── Miljø-merket (Queuey F2.2, 2026-10-05) ──────────────────────────────
+
+    /// <summary>En server der workspacet er prod, så en nøkkel som setter dev, nektes slik Queuey nekter den.</summary>
+    private static RecordingHandler ProdWorkspace() => new(req => req.Key switch
+    {
+        "GET /tenants/ten_abc/queues" => RecordingHandler.Json(HttpStatusCode.OK, Array.Empty<object>()),
+        "PATCH /tenants/ten_abc" => RecordingHandler.Error(HttpStatusCode.Forbidden, "environment_lowering_needs_a_person",
+            "Only a person can lower a workspace's environment, and this would lower workspace ten_abc from prod to dev. "
+            + "An API key can set the environment when it creates a workspace, and can raise it towards prod.",
+            "Ask a person to change it with Set environment… on the workspace's page in the Queuey console: https://app.queuey.ai/console/t/ten_abc?set=environment"),
+        _ => throw new InvalidOperationException(req.Key),
+    });
+
+    [Fact]
+    public async Task A_key_that_would_lower_the_environment_is_told_why_and_what_a_person_does_and_nothing_else_is_written()
+    {
+        string path = DeployFile("""{ "tenant": "ten_abc", "workspace": { "environment": "dev", "retentionDays": 7 }, "queues": { "orders": {} } }""");
+        RecordingHandler api = ProdWorkspace();
+
+        CliRun human = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path)), api);
+
+        Assert.Equal(ExitCodes.RuntimeError, human.Exit);
+        Assert.Contains("Queuey error: Only a person can lower a workspace's environment, and this would lower workspace ten_abc from prod to dev.", human.Stderr);
+        Assert.Contains("→ Ask a person to change it with Set environment… on the workspace's page in the Queuey console: https://app.queuey.ai/console/t/ten_abc?set=environment", human.Stderr);
+        Assert.Equal(new[] { "PATCH /tenants/ten_abc" }, api.Writes.Select(w => w.Key).ToArray());
+        Assert.Equal("dev", api.Writes.Single().Json.GetProperty("environment").GetString());
+
+        CliRun json = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path, "--json")), ProdWorkspace());
+
+        Assert.Equal(ExitCodes.RuntimeError, json.Exit);
+        JsonElement error = JsonDocument.Parse(json.Stdout).RootElement.GetProperty("error");
+        Assert.Equal("environment_lowering_needs_a_person", error.GetProperty("code").GetString());
+        Assert.Equal(403, error.GetProperty("status").GetInt32());
+        Assert.Contains("Queuey console", error.GetProperty("action").GetString());
+    }
+
+    [Fact]
+    public async Task A_dry_run_shows_the_environment_as_the_file_writes_it_and_checks_it_once_expanded()
+    {
+        // Utvidelsen leser prosessens miljø, så variabelen har en standardverdi her i stedet for å settes.
+        string path = DeployFile("""{ "workspace": { "environment": "${QUEUEY_WORKSPACE_ENVIRONMENT:-staging}", "retentionDays": 7 }, "queues": {} }""");
+
+        CliRun text = await CliHarness.RunAsync(() => ApplyCommand.RunAsync(new[] { "--file", path, "--dry-run" }));
+        CliRun json = await CliHarness.RunAsync(() => ApplyCommand.RunAsync(new[] { "--file", path, "--dry-run", "--json" }));
+
+        Assert.Equal(ExitCodes.Success, text.Exit);
+        Assert.Contains("workspace\tenvironment=${QUEUEY_WORKSPACE_ENVIRONMENT:-staging} retentionDays=7", text.Stdout);
+        Assert.Equal("${QUEUEY_WORKSPACE_ENVIRONMENT:-staging}",
+            JsonDocument.Parse(json.Stdout).RootElement.GetProperty("workspace").GetProperty("environment").GetString());
+
+        string wrong = DeployFile("""{ "workspace": { "environment": "${QUEUEY_F22_NEVER_SET:-qa}" }, "queues": {} }""");
+        CliRun refused = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "apply", "--file", wrong, "--dry-run" }));
+
+        Assert.Equal(ExitCodes.Configuration, refused.Exit);
+        Assert.Contains("workspace.environment must be one of dev, test, staging, prod; got 'qa'.", refused.Stderr);
     }
 
     [Fact]

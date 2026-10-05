@@ -31,8 +31,9 @@ public class DeploymentCopyTests
         DeploymentFile file = Filled();
         Dictionary<string, string?> expected = Leaves(file);
 
-        // Det ToTemplate skal endre: workspacet og vertene er det som skiller miljøene.
+        // Det ToTemplate skal endre: workspacet, miljø-merket og vertene er det som skiller miljøene.
         expected["Tenant"] = null;
+        expected["Workspace.Environment"] = "${" + DeploymentTemplate.EnvironmentVariable + "}";
         expected["Workspace.Delivery.BaseUrl"] = "${" + DeploymentTemplate.BaseUrlVariable + "}";
         expected["Queues[invoices].Delivery.Url"] = "${" + DeploymentTemplate.QueueUrlVariable("invoices", "staging") + "}";
 

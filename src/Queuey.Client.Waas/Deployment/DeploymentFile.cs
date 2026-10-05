@@ -264,6 +264,7 @@ public sealed class DeploymentFile
             Tenant = DeploymentVariables.Expand(Tenant, lookup, "tenant"),
             Workspace = Workspace is null ? null : new DeploymentWorkspace
             {
+                Environment = DeploymentVariables.Expand(Workspace.Environment, lookup, "workspace.environment"),
                 Ordering = Workspace.Ordering,
                 DlqEnabled = Workspace.DlqEnabled,
                 RetentionDays = Workspace.RetentionDays,
@@ -321,6 +322,7 @@ public sealed class DeploymentFile
     {
         var names = new List<string>();
         names.AddRange(DeploymentVariables.Referenced(Tenant));
+        names.AddRange(DeploymentVariables.Referenced(Workspace?.Environment));
         names.AddRange(DeploymentVariables.Referenced(Workspace?.Delivery?.BaseUrl));
         names.AddRange(DeploymentVariables.Referenced(Workspace?.Delivery?.CredentialRef));
 
@@ -353,6 +355,7 @@ public sealed class DeploymentFile
         // None og en ukjent method til POST uten å si fra, og en kilde uten navn fjernet den som var lagret.
         Workspace?.Ingress?.Validate("workspace.ingress");
         ValidateDelivery("workspace.delivery", Workspace?.Delivery?.AuthMode, Workspace?.Delivery?.Method);
+        ValidateEnvironment(Workspace?.Environment);
 
         foreach (KeyValuePair<string, DeploymentQueue> entry in Queues)
         {
@@ -381,6 +384,18 @@ public sealed class DeploymentFile
         }
 
         return plans;
+    }
+
+    // Miljø-merket (Queuey F2.2, 2026-10-05): en av de fire, i hvilken som helst skrift. En ${VAR} sjekkes når den er utvidet:
+    // en dry run viser fila slik den står, og leser den derfor også uutvidet.
+    private static void ValidateEnvironment(string? environment)
+    {
+        if (environment is null || environment.IndexOf("${", StringComparison.Ordinal) >= 0)
+            return;
+
+        if (!DeploymentWorkspace.EnvironmentValues.Contains(environment.Trim(), StringComparer.OrdinalIgnoreCase))
+            throw new QueueyConfigurationException(
+                $"workspace.environment must be one of {string.Join(", ", DeploymentWorkspace.EnvironmentValues)}; got '{environment}'.");
     }
 
     private static void ValidateDelivery(string where, string? authMode, string? method)
@@ -503,6 +518,17 @@ public sealed class DeploymentQueue
 /// </summary>
 public sealed class DeploymentWorkspace
 {
+    /// <summary>The values <see cref="Environment"/> accepts, lowest first, in any casing.</summary>
+    public static readonly IReadOnlyList<string> EnvironmentValues = new[] { "dev", "test", "staging", "prod" };
+
+    /// <summary>
+    /// The workspace's environment: <c>dev</c>, <c>test</c>, <c>staging</c> or <c>prod</c>, lowest first. Queuey treats a
+    /// workspace without one as <c>prod</c>. An API key may raise it towards <c>prod</c>, but only a person lowers it, in
+    /// the Queuey console, so apply is refused when the file names a lower environment than the workspace has. A file
+    /// applied to several workspaces takes it from a variable, such as <c>${QUEUEY_WORKSPACE_ENVIRONMENT}</c>.
+    /// </summary>
+    public string? Environment { get; set; }
+
     /// <summary>Lane strategy for every queue that does not override it: <c>fifo</c>, <c>bykey</c>, <c>besteffort</c>.</summary>
     public string? Ordering { get; set; }
 
@@ -530,6 +556,9 @@ public sealed class DeploymentWorkspace
 
     /// <summary>How arriving events are read: ingress auth, and where the type and key come from.</summary>
     public DeploymentIngress? Ingress { get; set; }
+
+    /// <summary>The environment as Queuey stores it, lower case, or null when the file names none.</summary>
+    internal string? EnvironmentToSend => Environment?.Trim().ToLowerInvariant();
 
     internal bool HasPolicy => Ordering is not null || DlqEnabled is not null
                             || RetentionDays is not null || Idempotent is not null
