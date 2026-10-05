@@ -58,10 +58,15 @@ joins `Queuey.Client.sln` — adding it there is part of the change, not a follo
 
 ## Release
 
-Tag-driven: `git tag v0.1.0-preview.6 && git push --tags` packs every packable
-project to NuGet and attaches self-contained `queuey` CLI binaries to a GitHub
-Release. The tag overrides `<Version>` in `Directory.Build.props`. No tag has been
-pushed yet — `0.1.0-preview.5` exists only as local packages in `artifacts/`.
+Tag-driven: pushing a `v*` tag packs every packable project to NuGet and attaches
+self-contained `queuey` CLI binaries to a GitHub Release (`release.yml`). The tag
+must be the committed version (2026-10-05): the deployment schema's `$id` names the
+release tag of `<Version>` in `Directory.Build.props`, and the release's test step
+builds with the tag's version, so a tag that is not the committed version fails
+before anything is packed. A release is: set `<Version>`, regenerate the schema
+(`QUEUEY_UPDATE_SCHEMA=1 dotnet test --filter DeploymentSchemaTests`), merge, then
+tag the merged commit `v<Version>`. Tags pushed as of 2026-10-05:
+`v0.1.0-preview.6` to `.8`; `main` is at `0.1.0-preview.9`, not yet tagged.
 
 ## Across repos
 

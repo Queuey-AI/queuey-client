@@ -12,8 +12,14 @@ name: Release
 #     releases/latest/download/queuey-<rid>.tar.gz is one URL the docs can hand
 #     out that never goes stale.
 #
-# The version comes from the tag (overrides Directory.Build.props), so a
-# release is exactly one `git tag && git push --tags`.
+# The version comes from the tag (overrides Directory.Build.props), but the tag
+# must be the version that is committed: the deployment schema's $id
+# (schema/queuey.deploy.schema.json) names the release tag of <Version>, and
+# the test step builds with the tag's version, so a tag that is not the
+# committed version fails the tests before anything is packed or published.
+# A release is therefore: set <Version> in Directory.Build.props, regenerate
+# the schema (QUEUEY_UPDATE_SCHEMA=1 dotnet test --filter DeploymentSchemaTests),
+# merge that, then tag the merged commit `v<Version>` and push the tag.
 #
 # NuGet.org is reached through Trusted Publishing (OIDC): the job asks GitHub
 # for a short-lived token, exchanges it at nuget.org for an API key that lives
@@ -51,8 +57,10 @@ jobs:
       - name: Resolve version from tag
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
+      # Built with the tag's version, as the packages are: a tag that is not the
+      # committed <Version> fails here (DeploymentSchemaTests), not after the push.
       - name: Test (the gate travels with the release)
-        run: dotnet test Queuey.Client.sln --configuration Release
+        run: dotnet test Queuey.Client.sln --configuration Release -p:Version=$VERSION
 
       - name: Pack
         run: dotnet pack Queuey.Client.sln --configuration Release -o artifacts -p:Version=$VERSION
@@ -73,6 +81,9 @@ jobs:
           --skip-duplicate
 
   cli-binaries:
+    # The binaries pass the same gate as the packages: nothing is attached to a
+    # Release unless the tests passed with the tag's version.
+    needs: nuget
     runs-on: ubuntu-latest
     strategy:
       matrix:
