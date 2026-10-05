@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
@@ -16,6 +17,7 @@ namespace Queuey.Client;
 /// <item>nested <c>{ "error": { "code", "message" } }</c> (auth + business errors),</item>
 /// <item>flat <c>{ "error": "ip_not_allowed", "message": "…" }</c> (error is a string code),</item>
 /// <item><c>{ "StatusCode", "Message" }</c> (unhandled exceptions),</item>
+/// <item>ASP.NET's validation problem, <c>{ "title", "errors": { field: [messages] } }</c>, when a body cannot be read,</item>
 /// <item>a plain-text body (e.g. the license middleware's 400), and</item>
 /// <item>an empty body (e.g. ingress 404, license 403) — the failure is derived from the status.</item>
 /// </list>
@@ -130,11 +132,38 @@ internal static class QueueyErrorMapper
             // Fallbacks for the exception shape { StatusCode, Message } and stray top-level fields.
             message ??= GetString(root, "message");
             code ??= GetString(root, "code");
+
+            // ASP.NET svarer selv, før kontrolleren og envelopen, når kroppen ikke kan leses: et felt serveren ikke kjenner
+            // (en server eldre enn klienten), eller en verdi av feil type. Før 2026-10-05 ble det bare «Bad Request».
+            if (message is null && TryGetProperty(root, "errors", out JsonElement errors) && errors.ValueKind == JsonValueKind.Object)
+                message = ProblemMessage(GetString(root, "title"), errors);
+            message ??= GetString(root, "detail") ?? GetString(root, "title");
         }
         catch (JsonException)
         {
             message = body.Trim();
         }
+    }
+
+    /// <summary>A validation problem's title and each error, with the field it names: <c>$.backoff: …</c>.</summary>
+    private static string? ProblemMessage(string? title, JsonElement errors)
+    {
+        var parts = new List<string>();
+        foreach (JsonProperty field in errors.EnumerateObject())
+        {
+            if (field.Value.ValueKind != JsonValueKind.Array)
+                continue;
+
+            foreach (JsonElement text in field.Value.EnumerateArray())
+            {
+                if (text.ValueKind == JsonValueKind.String && text.GetString() is { } said && !string.IsNullOrWhiteSpace(said))
+                    parts.Add((field.Name is "" or "$" ? "" : field.Name + ": ") + said.Trim());
+            }
+        }
+
+        if (parts.Count == 0)
+            return title;
+        return string.IsNullOrWhiteSpace(title) ? string.Join(" ", parts) : title!.Trim() + " " + string.Join(" ", parts);
     }
 
     private static bool TryGetProperty(JsonElement obj, string name, out JsonElement value)
