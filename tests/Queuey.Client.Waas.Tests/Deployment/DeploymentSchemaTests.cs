@@ -106,6 +106,8 @@ public class DeploymentSchemaTests
         Assert.Matches(variable, "${QUEUEY_WORKSPACE_ENVIRONMENT}");
         Assert.Matches(variable, "${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}");
         Assert.DoesNotMatch(variable, "production");
+        Assert.DoesNotMatch(variable, "pro${SUFFIX}");
+        Assert.DoesNotMatch(variable, "${ENV}-eu");
         Assert.Contains("only a person lowers it", environment["description"]!.GetValue<string>());
 
         // idempotent er mottakerens løfte om duplikater, ikke deduplisering av publiseringer (review 2026-10-05).
@@ -156,8 +158,11 @@ public class DeploymentSchemaTests
         [(typeof(DeploymentWorkspace), nameof(DeploymentWorkspace.Environment))] = DeploymentWorkspace.EnvironmentValues,
     };
 
-    /// <summary>A <c>${VAR}</c> or <c>${VAR:-default}</c> anywhere in the value, as DeploymentVariables expands it.</summary>
-    internal const string VariablePattern = @"\$\{[A-Za-z_][A-Za-z0-9_]*(:-[^}]*)?\}";
+    /// <summary>
+    /// The whole value is one <c>${VAR}</c> or <c>${VAR:-default}</c>, as DeploymentVariables expands it. Anchored (review
+    /// of #45, 2026-10-06): a value with text around the variable is not an environment.
+    /// </summary>
+    internal const string VariablePattern = @"^\$\{[A-Za-z_][A-Za-z0-9_]*(:-[^}]*)?\}$";
 
     // Felt som må stå når typen er deklarert: de samme som valideringen krever (DeliveryFilter.Validate).
     private static readonly Dictionary<Type, string[]> RequiredWhenDeclared = new()

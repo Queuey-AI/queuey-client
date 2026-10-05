@@ -678,7 +678,8 @@ public sealed class QueueyService : IQueueyService
             // Miljø-merket før alt annet (Queuey F2.2): bare en person senker det, så en nøkkel som ville senket det, nektes
             // med 403, og da er ingenting annet skrevet. Feilen går ut som Queuey sa den, med hva en person gjør.
             if (workspace.EnvironmentToSend is { } environment)
-                await Management.SetWorkspaceEnvironmentAsync(tenant, environment, cancellationToken).ConfigureAwait(false);
+                await _controlPlane.PatchTenantAsync(tenant, QueueyManagement.WireOfEnvironment(environment), cancellationToken)
+                    .ConfigureAwait(false);
 
             // Ingress FIRST, and not for tidiness: "ordering: bykey" is rejected unless a group-key
             // source already exists, so a policy patch that arrives before the ingress one fails

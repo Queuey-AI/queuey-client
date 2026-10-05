@@ -160,15 +160,9 @@ internal sealed class QueueyManagement : IQueueyManagement
         Backoff = RetryBackoffWire.From(policy.Backoff),
     };
 
-    public Task SetWorkspaceEnvironmentAsync(string tenantPublicId, string environment, CancellationToken cancellationToken = default)
-    {
-        if (string.IsNullOrWhiteSpace(tenantPublicId)) throw new ArgumentException("A tenant public id is required.", nameof(tenantPublicId));
-        if (string.IsNullOrWhiteSpace(environment)) throw new ArgumentException("An environment is required.", nameof(environment));
-
-        return _controlPlane.PatchTenantAsync(tenantPublicId, WireOfEnvironment(environment), cancellationToken);
-    }
-
-    // Samme body for apply og for planen (?dryRun=true), og med små bokstaver, slik Queuey lagrer merket.
+    // Samme body for apply og for planen (?dryRun=true), og med små bokstaver, slik Queuey lagrer merket. Bare en intern
+    // hjelper: IQueueyManagement er offentlig i den taggede v0.1.0-preview.8, og et nytt medlem der ville brutt dem som
+    // implementerer det (review av #45, 2026-10-06). apply og plan sender PATCH /tenants/{ten} selv.
     internal static PatchWorkspaceWireRequest WireOfEnvironment(string environment) => new()
     {
         Environment = environment.Trim().ToLowerInvariant(),

@@ -430,6 +430,12 @@ before anything else is written, and the error says where a person changes it in
 A file applied to several workspaces takes it from a variable: `"environment": "${QUEUEY_WORKSPACE_ENVIRONMENT}"`,
 which `pull --as` writes for you.
 
+**Every workspace that exists today has no environment, so it counts as `prod`.** Adding `"environment": "dev"`
+(or `test`, or `staging`) to the file of an existing workspace therefore stops `apply` in CI until a person
+sets that environment once: open the workspace in the Queuey console, choose **Set environment…** in its
+⋯ menu, and confirm the lower environment. From then on the file and the workspace agree, and `apply`
+goes through. Setting `"environment": "prod"` needs no one, because it lowers nothing.
+
 **Retention is capped by your plan.** Declaring more days than the plan allows fails the apply with
 `retention_cap_exceeded` rather than being silently clamped — a shorter window is always accepted.
 
