@@ -81,8 +81,9 @@ APPLY
                  Queuey what it would change first, run `queuey plan`.
                  --dry-run --json prints { ""schemaVersion"": 2, ""workspace"": …, ""queues"": […] }:
                  the workspace's declaration (null when the file has none) and each queue's,
-                 with what the dry run notes about them. Version 1, a bare array of queues,
-                 was what 0.1.0-preview.8 printed.
+                 with what the dry run notes about them. Each carries every field the file
+                 can set on it, in the file's words, null when the file leaves it out.
+                 Version 1, a bare array of queues, was what 0.1.0-preview.8 printed.
                  The file carries NO secrets: auth and signing name a credentialRef, so it is
                  meant to be committed. Keep it separate from queuey.json, which holds your
                  API key and must not be.

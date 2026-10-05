@@ -291,8 +291,8 @@ internal static class ApplyCommand
             w.Idempotent,
             backoff = w.Backoff is { } b ? new { b.BaseDelayMs, b.MaxDelayMs, b.Jitter } : null,
         },
-        delivery = w.Delivery is null ? null : new { w.Delivery.BaseUrl, w.Delivery.AuthMode, w.Delivery.CredentialRef },
-        ingress = w.Ingress is null ? null : new { w.Ingress.AuthMode, eventType = w.Ingress.EventType?.Name, groupKey = w.Ingress.GroupKey?.Name },
+        delivery = ToJson(w.Delivery),
+        ingress = ToJson(w.Ingress),
         notes = CeilingNotes(w.Backoff).ToArray(),
     };
 
@@ -312,10 +312,52 @@ internal static class ApplyCommand
                 ? new { match = f.Match ?? "all", conditions = f.Conditions?.Select(c => new { c.Field, c.Op, c.Value }) }
                 : null,
         },
-        delivery = p.Delivery is null ? null : new { p.Delivery.Url, p.Delivery.Inherit, p.Delivery.AuthMode, p.Delivery.CredentialRef },
-        ingress = p.Ingress is null ? null : new { p.Ingress.AuthMode, eventType = p.Ingress.EventType?.Name, groupKey = p.Ingress.GroupKey?.Name },
+        delivery = ToJson(p.Delivery),
+        ingress = ToJson(p.Ingress),
         notes = CeilingNotes(p.Definition.Policy.Backoff).ToArray(),
     };
+
+    // Levering og ingress som fila skriver dem, felt for felt, og som serverens config-lesing har dem: der er
+    // ingress.eventType { from, name }, så en sti fra `queuey plan` peker på det samme her. Før 2026-10-05 var eventType
+    // og groupKey bare navnet, uten hvor det leses fra, og timeoutMs, signing, rateLimit, authHeaderName, method og
+    // successStatusCode manglet, så en fil som satte dem, så ut som en som lot dem stå.
+    private static object? ToJson(WorkspaceDelivery? d) => d is null ? null : new
+    {
+        d.BaseUrl,
+        d.AuthMode,
+        d.CredentialRef,
+        d.AuthHeaderName,
+        d.Method,
+        d.TimeoutMs,
+        signing = ToJson(d.Signing),
+        rateLimit = ToJson(d.RateLimit),
+    };
+
+    private static object? ToJson(QueueDelivery? d) => d is null ? null : new
+    {
+        d.Url,
+        d.Inherit,
+        d.AuthMode,
+        d.CredentialRef,
+        d.AuthHeaderName,
+        d.TimeoutMs,
+        signing = ToJson(d.Signing),
+        rateLimit = ToJson(d.RateLimit),
+    };
+
+    private static object? ToJson(DeliverySigning? s) => s is null ? null : new { s.Enabled, s.CredentialRef, s.TemplateKey };
+
+    private static object? ToJson(DeliveryRateLimit? r) => r is null ? null : new { r.MaxRequests, r.PerSeconds };
+
+    private static object? ToJson(DeploymentIngress? i) => i is null ? null : new
+    {
+        i.AuthMode,
+        eventType = ToJson(i.EventType),
+        groupKey = ToJson(i.GroupKey),
+        i.SuccessStatusCode,
+    };
+
+    private static object? ToJson(ContextSource? s) => s is null ? null : new { s.From, s.Name };
 
     private static object ToJsonResult(QueueSyncResult result, string path, ResolvedConfig config, string? tenant) => new
     {

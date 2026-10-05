@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Queuey.Client.Cli;
 using Queuey.Client.Waas;
 
@@ -83,6 +84,48 @@ public sealed class DeployCommandTests : IDisposable
         Assert.Equal("orders", plan.GetProperty("name").GetString());
         Assert.Equal("logOnly", plan.GetProperty("mode").GetString());
         Assert.Equal("any", plan.GetProperty("policy").GetProperty("filter").GetProperty("match").GetString());
+    }
+
+    [Fact]
+    public async Task A_dry_run_as_json_carries_delivery_and_ingress_field_for_field_as_the_file_declares_them()
+    {
+        // Sjekket mot serverens plan 2026-10-05: der er ingress.eventType { from, name }. Dry-run skrev bare navnet, og
+        // timeoutMs, signing, rateLimit, authHeaderName, method og successStatusCode manglet, så en fil som satte dem,
+        // så ut som en som lot dem stå.
+        const string workspaceDelivery = """
+            { "baseUrl": "https://hooks.example.com", "authMode": "ApiKey", "credentialRef": "partner-key", "authHeaderName": "X-Api-Key",
+              "method": "PUT", "timeoutMs": 15000, "signing": { "enabled": true, "credentialRef": "signing-key", "templateKey": "queuey" },
+              "rateLimit": { "maxRequests": 10, "perSeconds": 1 } }
+            """;
+        const string workspaceIngress = """
+            { "authMode": "ApiKey", "eventType": { "from": "body", "name": "type" }, "groupKey": { "from": "query", "name": "customer" },
+              "successStatusCode": 200 }
+            """;
+        const string queueDelivery = """
+            { "url": "/orders", "inherit": false, "authMode": "Bearer", "credentialRef": "orders-token", "authHeaderName": "Authorization",
+              "timeoutMs": 5000, "signing": { "enabled": false, "credentialRef": null, "templateKey": null },
+              "rateLimit": { "maxRequests": 5, "perSeconds": 60 } }
+            """;
+        const string queueIngress = """
+            { "authMode": "None", "eventType": { "from": "header", "name": "X-Event" }, "groupKey": null, "successStatusCode": null }
+            """;
+        string path = DeployFile($$"""
+            { "workspace": { "ingress": {{workspaceIngress}}, "delivery": {{workspaceDelivery}} },
+              "queues": { "orders": { "ingress": {{queueIngress}}, "delivery": {{queueDelivery}} } } }
+            """);
+
+        CliRun run = await CliHarness.RunAsync(() => ApplyCommand.RunAsync(new[] { "--file", path, "--dry-run", "--json" }));
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        JsonNode root = JsonNode.Parse(run.Stdout)!;
+        AssertSameJson(workspaceDelivery, root["workspace"]!["delivery"]);
+        AssertSameJson(workspaceIngress, root["workspace"]!["ingress"]);
+        AssertSameJson(queueDelivery, root["queues"]![0]!["delivery"]);
+        AssertSameJson(queueIngress, root["queues"]![0]!["ingress"]);
+
+        static void AssertSameJson(string declared, JsonNode? printed)
+            => Assert.True(JsonNode.DeepEquals(JsonNode.Parse(declared), printed),
+                $"Declared {declared.Trim()}, but the dry run printed {printed?.ToJsonString()}.");
     }
 
     [Fact]

@@ -339,8 +339,11 @@ agent to read:
 ```
 
 `workspace` is null when the file declares none, and `notes` says what a dry run can tell without
-asking Queuey, such as a wait above its ceiling. Check `schemaVersion` first: version 1, a bare array of
-queues, is what 0.1.0-preview.8 printed.
+asking Queuey, such as a wait above its ceiling. Each declaration carries every field the file can set
+on the workspace or the queue, in the file's words, grouped as Queuey's config reads them back:
+behaviour under `policy`, then `delivery` and `ingress` (where `eventType` is `{ "from", "name" }`). A
+field the file leaves out is null. Check `schemaVersion` first: version 1, a bare array of queues, is
+what 0.1.0-preview.8 printed.
 
 A relative `url` appends to the workspace base, so moving hosts is one edit instead of N. An absolute
 URL overrides outright. A queue with no `delivery` block inherits — the shape to reach for.
