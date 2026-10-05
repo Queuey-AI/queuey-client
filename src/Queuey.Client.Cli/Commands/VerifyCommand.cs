@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -101,8 +102,16 @@ internal static class VerifyCommand
             Console.WriteLine($"  → {action}");
     }
 
+    /// <summary>
+    /// The version of <c>verify --json</c>'s shape. A script that reads it checks this first, as it does in
+    /// <c>apply --dry-run --json</c> and <c>plan --json</c>.
+    /// </summary>
+    // Ny kontrakt med verify (review 2026-10-05): versjonert fra første utgave, og «action» som i alle andre utskrifter.
+    internal const int JsonSchemaVersion = 1;
+
     private static object ToJson(DeliveryVerification r) => new
     {
+        schemaVersion = JsonSchemaVersion,
         tenant = r.Tenant,
         queue = r.Queue,
         queuePublicId = r.QueuePublicId,
@@ -117,7 +126,7 @@ internal static class VerifyCommand
         failureClass = r.FailureClass,
         error = r.Error,
         summary = r.Summary,
-        suggestedAction = r.SuggestedAction,
+        action = r.SuggestedAction,
     };
 
     private static byte[]? ReadBody(ArgMap map, out string? error)
@@ -131,7 +140,14 @@ internal static class VerifyCommand
         if (!string.IsNullOrWhiteSpace(file))
         {
             if (!File.Exists(file)) { error = $"File not found: {file}"; return null; }
-            return File.ReadAllBytes(file);
+            byte[] bytes = File.ReadAllBytes(file);
+            if (IsDeploymentFile(bytes))
+            {
+                error = $"--file is the event to send, and {file} is a deployment file. Name the deployment file with --deployment, " +
+                        "and send the event with --data, --file or --stdin.";
+                return null;
+            }
+            return bytes;
         }
 
         string? data = map.Get("data");
@@ -142,5 +158,38 @@ internal static class VerifyCommand
         error = "verify requires the event to send: --data <json>, --file <path>, or --stdin. " +
                 "It is delivered to the real receiver like any other event, so send data it treats as harmless.";
         return null;
+    }
+
+    /// <summary>
+    /// Whether the bytes are a deployment file rather than an event: a JSON object with only the file's top-level fields,
+    /// among them <c>workspace</c> or <c>queues</c>. <c>apply</c> and <c>plan</c> take the deployment file with
+    /// <c>--file</c>, so it is the mistake to expect.
+    /// </summary>
+    // Review 2026-10-05: verify --file er eventen, mens apply og plan --file er deploy-fila. Et feil valg sendte deploy-fila
+    // som event til den ekte mottakeren.
+    internal static bool IsDeploymentFile(byte[] bytes)
+    {
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(bytes, new JsonDocumentOptions
+            {
+                CommentHandling = JsonCommentHandling.Skip,
+                AllowTrailingCommas = true,
+            });
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                return false;
+
+            var names = new List<string>();
+            foreach (JsonProperty property in doc.RootElement.EnumerateObject())
+                names.Add(property.Name);
+
+            return names.Count > 0
+                   && names.All(n => n is "$schema" or "tenant" or "workspace" or "queues")
+                   && names.Any(n => n is "workspace" or "queues");
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 }

@@ -165,6 +165,30 @@ internal sealed class EventAttemptResponse
     public int? DurationMs { get; set; }
     public string? ErrorMessage { get; set; }
     public string? FailureClass { get; set; }
+
+    // DeliveryStatus, tall på ledningen (Held = 5), lest leniently som eventens status.
+    public JsonElement Status { get; set; }
+
+    // Det Queuey bestemte etter forsøket, med årsaken: RetryLater, HoldEvent, HoldQueue, HoldKey, HoldTarget eller
+    // MoveToDlq. Det står på ledningen både i prod og på integration/agents. Før 2026-10-05 gjettet verify ut fra
+    // feilklassen, og tok feil når DLQ-en var av, ved tidsavbrudd og ved holdte forsøk.
+    public string? DecisionKind { get; set; }
+    public string? DecisionReason { get; set; }
+    public DateTimeOffset? DecisionUntilUtc { get; set; }
+
+    /// <summary>
+    /// A row for a delivery Queuey held before sending: the send budget was spent, or the receiver is being probed or
+    /// waits for a person. Not a failure: the event is rescheduled, and the receiver was not contacted.
+    /// </summary>
+    internal bool IsHeld => Status.ValueKind switch
+    {
+        JsonValueKind.Number => Status.TryGetInt32(out int n) && n == 5,
+        JsonValueKind.String => string.Equals(Status.GetString(), "Held", StringComparison.OrdinalIgnoreCase),
+        _ => string.Equals(DecisionKind, "HoldTarget", StringComparison.Ordinal),
+    };
+
+    /// <summary>The failure class, or null for none (a held row and a success carry <c>None</c>).</summary>
+    internal string? Class => FailureClass is { Length: > 0 } c && c != "None" ? c : null;
 }
 
 /// <summary>
@@ -173,6 +197,9 @@ internal sealed class EventAttemptResponse
 /// </summary>
 internal static class DeliveryVerifier
 {
+    // Årsaken Queuey skriver når et tidsavbrudd mot en mottaker som ikke er merket idempotent, parkerer køen.
+    private const string TimeoutNotIdempotent = "target_requires_action_timeout_not_idempotent";
+
     public static async Task<DeliveryVerification> RunAsync(
         QueueyClient client,
         QueueyControlPlaneClient controlPlane,
@@ -183,8 +210,10 @@ internal static class DeliveryVerifier
         VerifyDeliveryOptions options,
         CancellationToken cancellationToken)
     {
-        // A fresh idempotency key per run: an idempotent queue would otherwise collapse a second
-        // verification into the first and report the first one's outcome.
+        await EnsureEventsCanBeReadAsync(controlPlane, management, tenantPublicId, queueName, cancellationToken).ConfigureAwait(false);
+
+        // A fresh idempotency key per run: ingress collapses a repeated key into the event it already has, and verify
+        // would then report the first run's outcome.
         PublishResult published = await client.Ingress.PublishAsync(queueName, payload, new PublishOptions
         {
             ContentType = options.ContentType,
@@ -207,11 +236,10 @@ internal static class DeliveryVerifier
             }
             catch (QueueyForbiddenException ex)
             {
-                // Eventen er alt sendt; si hvorfor utfallet ikke kan leses, og hva som hjelper.
+                // Lesingen ble sjekket før publiseringen, så dette er en tilgang som endret seg underveis.
                 throw new QueueyForbiddenException(
                     $"Published {published.EventId} to '{queueName}', but this key cannot read events back, so its outcome " +
-                    "is unknown. Verifying needs the event.read permission: a deploy key made with the Build profile has " +
-                    $"it (keys made before 2026-09-23 do not). {ex.Message}",
+                    $"is unknown. Verifying needs the event.read permission on the queue. {ex.Message}",
                     ex.ErrorCode);
             }
 
@@ -241,12 +269,12 @@ internal static class DeliveryVerifier
         }
 
         // En eldre feilende event holder eventene bak seg i to tilfeller:
-        // - Feilen parkerer målet eller køen (401, 403, 404, TLS, en permanent feil, transform eller
-        //   Stripe-signaturen). Da holder Queuey hele køen til noen gjenopptar den, uansett ordering.
-        // - Hele køen er én rekke: ordering fifo, uten partisjonsnøkkel. Med bykey holder eventen ellers
-        //   bare sin egen nøkkel, og med besteffort ingen.
-        // Før 2026-09-24 ble den navngitt uansett, og kunne peke på feil årsak. Fram til 2026-10-05 bare på
-        // fifo, også når en 401 holdt en bykey-kø.
+        // - Den holder hele køen: Queuey parkerte målet (HoldEvent), eventen stopper køen med DLQ-en av (HoldQueue), eller
+        //   målet holdes for en probe eller en person. Det gjelder uansett ordering.
+        // - Hele køen er én rekke: ordering fifo, uten partisjonsnøkkel. Med bykey holder eventen ellers bare sin egen
+        //   nøkkel, og med besteffort ingen.
+        // Før 2026-09-24 ble den navngitt uansett, og kunne peke på feil årsak. Fram til 2026-10-05 bare på fifo, også når
+        // en 401 holdt en bykey-kø.
         EventDetailsResponse? blocker = null;
         bool flowExplains = row is { DeliveryHeld: true } or { Suspended: true };
         bool notTriedYet = last is null || (last.AttemptCount == 0 && (last.Attempts?.Count ?? 0) == 0);
@@ -260,7 +288,7 @@ internal static class DeliveryVerifier
                     EventDetailsResponse failing = await controlPlane.GetEventAsync(published.QueuePublicId, id, cancellationToken).ConfigureAwait(false);
                     failing.PublicId ??= id;
 
-                    if (HoldsTheQueue(LastAttempt(failing)?.FailureClass)
+                    if (HoldsTheQueue(failing)
                         || await OrderingAsync(controlPlane, published.QueuePublicId, cancellationToken).ConfigureAwait(false) == "fifo")
                         blocker = failing;
                 }
@@ -272,6 +300,50 @@ internal static class DeliveryVerifier
         }
 
         return Judge(queueName, published, last, row, options.Timeout, blocker, tenantPublicId);
+    }
+
+    /// <summary>
+    /// Refuses before publishing when the key cannot read the queue's events: the event goes to the real receiver,
+    /// and verify could not say what became of it. A cheap read of one event. When the queue cannot be found by name
+    /// here, the publish decides, and the read after it is the backstop.
+    /// </summary>
+    private static async Task EnsureEventsCanBeReadAsync(
+        QueueyControlPlaneClient controlPlane, IQueueyManagement management, string? tenantPublicId, string queueName,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(tenantPublicId))
+            return;
+
+        string? queuePublicId;
+        try
+        {
+            queuePublicId = (await management.ListQueuesAsync(tenantPublicId!, cancellationToken).ConfigureAwait(false))
+                .FirstOrDefault(q => string.Equals(q.DisplayName, queueName, StringComparison.Ordinal))?.PublicId;
+        }
+        catch (QueueyException)
+        {
+            return;
+        }
+
+        if (queuePublicId is null)
+            return;
+
+        try
+        {
+            await controlPlane.ReadOneEventAsync(queuePublicId, cancellationToken).ConfigureAwait(false);
+        }
+        catch (QueueyForbiddenException ex)
+        {
+            // Før 2026-10-05 publiserte verify først og fant ut etterpå at nøkkelen ikke kunne lese utfallet.
+            throw new QueueyForbiddenException(
+                $"This key cannot read events on queue '{queueName}', so verify could not follow the event it sends. Nothing " +
+                $"was published. Verifying needs the event.read permission on the queue: use a key that has it. {ex.Message}",
+                ex.ErrorCode);
+        }
+        catch (QueueyException)
+        {
+            // Bare tilgangen sjekkes her. Andre svar avgjøres av publiseringen og lesingen etter den.
+        }
     }
 
     /// <summary>
@@ -294,12 +366,16 @@ internal static class DeliveryVerifier
     /// <summary>
     /// Done waiting: a terminal status, or a failed attempt. A failure is reported on the first
     /// attempt rather than after every retry — the retries can take hours, and the first answer is
-    /// what says what to fix.
+    /// what says what to fix. A delivery Queuey held before sending is not an outcome: verify keeps waiting.
     /// </summary>
     internal static bool IsSettled(EventDetailsResponse e) => e.StatusName switch
     {
         "Delivered" or "Logged" or "Filtered" or "Dlq" or "Skipped" or "Sandbox" => true,
-        "Failed" => true,
+
+        // Et holdt forsøk setter eventen til Failed for å planlegge den på nytt (sendebudsjettet, en mottaker som probes
+        // eller venter på en person). Før 2026-10-05 ble det lest som en feil: to verify innenfor samme vindu for
+        // sendebudsjettet ga «could not be reached» og exit 1.
+        "Failed" => LastAttempt(e) is not { IsHeld: true },
         _ => false,
     };
 
@@ -307,9 +383,11 @@ internal static class DeliveryVerifier
         string queue, PublishResult published, EventDetailsResponse? e, QueueListItem? queueRow, TimeSpan timeout,
         EventDetailsResponse? blocker = null, string? tenant = null)
     {
-        EventAttemptResponse? attempt = e?.Attempts?.OrderByDescending(a => a.AttemptNumber).FirstOrDefault();
+        EventAttemptResponse? attempt = LastAttempt(e);
+        EventAttemptResponse? tried = LastTried(e);
         string? status = e?.StatusName;
-        int attempts = Math.Max(e?.AttemptCount ?? 0, e?.Attempts?.Count ?? 0);
+        int attempts = Math.Max(e?.AttemptCount ?? 0, e?.Attempts?.Count(a => !a.IsHeld) ?? 0);
+        bool held = attempt is { IsHeld: true };
 
         DeliveryVerification Result(DeliveryVerdict verdict, string summary, string? action) => new()
         {
@@ -320,16 +398,16 @@ internal static class DeliveryVerifier
             Verdict = verdict,
             Status = status,
             Attempts = attempts,
-            Target = attempt?.TargetEndpoint,
-            ResponseCode = attempt?.ResponseCode,
-            DurationMs = attempt?.DurationMs,
-            FailureClass = attempt?.FailureClass,
-            Error = attempt?.ErrorMessage,
+            Target = (tried ?? attempt)?.TargetEndpoint,
+            ResponseCode = tried?.ResponseCode,
+            DurationMs = tried?.DurationMs,
+            FailureClass = tried?.Class,
+            Error = tried?.ErrorMessage,
             Summary = summary,
             SuggestedAction = action,
         };
 
-        switch (status)
+        switch (held ? null : status)
         {
             case "Delivered":
                 return Result(DeliveryVerdict.Delivered,
@@ -362,34 +440,41 @@ internal static class DeliveryVerifier
 
             case "Failed":
             case "Dlq":
-                return Result(DeliveryVerdict.Failed, FailureSummary(attempt, status == "Dlq"), FailureAction(attempt));
+                return Result(DeliveryVerdict.Failed, FailureSummary(attempt, status == "Dlq"), FailureAction(attempt, queue));
         }
 
         // Ingen utfall innen fristen.
-        string waiting = status is null
-            ? $"The event could not be read within {timeout.TotalSeconds:0} s."
-            : $"No outcome within {timeout.TotalSeconds:0} s: the event is still {status}.";
+        string waiting = held
+            ? $"No outcome within {timeout.TotalSeconds:0} s: Queuey is holding the event before sending it."
+            : status is null
+                ? $"The event could not be read within {timeout.TotalSeconds:0} s."
+                : $"No outcome within {timeout.TotalSeconds:0} s: the event is still {status}.";
 
         // Holdt og suspendert levering først: de stopper hele køen, så en feilende event foran er ikke
         // grunnen til at denne venter.
         if (queueRow?.DeliveryHeld == true)
             return Result(DeliveryVerdict.Timeout,
                 waiting + " Delivery is held on this queue, so events wait until it is resumed.",
-                "Resume delivery in the Queuey console. A deploy never resumes a queue someone paused.");
+                "A person resumes delivery in the Queuey console. A deploy never resumes a queue someone paused.");
 
         if (queueRow?.Suspended == true)
             return Result(DeliveryVerdict.Timeout,
                 waiting + " The queue is suspended.",
                 "Contact Queuey support: a suspended queue does not deliver.");
 
-        if (LastAttempt(blocker) is { } blocking)
+        if (held)
+            return Result(DeliveryVerdict.Timeout,
+                waiting + " " + HeldBecause(attempt!) + (tried is null ? "" : $" Its last attempt: {Outcome(tried)}{Bracketed(tried.Class)}."),
+                HeldAction(attempt!));
+
+        if (LastTried(blocker) is { } blocking)
             return Result(DeliveryVerdict.Timeout,
                 waiting + $" An earlier event on this queue, {blocker!.PublicId}, is failing — {Outcome(blocking)}" +
-                (string.IsNullOrWhiteSpace(blocking.FailureClass) ? "" : $" [{blocking.FailureClass}]") +
-                (HoldsTheQueue(blocking.FailureClass)
-                    ? " — and Queuey holds the queue's deliveries until that is fixed and the queue is resumed."
+                Bracketed(blocking.Class) +
+                (HoldsTheQueue(blocker)
+                    ? " — and Queuey holds the queue's deliveries until that is dealt with."
                     : " — and with fifo ordering the events behind it wait for it."),
-                FailureAction(blocking) + " Once that event is delivered or skipped, the events behind it go out.");
+                FailureAction(blocking, queue) + " Once that event is delivered or skipped, the events behind it go out.");
 
         if (queueRow is { HasDeliveryTarget: false })
             return Result(DeliveryVerdict.Timeout,
@@ -404,23 +489,52 @@ internal static class DeliveryVerifier
     private static EventAttemptResponse? LastAttempt(EventDetailsResponse? e)
         => e?.Attempts?.OrderByDescending(a => a.AttemptNumber).FirstOrDefault();
 
-    /// <summary>
-    /// Failures that stop Queuey before it sends anything: the receiver was never contacted, so the
-    /// outcome is not the receiver's to explain.
-    /// </summary>
-    private static bool StoppedBeforeSending(string? failureClass)
-        => failureClass is "TransformFailed" or "OriginNotVerified" or "SignatureRecalculationFailed";
+    /// <summary>The latest attempt Queuey made, sent or stopped before sending: not a held row.</summary>
+    private static EventAttemptResponse? LastTried(EventDetailsResponse? e)
+        => e?.Attempts?.Where(a => !a.IsHeld).OrderByDescending(a => a.AttemptNumber).FirstOrDefault();
+
+    private static string Bracketed(string? failureClass) => failureClass is null ? "" : $" [{failureClass}]";
 
     /// <summary>
-    /// Failures that park the receiver or the queue for a person: Queuey holds every delivery on the
-    /// queue, whatever its ordering, until someone fixes the cause and resumes the queue.
+    /// Whether the event holds every delivery on its queue, whatever the ordering: by the decision Queuey recorded,
+    /// or by the class when there is none. A target held for a probe or a person holds all its events too.
     /// </summary>
-    private static bool HoldsTheQueue(string? failureClass) => failureClass is
+    private static bool HoldsTheQueue(EventDetailsResponse e)
+    {
+        if (LastAttempt(e) is { IsHeld: true } heldRow && heldRow.DecisionReason?.StartsWith("target_", StringComparison.Ordinal) == true)
+            return true;
+
+        return LastTried(e) is { } tried && HoldsTheQueue(tried);
+    }
+
+    private static bool HoldsTheQueue(EventAttemptResponse a) => a.DecisionKind switch
+    {
+        "HoldEvent" or "HoldQueue" => true,
+        "RetryLater" or "MoveToDlq" or "HoldKey" or "HoldTarget" or "Delivered" => false,
+        _ => ParksByClass(a.Class),
+    };
+
+    /// <summary>
+    /// The classes that park the receiver or the queue for a person, for an attempt without a recorded decision.
+    /// </summary>
+    private static bool ParksByClass(string? failureClass) => failureClass is
         "AuthenticationFailed" or "AuthorizationFailed" or "RouteOrConfigError" or "ProtocolOrSecurityIssue"
         or "PermanentTargetError" or "TransformFailed" or "SignatureRecalculationFailed";
 
+    /// <summary>
+    /// Failures that stop Queuey before it sends anything: the receiver was never contacted, so the outcome is not
+    /// the receiver's to explain. A credential or identity-provider setup failure is an authentication failure without
+    /// a response, and a destination the egress guard refuses is a route failure without one.
+    /// </summary>
+    private static bool StoppedBeforeSending(EventAttemptResponse? a) => a?.Class switch
+    {
+        "TransformFailed" or "OriginNotVerified" or "SignatureRecalculationFailed" => true,
+        "AuthenticationFailed" or "RouteOrConfigError" => a.ResponseCode is null,
+        _ => false,
+    };
+
     private static string Outcome(EventAttemptResponse? a)
-        => StoppedBeforeSending(a?.FailureClass)
+        => StoppedBeforeSending(a)
             ? $"Queuey did not send it to {a!.TargetEndpoint ?? "the receiver"}"
             : a?.ResponseCode is { } code
             ? $"{a.TargetEndpoint ?? "the receiver"} answered {code}"
@@ -431,12 +545,12 @@ internal static class DeliveryVerifier
     private static string FailureSummary(EventAttemptResponse? a, bool inDlq)
     {
         string target = a?.TargetEndpoint ?? "the receiver";
-        string cls = string.IsNullOrWhiteSpace(a?.FailureClass) ? "" : $" [{a!.FailureClass}]";
-        string then = inDlq ? " The event is in the DLQ." : WhatQueueyDoesNext(a?.FailureClass);
+        string cls = Bracketed(a?.Class);
+        string then = inDlq ? " The event is in the DLQ." : WhatQueueyDoesNext(a);
 
         // Stoppet før sending (2026-10-05): «it did not answer» la skylda på en mottaker som aldri ble
         // kontaktet. Feilmeldingen fra forsøket sier hva som stoppet den.
-        if (StoppedBeforeSending(a?.FailureClass))
+        if (StoppedBeforeSending(a))
             return $"Queuey did not send the event to {target}{cls}"
                    + (string.IsNullOrWhiteSpace(a!.ErrorMessage) ? "" : $": {a.ErrorMessage!.Trim().TrimEnd('.')}")
                    + $". The receiver was never contacted.{then}";
@@ -448,38 +562,81 @@ internal static class DeliveryVerifier
     }
 
     /// <summary>
-    /// What Queuey does with a failed event that is not in the DLQ, by its class. A class whose next step
-    /// depends on more than the class (the DLQ setting, the ordering) gets no forecast.
+    /// What Queuey does with a failed event that is not in the DLQ: what it decided after the attempt, or by the class
+    /// for an attempt without a decision. A class whose next step depends on more than the class gets no forecast.
     /// </summary>
-    // Før 2026-10-05 sa hver feil «Queuey retries it on the queue's schedule», også en 401, der Queuey i stedet
-    // holder køen til en person gjenopptar den.
-    private static string WhatQueueyDoesNext(string? failureClass) => failureClass switch
+    // Før 2026-10-05 sa hver feil «Queuey retries it on the queue's schedule», også en 401, der Queuey i stedet holder
+    // køen til en person gjenopptar den.
+    private static string WhatQueueyDoesNext(EventAttemptResponse? a) => a?.DecisionKind switch
     {
-        "TargetServerError" or "TargetUnavailable" =>
-            " Queuey sends it again, and if the receiver stays down, probes it and resumes delivering when it answers.",
-        "RateLimited" =>
-            " Queuey sends it again after the wait the receiver asked for.",
-        _ when HoldsTheQueue(failureClass) =>
-            " Queuey holds the queue's deliveries until this is fixed and the queue is resumed.",
-        _ => "",
+        "MoveToDlq" => " The event is in the DLQ.",
+        "HoldEvent" when a.DecisionReason == TimeoutNotIdempotent =>
+            " The receiver may have got it, and the queue is not marked idempotent, so Queuey holds the queue rather than " +
+            "risk delivering it twice, until a person resumes it.",
+        "HoldEvent" => " Queuey holds the queue's deliveries until this is fixed and a person resumes the queue.",
+        "HoldQueue" => " With the DLQ off, the event holds the queue: nothing behind it is delivered until a person deals with it.",
+        "HoldKey" => " With the DLQ off, the event holds its key: later events with the same key wait, and other keys keep delivering.",
+        "RetryLater" when a.Class == "RateLimited" => " Queuey sends it again after the wait the receiver asked for.",
+        "RetryLater" => " Queuey sends it again, and if the receiver stays down, probes it and resumes delivering when it answers.",
+        _ => a?.Class switch
+        {
+            "TargetServerError" or "TargetUnavailable" =>
+                " Queuey sends it again, and if the receiver stays down, probes it and resumes delivering when it answers.",
+            "RateLimited" => " Queuey sends it again after the wait the receiver asked for.",
+            { } c when ParksByClass(c) => " Queuey holds the queue's deliveries until this is fixed and a person resumes the queue.",
+            _ => "",
+        },
     };
 
     /// <summary>
-    /// What to change, and for a failure that holds the queue, the step after the fix. Without that step
-    /// the next verify waits behind the held queue and times out, even with the cause fixed.
+    /// What to change, and when the queue waits for a person, the step after the fix. Without that step the next
+    /// verify waits behind the held queue and times out, even with the cause fixed.
     /// </summary>
-    private static string FailureAction(EventAttemptResponse? a)
-        => WhatToFix(a) + (HoldsTheQueue(a?.FailureClass)
-            ? " Then resume the queue with Verify & resume, in the Queuey console or over MCP: until then Queuey holds its deliveries, so verifying again waits."
-            : "");
-
-    private static string WhatToFix(EventAttemptResponse? a) => a?.FailureClass switch
+    private static string FailureAction(EventAttemptResponse? a, string queue)
     {
+        // Et tidsavbrudd mot en mottaker som ikke er merket idempotent, parkerer køen med standardvalgene (idempotent false,
+        // timeoutBehavior Hold). Rådet før 2026-10-05 var å sjekke URL-en, og at Queuey sendte den igjen.
+        if (a?.DecisionKind == "HoldEvent" && a.DecisionReason == TimeoutNotIdempotent)
+            return $"The receiver did not answer within the delivery timeout. If it handles the same event twice safely, declare " +
+                   $"\"idempotent\": true on queues.{queue}; if it is only slow, raise delivery.timeoutMs. Run `queuey apply`, " +
+                   "then a person resumes the queue in the Queuey console.";
+
+        string fix = WhatToFix(a);
+        return a?.DecisionKind switch
+        {
+            "HoldEvent" => fix + PersonResumes,
+            "HoldQueue" => fix + " Then a person unlocks the queue in the Queuey console, which sends the event again, or skips it. " +
+                           "With \"dlqEnabled\": true, an event the receiver rejects goes to the DLQ instead, and the queue keeps delivering.",
+            "HoldKey" => fix + " Then a person sends the event again or skips it in the Queuey console; until then, events with its key wait. " +
+                         "With \"dlqEnabled\": true, an event the receiver rejects goes to the DLQ instead.",
+            "RetryLater" or "MoveToDlq" => fix,
+            _ => ParksByClass(a?.Class) ? fix + PersonResumes : fix,
+        };
+    }
+
+    // Verify & resume finnes i konsollet. REST-ruten krever en person, og MCP krever target.write, så en nøkkel kan ikke
+    // gjøre det (review 2026-10-05).
+    private const string PersonResumes =
+        " Then a person resumes the queue in the Queuey console (Verify & resume): until then Queuey holds its deliveries, " +
+        "so verifying again waits.";
+
+    private static string WhatToFix(EventAttemptResponse? a) => a?.Class switch
+    {
+        // Uten svar kom feilen fra Queuey sitt oppsett av autentiseringen (credential eller identitetsleverandør), ikke fra
+        // mottakeren (review 2026-10-05).
+        "AuthenticationFailed" when a.ResponseCode is null =>
+            "Queuey could not set up the credentials for this delivery, so it never contacted the receiver. Check " +
+            "delivery.credentialRef and the stored credential, or for OAuth2 the identity provider it asks for a token; " +
+            "`queuey credentials set` stores a new secret under the same name.",
         "AuthenticationFailed" =>
             "The receiver rejected the credentials. Check delivery.authMode and delivery.credentialRef (or signing) " +
             "against what the receiver expects; `queuey credentials set` stores a new secret under the same name.",
         "AuthorizationFailed" =>
             "The receiver refused the request (403). Check its permissions or IP allowlist for Queuey's deliveries.",
+        // Uten svar stoppet Queuey sin egen sperre for utgående trafikk adressen (destination_not_allowed).
+        "RouteOrConfigError" when a.ResponseCode is null =>
+            $"Queuey does not send to {a.TargetEndpoint ?? "this address"}: it is a private, local or blocked address. Point " +
+            "the delivery URL at a public address, or receive on your machine with `queuey listen`.",
         "RouteOrConfigError" =>
             $"The receiver has no such route. Check the delivery URL: {a.TargetEndpoint}.",
         "BadPayload" or "ContentTypeMismatch" or "PayloadTooLarge" =>
@@ -501,10 +658,12 @@ internal static class DeliveryVerifier
         "SignatureRecalculationFailed" =>
             "Queuey could not recalculate the Stripe signature on this queue, so it held the delivery. Fix what the error names: " +
             "turn the queue's Stripe verification back on, remove its payload mutations, or replace the signing secret.",
+        // Ingress avviser en usignert publisering med 401 på en kø som verifiserer Stripe, så eventen ble verifisert, men
+        // Queuey kan ikke gå god for at Stripe sendte den (review 2026-10-05).
         "OriginNotVerified" =>
-            "This queue re-signs its deliveries as the provider, and Queuey signs only what the provider sent through the queue's " +
-            "verified ingress, which a test event is not. Prove delivery with an event from the provider instead: for Stripe, " +
-            "the event's Resend button in the Dashboard or `stripe events resend`.",
+            "Queuey re-signs this queue's deliveries as Stripe, and only for events it can vouch Stripe sent. This one arrived " +
+            "before signature recalculation started, or just after the signing secret changed. Resend it from Stripe: the " +
+            "event's Resend button in the Dashboard, or `stripe events resend`.",
         "ProtocolOrSecurityIssue" =>
             "The secure connection to the receiver failed. Check the delivery URL's scheme, and the receiver's certificate and the TLS version it requires.",
         "PermanentTargetError" =>
@@ -512,5 +671,33 @@ internal static class DeliveryVerifier
         _ when a?.ResponseCode is null =>
             "Check that the delivery URL is right and reachable from the internet.",
         _ => "Look at this attempt in the Queuey console for the receiver's response.",
+    };
+
+    /// <summary>Why Queuey holds the event before sending it, from the held row's reason.</summary>
+    private static string HeldBecause(EventAttemptResponse held)
+    {
+        string until = held.DecisionUntilUtc is { } at ? $", until {at.UtcDateTime:HH:mm:ss} UTC" : "";
+        return held.DecisionReason switch
+        {
+            "rate_limit_budget" =>
+                $"The send budget for this endpoint (delivery.rateLimit) is spent for this window, so Queuey holds it without contacting the receiver{until}.",
+            "target_open" or "target_probe_in_flight" =>
+                "The receiver failed several times in a row, so Queuey holds the queue's deliveries and probes it.",
+            "target_requires_action" =>
+                "An earlier failure parked the receiver, so Queuey holds the queue's deliveries until a person resumes the queue.",
+            { Length: > 0 } reason => $"Queuey holds it ({reason}).",
+            _ => "Queuey holds it.",
+        };
+    }
+
+    private static string HeldAction(EventAttemptResponse held) => held.DecisionReason switch
+    {
+        "rate_limit_budget" =>
+            "The event goes out when the window resets. Verify again then, or raise delivery.rateLimit if the pacing is too slow.",
+        "target_open" or "target_probe_in_flight" =>
+            "Find out why the receiver fails. Queuey sends the held events when a probe gets through.",
+        "target_requires_action" =>
+            "Fix what the earlier failure names, then a person resumes the queue in the Queuey console (Verify & resume).",
+        _ => "Look at the event in the Queuey console.",
     };
 }
