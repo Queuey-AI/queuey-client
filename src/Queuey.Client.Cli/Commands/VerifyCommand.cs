@@ -76,7 +76,7 @@ internal static class VerifyCommand
             return (null, path);
         }
 
-        return (DeploymentTenant.ReadFromFile(File.ReadAllText(path), path), path);
+        return (DeploymentTenant.ReadFromFile(CliFiles.ReadAllText(path), path), path);
     }
 
     private static void WriteHuman(DeliveryVerification r)
@@ -135,7 +135,7 @@ internal static class VerifyCommand
         if (!string.IsNullOrWhiteSpace(file))
         {
             if (!File.Exists(file)) { code = "missing_file"; error = $"File not found: {file}"; return null; }
-            byte[] bytes = File.ReadAllBytes(file);
+            byte[] bytes = CliFiles.ReadAllBytes(file);
             if (IsDeploymentFile(bytes))
             {
                 code = "deployment_file_as_event";

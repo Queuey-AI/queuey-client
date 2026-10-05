@@ -83,17 +83,27 @@ internal sealed class CommandOptions
         if (map.Keys.FirstOrDefault(k => !Flags.Contains(k) && !_values.Contains(k)) is { } unknown)
         {
             string? hint = Hints.TryGetValue(unknown, out string? own) ? own : GlobalHints.TryGetValue(unknown, out string? global) ? global : null;
+
+            // Navnet vises bare når det ser ut som et valgnavn, og ikke kom der valget før ventet verdien sin (re-review
+            // 2026-10-05): `edge run --mqtt-password -Xy9…` viste passordet som «Unknown option --Xy9…».
+            string? valueOf = hint is null && map.InPlaceOfAValue.TryGetValue(unknown, out string? before) ? before : null;
+            bool shown = hint is not null || (valueOf is null && CliErrors.LooksLikeAnOptionName(unknown));
+            hint ??= valueOf is null ? null : $"A value that starts with '-' is read as an option: give it as --{valueOf}=<value>.";
+
             exitCode = CliErrors.Usage(map, "unknown_option",
-                $"Unknown option --{CliErrors.Shown(unknown)} for queuey {Command}.",
+                shown ? $"Unknown option --{unknown} for queuey {Command}."
+                : valueOf is not null ? $"queuey {Command} was given an unknown option right after --{valueOf}. It is not shown, since it may be the value of --{valueOf}."
+                : $"queuey {Command} was given an unknown option. It is not shown, since it does not look like an option name and may be a secret.",
                 (hint is null ? "" : hint + " ") + ValidOptionsSentence(),
-                new Dictionary<string, object?> { ["option"] = "--" + CliErrors.Shown(unknown), ["validOptions"] = Valid });
+                new Dictionary<string, object?> { ["option"] = shown ? "--" + unknown : null, ["validOptions"] = Valid });
             return false;
         }
 
         if (map.BadSwitches.FirstOrDefault() is { } badSwitch)
         {
+            // Bare kommandoens egne brytere havner her, så navnet er aldri noe brukeren har limt inn.
             exitCode = CliErrors.Usage(map, "invalid_option_value",
-                $"--{CliErrors.Shown(badSwitch)} is a switch for queuey {Command}: give it alone, or as --{CliErrors.Shown(badSwitch)}=true or --{CliErrors.Shown(badSwitch)}=false.");
+                $"--{badSwitch} is a switch for queuey {Command}: give it alone, or as --{badSwitch}=true or --{badSwitch}=false.");
             return false;
         }
 
@@ -102,7 +112,7 @@ internal sealed class CommandOptions
             string extra = map.Positionals[Positionals];
             string? hint = Hints.TryGetValue(extra, out string? own) ? own : null;
             exitCode = CliErrors.Usage(map, "unexpected_argument",
-                $"Unexpected argument '{CliErrors.Shown(extra)}' for queuey {Command}.",
+                $"Unexpected argument '{(hint is null ? CliErrors.Shown(extra) : extra)}' for queuey {Command}.",
                 (hint is null ? "" : hint + " ") + (Positionals == 0
                     ? $"queuey {Command} takes options only. {ValidOptionsSentence()}"
                     : $"queuey {Command} takes {Positionals} argument{(Positionals == 1 ? "" : "s")} besides its options. See `queuey --help`."));

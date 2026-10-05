@@ -40,11 +40,8 @@ internal static class ApplyCommand
             // Samme regel for tenant som apply, så en dry-run feiler der applyen ville feilet.
             DeploymentTenant.EnsureNoConflict(map, CliHost.Env, file.ResolveTenant(), path);
 
-            // Network-free: resolving validates names and policy, which is the failure worth catching
-            // before a deploy window rather than during one.
-            // Expanding first means an unset ${VAR} fails here, in the dry run, rather than during
-            // the deploy it was meant to protect.
-            file.Expand().Resolve();
+            // Network-free: ParseNamed has expanded and resolved the file, so names, policy and an unset ${VAR}
+            // already failed there, in the dry run, rather than during the deploy it was meant to protect.
 
             // Det som vises, er fila slik den står, med ${VAR} uutvidet. Før skrev --json de utvidede verdiene, også et
             // token i en ?code=, mens teksten viste workspacet uutvidet og køene utvidet (review 2026-10-05).
@@ -107,18 +104,23 @@ internal static class ApplyCommand
     }
 
     /// <summary>
-    /// The deployment file at <paramref name="path"/>, parsed, with the path in front of the error when it
-    /// cannot be: the parser speaks of "the deployment file", and a command can read more than one file.
+    /// The deployment file at <paramref name="path"/>, parsed and checked the way apply checks it — every <c>${VAR}</c>
+    /// expanded and every value validated — with the path in front of the error when it fails: the parser and the
+    /// checks speak of "the deployment file" or of a field, and a command can read more than one file. The file is
+    /// returned as written, with <c>${VAR}</c> unexpanded.
     /// </summary>
     internal static DeploymentFile ParseNamed(string path)
     {
         try
         {
-            return DeploymentFile.Parse(File.ReadAllText(path));
+            DeploymentFile file = DeploymentFile.Parse(CliFiles.ReadAllText(path));
+            _ = file.Expand().Resolve();
+            return file;
         }
         catch (QueueyConfigurationException ex)
         {
-            // Parseren sier «the deployment file», ikke hvilken (review 2026-10-05).
+            // Parseren sier «the deployment file», ikke hvilken (review 2026-10-05). Re-review samme dag: valideringen
+            // (en ingress-kilde, en authMode) og en ${VAR} som mangler, fikk ikke stien, så den sjekkes her også.
             throw new QueueyConfigurationException($"{path}: {ex.Message}") { SuggestedAction = ex.SuggestedAction };
         }
     }

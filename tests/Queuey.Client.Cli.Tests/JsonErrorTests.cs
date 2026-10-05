@@ -141,6 +141,48 @@ public sealed class JsonErrorTests : IDisposable
     }
 
     [Fact]
+    public async Task An_io_error_that_is_not_about_a_named_file_is_not_called_an_unreadable_file()
+    {
+        // Re-review 2026-10-05: CliEntry gjorde hver IOException til file_unreadable, med handlingen «sjekk at stien er en
+        // fil du kan lese». En IOException fra nettet har ingen sti.
+        RecordingHandler api = new(_ => throw new IOException("The connection was reset."));
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("metrics", "que_orders", "--json")), api);
+
+        JsonElement error = ErrorOn(run, ExitCodes.RuntimeError);
+        Assert.Equal("internal_error", error.GetProperty("code").GetString());
+        Assert.Equal("IOException: The connection was reset.", error.GetProperty("message").GetString());
+    }
+
+    public static TheoryData<string[], string, string> FilesThatFailTheirChecks() => new()
+    {
+        { new[] { "apply" }, """{ "queues": { "orders": { "ingress": { "eventType": { "name": "X-Event" } } } } }""",
+            "queues.orders.ingress.eventType needs \"from\"" },
+        { new[] { "apply", "--dry-run" }, """{ "queues": { "orders": { "ingress": { "authMode": "Kerberos" } } } }""",
+            "queues.orders.ingress.authMode must be one of None, ApiKey, SignedRequest, ApiKeyAndSignedRequest; got 'Kerberos'." },
+        { new[] { "plan" }, """{ "queues": { "orders": { "delivery": { "authMode": "Kerberos" } } } }""",
+            "queues.orders.delivery.authMode must be one of " },
+        { new[] { "apply", "--check" }, """{ "queues": { "orders": { "delivery": { "url": "https://x.example/${QUEUEY_TEST_SURELY_UNSET}" } } } }""",
+            "Environment variable 'QUEUEY_TEST_SURELY_UNSET' is referenced by queues.orders.delivery.url" },
+    };
+
+    [Theory]
+    [MemberData(nameof(FilesThatFailTheirChecks))]
+    public async Task A_file_that_fails_its_checks_is_named_in_front_of_the_error_and_nothing_is_sent(string[] command, string json, string error)
+    {
+        // Re-review 2026-10-05: en parsefeil hadde stien foran, men ikke en ugyldig ingress-kilde, en authMode eller en
+        // ${VAR} som mangler. Testserveren feiler testen om noe sendes.
+        string path = DeployFile(json);
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With(
+            command.Concat(new[] { "--file", path, "--tenant", "ten_abc", "--json" }).ToArray())));
+
+        JsonElement e = ErrorOn(run, ExitCodes.Configuration);
+        Assert.Equal("config_error", e.GetProperty("code").GetString());
+        Assert.StartsWith($"{path}: {error}", e.GetProperty("message").GetString());
+    }
+
+    [Fact]
     public async Task A_missing_license_says_where_to_set_it_not_that_streams_need_it()
     {
         // Review 2026-10-05: feilen nevnte «(SyncStreams)» for apply og verify, og ingen sa hvor verdien settes.

@@ -67,7 +67,7 @@ internal static class PublishCommand
         if (!string.IsNullOrWhiteSpace(file))
         {
             if (!File.Exists(file)) { code = "missing_file"; error = $"File not found: {file}"; return null; }
-            return File.ReadAllBytes(file);
+            return CliFiles.ReadAllBytes(file);
         }
 
         string? data = map.Get("data");

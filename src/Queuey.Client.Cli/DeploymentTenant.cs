@@ -47,13 +47,23 @@ internal static class DeploymentTenant
             return;
 
         (string? explicitTenant, string source) = Explicit(args, getEnv);
-        if (explicitTenant is null || string.Equals(explicitTenant, fileTenant!.Trim(), StringComparison.Ordinal))
+        string named = fileTenant!.Trim();
+        if (explicitTenant is null || string.Equals(explicitTenant, named, StringComparison.Ordinal))
             return;
 
+        // Fila vises bare når den navngir en ten_-id (re-review 2026-10-05). --tenant og QUEUEY_TENANT er alltid en, siden
+        // Explicit avviser alt annet før det sammenlignes.
+        bool fileShown = CliErrors.LooksLikeAWorkspaceId(named);
         throw new QueueyConfigurationException(
-            $"{filePath} names workspace {fileTenant!.Trim()}, but {source} names {explicitTenant}. " +
+            $"{filePath} names {(fileShown ? $"workspace {named}" : "a tenant that is not a workspace id")}, but {source} names {explicitTenant}. " +
             "A deploy and its verification have to reach the same workspace, so neither is picked: remove one of " +
-            "them, or make them name the same workspace.");
+            "them, or make them name the same workspace.")
+        {
+            SuggestedAction = fileShown
+                ? null
+                : "A workspace id starts with ten_, and a value that does not is not shown, since it may be a secret. " +
+                  "An API key belongs in --api-key or QUEUEY_API_KEY.",
+        };
     }
 
     /// <summary>
@@ -102,12 +112,13 @@ internal static class DeploymentTenant
         }
     }
 
+    // Samme sjekk som CliConfig: apply --dry-run sammenligner uten å lese konfigurasjonen ellers.
     private static (string? Tenant, string Source) Explicit(ArgMap args, Func<string, string?> getEnv)
     {
         if (args.Get("tenant") is { } flag && !string.IsNullOrWhiteSpace(flag))
-            return (flag.Trim(), "--tenant");
+            return (CliConfig.WorkspaceId(flag, "--tenant"), "--tenant");
         if (getEnv("QUEUEY_TENANT") is { } env && !string.IsNullOrWhiteSpace(env))
-            return (env.Trim(), "QUEUEY_TENANT");
+            return (CliConfig.WorkspaceId(env, "QUEUEY_TENANT"), "QUEUEY_TENANT");
         return (null, string.Empty);
     }
 }
