@@ -47,13 +47,25 @@ internal static class DeploymentTenant
             return;
 
         (string? explicitTenant, string source) = Explicit(args, getEnv);
-        if (explicitTenant is null || string.Equals(explicitTenant, fileTenant!.Trim(), StringComparison.Ordinal))
+        string named = fileTenant!.Trim();
+        if (explicitTenant is null || string.Equals(explicitTenant, named, StringComparison.Ordinal))
             return;
 
+        // Et workspace vises bare når det er en ten_-id (re-review 2026-10-05): en API-nøkkel i QUEUEY_TENANT, en forveksling
+        // i CI, sto i denne feilen ved hver apply og verify.
+        bool fileShown = CliErrors.LooksLikeAWorkspaceId(named);
+        bool explicitShown = CliErrors.LooksLikeAWorkspaceId(explicitTenant);
         throw new QueueyConfigurationException(
-            $"{filePath} names workspace {fileTenant!.Trim()}, but {source} names {explicitTenant}. " +
+            $"{filePath} names {(fileShown ? $"workspace {named}" : "a tenant that is not a workspace id")}, but {source} names " +
+            $"{(explicitShown ? explicitTenant : "something that is not a workspace id")}. " +
             "A deploy and its verification have to reach the same workspace, so neither is picked: remove one of " +
-            "them, or make them name the same workspace.");
+            "them, or make them name the same workspace.")
+        {
+            SuggestedAction = fileShown && explicitShown
+                ? null
+                : "A workspace id starts with ten_, and a value that does not is not shown, since it may be a secret. " +
+                  "An API key belongs in --api-key or QUEUEY_API_KEY.",
+        };
     }
 
     /// <summary>

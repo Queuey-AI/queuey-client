@@ -10,8 +10,24 @@ namespace Queuey.Client.Cli.Tests;
 /// underkommando eller et argument, og navnet på et ukjent valg bare når det er kort kebab-case med små bokstaver.
 /// </summary>
 [Collection(ConsoleCollection.Name)]
-public sealed class SecretEchoTests
+public sealed class SecretEchoTests : IDisposable
 {
+    private readonly string _dir = Path.Combine(Path.GetTempPath(), "queuey-secret-echo-tests", Guid.NewGuid().ToString("N"));
+
+    public SecretEchoTests() => Directory.CreateDirectory(_dir);
+
+    public void Dispose()
+    {
+        try { Directory.Delete(_dir, recursive: true); } catch { }
+    }
+
+    private string DeployFile(string tenant)
+    {
+        string path = Path.Combine(_dir, "queuey.deploy.json");
+        File.WriteAllText(path, $$"""{ "tenant": "{{tenant}}", "queues": { "orders": {} } }""");
+        return path;
+    }
+
     [Theory]
     [InlineData(new[] { "whoami", "sk_live_s3cr3t", "--json" }, "sk_live_s3cr3t", "Unexpected argument 'sk…' for queuey whoami.")]
     [InlineData(new[] { "whoami", "--json", "3f9c0a7e5b2d4c18a6e9f0b1c2d3e4f5" }, "3f9c0a7e5b2d4c18a6e9f0b1c2d3e4f5", "Unexpected argument '3f9…' for queuey whoami.")]
@@ -114,6 +130,76 @@ public sealed class SecretEchoTests
         Assert.DoesNotContain("s3cr3t", run.Stdout + run.Stderr);
         JsonElement error = JsonDocument.Parse(run.Stdout).RootElement.GetProperty("error");
         Assert.Contains("never the secret itself", error.GetProperty("action").GetString());
+    }
+
+    [Fact]
+    public async Task A_secret_given_as_the_credential_type_is_not_written_back()
+    {
+        // Re-review 2026-10-05: `--type sk_live_…` skrev hemmeligheten tilbake som en ukjent type. Typen sjekkes før miljøet
+        // leses og før noe sendes; testserveren feiler testen om noe sendes.
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With(
+            "credentials", "set", "--name", "partner-key", "--from-env", "QUEUEY_TEST_UNSET_SECRET_VARIABLE",
+            "--type", "sk_live_FAKEsecret123", "--tenant", "ten_abc", "--json")));
+
+        Assert.Equal(ExitCodes.Usage, run.Exit);
+        JsonElement error = JsonDocument.Parse(run.Stdout).RootElement.GetProperty("error");
+        Assert.Equal("invalid_value", error.GetProperty("code").GetString());
+        Assert.Equal("--type is not a credential type. Its value is not shown, since it may be a secret.", error.GetProperty("message").GetString());
+        Assert.StartsWith("Expected one of: ApiKeyHeader, BearerToken,", error.GetProperty("action").GetString());
+        Assert.DoesNotContain("FAKEsecret123", run.Stdout + run.Stderr);
+    }
+
+    [Fact]
+    public async Task A_credential_type_in_the_wrong_case_is_shown_with_its_spelling()
+    {
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With(
+            "credentials", "set", "--name", "partner-key", "--from-env", "QUEUEY_TEST_UNSET_SECRET_VARIABLE",
+            "--type", "bearertoken", "--tenant", "ten_abc", "--json")));
+
+        Assert.Equal(ExitCodes.Usage, run.Exit);
+        Assert.Equal("Unknown credential type 'bearertoken'. Did you mean BearerToken?",
+            JsonDocument.Parse(run.Stdout).RootElement.GetProperty("error").GetProperty("message").GetString());
+    }
+
+    public static TheoryData<string[], Dictionary<string, string>, string> KeysGivenAsTheWorkspace => new()
+    {
+        { new[] { "apply", "--tenant", "qak_FAKEkid.FAKEsecret" }, new Dictionary<string, string>(), "--tenant" },
+        { new[] { "apply", "--dry-run" }, new Dictionary<string, string> { ["QUEUEY_TENANT"] = "qak_FAKEkid.FAKEsecret" }, "QUEUEY_TENANT" },
+        { new[] { "verify", "orders", "--data", "{}" }, new Dictionary<string, string> { ["QUEUEY_TENANT"] = "qak_FAKEkid.FAKEsecret" }, "QUEUEY_TENANT" },
+    };
+
+    [Theory]
+    [MemberData(nameof(KeysGivenAsTheWorkspace))]
+    public async Task A_tenant_that_is_not_a_workspace_id_is_not_shown(string[] command, Dictionary<string, string> env, string source)
+    {
+        // Re-review 2026-10-05: en API-nøkkel i QUEUEY_TENANT, en forveksling i CI, ble skrevet ut ved hver apply og verify,
+        // som «…but QUEUEY_TENANT names qak_…».
+        string path = DeployFile("ten_file");
+        string[] args = command.Concat(new[] { command[0] == "verify" ? "--deployment" : "--file", path, "--json" }).ToArray();
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With(args)), env: env);
+
+        Assert.Equal(ExitCodes.Configuration, run.Exit);
+        JsonElement error = JsonDocument.Parse(run.Stdout).RootElement.GetProperty("error");
+        Assert.Equal($"{path} names workspace ten_file, but {source} names something that is not a workspace id. " +
+                     "A deploy and its verification have to reach the same workspace, so neither is picked: remove one of them, " +
+                     "or make them name the same workspace.", error.GetProperty("message").GetString());
+        Assert.Contains("An API key belongs in --api-key or QUEUEY_API_KEY.", error.GetProperty("action").GetString());
+        Assert.DoesNotContain("FAKE", run.Stdout + run.Stderr);
+    }
+
+    [Fact]
+    public async Task A_tenant_in_the_file_that_is_not_a_workspace_id_is_not_shown_either()
+    {
+        string path = DeployFile("sk_live_FAKEsecret");
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With(
+            "apply", "--file", path, "--tenant", "ten_flag", "--json")));
+
+        Assert.Equal(ExitCodes.Configuration, run.Exit);
+        Assert.StartsWith($"{path} names a tenant that is not a workspace id, but --tenant names ten_flag.",
+            JsonDocument.Parse(run.Stdout).RootElement.GetProperty("error").GetProperty("message").GetString());
+        Assert.DoesNotContain("FAKEsecret", run.Stdout + run.Stderr);
     }
 
     [Fact]

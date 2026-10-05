@@ -60,6 +60,23 @@ internal static class CliErrors
         return true;
     }
 
+    /// <summary>
+    /// Whether a value an error would show as a workspace is one: <c>ten_</c> and an id. Anything else in
+    /// <c>--tenant</c> or <c>QUEUEY_TENANT</c> may be a secret put there by mistake, and the error says it is not a
+    /// workspace id instead of showing it.
+    /// </summary>
+    // Re-review 2026-10-05: en API-nøkkel i QUEUEY_TENANT, en forveksling i CI, ble skrevet ut ved hver apply og verify.
+    internal static bool LooksLikeAWorkspaceId(string value)
+    {
+        if (value.Length is <= 4 or > 64 || !value.StartsWith("ten_", StringComparison.Ordinal))
+            return false;
+
+        foreach (char c in value)
+            if (c is not (>= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '_' or '-'))
+                return false;
+        return true;
+    }
+
     /// <summary>A usage error (exit 2): the command line itself is wrong, and nothing was sent.</summary>
     public static int Usage(ArgMap map, string code, string message, string? action = null, IReadOnlyDictionary<string, object?>? details = null)
         => Write(map.Has("json"), code, message, action, status: null, ExitCodes.Usage, label: null, details);
