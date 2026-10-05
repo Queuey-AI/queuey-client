@@ -65,8 +65,7 @@ release tag of `<Version>` in `Directory.Build.props`, and the release's test st
 builds with the tag's version, so a tag that is not the committed version fails
 before anything is packed. A release is: set `<Version>`, regenerate the schema
 (`QUEUEY_UPDATE_SCHEMA=1 dotnet test --filter DeploymentSchemaTests`), merge, then
-tag the merged commit `v<Version>`. Tags pushed as of 2026-10-05:
-`v0.1.0-preview.6` to `.8`; `main` is at `0.1.0-preview.9`, not yet tagged.
+tag the merged commit `v<Version>`.
 
 ## Across repos
 
