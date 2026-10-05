@@ -187,8 +187,10 @@ REPLAY
   queuey replay <event-id> --queue <que_...> [--json]
                  Replays one existing event to your connected `queuey listen` session for local
                  debugging (Stripe-replay style). Read-only — the event isn't modified and the real
-                 endpoint is never contacted; works on any event, including a DLQ'd one. Run
-                 `queuey listen` first so there's a listener to receive it.
+                 endpoint is never contacted. Works on any event of a queue that forwards to the
+                 listener (Local forward) and shares its payloads in full, a DLQ'd one included; on
+                 any other queue the server refuses and says what to change. Run `queuey listen`
+                 first so there's a listener to receive it.
 
 EDGE
   queuey edge run     --spool <path> --tenant <ten_...> --api-key <qak_...>

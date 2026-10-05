@@ -708,6 +708,11 @@ FullAccess or ProducerAdmin key — an ingress-only publish key can't listen).
 Read-only DLQ debugging: forwards an existing event (including a DLQ'd one) to your connected
 `queuey listen` session. The event is **not** modified and the real endpoint is never contacted.
 
+It works on a queue that forwards its deliveries to the listener (Local forward) and shares its payloads
+in full, and the key needs `queue.write` and `queue.listen` on it. Any other queue is refused, and
+`queuey replay` prints the server's reason, which says what to change. On a queue whose payload privacy
+is shape only, a person changes it in the console first; live deliveries still reach the listener.
+
 ```bash
 # terminal 1 — start a listener
 queuey listen --api-key qak_… --queue que_… --forward-to http://localhost:5094/webhook
