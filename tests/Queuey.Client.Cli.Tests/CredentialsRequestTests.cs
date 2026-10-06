@@ -18,11 +18,11 @@ public sealed class CredentialsRequestTests
     private static Task<CliRun> Request(RecordingHandler? api, params string[] args) => CliHarness.RunAsync(() => CliEntry.RunAsync(
         CliHarness.With(new[] { "credentials", "request" }.Concat(args).Concat(new[] { "--tenant", "ten_abc" }).ToArray())), api);
 
-    private static object Answer(string? replaces = null, string? keyId = "stripe-whsec", string? url = Url) => new
+    private static object Answer(string? replaces = null, string? keyId = "stripe-whsec", string? url = Url, string workspaceName = "Payments") => new
     {
         requestId = "creq_7Hk2pQ",
         workspaceId = "ten_abc",
-        workspaceName = "Payments",
+        workspaceName,
         organizationName = "Acme AS",
         name = "stripe-whsec",
         type = "HmacSigning",
@@ -89,6 +89,47 @@ public sealed class CredentialsRequestTests
         Assert.Contains("No API returns it, it never passes through this terminal or a conversation, and Queuey uses it only where "
                         + "the workspace's configuration does.", run.Stdout);
         Assert.DoesNotContain("replaces", run.Stdout);
+    }
+
+    [Theory]
+    [InlineData("Pay\u001b[2J\u001b[1;1Hments")]
+    [InlineData("Pay\u001b]0;queuey\u0007ments")]
+    [InlineData("Pay\u202ements\u2066")]
+    [InlineData("Pay\nments")]
+    public async Task A_workspace_name_from_the_server_never_writes_escape_sequences_or_control_characters(string workspaceName)
+    {
+        // Review av queuey-client#54, L3: serveren sjekker ikke workspacets navn for kontrolltegn. En ANSI-sekvens der kunne
+        // tømt skjermen, endret vinduets tittel eller snudd teksten rundt lenken personen skal få (F2.7-regelen).
+        CliRun run = await Request(Server(Answer(workspaceName: workspaceName)), "stripe-whsec", "--type", "HmacSigning");
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.Contains("in workspace Pay", run.Stdout);
+        Assert.Contains("ments (ten_abc).", run.Stdout);
+        Assert.DoesNotContain("\u001b", run.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("\u0007", run.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("\u202e", run.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("\u2066", run.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("Pay\nments", run.Stdout, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task List_writes_the_names_from_the_server_without_escape_sequences()
+    {
+        RecordingHandler api = new(req => req switch
+        {
+            { Method.Method: "GET", Path: "/tenants/ten_abc/credentials" } => RecordingHandler.Json(HttpStatusCode.OK, new[]
+            {
+                new { publicId = "cred_1", name = "stripe\u001b[31m-whsec", type = "HmacSigning", keyId = "stripe\u202e-live" },
+            }),
+            _ => throw new InvalidOperationException(req.Key),
+        });
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("credentials", "list", "--tenant", "ten_abc")), api);
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.Contains("  stripe-whsec\tHmacSigning\tkeyId=stripe-live", run.Stdout);
+        Assert.DoesNotContain("\u001b", run.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("\u202e", run.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -260,6 +301,22 @@ public sealed class CredentialsRequestTests
     }
 
     [Fact]
+    public async Task Set_says_when_the_value_was_the_one_the_credential_holds_and_that_it_is_usable()
+    {
+        // Queuey #446, M2 og L2: verdien credentialen alt har, er ingen ny versjon, og gjør en utløpt credential brukbar igjen.
+        CliRun run = await Set(new
+        {
+            publicId = "cred_9Lm2", name = "stripe-whsec", type = "HmacSigning", keyId = "stripe-whsec",
+            version = 1, created = false, secretReplaced = false, boundWorkspace = false, boundQueues = Array.Empty<string>(),
+        });
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.Contains("'stripe-whsec' (HmacSigning) already holds this value: its secret stays version 1, under the same id, and the "
+                        + "credential is usable, with no expiry.", run.Stdout);
+        Assert.DoesNotContain("Replaced", run.Stdout);
+    }
+
+    [Fact]
     public async Task Set_against_a_Queuey_that_predates_versions_answers_as_before()
     {
         CliRun run = await Set(new { publicId = "cred_9Lm2", name = "stripe-whsec", type = "HmacSigning", keyId = "stripe-whsec" }, "--json");
@@ -269,5 +326,6 @@ public sealed class CredentialsRequestTests
         Assert.Equal("cred_9Lm2", json.GetProperty("publicId").GetString());
         Assert.Equal(JsonValueKind.Null, json.GetProperty("version").ValueKind);
         Assert.Equal(JsonValueKind.Null, json.GetProperty("created").ValueKind);
+        Assert.Equal(JsonValueKind.Null, json.GetProperty("secretReplaced").ValueKind);
     }
 }

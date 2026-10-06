@@ -1042,7 +1042,8 @@ Mint once from an admin credential and put the result in your secret store.
 
 **`credentials set` reads the secret from the environment, never an argument.** Arguments land in
 shell history and CI logs. Setting a name the workspace has gives that credential the new value as a new version
-of its secret, under the same id, so everything that refers to it uses it. When the value is not yours to hold,
+of its secret, under the same id, so everything that refers to it uses it. Setting the value it already holds
+keeps its version, and makes it usable again if it had expired. When the value is not yours to hold,
 `credentials request` asks the person who has it to paste it in the console instead.
 
 **`pull` won't overwrite.** Use `--stdout` and diff it first — replacing a committed declaration is

@@ -290,7 +290,8 @@ CREDENTIALS
                  environment — never an argument, which would land in shell history and CI
                  logs — is encrypted at rest, and is never readable again. A name the
                  workspace has gets the value as a new version of its secret, under the
-                 same id, and an ingress that waits for the name verifies with it at once.
+                 same id (the value it already holds keeps its version), and an ingress
+                 that waits for the name verifies with it at once.
   queuey credentials request <name> [--type <type>] [--key-id <id>] [--username <u>]
                 [--profile <name>] [--json]
                  Asks a person for a secret, so it never passes through this terminal or a

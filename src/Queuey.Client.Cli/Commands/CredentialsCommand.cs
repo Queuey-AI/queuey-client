@@ -147,18 +147,23 @@ internal static class CredentialsCommand
             Console.WriteLine(JsonSerializer.Serialize(new
             {
                 created.PublicId, created.Name, created.Type, created.KeyId,
-                created.Version, created.Created, created.BoundWorkspace, created.BoundQueues,
+                created.Version, created.Created, created.SecretReplaced, created.BoundWorkspace, created.BoundQueues,
             }, CliHost.JsonOut));
             return ExitCodes.Success;
         }
 
         // Queuey F2.9: et navn som finnes, får hemmeligheten som en ny versjon under samme id. En eldre Queuey sier ingenting
-        // om det (Created er null), og da står meldingen som før.
-        Console.WriteLine(created.Created == false
-            ? $"Replaced the secret of '{created.Name}' ({created.Type}): it holds version {created.Version} now, under the same "
-              + "id, so everything that refers to it uses the new value. The value is encrypted and can't be read back."
+        // om det (Created er null), og da står meldingen som før. Verdien credentialen alt har, er ingen ny versjon (Queuey #446,
+        // M2), og gjør en utløpt credential brukbar igjen (L2). Navn og typer kommer fra serveren, så linjene går gjennom
+        // TerminalText (F2.7-regelen, review av queuey-client#54, L3).
+        Console.WriteLine(TerminalText.Line(created.Created == false
+            ? created.SecretReplaced == false
+                ? $"'{created.Name}' ({created.Type}) already holds this value: its secret stays version {created.Version}, under the "
+                  + "same id, and the credential is usable, with no expiry. The value is encrypted and can't be read back."
+                : $"Replaced the secret of '{created.Name}' ({created.Type}): it holds version {created.Version} now, under the same "
+                  + "id, so everything that refers to it uses the new value. The value is encrypted and can't be read back."
             : $"Stored '{created.Name}' ({created.Type}). Refer to it as credentialRef \"{created.Name}\" — "
-              + "the value is encrypted and can't be read back.");
+              + "the value is encrypted and can't be read back."));
         WriteBinding(created.BoundWorkspace == true, created.BoundQueues);
 
         return ExitCodes.Success;
@@ -253,26 +258,30 @@ internal static class CredentialsCommand
             return ExitCodes.Success;
         }
 
+        // Review av queuey-client#54, L3: workspacets navn, og alt annet her som kommer fra serveren, går gjennom TerminalText
+        // (F2.7-regelen). Serveren sjekker ikke navnet for kontrolltegn, og en ANSI-sekvens der kunne skjult eller endret linjen
+        // med lenken.
         string workspace = request.WorkspaceName is { Length: > 0 } wsName ? $"{wsName} ({request.WorkspaceId ?? tenant})" : request.WorkspaceId ?? tenant!;
-        Console.WriteLine($"Asked for the secret of '{request.Name}' ({request.Type}) in workspace {workspace}.");
+        Console.WriteLine(TerminalText.Line($"Asked for the secret of '{request.Name}' ({request.Type}) in workspace {workspace}."));
         string until = request.ExpiresAt is { } expires ? $", until {expires.UtcDateTime:yyyy-MM-dd HH:mm} UTC" : "";
         if (request.Url is { Length: > 0 } url)
         {
             Console.WriteLine($"Hand this link to a person who can manage the workspace's credentials. They sign in to Queuey and "
                               + $"paste the value there, once{until}:");
             Console.WriteLine();
-            Console.WriteLine($"  {url}");
+            Console.WriteLine($"  {TerminalText.Line(url)}");
             Console.WriteLine();
         }
         else
         {
-            Console.WriteLine($"This Queuey has no console address to link to. A person who can manage the workspace's credentials "
-                              + $"opens request {request.RequestId} in the Queuey console and pastes the value there, once{until}.");
+            Console.WriteLine(TerminalText.Line($"This Queuey has no console address to link to. A person who can manage the workspace's "
+                                                + $"credentials opens request {request.RequestId} in the Queuey console and pastes the value "
+                                                + $"there, once{until}."));
         }
 
         if (request.ReplacesCredentialId is { Length: > 0 } replaces)
-            Console.WriteLine($"A credential is stored under this name ({replaces}): the value replaces its secret as a new version, "
-                              + "under the same id and with the key id and username it has.");
+            Console.WriteLine(TerminalText.Line($"A credential is stored under this name ({replaces}): the value replaces its secret as a "
+                                                + "new version, under the same id and with the key id and username it has."));
         // Queuey F2.9-review, M5: det som holder. En nøkkel med queue.write kunne peke en køs auth mot en mottaker den har, så
         // teksten lover ikke at den som spurte, aldri kan få verdien.
         Console.WriteLine("The value is stored encrypted. No API returns it, it never passes through this terminal or a conversation, "
@@ -287,7 +296,7 @@ internal static class CredentialsCommand
         if (workspace)
             Console.WriteLine("The workspace's ingress waited for this name, and verifies with it now.");
         if (queues is { Count: > 0 })
-            Console.WriteLine($"The ingress of {string.Join(", ", queues)} waited for this name, and verifies with it now.");
+            Console.WriteLine(TerminalText.Line($"The ingress of {string.Join(", ", queues)} waited for this name, and verifies with it now."));
     }
 
     private static async Task<int> ListAsync(string[] args)
@@ -312,9 +321,11 @@ internal static class CredentialsCommand
             return ExitCodes.Success;
         }
 
-        Console.WriteLine($"{creds.Count} credential(s) in {tenant}");
+        // Navn, typer og key id-er kommer fra serveren: hver verdi går gjennom TerminalText, og tabulatorene mellom dem står.
+        Console.WriteLine(TerminalText.Line($"{creds.Count} credential(s) in {tenant}"));
         foreach (CredentialResult c in creds)
-            Console.WriteLine($"  {c.Name}\t{c.Type}{(string.IsNullOrEmpty(c.KeyId) ? "" : $"\tkeyId={c.KeyId}")}");
+            Console.WriteLine($"  {TerminalText.Line(c.Name)}\t{TerminalText.Line(c.Type)}"
+                              + (string.IsNullOrEmpty(c.KeyId) ? "" : $"\tkeyId={TerminalText.Line(c.KeyId)}"));
 
         return ExitCodes.Success;
     }

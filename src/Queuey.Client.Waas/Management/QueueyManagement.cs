@@ -243,6 +243,7 @@ internal sealed class QueueyManagement : IQueueyManagement
         {
             PublicId = r.PublicId, Name = r.Name, Type = r.Type, KeyId = r.KeyId,
             Version = r.Version, Created = r.Created, BoundWorkspace = r.BoundWorkspace, BoundQueues = r.BoundQueues,
+            SecretReplaced = r.Created == false ? r.SecretReplaced : null,
         };
 
     private static PatchSigningWire? ToWire(DeliverySigning? s)

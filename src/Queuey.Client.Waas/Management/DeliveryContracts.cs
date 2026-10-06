@@ -151,10 +151,17 @@ public sealed class CredentialResult
     public int? Version { get; set; }
 
     /// <summary>
-    /// When it was just stored: true when the name was new in the workspace, false when the secret replaced the one the
-    /// credential under that name held, which keeps its id. Null from a list, and from a Queuey that predates it.
+    /// When it was just stored: true when the name was new in the workspace, false when the value went to the credential
+    /// under that name, which keeps its id. Null from a list, and from a Queuey that predates it.
     /// </summary>
     public bool? Created { get; set; }
+
+    /// <summary>
+    /// When it was just stored under a name the workspace has: true when the value replaced the credential's secret as a
+    /// new version, false when it was the value the credential holds, which keeps its version and is usable again if it had
+    /// expired. Null when the name was new, from a list, and from a Queuey that predates it.
+    /// </summary>
+    public bool? SecretReplaced { get; set; }
 
     /// <summary>
     /// When it was just stored: true when the workspace's ingress waited for a credential by this name and verifies with it
@@ -224,6 +231,7 @@ internal sealed class CredentialWireResponse
     public bool? Created { get; set; }
     public bool? BoundWorkspace { get; set; }
     public List<string>? BoundQueues { get; set; }
+    public bool? SecretReplaced { get; set; }
 }
 
 /// <summary>Wire shape of <c>GET /tenants/{ten}/config</c> — the workspace's delivery + policy.</summary>
