@@ -513,7 +513,7 @@ public static class FlowDesigner
             var values = _profile.Where(p => referenced.Contains(p.Key)).ToArray();
             if (values.Length > 0)
             {
-                JsonObject variables = Child(Child(Child(content, "profiles"), _env), "variables");
+                JsonObject variables = Child(Entry(Child(content, "profiles"), _env), "variables");
                 foreach ((string name, (string value, DesignSetting setting)) in values)
                 {
                     if (ProfileProblem(name, value) is { } problem)
@@ -521,7 +521,7 @@ public static class FlowDesigner
                         ProfileConflict(name, setting, problem);
                         continue;
                     }
-                    MergeLeaf(variables, name, JsonValue.Create(value)!, setting.Path, setting);
+                    MergeLeaf(variables, name, JsonValue.Create(value)!, setting.Path, setting, exact: true);
                 }
             }
 
@@ -536,21 +536,25 @@ public static class FlowDesigner
                 if (value is null)
                     continue;
                 string leaf = $"{path}.{key}";
-                if (target[key] is JsonObject inner && value is JsonObject innerProposed)
+                if (Property(target, key) is JsonObject inner && value is JsonObject innerProposed)
                 {
                     MergeInto(inner, innerProposed, leaf);
                     continue;
                 }
-                MergeLeaf(target, key, value, leaf, SettingFor(leaf));
+                MergeLeaf(target, key, value, leaf, SettingFor(leaf), exact: false);
             }
         }
 
-        private void MergeLeaf(JsonObject target, string key, JsonNode proposed, string leaf, DesignSetting? setting)
+        /// <param name="exact">
+        /// True for a name the file matches exactly (a variable's), false for a property, which it matches in any casing.
+        /// </param>
+        private void MergeLeaf(JsonObject target, string key, JsonNode proposed, string leaf, DesignSetting? setting, bool exact)
         {
-            JsonNode? there = target[key];
+            string? actual = exact ? (target.ContainsKey(key) ? key : null) : KeyOf(target, key);
+            JsonNode? there = actual is null ? null : target[actual];
             if (there is null)
             {
-                target[key] = proposed.DeepClone();
+                target[actual ?? key] = proposed.DeepClone();
                 if (_file is not null && !_added.Any(a => leaf.StartsWith(a + ".", StringComparison.Ordinal)))
                     _added.Add(leaf);
                 return;
@@ -579,7 +583,7 @@ public static class FlowDesigner
         /// </summary>
         private void MergeUrl(JsonObject there, JsonObject queue)
         {
-            if ((there["delivery"] as JsonObject)?["url"] is not JsonValue thereValue || !thereValue.TryGetValue(out string? thereUrl)
+            if (Property(Property(there, "delivery") as JsonObject, "url") is not JsonValue thereValue || !thereValue.TryGetValue(out string? thereUrl)
                 || queue["delivery"] is not JsonObject delivery || delivery["url"] is not JsonValue oursValue
                 || !oursValue.TryGetValue(out string? ours))
                 return;
@@ -616,7 +620,7 @@ public static class FlowDesigner
         /// <summary>The queue's delivery kind when the file has one: it stays, since the kind follows no stated field directly.</summary>
         private void MergeKind(JsonObject there, JsonObject queue)
         {
-            if ((there["delivery"] as JsonObject)?["kind"] is not { } thereKind || queue["delivery"] is not JsonObject delivery
+            if (Property(Property(there, "delivery") as JsonObject, "kind") is not { } thereKind || queue["delivery"] is not JsonObject delivery
                 || delivery["kind"] is not { } ours)
                 return;
 
@@ -689,7 +693,7 @@ public static class FlowDesigner
             var names = new HashSet<string>(StringComparer.Ordinal);
             foreach ((string key, JsonNode? value) in content)
             {
-                if (key != "profiles")
+                if (!string.Equals(key, "profiles", StringComparison.OrdinalIgnoreCase))
                     Collect(value, names);
             }
             return names;
@@ -718,7 +722,7 @@ public static class FlowDesigner
         private IReadOnlyList<string> FromEnvironment(JsonObject content)
         {
             HashSet<string> referenced = Referenced(content);
-            if (content["profiles"]?[_env]?["variables"] is JsonObject given)
+            if (Property((Property(content, "profiles") as JsonObject)?[_env] as JsonObject, "variables") is JsonObject given)
                 referenced.ExceptWith(given.Select(v => v.Key));
             return referenced.OrderBy(n => n, StringComparer.Ordinal).ToArray();
         }
@@ -752,11 +756,17 @@ public static class FlowDesigner
         private JsonNode? At(JsonObject content, string path)
         {
             JsonNode? node = content;
+            string? previous = null;
             foreach (string part in Split(path))
             {
-                node = node is JsonObject obj ? obj[part] : null;
+                // Navnet på en kø, en profil eller en variabel er en nøkkel leseren tar som den står; resten er egenskaper.
+                bool name = previous is not null && (previous.Equals("queues", StringComparison.OrdinalIgnoreCase)
+                                                     || previous.Equals("profiles", StringComparison.OrdinalIgnoreCase)
+                                                     || previous.Equals("variables", StringComparison.OrdinalIgnoreCase));
+                node = node is JsonObject obj ? (name ? obj[part] : Property(obj, part)) : null;
                 if (node is null)
                     return null;
+                previous = part;
             }
             return node;
         }
@@ -782,12 +792,43 @@ public static class FlowDesigner
                 .OrderByDescending(s => s.Path.Length)
                 .FirstOrDefault();
 
-        private static JsonObject Child(JsonObject parent, string key)
+        /// <summary>
+        /// The key the file gives a property: the deployment file's reader matches property names in any casing, so a file's
+        /// "Queues" is its queues, and a second "queues" beside it would be a file it refuses (review of #56, K-3).
+        /// </summary>
+        private static string? KeyOf(JsonObject obj, string property)
         {
+            if (obj.ContainsKey(property))
+                return property;
+            foreach ((string key, JsonNode? _) in obj)
+            {
+                if (string.Equals(key, property, StringComparison.OrdinalIgnoreCase))
+                    return key;
+            }
+            return null;
+        }
+
+        private static JsonNode? Property(JsonObject? obj, string property)
+            => obj is not null && KeyOf(obj, property) is { } key ? obj[key] : null;
+
+        /// <summary>A property's object, made when the file has none: matched in any casing, as the reader does.</summary>
+        private static JsonObject Child(JsonObject parent, string property)
+        {
+            string key = KeyOf(parent, property) ?? property;
             if (parent[key] is JsonObject child)
                 return child;
             var created = new JsonObject();
             parent[key] = created;
+            return created;
+        }
+
+        /// <summary>A named entry's object (a queue, a profile), made when the file has none: matched as it is written.</summary>
+        private static JsonObject Entry(JsonObject parent, string name)
+        {
+            if (parent[name] is JsonObject child)
+                return child;
+            var created = new JsonObject();
+            parent[name] = created;
             return created;
         }
 
@@ -802,7 +843,7 @@ public static class FlowDesigner
             if (a is JsonValue va && b is JsonValue vb && va.TryGetValue(out string? sa) && vb.TryGetValue(out string? sb))
                 return string.Equals(sa, sb, CaseFree.Contains(key) ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
             if (a is JsonObject oa && b is JsonObject ob)
-                return oa.Count == ob.Count && oa.All(p => ob.ContainsKey(p.Key) && Same(p.Key, p.Value, ob[p.Key]));
+                return oa.Count == ob.Count && oa.All(p => KeyOf(ob, p.Key) is { } k && Same(p.Key, p.Value, ob[k]));
             return JsonNode.DeepEquals(a, b);
         }
 
