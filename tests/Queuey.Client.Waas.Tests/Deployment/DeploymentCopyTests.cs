@@ -89,8 +89,8 @@ public class DeploymentCopyTests
             // Profilene (F2.7) er en ordbok av ordbøker, som utfyllingen under ikke lager selv.
             Profiles = new Dictionary<string, DeploymentProfile>(StringComparer.Ordinal)
             {
-                ["dev"] = new() { Variables = new Dictionary<string, string>(StringComparer.Ordinal) { ["QUEUEY_A"] = sample.Text("dev-a"), ["QUEUEY_B"] = sample.Text("dev-b") } },
-                ["prod"] = new() { Variables = new Dictionary<string, string>(StringComparer.Ordinal) { ["QUEUEY_A"] = sample.Text("prod-a") } },
+                ["dev"] = new() { Variables = new Dictionary<string, string>(StringComparer.Ordinal) { ["DEPLOY_A"] = sample.Text("dev-a"), ["DEPLOY_B"] = sample.Text("dev-b") } },
+                ["prod"] = new() { Variables = new Dictionary<string, string>(StringComparer.Ordinal) { ["DEPLOY_A"] = sample.Text("prod-a") } },
             },
         };
 

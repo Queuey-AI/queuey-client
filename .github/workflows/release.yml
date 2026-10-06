@@ -31,6 +31,14 @@ name: Release
 #
 # Required variable: NUGET_USER (the nuget.org account name that registered the
 # policy — a profile name, never an email address).
+#
+# --profile is smoke-tested before anything of its kind is published
+# (scripts/smoke-profile.sh): the tool on the newest .NET runtime before the
+# NuGet push, and each self-contained binary on a runner of its own platform
+# before the binaries are attached. The connections file's owner is read
+# through the runtime's native shim, which a single-file binary carries inside
+# itself, so a build in which --profile does not work fails the release
+# instead of the user.
 
 on:
   push:
@@ -64,6 +72,19 @@ jobs:
 
       - name: Pack
         run: dotnet pack Queuey.Client.sln --configuration Release -o artifacts -p:Version=$VERSION
+
+      # The tool runs on the newest runtime a machine has (RollForward=LatestMajor),
+      # so --profile is tried there before the push. Bump this when a newer major
+      # is released.
+      - name: Setup the newest .NET runtime
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Smoke-test --profile in the tool on the newest runtime
+        run: |
+          dotnet tool install Queuey.Cli --tool-path "$RUNNER_TEMP/queuey-tool" --add-source artifacts --version "$VERSION"
+          scripts/smoke-profile.sh "$RUNNER_TEMP/queuey-tool/queuey"
 
       # The key expires an hour after it is issued, so it is fetched here —
       # after the slow test and pack steps — rather than at the top of the job.
@@ -120,11 +141,74 @@ jobs:
             cp "../../queuey-$VERSION-${{ matrix.rid }}.tar.gz" "../../queuey-${{ matrix.rid }}.tar.gz"
           fi
 
+      - name: Keep the archives for the smoke test and the release
+        uses: actions/upload-artifact@v4
+        with:
+          name: queuey-${{ matrix.rid }}
+          path: |
+            queuey-${{ env.VERSION }}-${{ matrix.rid }}.*
+            queuey-${{ matrix.rid }}.*
+          if-no-files-found: error
+
+  cli-smoke:
+    # Each binary runs where it is meant to run before it is attached, with
+    # --profile against a test profile (scripts/smoke-profile.sh). A binary in
+    # which --profile does not work fails the release here. The publish job
+    # cross-compiles every RID on Linux; only a runner of the binary's own
+    # platform can run it.
+    needs: cli-binaries
+    strategy:
+      matrix:
+        include:
+          - rid: linux-x64
+            os: ubuntu-latest
+          - rid: linux-arm64
+            os: ubuntu-24.04-arm
+          - rid: osx-arm64
+            os: macos-latest
+          - rid: osx-x64
+            os: macos-15-intel
+          - rid: win-x64
+            os: windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: queuey-${{ matrix.rid }}
+          path: dist
+
+      - name: Unpack (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Expand-Archive -Path "dist/queuey-${{ matrix.rid }}.zip" -DestinationPath bin
+
+      - name: Unpack
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p bin
+          tar -xzf "dist/queuey-${{ matrix.rid }}.tar.gz" -C bin
+
+      - name: Smoke-test --profile in the binary
+        shell: bash
+        run: scripts/smoke-profile.sh "bin/queuey${{ runner.os == 'Windows' && '.exe' || '' }}"
+
+  cli-release:
+    # Only binaries that passed their smoke test are attached.
+    needs: cli-smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: queuey-*
+          path: dist
+          merge-multiple: true
+
       - name: Attach to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --title "$GITHUB_REF_NAME" --generate-notes 2>/dev/null || true
-          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
-            queuey-$VERSION-${{ matrix.rid }}.* queuey-${{ matrix.rid }}.* --clobber
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" dist/* --clobber
