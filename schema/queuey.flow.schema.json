@@ -1,0 +1,592 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Queuey Desired Flow",
+  "description": "What a Queuey flow is for, and why its deployment file looks as it does: the source, the destination and the requirements, each field marked with where it came from. An agent writes the intent, with its fields marked stated; queuey advise --intent fills in the rest from the repository (evidence, with file and line) or as assumptions, and proposes the deployment file. The flow explains the configuration and is not it: apply reads only queuey.deploy.json.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "The JSON Schema this flow follows: queuey schema --flow prints it, and each release publishes it at https://raw.githubusercontent.com/Queuey-AI/queuey-client/v<version>/schema/queuey.flow.schema.json.",
+      "type": "string"
+    },
+    "environment": {
+      "description": "The Queuey workspace environment the flow is set up in: dev, test, staging or prod. In dev the queue delivers to a queuey listen session on the developer's machine; elsewhere it delivers over HTTP.",
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "string",
+          "maxLength": 2048,
+          "not": {
+            "pattern": "\\$\\{"
+          },
+          "enum": [
+            "dev",
+            "test",
+            "staging",
+            "prod"
+          ]
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          },
+          "maxItems": 100
+        }
+      },
+      "required": [
+        "value",
+        "provenance"
+      ],
+      "additionalProperties": false
+    },
+    "queue": {
+      "description": "The queue the flow goes through, by name: lowercase letters, digits, '.', '-' and '_'.",
+      "type": "object",
+      "properties": {
+        "value": {
+          "type": "string",
+          "maxLength": 64,
+          "not": {
+            "pattern": "\\$\\{"
+          },
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          },
+          "maxItems": 100
+        }
+      },
+      "required": [
+        "value",
+        "provenance"
+      ],
+      "additionalProperties": false
+    },
+    "source": {
+      "description": "Who sends the events, and how they prove it.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "Who sends the events: stripe, supabase (a Database Webhook), or app (code in this repository publishes them). Another value is kept, but advise designs only these.",
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "maxLength": 2048,
+              "not": {
+                "pattern": "\\$\\{"
+              },
+              "examples": [
+                "stripe",
+                "supabase",
+                "app"
+              ],
+              "minLength": 1
+            },
+            "provenance": {
+              "$ref": "#/$defs/provenance"
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/evidence"
+              },
+              "maxItems": 100
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false
+        },
+        "authentication": {
+          "description": "How the source proves an event is its own when it reaches Queuey's ingress: stripe-signature (Stripe signs every webhook), api-key (a key in a header, as a Supabase Database Webhook or the app sends it), queuey-signature (Queuey's own HMAC scheme), or none.",
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "maxLength": 2048,
+              "not": {
+                "pattern": "\\$\\{"
+              },
+              "enum": [
+                "stripe-signature",
+                "api-key",
+                "queuey-signature",
+                "none"
+              ]
+            },
+            "provenance": {
+              "$ref": "#/$defs/provenance"
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/evidence"
+              },
+              "maxItems": 100
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false
+        },
+        "eventTypes": {
+          "description": "The event types the flow carries, such as checkout.session.completed, or INSERT and UPDATE for a Supabase table.",
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_.*-]{1,200}$"
+              },
+              "maxItems": 100
+            },
+            "provenance": {
+              "$ref": "#/$defs/provenance"
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/evidence"
+              },
+              "maxItems": 100
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false
+        },
+        "table": {
+          "description": "For a Supabase Database Webhook: the table whose row changes are the events, such as public.orders.",
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "maxLength": 2048,
+              "not": {
+                "pattern": "\\$\\{"
+              },
+              "minLength": 1
+            },
+            "provenance": {
+              "$ref": "#/$defs/provenance"
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/evidence"
+              },
+              "maxItems": 100
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "destination": {
+      "description": "Where Queuey delivers the events: the handler, what serves it, and what it needs.",
+      "type": "object",
+      "properties": {
+        "route": {
+          "description": "The path Queuey delivers to, such as /api/stripe: the route of the handler that receives the events.",
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "maxLength": 2048,
+              "not": {
+                "pattern": "\\$\\{"
+              },
+              "pattern": "^/[^?#\\s]*$"
+            },
+            "provenance": {
+              "$ref": "#/$defs/provenance"
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/evidence"
+              },
+              "maxItems": 100
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false
+        },
+        "framework": {
+          "description": "What serves the route: aspnet, express, fastify, hono, koa, nestjs, nextjs, node, supabase-edge, fastapi, flask or go. Another value is kept.",
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "maxLength": 2048,
+              "not": {
+                "pattern": "\\$\\{"
+              },
+              "examples": [
+                "aspnet",
+                "express",
+                "fastify",
+                "hono",
+                "koa",
+                "nestjs",
+                "nextjs",
+                "node",
+                "supabase-edge",
+                "fastapi",
+                "flask",
+                "go"
+              ],
+              "minLength": 1
+            },
+            "provenance": {
+              "$ref": "#/$defs/provenance"
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/evidence"
+              },
+              "maxItems": 100
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false
+        },
+        "port": {
+          "description": "The port the receiver listens on while it is developed, where queuey listen --forward-to points.",
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "provenance": {
+              "$ref": "#/$defs/provenance"
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/evidence"
+              },
+              "maxItems": 100
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false
+        },
+        "baseUrl": {
+          "description": "Where the receiver is reachable over HTTP, such as https://api.example.com: the base Queuey delivers to outside dev. Never a local or private address, which Queuey's delivery does not reach.",
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "maxLength": 2048,
+              "not": {
+                "pattern": "\\$\\{"
+              },
+              "pattern": "^https?://[^?#\\s]+$"
+            },
+            "provenance": {
+              "$ref": "#/$defs/provenance"
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/evidence"
+              },
+              "maxItems": 100
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false
+        },
+        "expectsRawBody": {
+          "description": "Whether the receiver needs the exact bytes the source sent, as Stripe's constructEvent does.",
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "boolean"
+            },
+            "provenance": {
+              "$ref": "#/$defs/provenance"
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/evidence"
+              },
+              "maxItems": 100
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "requirements": {
+      "description": "What the receiver needs from the delivery: what it verifies, the order, and whether a repeat is safe.",
+      "type": "object",
+      "properties": {
+        "verification": {
+          "description": "What the receiver checks on each delivery: stripe-signature (Queuey signs each delivery again in Stripe's format), queuey-signature, shared-secret (a secret in a header), or none.",
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "maxLength": 2048,
+              "not": {
+                "pattern": "\\$\\{"
+              },
+              "enum": [
+                "stripe-signature",
+                "queuey-signature",
+                "shared-secret",
+                "none"
+              ]
+            },
+            "provenance": {
+              "$ref": "#/$defs/provenance"
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/evidence"
+              },
+              "maxItems": 100
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false
+        },
+        "ordering": {
+          "description": "Whether the receiver needs events in order: none, per-key (in order per orderingKey), or fifo (the whole queue in order, one at a time).",
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "maxLength": 2048,
+              "not": {
+                "pattern": "\\$\\{"
+              },
+              "enum": [
+                "none",
+                "per-key",
+                "fifo"
+              ]
+            },
+            "provenance": {
+              "$ref": "#/$defs/provenance"
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/evidence"
+              },
+              "maxItems": 100
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false
+        },
+        "orderingKey": {
+          "description": "With per-key ordering, where the key is: a top-level field of the JSON body (customer_id), or a header (header:X-Customer-Id). Queuey's ingress reads only top-level body fields.",
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "string",
+              "maxLength": 2048,
+              "not": {
+                "pattern": "\\$\\{"
+              },
+              "minLength": 1
+            },
+            "provenance": {
+              "$ref": "#/$defs/provenance"
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/evidence"
+              },
+              "maxItems": 100
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false
+        },
+        "idempotent": {
+          "description": "Whether the receiver handles the same event twice safely, such as by deduplicating on the event id. Queuey delivers at least once.",
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "boolean"
+            },
+            "provenance": {
+              "$ref": "#/$defs/provenance"
+            },
+            "evidence": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/evidence"
+              },
+              "maxItems": 100
+            }
+          },
+          "required": [
+            "value",
+            "provenance"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "assumptions": {
+      "description": "What the flow takes for granted that no field says, in words. The fields marked assumed are assumptions too.",
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "maxItems": 100
+    },
+    "conflicts": {
+      "description": "What advise will not decide: where the repository contradicts the intent, points several ways, or the intent asks for what Queuey cannot do. While there is one, advise proposes nothing. Advise fills this in; in an intent it is ignored.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/conflict"
+      },
+      "maxItems": 100
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "provenance": {
+      "description": "Where the value came from: stated (the intent says so), evidence (the repository shows it, at the file and line in evidence) or assumed (advise filled it in, an assumption to put to the person). Only stated values are intent: advise works the others out again each time.",
+      "enum": [
+        "stated",
+        "evidence",
+        "assumed"
+      ]
+    },
+    "evidence": {
+      "description": "Where in the repository a value was read.",
+      "type": "object",
+      "properties": {
+        "file": {
+          "description": "Repository-relative path.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "line": {
+          "description": "The line, from 1.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "what": {
+          "description": "What is there, in words.",
+          "type": "string",
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "file"
+      ],
+      "additionalProperties": false
+    },
+    "conflict": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "contradiction: the repository contradicts the intent. ambiguous: it points several ways, and the intent does not choose. unsupported: Queuey cannot do what the intent asks. missing: the design needs what neither says.",
+          "enum": [
+            "contradiction",
+            "ambiguous",
+            "unsupported",
+            "missing"
+          ]
+        },
+        "field": {
+          "description": "The flow field it is about, such as destination.route, or queuey.deploy.json when it is about the deployment file as a whole.",
+          "type": "string"
+        },
+        "stated": {
+          "description": "What the intent says, or null."
+        },
+        "found": {
+          "description": "What the repository shows, or null."
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/evidence"
+          }
+        },
+        "message": {
+          "description": "What does not fit.",
+          "type": "string"
+        },
+        "question": {
+          "description": "What to ask the person.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "field",
+        "question"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
