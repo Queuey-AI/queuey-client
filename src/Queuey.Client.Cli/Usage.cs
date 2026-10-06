@@ -95,6 +95,12 @@ APPLY
                  workspace holding settings the file is silent about is not drift.
                  ${VAR} in a value is expanded from the environment; an unset one is an
                  error, never an empty string. Use ${VAR:-default} when a default is meant.
+                 A variable whose name contains KEY, SECRET, TOKEN, PASSWORD, PASSWD or
+                 PASSPHRASE is never read, nor are the CLI's own QUEUEY_ settings (a file may
+                 use QUEUEY_TENANT, QUEUEY_WORKSPACE_ENVIRONMENT and the QUEUEY_…_URL and
+                 QUEUEY_…_DELIVERY_KIND names queuey pull writes), and a value that starts like
+                 a secret (qak_, whsec_ …) is refused: what a file expands is stored in Queuey
+                 and sent on. Keep a secret in a credential and name it in credentialRef.
                  A queue this file creates delivers when it has a destination (its own
                  delivery.url or workspace.delivery.baseUrl) and logs events until it has one.
                  Declare ""mode"": ""deliver"" or ""logOnly"" to own it; an existing queue keeps its
@@ -400,9 +406,13 @@ PROFILES
                     ~/.queuey/config.json (or the file QUEUEY_USER_CONFIG names), as
                     { ""profiles"": { ""dev"": { ""apiKey"": ""qak_…"", ""license"": ""lic_…"",
                     ""tenant"": ""ten_…"", ""apiBase"": ""https://…"", ""ingressBase"": ""https://…"" } } }.
-                    It holds keys, so it is read only when nobody else can read or write
-                    it: chmod 600 ~/.queuey/config.json. `queuey login` will write it; until
-                    then, write it by hand.
+                    It holds keys, so it is read only when nobody else can reach it, as
+                    ssh checks ~/.ssh: it belongs to you, chmod 600; a link is followed to
+                    the file it points to; and each folder above it, up to your home folder,
+                    belongs to you or root and is not writable by others (unless sticky,
+                    like /tmp). ACLs are not read, so put none on them. On Windows your
+                    profile's ACL protects it. `queuey login` will write it; until then,
+                    write it by hand.
                  2. The deployment file's values for that environment, committed with it:
                     ""profiles"": { ""dev"": { ""variables"": { ""QUEUEY_BASE_URL"": ""https://…"",
                     ""QUEUEY_STRIPE_DELIVERY_KIND"": ""localForward"" } } }. They fill the file's
@@ -410,7 +420,8 @@ PROFILES
                     taken as written, and one that looks like a secret is refused.
                  apply, plan, verify, publish, listen, events get and credentials take both
                  (listen and credentials read ./queuey.deploy.json for it); whoami shows the
-                 connection; apply --dry-run needs only the file's half, as it never connects.
+                 connection; apply --dry-run needs only the file's half, as it never connects,
+                 and says on stderr when the connection is missing or cannot be read.
                  With a profile, a flag still wins for its value, queuey.json is not read, and
                  a QUEUEY_ variable for the key, license, workspace or a host that disagrees
                  with the profile is an error, as is a ${VAR} the profile and the environment

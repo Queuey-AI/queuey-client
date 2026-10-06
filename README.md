@@ -704,6 +704,18 @@ An unset variable is an **error**, never an empty string — expanding to nothin
 you a base URL of `https://` and a deploy that "succeeded" while pointing at nowhere. Use
 `${VAR:-default}` when a default is genuinely intended.
 
+**A file never reads a secret from the environment.** Whatever a file expands is stored in Queuey, and
+a delivery URL sends it on to the receiver, so `${QUEUEY_API_KEY}` in a URL would hand your key to
+whoever the URL points at. The CLI refuses, before it reads the variable:
+
+- a name that contains `KEY`, `SECRET`, `TOKEN`, `PASSWORD`, `PASSWD` or `PASSPHRASE`, in any case;
+- the CLI's own `QUEUEY_` settings. A file may use `QUEUEY_TENANT`, `QUEUEY_WORKSPACE_ENVIRONMENT`, and
+  the `QUEUEY_…_URL` and `QUEUEY_…_DELIVERY_KIND` names `pull --as` writes;
+- a value, from any variable or default, that starts like a secret (`qak_`, `whsec_`, `sk_live_` …).
+
+Keep a secret in a credential (`queuey credentials set`) and name it in `credentialRef`. A
+`credentialRef` takes the credential's name, never its value, so it never needs such a variable.
+
 `--check` compares only what the file declares. A workspace holding settings your file is silent
 about is inheritance working as designed, not drift — so you can put as much or as little under code
 as you want.
@@ -772,12 +784,20 @@ the file `QUEUEY_USER_CONFIG` names:
 
 `apiBase` and `ingressBase` default to Queuey's hosts. A profile may also set `source`.
 
-The file holds keys, so the CLI reads it only when nobody else can. It must not be readable or writable
-by others, and its folder must not be writable by others: `chmod 600 ~/.queuey/config.json`. A file
-others could write could point the CLI at another host and catch the key, and a warning is easy to miss
-in CI. On Windows, your user profile's permissions protect it. `queuey login` will write the file;
-until then, write it by hand. In CI, write it from the pipeline's secrets to a file only the job can
-read, and point `QUEUEY_USER_CONFIG` at it.
+The file holds keys, so the CLI reads it only when nobody else can reach it, checked as ssh checks
+`~/.ssh`:
+
+- It must belong to you and be readable and writable by you alone: `chmod 600 ~/.queuey/config.json`.
+- A link is followed to the file it points to, and that file is the one checked and read.
+- Each folder above it, up to and including your home folder, must belong to you or root, and others
+  must not be able to write to it. A folder with the sticky bit, such as `/tmp`, is allowed.
+- The CLI reads the mode and the owner, not ACLs. An ACL (`setfacl`, or `chmod +a` on macOS) can let
+  others in without the mode showing it, so do not put one on the file or its folders.
+
+A file others could write could point the CLI at another host and catch the key, and a warning is easy
+to miss in CI. On Windows, the CLI does not check: your user profile's ACL protects the file.
+`queuey login` will write the file; until then, write it by hand. In CI, write it from the pipeline's
+secrets to a file only the job can read, and point `QUEUEY_USER_CONFIG` at it.
 
 ```bash
 queuey plan  --profile prod     # CI, in the pull request that promotes a change
@@ -790,7 +810,8 @@ Which commands use it:
 - `apply`, `plan`, `verify`, `publish`, `listen`, `events get` and `credentials` take both halves.
   `listen` and `credentials` read `./queuey.deploy.json` for theirs.
 - `whoami --profile` shows the connection it resolves.
-- `apply --dry-run` needs only the file's half, since it never connects.
+- `apply --dry-run` needs only the file's half, since it never connects. If the connection is missing
+  or cannot be read, it says so on stderr and goes on.
 - A command that takes no profile refuses to run while `QUEUEY_PROFILE` is set, instead of connecting
   somewhere else.
 
