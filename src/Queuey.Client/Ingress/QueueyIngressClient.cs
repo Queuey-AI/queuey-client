@@ -67,18 +67,9 @@ internal sealed class QueueyIngressClient : IQueueyIngress
             sandbox: false,
             query: null,
             options?.EventType, options?.GroupKey, options?.IdempotencyKey, options?.Source,
-            receiptOptional: true,
             cancellationToken).ConfigureAwait(false);
 
-        if (receipt is not null && string.IsNullOrWhiteSpace(receipt.EventId))
-            throw new QueueyException(
-                "The ingress answered with JSON that is not Queuey's receipt (it has no event id), so whether the event was taken is unknown.",
-                errorCode: "unreadable_response")
-            {
-                SuggestedAction = "Check that the ingress base address points at Queuey's ingress, not at a proxy, and look the event up in Queuey before sending it again.",
-            };
-
-        return receipt;
+        return Checked(receipt);
     }
 
     public Task<PublishResult> PublishSandboxAsync(string queueName, byte[] payload, SandboxPublishOptions? options = null, CancellationToken cancellationToken = default)
@@ -101,6 +92,10 @@ internal sealed class QueueyIngressClient : IQueueyIngress
             options?.EventType, options?.GroupKey, options?.IdempotencyKey, options?.Source,
             cancellationToken);
 
+    // Den offentlige veien (F2.7-re-review, 2026-10-06): et 204-svar, eller et tomt 2xx, er et event ingressen tok imot uten
+    // kvittering. Før kastet den en rå JsonException etter at eventet var tatt imot, og en som prøvde igjen, laget et duplikat.
+    // Nå gir den et resultat med tom EventId og QueuePublicId, som PublishResult dokumenterer. Et 2xx som ikke er Queuey sin
+    // kvittering, kaster.
     private async Task<PublishResult> SendAsync(
         string queueName,
         byte[] body,
@@ -112,8 +107,29 @@ internal sealed class QueueyIngressClient : IQueueyIngress
         string? idempotencyKey,
         string? source,
         CancellationToken cancellationToken)
-        => (await SendCoreAsync(queueName, body, contentType, sandbox, query, eventType, groupKey, idempotencyKey, source,
-            receiptOptional: false, cancellationToken).ConfigureAwait(false))!;
+    {
+        PublishResult? receipt = await SendCoreAsync(queueName, body, contentType, sandbox, query, eventType, groupKey, idempotencyKey,
+            source, cancellationToken).ConfigureAwait(false);
+
+        return Checked(receipt) ?? new PublishResult
+        {
+            QueuePublicId = string.Empty,
+            EventId = string.Empty,
+            ReceivedAtUtc = DateTimeOffset.UtcNow,
+            Mode = string.Empty,
+        };
+    }
+
+    // JSON uten event-id er ikke Queuey sin kvittering, og hva som skjedde med eventet, er ukjent.
+    private static PublishResult? Checked(PublishResult? receipt)
+        => receipt is not null && string.IsNullOrWhiteSpace(receipt.EventId)
+            ? throw new QueueyException(
+                "The ingress answered with JSON that is not Queuey's receipt (it has no event id), so whether the event was taken is unknown.",
+                errorCode: "unreadable_response")
+            {
+                SuggestedAction = "Check that the ingress base address points at Queuey's ingress, not at a proxy, and look the event up in Queuey before sending it again.",
+            }
+            : receipt;
 
     private async Task<PublishResult?> SendCoreAsync(
         string queueName,
@@ -125,9 +141,9 @@ internal sealed class QueueyIngressClient : IQueueyIngress
         string? groupKey,
         string? idempotencyKey,
         string? source,
-        bool receiptOptional,
         CancellationToken cancellationToken)
     {
+        // Et svar uten kropp er null her; de to veiene over skiller seg i hva de gir tilbake for det.
         if (string.IsNullOrWhiteSpace(queueName))
             throw new ArgumentException("A queue name is required.", nameof(queueName));
         if (string.IsNullOrWhiteSpace(_tenantPublicId))
@@ -149,11 +165,8 @@ internal sealed class QueueyIngressClient : IQueueyIngress
 
         try
         {
-            return receiptOptional
-                ? await _connection.SendForOptionalJsonAsync<PublishResult>(
-                    HttpMethod.Post, uri, body, contentType, _authenticator, Configure, cancellationToken).ConfigureAwait(false)
-                : await _connection.SendForJsonAsync<PublishResult>(
-                    HttpMethod.Post, uri, body, contentType, _authenticator, Configure, cancellationToken).ConfigureAwait(false);
+            return await _connection.SendForOptionalJsonAsync<PublishResult>(
+                HttpMethod.Post, uri, body, contentType, _authenticator, Configure, cancellationToken).ConfigureAwait(false);
         }
         catch (QueueyNotFoundException ex) when (!QueueyName.IsValid(queueName))
         {

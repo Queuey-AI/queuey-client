@@ -3,12 +3,20 @@ using System;
 namespace Queuey.Client;
 
 /// <summary>The result of a successful publish (HTTP 202 Accepted).</summary>
+/// <remarks>
+/// A queue whose ingress is set to answer 204 (for producers that accept nothing else) sends no receipt. The event was
+/// taken all the same, and <see cref="EventId"/>, <see cref="QueuePublicId"/> and <see cref="Mode"/> are then empty: its
+/// id is unknown to the publisher. Publish with an idempotency key to send such an event again without a duplicate.
+/// </remarks>
 public sealed class PublishResult
 {
-    /// <summary>Public id (<c>que_…</c>) of the queue the event landed on.</summary>
+    /// <summary>Public id (<c>que_…</c>) of the queue the event landed on. Empty when the ingress answered without a receipt.</summary>
     public string QueuePublicId { get; init; } = default!;
 
-    /// <summary>Public id (<c>evt_…</c>) of the accepted event (the original event id on a replay).</summary>
+    /// <summary>
+    /// Public id (<c>evt_…</c>) of the accepted event (the original event id on a replay). Empty when the ingress answered
+    /// without a receipt (a queue whose ingress answers 204).
+    /// </summary>
     public string EventId { get; init; } = default!;
 
     /// <summary>Server receive time.</summary>

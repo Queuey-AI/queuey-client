@@ -15,7 +15,11 @@ public sealed class QueueyClient : IDisposable
     private readonly bool _ownsHttpClient;
 
     /// <summary>Publishing operations against the ingress host.</summary>
-    public IQueueyIngress Ingress { get; }
+    public IQueueyIngress Ingress => IngressClient;
+
+    // Den konkrete klienten, for Queuey.Client.Waas (F2.7-re-review, 2026-10-06): publiseringen der skiller et tomt svar fra et
+    // som ikke er kvitteringen, og trenger ikke lenger en sti som kastet en rå JsonException på et 204-svar.
+    internal QueueyIngressClient IngressClient { get; }
 
     /// <summary>Creates a client that owns and manages its own <see cref="HttpClient"/>.</summary>
     public QueueyClient(QueueyOptions options)
@@ -40,7 +44,7 @@ public sealed class QueueyClient : IDisposable
 
         IQueueyAuthenticator authenticator = BuildIngressAuthenticator(options);
         var connection = new QueueyHttpConnection(httpClient);
-        Ingress = new QueueyIngressClient(
+        IngressClient = new QueueyIngressClient(
             connection,
             authenticator,
             options.ResolveIngressBaseAddress(),

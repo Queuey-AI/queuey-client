@@ -228,6 +228,53 @@ public class PublishTests
         Assert.Contains("Legacy%20Queue", handler.LastRequest!.RequestUri!.AbsoluteUri);
     }
 
+    // Re-review av #52 (2026-10-06): en kø med ingress satt til å svare 204 sender ingen kvittering. Den offentlige veien kastet
+    // en rå JsonException etter at eventet var tatt imot, så en som prøvde igjen, laget et duplikat. Nå gir den tomme id-er.
+    [Theory]
+    [InlineData(HttpStatusCode.NoContent)]
+    [InlineData(HttpStatusCode.Accepted)]
+    public async Task A_publish_answered_without_a_receipt_returns_empty_ids(HttpStatusCode status)
+    {
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(status) { Content = new ByteArrayContent(Array.Empty<byte>()) });
+        using var client = new QueueyClient(ApiKeyOptions(), new HttpClient(handler));
+
+        PublishResult result = await client.Ingress.PublishAsync("orders", new { x = 1 });
+        PublishResult sandbox = await client.Ingress.PublishSandboxAsync("orders", new { x = 1 });
+
+        foreach (PublishResult r in new[] { result, sandbox })
+        {
+            Assert.Equal("", r.EventId);
+            Assert.Equal("", r.QueuePublicId);
+            Assert.Equal("", r.Mode);
+        }
+    }
+
+    [Fact]
+    public async Task Json_that_is_not_the_receipt_is_an_error_and_not_a_publish()
+    {
+        var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(HttpStatusCode.OK, new { status = "ok" }));
+        using var client = new QueueyClient(ApiKeyOptions(), new HttpClient(handler));
+
+        QueueyException ex = await Assert.ThrowsAsync<QueueyException>(() => client.Ingress.PublishAsync("orders", new { x = 1 }));
+
+        Assert.Equal("unreadable_response", ex.ErrorCode);
+    }
+
+    [Fact]
+    public async Task A_page_that_is_not_json_is_an_error_and_not_a_publish()
+    {
+        var handler = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("<html>Sign in</html>", Encoding.UTF8, "text/html"),
+        });
+        using var client = new QueueyClient(ApiKeyOptions(), new HttpClient(handler));
+
+        QueueyException ex = await Assert.ThrowsAsync<QueueyException>(() => client.Ingress.PublishAsync("orders", new { x = 1 }));
+
+        Assert.Equal("unreadable_response", ex.ErrorCode);
+        Assert.DoesNotContain("Sign in", ex.Message);
+    }
+
     [Fact]
     public async Task Publish_without_tenant_throws_configuration_exception()
     {
