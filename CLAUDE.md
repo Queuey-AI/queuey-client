@@ -67,6 +67,11 @@ before anything is packed. A release is: set `<Version>`, regenerate the schema
 (`QUEUEY_UPDATE_SCHEMA=1 dotnet test --filter DeploymentSchemaTests`), merge, then
 tag the merged commit `v<Version>`.
 
+Before the tag, `scripts/check-queuey-vectors.sh <path to ../Queuey>` must pass. It compares
+the test vectors the CLI mirrors from Queuey — the egress guard's blocked and allowed addresses,
+and the credential name rules — against Queuey's `origin/main`, so a range or rule added on one
+side and not the other stops the tag. CI cannot run it: the Queuey repository is private.
+
 ## Across repos
 
 | What | Where |
