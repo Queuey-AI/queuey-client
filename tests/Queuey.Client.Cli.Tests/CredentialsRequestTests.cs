@@ -264,24 +264,79 @@ public sealed class CredentialsRequestTests
     private const string ValueVariable = "QUEUEY_TEST_CREDENTIAL_VALUE_F29";
 
     private static async Task<CliRun> Set(object answer, params string[] extra)
+        => (await SetAgainst(() => RecordingHandler.Json(HttpStatusCode.OK, answer), extra)).Run;
+
+    private static async Task<(CliRun Run, RecordingHandler Api)> SetAgainst(Func<HttpResponseMessage> answer, params string[] extra)
     {
         RecordingHandler api = new(req => req switch
         {
-            { Method.Method: "POST", Path: "/tenants/ten_abc/credentials" } => RecordingHandler.Json(HttpStatusCode.OK, answer),
+            { Method.Method: "POST", Path: "/tenants/ten_abc/credentials" } => answer(),
             _ => throw new InvalidOperationException(req.Key),
         });
         Environment.SetEnvironmentVariable(ValueVariable, "whsec_test_value_never_printed");
         try
         {
-            return await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With(new[]
+            CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With(new[]
             {
                 "credentials", "set", "--name", "stripe-whsec", "--type", "HmacSigning", "--from-env", ValueVariable, "--tenant", "ten_abc",
             }.Concat(extra).ToArray())), api);
+            return (run, api);
         }
         finally
         {
             Environment.SetEnvironmentVariable(ValueVariable, null);
         }
+    }
+
+    // Queuey (besluttet av Kenneth 2026-10-06): en annen verdi for et navn workspacet har, krever --replace. Svaret Queuey gir uten.
+    private static HttpResponseMessage HoldsAnotherValue()
+    {
+        HttpResponseMessage refused = RecordingHandler.Error(HttpStatusCode.Conflict, "credential_exists",
+            "Credential 'stripe-whsec' in this workspace (cred_9Lm2) holds a different secret, and nothing was stored.",
+            "To replace it, send the same request with \"replace\": true (queuey credentials set --replace).");
+        return refused;
+    }
+
+    [Fact]
+    public async Task Set_sends_replace_only_when_the_flag_is_given()
+    {
+        object stored = new { publicId = "cred_9Lm2", name = "stripe-whsec", type = "HmacSigning", keyId = "stripe-whsec", version = 1, created = true };
+
+        (CliRun plain, RecordingHandler plainApi) = await SetAgainst(() => RecordingHandler.Json(HttpStatusCode.OK, stored));
+        (CliRun replacing, RecordingHandler replacingApi) = await SetAgainst(() => RecordingHandler.Json(HttpStatusCode.OK, stored), "--replace");
+
+        Assert.Equal(ExitCodes.Success, plain.Exit);
+        Assert.Equal(ExitCodes.Success, replacing.Exit);
+        Assert.False(Assert.Single(plainApi.Requests).Json.TryGetProperty("replace", out _), "no flag, no replace in the body");
+        Assert.True(Assert.Single(replacingApi.Requests).Json.GetProperty("replace").GetBoolean());
+    }
+
+    [Fact]
+    public async Task Set_of_another_value_without_replace_says_what_replacing_does_and_names_the_flag()
+    {
+        (CliRun run, RecordingHandler api) = await SetAgainst(HoldsAnotherValue);
+
+        Assert.Equal(ExitCodes.RuntimeError, run.Exit);
+        Assert.Single(api.Requests);
+        // Et bytte er en persons beslutning (review av #60): feilen sier det, og foreslår ikke bare flagget til en agent.
+        Assert.Contains("'stripe-whsec' already holds a different secret, used by every queue and ingress that names it.",
+            run.Stderr, StringComparison.Ordinal);
+        Assert.Contains("→ Replacing it is a decision for a person: if that is intended, run again with --replace; to keep it, store "
+                        + "the new value under another name.", run.Stderr, StringComparison.Ordinal);
+        Assert.DoesNotContain("whsec_test_value_never_printed", run.Stdout + run.Stderr, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Set_of_another_value_without_replace_is_an_error_in_json_too()
+    {
+        (CliRun run, _) = await SetAgainst(HoldsAnotherValue, "--json");
+
+        Assert.Equal(ExitCodes.RuntimeError, run.Exit);
+        JsonElement error = Error(run);
+        Assert.Equal("credential_exists", error.GetProperty("code").GetString());
+        Assert.Equal(409, error.GetProperty("status").GetInt32());
+        Assert.StartsWith("Replacing it is a decision for a person", error.GetProperty("action").GetString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("whsec_test_value_never_printed", run.Stdout + run.Stderr, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -304,13 +359,15 @@ public sealed class CredentialsRequestTests
     public async Task Set_says_when_the_value_was_the_one_the_credential_holds_and_that_it_is_usable()
     {
         // Queuey #446, M2 og L2: verdien credentialen alt har, er ingen ny versjon, og gjør en utløpt credential brukbar igjen.
-        CliRun run = await Set(new
+        // Den trenger ingen --replace (2026-10-06), så en idempotent set i CI virker som før.
+        (CliRun run, RecordingHandler api) = await SetAgainst(() => RecordingHandler.Json(HttpStatusCode.OK, new
         {
             publicId = "cred_9Lm2", name = "stripe-whsec", type = "HmacSigning", keyId = "stripe-whsec",
             version = 1, created = false, secretReplaced = false, boundWorkspace = false, boundQueues = Array.Empty<string>(),
-        });
+        }));
 
         Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.False(Assert.Single(api.Requests).Json.TryGetProperty("replace", out _));
         Assert.Contains("'stripe-whsec' (HmacSigning) already holds this value: its secret stays version 1, under the same id, and the "
                         + "credential is usable. An expiry that has not passed stays.", run.Stdout);
         Assert.DoesNotContain("no expiry", run.Stdout);

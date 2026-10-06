@@ -50,11 +50,20 @@ public interface IQueueyManagement
     /// <summary>
     /// Stores a delivery credential under a workspace and returns its label. The secret is encrypted
     /// at rest and never readable again — a <c>credentialRef</c> points at it by name, which is what
-    /// keeps a deployment file safe to commit.
+    /// keeps a deployment file safe to commit. A name the workspace has keeps its credential: the value it
+    /// holds stores as before, and another value replaces its secret only with <paramref name="replace"/>,
+    /// since that changes every queue and ingress that uses it.
     /// </summary>
+    /// <param name="replace">
+    /// True to replace the secret of the credential that has the name when it holds another value, as a new
+    /// version under the same id. Without it Queuey refuses another value (<c>credential_exists</c>).
+    /// </param>
+    /// <exception cref="QueueyConflictException">
+    /// <c>credential_exists</c>: the name's credential holds another value and <paramref name="replace"/> is false.
+    /// </exception>
     Task<CredentialResult> CreateCredentialAsync(
         string tenantPublicId, string name, string type, string secret,
-        string? keyId = null, string? username = null, CancellationToken cancellationToken = default);
+        string? keyId = null, string? username = null, bool replace = false, CancellationToken cancellationToken = default);
 
     /// <summary>Lists a workspace's delivery credentials — labels and types only, never values.</summary>
     Task<IReadOnlyList<CredentialResult>> ListCredentialsAsync(string tenantPublicId, CancellationToken cancellationToken = default);
