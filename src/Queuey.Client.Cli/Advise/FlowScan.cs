@@ -159,13 +159,18 @@ public static class FlowScan
 
     public static FlowFacts Scan(string root) => Scan(root, ScanBudget.Default);
 
+    /// <summary>How long opening the root's deployment file may take: a pipe swapped in for it waits for a writer.</summary>
+    internal static readonly TimeSpan DeployFileOpenTimeout = TimeSpan.FromSeconds(5);
+
     /// <summary>Scans within <paramref name="budget"/>: a limit it reaches stops the scan and is named in <see cref="FlowFacts.Limits"/>.</summary>
-    public static FlowFacts Scan(string root, ScanBudget budget)
+    public static FlowFacts Scan(string root, ScanBudget budget) => Scan(root, budget, DeployFileOpenTimeout);
+
+    internal static FlowFacts Scan(string root, ScanBudget budget, TimeSpan deployFileOpenTimeout)
     {
         if (string.IsNullOrWhiteSpace(root)) throw new ArgumentException("A repository path is required.", nameof(root));
         if (!Directory.Exists(root)) throw new DirectoryNotFoundException($"No such directory: {root}");
 
-        var scan = new Scanner(Path.GetFullPath(root), budget);
+        var scan = new Scanner(Path.GetFullPath(root), budget, deployFileOpenTimeout);
         scan.Run();
         return scan.Facts();
     }
@@ -199,10 +204,13 @@ public static class FlowScan
         private readonly List<Finding> _queuey = new();
         private ExistingDeployFile? _deployFile;
 
-        public Scanner(string root, ScanBudget budget)
+        private readonly TimeSpan _deployFileOpenTimeout;
+
+        public Scanner(string root, ScanBudget budget, TimeSpan deployFileOpenTimeout)
         {
             _root = root;
             _budget = budget;
+            _deployFileOpenTimeout = deployFileOpenTimeout;
             _walk = new RepoWalk(root, budget, SkipDirectory, IsInteresting);
         }
 
@@ -638,7 +646,8 @@ public static class FlowScan
 
         /// <summary>
         /// The deployment file in the root, checked on its own: null when there is none, a file advise did not read (with why
-        /// and what to do) when it is a link, a folder, too large or unreadable, and otherwise the file as it reads.
+        /// and what to do) when it is a link, a folder, too large, unreadable, not a regular file, slow to open or a link by the
+        /// time it was read, and otherwise the file as it reads.
         /// </summary>
         private ExistingDeployFile? RootDeployFile()
         {
@@ -675,10 +684,12 @@ public static class FlowScan
                 return Unread(name, tooLarge, tooLargeWayOut);
 
             string? text;
+            ReadRefusal refusal;
             try
             {
-                // En fil med lengde 0 åpnes ikke: det er en tom fil, eller et rør der åpningen kunne ventet for alltid.
-                text = info.Length == 0 ? string.Empty : RepoWalk.ReadBounded(path, MaxDeployFileBytes);
+                // Det som åpnes, kan være noe annet enn det som ble sjekket: åpningen har en tidsgrense, og en strøm som ikke
+                // kan søke (et rør), avvises før noe leses (review av #57, K-a).
+                text = RepoWalk.ReadBounded(path, MaxDeployFileBytes, _deployFileOpenTimeout, out refusal);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -686,10 +697,32 @@ public static class FlowScan
                     "Check that this user can read it, then run advise --intent again.");
             }
 
-            if (text is null)
-                return Unread(name, tooLarge, tooLargeWayOut);
+            switch (refusal)
+            {
+                case ReadRefusal.TooLarge:
+                    return Unread(name, tooLarge, tooLargeWayOut);
+                case ReadRefusal.NotRegular:
+                    return Unread(name, "is not a regular file (a pipe or a socket, for instance), so advise cannot merge the flow into it.",
+                        $"Put the deployment file itself at {name}, then run advise --intent again.");
+                case ReadRefusal.TimedOut:
+                    return Unread(name, $"did not open within {RepoWalk.DurationText(_deployFileOpenTimeout)}, as a pipe without a " +
+                                        "writer never does, so advise cannot merge the flow into it.",
+                        $"Put the deployment file itself at {name}. If it is there and the disk was only slow, run advise --intent again.");
+            }
 
-            ReadDeployFile(name, text);
+            // Ble fila byttet ut med en lenke mens den ble lest, er det som ble lest, ikke fila som står der nå.
+            try
+            {
+                if (new FileInfo(path).LinkTarget is { } swapped)
+                    return LinkedDeployFile(name, swapped);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return Unread(name, $"could not be checked ({ex.Message}), so advise cannot merge the flow into it.",
+                    "Check that this user can read it, then run advise --intent again.");
+            }
+
+            ReadDeployFile(name, text!);
             return _deployFile;
         }
 
@@ -700,7 +733,11 @@ public static class FlowScan
             string? inside = resolved.StartsWith(_root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.Ordinal)
                 ? Relative(resolved)
                 : null;
-            if (inside is not null && TerminalText.HasUnsafeCharacters(inside))
+
+            // Målet står i en vei ut en agent kan lime inn i et skall (review av #57, K-b, skallregelen fra #52). Bare en vanlig
+            // sti vises: bokstaver, sifre og . _ / -, uten .. som ledd og uten - først, så ln og cp aldri leser den som et
+            // flagg. Et annet mål regnes som en lenke ut av repoet.
+            if (inside is not null && !IsPlainPath(inside))
                 inside = null;
 
             return inside is null
@@ -710,8 +747,13 @@ public static class FlowScan
                 : Unread(name, $"is a symbolic link to {inside}, and advise follows no link, so it cannot read the file it would merge " +
                                "the flow into.",
                     $"Put a copy of {inside} in the link's place while advise runs, write the content it proposes to {inside}, and " +
-                    $"bring the link back with git checkout -- {name}. Or add the flow's queue to {inside} by hand.");
+                    $"bring the link back: git checkout -- {name} when git tracks it, or ln -sf {inside} {name} when it does not. Or " +
+                    $"add the flow's queue to {inside} by hand.");
         }
+
+        /// <summary>A path a shell reads as it is and a command never as a flag: letters, digits and . _ / -, without .. as a segment, not starting with -.</summary>
+        private static bool IsPlainPath(string path)
+            => PlainPath.IsMatch(path) && !path.StartsWith('-') && !path.Split('/').Contains("..");
 
         private ExistingDeployFile Unread(string name, string reason, string wayOut)
         {
@@ -1138,6 +1180,7 @@ public static class FlowScan
     private static readonly TimeSpan MatchTimeout = TimeSpan.FromMilliseconds(250);
     private static readonly Regex OrSeparator = new(@"\s+or\s+", CompiledIgnoreCase, MatchTimeout);
     private static readonly Regex FunctionName = new(@"^[A-Za-z0-9_-]{1,64}$", Compiled, MatchTimeout);
+    private static readonly Regex PlainPath = new(@"^[A-Za-z0-9._/-]+$", Compiled, MatchTimeout);
     private static readonly Regex FileNameEnding = new(
         @"\.(js|mjs|cjs|ts|tsx|jsx|json|cs|py|go|html|css|md|txt|ya?ml|sql|toml|env|lock|config)$", Compiled, MatchTimeout);
 

@@ -1067,8 +1067,10 @@ file are not carried over, and `merge` says so.
 
 advise reads the `queuey.deploy.json` in the repository's root on its own, before the scan and outside its limits. When
 the file is there in a form advise does not read, the result is a conflict that says what to do, never a new file over
-it. That covers a symbolic link (in a monorepo, to `infra/queuey.deploy.json`), a folder, a file larger than 512 KiB, or
-one this user cannot read.
+it. That covers a symbolic link (in a monorepo, to `infra/queuey.deploy.json`), a folder, a file larger than 512 KiB,
+one this user cannot read, and anything that is not a regular file, such as a pipe. The file gets 5 seconds to open,
+since a pipe without a writer never does. The conflict names where a link points only when that is a plain path in the
+repository: letters, digits and `. _ / -`.
 
 **Stripe.** advise finds the handler and its route, `constructEvent`, the raw body, the framework and the port. It
 proposes a queue whose ingress verifies Stripe's signature and whose deliveries Queuey signs again in Stripe's format,

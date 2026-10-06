@@ -4,9 +4,26 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Text;
+using System.Threading;
 
 namespace Queuey.Client.Cli.Advise;
+
+/// <summary>Why <see cref="RepoWalk.ReadBounded"/> gave no text.</summary>
+internal enum ReadRefusal
+{
+    None,
+
+    /// <summary>The file holds more than the bound.</summary>
+    TooLarge,
+
+    /// <summary>The file is not a regular file: its stream cannot seek, as a pipe's or a socket's cannot.</summary>
+    NotRegular,
+
+    /// <summary>The open did not finish in time, as opening a pipe without a writer never does.</summary>
+    TimedOut,
+}
 
 /// <summary>
 /// How much one scan of a repository may take: files, folders, bytes read, time, and the length of a line it matches. A
@@ -227,6 +244,9 @@ internal sealed class RepoWalk
         {
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, bufferSize: 16 * 1024,
                 FileOptions.SequentialScan);
+            // Ikke en vanlig fil (et rør, en socket): det som ble sjekket, er ikke det som ble åpnet.
+            if (!stream.CanSeek)
+                return string.Empty;
             byte[] buffer = new byte[cap + 1];
             int read = 0;
             while (read < buffer.Length)
@@ -281,13 +301,31 @@ internal sealed class RepoWalk
     }
 
     /// <summary>
-    /// The text of one file, read to <paramref name="max"/> bytes and no further whatever its length says, or null when it
-    /// holds more. Outside any budget: for the one file a caller names. An I/O or access error goes to the caller.
+    /// The text of one file, outside any budget, for the one file a caller names: opened within <paramref name="openTimeout"/>,
+    /// only when it is a regular file, and read to <paramref name="max"/> bytes and no further whatever its length says. Null
+    /// with <paramref name="refusal"/> saying why otherwise. An I/O or access error goes to the caller.
     /// </summary>
-    internal static string? ReadBounded(string path, int max)
+    /// <remarks>
+    /// The file was checked before (lstat, by the caller), but what is opened can be another: a file swapped for a link to a
+    /// pipe between the check and the open (review of #57, K-a). Opening a pipe waits for a writer, so the open runs on a
+    /// thread of its own and is given up after the timeout; and a stream that cannot seek is refused before anything is read.
+    /// </remarks>
+    internal static string? ReadBounded(string path, int max, TimeSpan openTimeout, out ReadRefusal refusal)
     {
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, bufferSize: 16 * 1024,
-            FileOptions.SequentialScan);
+        FileStream? opened = OpenWithin(path, openTimeout);
+        if (opened is null)
+        {
+            refusal = ReadRefusal.TimedOut;
+            return null;
+        }
+
+        using FileStream stream = opened;
+        if (!stream.CanSeek)
+        {
+            refusal = ReadRefusal.NotRegular;
+            return null;
+        }
+
         byte[] buffer = new byte[max + 1];
         int read = 0;
         while (read < buffer.Length)
@@ -297,11 +335,79 @@ internal sealed class RepoWalk
                 break;
             read += n;
         }
-        return read > max ? null : new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetString(buffer, 0, read).TrimStart('\uFEFF');
+
+        if (read > max)
+        {
+            refusal = ReadRefusal.TooLarge;
+            return null;
+        }
+
+        refusal = ReadRefusal.None;
+        return new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetString(buffer, 0, read).TrimStart('\uFEFF');
+    }
+
+    /// <summary>
+    /// Opens a file for reading on a thread of its own, and gives up after <paramref name="timeout"/>: null then. An open that
+    /// finishes after that is closed where it finishes. A thread rather than the thread pool, so a busy pool never makes an
+    /// ordinary open look late.
+    /// </summary>
+    private static FileStream? OpenWithin(string path, TimeSpan timeout)
+    {
+        var state = new OpenState();
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, bufferSize: 16 * 1024,
+                    FileOptions.SequentialScan);
+                lock (state)
+                {
+                    if (state.Abandoned)
+                        stream.Dispose();
+                    else
+                        state.Stream = stream;
+                }
+            }
+            catch (Exception ex)
+            {
+                lock (state)
+                    state.Error = ex;
+            }
+            finally
+            {
+                state.Done.Set();
+            }
+        })
+        {
+            IsBackground = true,   // en åpning som venter for alltid, holder ikke prosessen
+            Name = "queuey-advise-open",
+        };
+        thread.Start();
+
+        state.Done.Wait(timeout);
+        lock (state)
+        {
+            if (state.Error is { } error)
+                ExceptionDispatchInfo.Capture(error).Throw();
+            if (state.Stream is null)
+                state.Abandoned = true;
+            return state.Stream;
+        }
+    }
+
+    private sealed class OpenState
+    {
+        // Aldri Dispose: tråden kan sette den etter at den som ventet, har gitt opp.
+        public readonly ManualResetEventSlim Done = new();
+        public FileStream? Stream;
+        public Exception? Error;
+        public bool Abandoned;
     }
 
     /// <summary>A size in the units a person reads: bytes, KiB or MiB.</summary>
     internal static string SizeText(long bytes) => Size(bytes);
+
+    internal static string DurationText(TimeSpan span) => Seconds(span);
 
     private void Stop(string reason)
     {
