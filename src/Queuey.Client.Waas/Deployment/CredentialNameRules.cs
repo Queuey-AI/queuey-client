@@ -95,7 +95,7 @@ internal static class CredentialNameRules
         foreach (int n in counts.Values)
         {
             double p = (double)n / text.Length;
-            bits -= p * Math.Log(p, 2);
+            bits -= p * Log2(p);
         }
 
         if (bits < minBitsPerChar)
@@ -111,6 +111,16 @@ internal static class CredentialNameRules
 
         return (double)text.Length / words < 4.0;
     }
+
+    // Math.Log2 som Queuey, så de to sidene dømmer likt rett på terskelen (review av F2.3, 2026-10-06): Math.Log(p, 2) kan
+    // avvike i siste bit og havne på den andre siden. netstandard2.0 mangler Math.Log2, og der står Math.Log(p, 2); CLI-en
+    // og net8-forbrukere bruker net8-bygget.
+    private static double Log2(double value)
+#if NET5_0_OR_GREATER
+        => Math.Log2(value);
+#else
+        => Math.Log(value, 2);
+#endif
 
     private static bool IsLower(char c) => c >= 'a' && c <= 'z';
     private static bool IsUpper(char c) => c >= 'A' && c <= 'Z';

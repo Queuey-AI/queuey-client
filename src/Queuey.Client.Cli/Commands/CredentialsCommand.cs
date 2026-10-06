@@ -53,9 +53,24 @@ internal static class CredentialsCommand
         if (!SetOptions.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) return Help();
 
-        string? name = map.Get("name");
+        string? name = map.Get("name")?.Trim();
         if (string.IsNullOrWhiteSpace(name))
             return CliErrors.Usage(map, "missing_argument", "credentials set requires --name <name>.");
+
+        // Queuey F2.3-review (2026-10-06): CLI-en laget navn dens egen deploy-fil avviser (ingress.signedRequest.credentialRef).
+        // Samme regler som fila: et navn som ser ut som en hemmelighet, og formen. Sjekket før typen, miljøet og workspacet,
+        // som andre bruksfeil. Navnet vises med høyst tre tegn, og ikke i det hele tatt når det ser ut som en hemmelighet.
+        if (DeploymentCredentialNames.LooksLikeASecret(name!))
+            return CliErrors.Usage(map, "invalid_value",
+                "--name looks like a secret, not the name of a credential. Its value is not shown.",
+                "Name the credential with letters, digits and . _ : @ / -, such as partner-key, and keep the secret in the "
+                + "environment variable --from-env names.");
+        if (!DeploymentCredentialNames.FitsShape(name))
+            return CliErrors.Usage(map, "invalid_value",
+                $"--name '{CliErrors.Shown(name!)}' can't name a credential: a name may only use letters, digits and . _ : @ / -, "
+                + $"starting with a letter or digit, at most {DeploymentCredentialNames.MaxLength} characters.",
+                "Choose a name of that shape, such as partner-key or stripe.whsec. A deployment file refers to the credential by it "
+                + "(ingress.signedRequest.credentialRef).");
 
         // ApiKeyHeader by default: it is the type that pairs with `authMode: "ApiKey"`, which is what
         // a deployment file names most often. Checked here rather than at the server, because an
