@@ -30,7 +30,7 @@ queuey apply  --file queuey.deploy.json --check     # the CI drift gate
 queuey verify orders --data '{"test":true}'         # did an event actually arrive?
 
 # 2. Receive real webhooks on your laptop, without exposing a port
-queuey listen --forward-to http://localhost:5000/hooks
+queuey listen --queue <name> --forward-to http://localhost:5000
 
 # 3. Publish, inspect, operate
 queuey publish order-events --event order.created --data '{"orderId":"A-1"}'
