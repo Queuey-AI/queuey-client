@@ -6,8 +6,10 @@ namespace Queuey.Client.Cli.Tests;
 
 /// <summary>
 /// Brukerens tilkoblinger (F2.7, 2026-10-06): ~/.queuey/config.json, eller fila QUEUEY_USER_CONFIG navngir. Den holder
-/// nøkler, så den leses bare når ingen andre kan lese eller skrive den, og ingenting av den vises i en feil.
+/// nøkler, så den leses bare når ingen andre kan lese eller skrive den, og ingenting av den vises i en feil. I samlingen
+/// til konsolltestene, fordi noen tester bytter ut hvem som eier en fil (UserProfiles.Inspect), som ProfileCommandTests leser.
 /// </summary>
+[Collection(ConsoleCollection.Name)]
 public sealed class UserProfilesTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "queuey-user-profile-tests", Guid.NewGuid().ToString("N"));
@@ -125,7 +127,7 @@ public sealed class UserProfilesTests : IDisposable
         var ex = Assert.Throws<QueueyConfigurationException>(() => UserProfiles.Load("dev", Pointing(path), out _));
 
         Assert.Equal($"{shared} can be written by other users (mode 0770), who could replace {path}, so it was not read.", ex.Message);
-        Assert.Equal($"Let only you write to it: chmod 700 {shared}", ex.SuggestedAction);
+        Assert.Equal($"Let only you write to it: chmod go-w {shared}", ex.SuggestedAction);
 
         // Som /tmp: sticky-biten hindrer andre i å bytte ut en fil de ikke eier.
         File.SetUnixFileMode(shared, (UnixFileMode)Convert.ToInt32("1777", 8));
@@ -147,9 +149,162 @@ public sealed class UserProfilesTests : IDisposable
 
         var ex = Assert.Throws<QueueyConfigurationException>(() => UserProfiles.Load("dev", Pointing(path), out _));
 
-        Assert.StartsWith($"Could not read {path} at line 3", ex.Message);
+        Assert.StartsWith($"Could not read {path} at line 3 ($.profiles.dev.…)", ex.Message);
         Assert.EndsWith("Nothing of it is shown.", ex.Message);
         Assert.DoesNotContain("key-for-dev", ex.Message + ex.SuggestedAction);
+    }
+
+    [Fact]
+    public void A_key_pasted_as_a_name_in_the_file_is_masked_in_the_error()
+    {
+        // Herding før tag (review av #53): stien fra parseren har navnene i fila, og en nøkkel limt inn som et navn sto i feilen.
+        string path = WriteUserConfig(_dir, """{ "profiles": { "dev": { "qak_kid.pasted-key": "x" } } }""");
+
+        var asField = Assert.Throws<QueueyConfigurationException>(() => UserProfiles.Load("dev", Pointing(path), out _));
+
+        Assert.StartsWith($"Could not read {path} at line 1 ($.profiles.dev.…)", asField.Message);
+        Assert.DoesNotContain("qak_kid", asField.Message + asField.SuggestedAction);
+
+        path = WriteUserConfig(_dir, """{ "profiles": { "qak_kid.pasted-key": { "apiKey": 5 } } }""");
+
+        var asProfile = Assert.Throws<QueueyConfigurationException>(() => UserProfiles.Load("dev", Pointing(path), out _));
+
+        Assert.StartsWith($"Could not read {path} at line 1 ($.profiles.….apiKey)", asProfile.Message);
+        Assert.DoesNotContain("qak_kid", asProfile.Message + asProfile.SuggestedAction);
+    }
+
+    [Fact]
+    public void A_link_is_followed_to_the_file_it_points_to_and_that_file_is_checked()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        // En vanlig dotfiles-oppsett: ~/.queuey/config.json er en lenke. Det er fila den peker på, som sjekkes og leses.
+        string dotfiles = Path.Combine(_dir, "dotfiles");
+        Directory.CreateDirectory(dotfiles);
+        File.SetUnixFileMode(dotfiles, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        string real = WriteUserConfig(dotfiles, TwoProfiles);
+        string link = Path.Combine(_dir, "config.json");
+        File.CreateSymbolicLink(link, real);
+
+        Assert.Equal("ten_dev", UserProfiles.Load("dev", Pointing(link), out string from).Tenant);
+        Assert.Equal(link, from);
+
+        File.SetUnixFileMode(real, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead | UnixFileMode.OtherRead);
+        var ex = Assert.Throws<QueueyConfigurationException>(() => UserProfiles.Load("dev", Pointing(link), out _));
+
+        Assert.Equal($"{link} (a link to {real}) holds API keys, and other users can reach it (mode 0644), so it was not read.", ex.Message);
+        Assert.Equal($"Let only you read and write it: chmod 600 {real}", ex.SuggestedAction);
+    }
+
+    [Fact]
+    public void A_file_that_belongs_to_another_user_is_not_read_and_root_reads_only_its_own()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        string path = WriteUserConfig(_dir, TwoProfiles);
+        Func<string, (uint, UnixFileMode)> realInspect = UserProfiles.Inspect;
+        Func<uint> realUser = UserProfiles.CurrentUser;
+        uint me = realUser();
+        try
+        {
+            // En test kan ikke gi en fil til en annen bruker uten root, så eieren byttes i sømmen.
+            UserProfiles.Inspect = p => p == path ? (4242u, UnixFileMode.UserRead | UnixFileMode.UserWrite) : realInspect(p);
+            var other = Assert.Throws<QueueyConfigurationException>(() => UserProfiles.Load("dev", Pointing(path), out _));
+            Assert.Equal($"{path} belongs to another user (uid 4242), not the one running queuey (uid {me}), so it was not read.", other.Message);
+
+            // root kan lese alles filer, så en queuey som kjører som root, leser bare en fil root eier.
+            if (me != 0)
+            {
+                UserProfiles.Inspect = realInspect;
+                UserProfiles.CurrentUser = () => 0;
+                var asRoot = Assert.Throws<QueueyConfigurationException>(() => UserProfiles.Load("dev", Pointing(path), out _));
+                Assert.Equal($"{path} belongs to another user (uid {me}), not the one running queuey (uid 0), so it was not read.", asRoot.Message);
+            }
+        }
+        finally
+        {
+            UserProfiles.Inspect = realInspect;
+            UserProfiles.CurrentUser = realUser;
+        }
+    }
+
+    [Fact]
+    public void A_folder_above_the_file_that_belongs_to_another_user_is_not_read_but_root_may_own_one()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        string path = WriteUserConfig(_dir, TwoProfiles);
+        string above = Path.GetDirectoryName(_dir)!;
+        UnixFileMode open = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute
+                            | UnixFileMode.GroupRead | UnixFileMode.GroupExecute | UnixFileMode.OtherRead | UnixFileMode.OtherExecute;
+        Func<string, (uint, UnixFileMode)> realInspect = UserProfiles.Inspect;
+        try
+        {
+            UserProfiles.Inspect = p => p == above ? (4242u, open) : realInspect(p);
+            var ex = Assert.Throws<QueueyConfigurationException>(() => UserProfiles.Load("dev", Pointing(path), out _));
+            Assert.Equal($"{above} belongs to another user (uid 4242), who could replace {path}, so it was not read.", ex.Message);
+
+            UserProfiles.Inspect = p => p == above ? (0u, open) : realInspect(p);
+            Assert.Equal("ten_dev", UserProfiles.Load("dev", Pointing(path), out _).Tenant);
+        }
+        finally
+        {
+            UserProfiles.Inspect = realInspect;
+        }
+    }
+
+    [Fact]
+    public void Every_folder_up_to_the_home_folder_is_checked_and_none_above_it()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        string home = Path.Combine(_dir, "home");
+        string queuey = Path.Combine(home, ".queuey");
+        Directory.CreateDirectory(queuey);
+        File.SetUnixFileMode(queuey, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        File.SetUnixFileMode(home, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        string path = WriteUserConfig(queuey, TwoProfiles);
+        Func<string, (uint, UnixFileMode)> realInspect = UserProfiles.Inspect;
+        var seen = new List<string>();
+        try
+        {
+            UserProfiles.Inspect = p => { seen.Add(p); return realInspect(p); };
+
+            Assert.Equal(path, UserProfiles.EnsureOnlyTheUserCanReachIt(path, home));
+            Assert.Equal(new[] { path, queuey, home }, seen);
+
+            // Som ssh: en hjemmemappe andre kan skrive i, lar dem bytte ut ~/.queuey.
+            File.SetUnixFileMode(home, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupWrite
+                                       | UnixFileMode.GroupRead | UnixFileMode.GroupExecute);
+            var ex = Assert.Throws<QueueyConfigurationException>(() => UserProfiles.EnsureOnlyTheUserCanReachIt(path, home));
+            Assert.Equal($"{home} can be written by other users (mode 0770), who could replace {path}, so it was not read.", ex.Message);
+            Assert.Equal($"Let only you write to it: chmod go-w {home}", ex.SuggestedAction);
+        }
+        finally
+        {
+            UserProfiles.Inspect = realInspect;
+            File.SetUnixFileMode(home, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    [Fact]
+    public void The_owner_and_mode_come_from_the_file_system()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        // Eieren leses gjennom runtimens shim (UserProfiles.Native); feltene står der de skal, ellers feiler dette.
+        string path = WriteUserConfig(_dir, TwoProfiles);
+
+        (uint owner, UnixFileMode mode) = UserProfiles.Inspect(path);
+
+        Assert.Equal(UserProfiles.CurrentUser(), owner);
+        Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, mode);
+        Assert.Equal(0u, UserProfiles.Inspect("/").Owner);
     }
 
     [Fact]
@@ -420,11 +575,20 @@ public sealed class ProfileCommandTests : IDisposable
     [Fact]
     public async Task A_dry_run_with_a_profile_needs_only_the_files_half()
     {
-        // Ingen brukerfil: en dry run kobler aldri til, så den trenger bare fila sine verdier.
+        // Ingen brukerfil: en dry run kobler aldri til, så den trenger bare fila sine verdier. Den sier likevel fra på stderr
+        // (herding før tag), så brukeren vet det før en ekte apply stopper på det.
         CliRun run = await Run(null, new Dictionary<string, string>(), "apply", "--file", _deploy, "--dry-run", "--profile", "prod");
 
         Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
         Assert.Contains("Nothing was sent.", run.Stdout);
+        Assert.Contains("Warning: the dry run went on without profile prod's connection, which apply --profile prod needs: " +
+                        $"--profile prod needs its connection in {CliHarness.NoUserConfig}, and there is no such file.", run.Stderr);
+
+        // Med brukerens fil på plass er det ingenting å si fra om.
+        UserConfig();
+        CliRun quiet = await Run(null, Env(), "apply", "--file", _deploy, "--dry-run", "--profile", "prod");
+        Assert.True(quiet.Exit == ExitCodes.Success, quiet.Stdout + quiet.Stderr);
+        Assert.DoesNotContain("Warning", quiet.Stderr);
     }
 
     [Fact]
