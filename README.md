@@ -1092,9 +1092,11 @@ gives, never by its name. Without an environment in the intent, one profile take
 take it with `--profile`; the file's only profile also takes it when that profile gives no environment, and gets it
 written in. When no profile gives it, or several do, the flow has a conflict that says what to change. Profiles that
 share an environment, such as `eu` and `us` in prod, are told apart with `advise --intent … --profile <name>`, which
-names a profile the file has (or the first one, in a new file); its environment still decides the rest. A queue the
+names a profile the file has, or the first one in a new file, where the intent must state the environment it is for: a
+profile's name does not say. Its environment still decides the rest. A queue the
 file already forwards to a listener (`"kind": "localForward"`, directly or through its profile) outside dev is a
-conflict too: state `dev`, or give it `http` where the file sets it. So is an environment apply would refuse, such as
+conflict too: state `dev`, or give it `http` where the file sets it; so is a fixed `localForward` in a file that can run
+outside dev, because its environment comes from a variable or a profile gives another. So is an environment apply would refuse, such as
 `"development"` in a profile, and a `workspace.environment` that is not one fixed value or exactly one `${VAR}`.
 
 A file without profiles that takes its environment from a variable, such as `${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}` so CI
