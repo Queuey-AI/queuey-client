@@ -172,16 +172,20 @@ public static class DeploymentDrift
         if (want.CredentialRef?.Trim() is not { } declared)
             return;
 
+        // Navnet ingressen venter på, er lagret av en med skrivetilgang (Queuey F2.3-review): det vises bare i den trygge formen.
         if (have?.AwaitsStoredCredential == true)
         {
             drift.Add(new DriftItem(path + ".credentialRef", declared,
-                $"waiting for '{have.CredentialRef}', which is stored now: apply points the ingress at it"));
+                CredentialNameRules.Showable(have.CredentialRef) is { } shown
+                    ? $"waiting for '{shown}', which is stored now: apply points the ingress at it"
+                    : "waiting for a credential that is stored now: apply points the ingress at it"));
             return;
         }
 
         if (!string.Equals(declared, have?.CredentialRef, StringComparison.Ordinal)
             && !string.Equals(declared, have?.BoundCredentialId, StringComparison.Ordinal))
-            drift.Add(new DriftItem(path + ".credentialRef", declared, have?.CredentialRef));
+            drift.Add(new DriftItem(path + ".credentialRef", declared,
+                have?.CredentialRef is null ? null : CredentialNameRules.Showable(have.CredentialRef) ?? "(a name that is not shown)"));
     }
 
     private static void CompareSource(string path, ContextSource? want, ContextSource? have, List<DriftItem> drift)

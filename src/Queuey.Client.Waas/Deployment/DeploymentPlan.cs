@@ -397,10 +397,14 @@ internal sealed class DeploymentPlanner
             };
             if (!plan.Definition.Policy.IsEmpty || plan.Ingress is not null || plan.Delivery is not null || plan.Kind is not null)
                 notes.Add("Its policy, ingress and delivery passed the checks the CLI makes; Queuey checks the rest, such as a signing template, once the queue exists.");
+            // Navnet er sjekket mot formen (DeploymentSignedRequest.Validate); Showable holder det ute av kommandoen like fullt.
             if (plan.Ingress?.SignedRequest?.CredentialRef is { } awaited && !awaited.StartsWith("cred_", StringComparison.Ordinal)
                 && !deliveries.KnownCredential(awaited))
-                notes.Add($"No credential named '{awaited.Trim()}' is stored in this workspace yet, so its ingress would refuse every event " +
-                          $"until it is: queuey credentials set --name {awaited.Trim()} --type HmacSigning --key-id {awaited.Trim()} --from-env <VARIABLE>, then apply again.");
+                notes.Add(CredentialNameRules.Showable(awaited) is { } shown
+                    ? $"No credential named '{shown}' is stored in this workspace yet, so its ingress would refuse every event " +
+                      $"until it is: queuey credentials set --name {shown} --type HmacSigning --key-id {shown} --from-env <VARIABLE>, then apply again."
+                    : "The credential its ingress names is not stored in this workspace yet, so its ingress would refuse every event " +
+                      "until it is: queuey credentials set --name <NAME> --type HmacSigning --key-id <NAME> --from-env <VARIABLE>, then apply again.");
 
             steps.Add(new DeploymentPlanStep
             {

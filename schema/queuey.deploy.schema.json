@@ -289,8 +289,16 @@
                   "maxLength": 64
                 },
                 "credentialRef": {
-                  "description": "The name of the credential holding the provider's signing secret (or its cred_… id). Store it with queuey credentials set --name <name> --type HmacSigning --key-id <name> --from-env <VARIABLE>.",
+                  "description": "The name of the credential holding the provider's signing secret (or its cred_… id): letters, digits and . _ : @ / -, starting with a letter or digit, since Queuey shows a name it waits for in suggested commands. Store it with queuey credentials set --name <name> --type HmacSigning --key-id <name> --from-env <VARIABLE>. A stored credential whose name has other characters is named by its id.",
                   "type": "string",
+                  "anyOf": [
+                    {
+                      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}$"
+                    },
+                    {
+                      "pattern": "^([A-Za-z0-9._:@/-]*\\$\\{[A-Za-z_][A-Za-z0-9_]*(:-[A-Za-z0-9._:@/-]*)?\\})+[A-Za-z0-9._:@/-]*$"
+                    }
+                  ],
                   "minLength": 1,
                   "maxLength": 200
                 }

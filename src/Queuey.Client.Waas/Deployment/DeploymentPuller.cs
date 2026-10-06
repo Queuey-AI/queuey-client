@@ -311,10 +311,15 @@ internal sealed class DeploymentPuller
             return null;
 
         string? pending = string.IsNullOrWhiteSpace(r.PendingCredential) ? null : r.PendingCredential;
+
+        // Fila må tåle sin egen sjekk (Queuey F2.3-review): en bundet credential med et navn utenfor formen skrives med id-en.
+        string? bound = NameFor(nameByRef, r.CredentialRef);
+        if (bound is not null && !CredentialNameRules.FitsPendingShape(bound))
+            bound = r.CredentialRef;
         return new DeploymentSignedRequest
         {
             Template = r.Template,
-            CredentialRef = NameFor(nameByRef, r.CredentialRef) ?? pending,
+            CredentialRef = bound ?? pending,
             BoundCredentialId = string.IsNullOrWhiteSpace(r.CredentialRef) ? null : r.CredentialRef,
             AwaitsStoredCredential = pending is not null && nameByRef.ContainsValue(pending),
         };

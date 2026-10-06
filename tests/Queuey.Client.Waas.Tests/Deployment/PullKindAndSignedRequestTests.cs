@@ -18,14 +18,16 @@ public class PullKindAndSignedRequestTests
     {
         public bool WhsecStored { get; init; }
 
+        public string WorkspaceCredentialName { get; init; } = "workspace-whsec";
+
         public HttpResponseMessage Route(HttpRequestMessage req)
         {
             string path = req.RequestUri!.AbsolutePath;
 
             if (path.EndsWith("/credentials", StringComparison.Ordinal))
                 return StubHttpMessageHandler.Json(HttpStatusCode.OK, WhsecStored
-                    ? new object[] { new { publicId = "cred_ws", name = "workspace-whsec", type = "HmacSigning" }, new { publicId = "cred_new", name = "stripe-whsec", type = "HmacSigning" } }
-                    : new object[] { new { publicId = "cred_ws", name = "workspace-whsec", type = "HmacSigning" } });
+                    ? new object[] { new { publicId = "cred_ws", name = WorkspaceCredentialName, type = "HmacSigning" }, new { publicId = "cred_new", name = "stripe-whsec", type = "HmacSigning" } }
+                    : new object[] { new { publicId = "cred_ws", name = WorkspaceCredentialName, type = "HmacSigning" } });
 
             if (path.EndsWith("/tenants/ten_abc/config", StringComparison.Ordinal))
                 return StubHttpMessageHandler.Json(HttpStatusCode.OK, new { ingress = WorkspaceIngress, delivery = new { kind = "Http" } });
@@ -88,6 +90,16 @@ public class PullKindAndSignedRequestTests
         IReadOnlyList<DeploymentQueuePlan> plans = DeploymentFile.Parse(file.ToJson()).Resolve();
         Assert.Equal(DeploymentDeliveryKind.LocalForward, plans.Single(p => p.Definition.Name == "stripe").Kind);
         Assert.DoesNotContain("BoundCredentialId", file.ToJson());
+    }
+
+    [Fact]
+    public async Task Pull_writes_a_bound_credential_whose_name_is_outside_the_safe_shape_by_its_id_so_the_file_applies()
+    {
+        // Konsollet lar en credential hete hva som helst, og fila tar bare navn i den trygge formen (Queuey F2.3-review).
+        DeploymentFile file = await Build(new Workspace { WorkspaceCredentialName = "Stripe webhook (prod)" }).PullDeploymentAsync("ten_abc");
+
+        Assert.Equal("cred_ws", file.Workspace!.Ingress!.SignedRequest!.CredentialRef);
+        DeploymentFile.Parse(file.ToJson()).Resolve();
     }
 
     [Fact]

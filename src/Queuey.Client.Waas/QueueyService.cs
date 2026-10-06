@@ -647,8 +647,9 @@ public sealed class QueueyService : IQueueyService
         file = file.Expand();
 
         IReadOnlyList<DeploymentQueuePlan> plans = file.Resolve();   // validates names + policy locally
-        if (!options.DryRun)
-            EnsureReachableDestinations(file);
+        // Også i en dry run (Queuey F2.3-review, 2026-10-06): den skal feile der applyen ville feilet, for en som kaller
+        // biblioteket som for CLI-en.
+        EnsureReachableDestinations(file);
         var byName = plans.ToDictionary(p => p.Definition.Name, StringComparer.Ordinal);
 
         string tenant = file.Tenant ?? (options.DryRun ? _options.TenantPublicId ?? string.Empty : RequireTenant());
@@ -803,9 +804,16 @@ public sealed class QueueyService : IQueueyService
         if (ingress?.SignedRequest is not { PendingCredential: { Length: > 0 } awaited } signed || !ChecksSignatures(ingress.AuthMode))
             return null;
 
-        return $"{who} verifies {signed.Template} signatures with the credential '{awaited}', which is not stored yet, so {consequence}. " +
-               $"Store it with queuey credentials set --name {awaited} --type HmacSigning --key-id {awaited} --from-env <VARIABLE>, " +
-               "then run queuey apply again.";
+        // Queuey F2.3-review (2026-10-06): navnet er lagret av en med skrivetilgang. Det står i teksten og i kommandoen bare
+        // når det har den trygge formen (CredentialNameRules.Showable); ellers står en plassholder. Malen er Queuey sin.
+        string template = CredentialNameRules.FitsPendingShape(signed.Template) ? signed.Template! : "provider";
+        return CredentialNameRules.Showable(awaited) is { } name
+            ? $"{who} verifies {template} signatures with the credential '{name}', which is not stored yet, so {consequence}. " +
+              $"Store it with queuey credentials set --name {name} --type HmacSigning --key-id {name} --from-env <VARIABLE>, " +
+              "then run queuey apply again."
+            : $"{who} verifies {template} signatures with a credential that is not stored yet, so {consequence}. Store it " +
+              "under the name ingress.signedRequest.credentialRef gives, with queuey credentials set --name <NAME> --type " +
+              "HmacSigning --key-id <NAME> --from-env <VARIABLE>, then run queuey apply again.";
     }
 
     private static bool ChecksSignatures(string? authMode)

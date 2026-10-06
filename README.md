@@ -578,6 +578,10 @@ stores it, and `apply --check` reports drift once it is stored. `template` is on
 templates; `queuey` is Queuey's own scheme, which verifies with the sending API client's signing key and
 takes no `credentialRef`. A `signedRequest` is checked while `authMode` is `SignedRequest` or
 `ApiKeyAndSignedRequest`, so a file that declares one with `None` or `ApiKey` beside it is refused.
+Since the name shows up in the commands Queuey suggests, `credentialRef` uses only letters, digits and
+`. _ : @ / -`, starting with a letter or digit; a stored credential whose name has other characters is
+named by its `cred_…` id. A value that looks like a secret (a known prefix such as `whsec_`, hex, a UUID,
+base64) is refused, and never repeated.
 
 **`kind` is where a queue's events go:** `http`, to its URL, or `localForward`, to a connected
 `queuey listen` session. While no session is connected, the events wait. The address a listener forwards to

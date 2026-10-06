@@ -104,8 +104,10 @@ public sealed class DeploymentSignedRequest
     public string? Template { get; set; }
 
     /// <summary>
-    /// The name of the credential holding the provider's signing secret (or its <c>cred_…</c> id). Store it with
-    /// <c>queuey credentials set --name &lt;name&gt; --type HmacSigning --key-id &lt;name&gt; --from-env &lt;VARIABLE&gt;</c>.
+    /// The name of the credential holding the provider's signing secret (or its <c>cred_…</c> id): letters, digits and
+    /// <c>. _ : @ / -</c>, starting with a letter or digit, since Queuey shows a name it waits for in suggested commands. Store
+    /// it with <c>queuey credentials set --name &lt;name&gt; --type HmacSigning --key-id &lt;name&gt; --from-env &lt;VARIABLE&gt;</c>.
+    /// A stored credential whose name has other characters is named by its id.
     /// </summary>
     public string? CredentialRef { get; set; }
 
@@ -129,15 +131,32 @@ public sealed class DeploymentSignedRequest
 
         // Queuey lagrer et navn som ikke finnes ennå, og viser det tilbake. En hemmelighet limt inn der navnet skal stå, avvises
         // derfor før noe sendes, og gjentas ikke (samme prefikser som Queuey, F2.3).
-        if (CredentialRef is not null && SecretPrefixes.Any(p => CredentialRef.Trim().StartsWith(p, StringComparison.OrdinalIgnoreCase)))
-            throw new QueueyConfigurationException(
-                $"{where}.credentialRef looks like a secret, not the name of a credential. Its value is not shown.")
-            {
-                SuggestedAction = "Store the secret with queuey credentials set --name <name> --type HmacSigning --key-id <name> --from-env <VARIABLE>, name that credential here, and keep the secret out of the file.",
-            };
+        if (CredentialRef is not null && CredentialNameRules.HasSecretPrefix(CredentialRef.Trim()))
+            throw SecretRefusal(where);
+
+        // Queuey F2.3-review (2026-10-06): navnet står i kommandoer og i tekst en agent leser, så det må ha formen som er trygg
+        // der, og ikke se ut som en tilfeldig hemmelighet (hex, UUID, base64). Samme regler som Queuey (CredentialNameRules).
+        // En ${VAR} sjekkes når den er utvidet, som apply gjør. Fila sjekkes uten å vite hvilke credentials som finnes, så en
+        // lagret credential med et annet navn navngis med id-en sin.
+        if (CredentialRef is { } reference && reference.IndexOf("${", StringComparison.Ordinal) < 0)
+        {
+            string name = reference.Trim();
+            if (CredentialNameRules.LooksRandom(name))
+                throw SecretRefusal(where);
+            if (!CredentialNameRules.FitsPendingShape(name))
+                throw new QueueyConfigurationException(
+                    $"{where}.credentialRef may only use letters, digits and . _ : @ / -, starting with a letter or digit. Its value is not shown.")
+                {
+                    SuggestedAction = "Name the credential that way: queuey credentials set --name <name> --type HmacSigning --key-id <name> --from-env <VARIABLE>. A stored credential whose name has other characters is named by its cred_… id.",
+                };
+        }
     }
 
-    private static readonly string[] SecretPrefixes = { "whsec_", "sk_live_", "sk_test_", "rk_live_", "rk_test_", "qak_" };
+    private static QueueyConfigurationException SecretRefusal(string where)
+        => new($"{where}.credentialRef looks like a secret, not the name of a credential. Its value is not shown.")
+        {
+            SuggestedAction = "Store the secret with queuey credentials set --name <name> --type HmacSigning --key-id <name> --from-env <VARIABLE>, name that credential here, and keep the secret out of the file.",
+        };
 }
 
 /// <summary>
