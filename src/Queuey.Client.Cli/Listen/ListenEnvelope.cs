@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 namespace Queuey.Client.Cli;
@@ -16,9 +17,29 @@ internal sealed record ListenEnvelope(
     string? ContentType,
     string BodyBase64,
     string? CorrelationId = null,
-    string? Mode = null);
+    string? Mode = null,
+    // The headers Queuey's signing set, by name. Null from a Queuey older than single-owner listening (2026-10-06).
+    List<string>? SignatureHeaders = null);
 
 internal sealed record ListenHeader(string Name, string Value);
 
-/// <summary>Reply from the hub's <c>Listen</c> call.</summary>
+/// <summary>Reply from the hub's legacy <c>Listen</c> call, which a Queuey older than single-owner listening has alone.</summary>
 internal sealed record ListenAck(string ScopeKey, string Mode);
+
+/// <summary>
+/// Reply from the hub's <c>ListenAsOwner</c>: listening (and whether another session was taken over), or refused with a
+/// code such as <c>listener_already_connected</c>, a message, and since when the scope has been held.
+/// </summary>
+internal sealed record ListenReply(
+    bool Listening,
+    string? ScopeKey = null,
+    bool TookOver = false,
+    string? Code = null,
+    string? Message = null,
+    DateTimeOffset? HeldSinceUtc = null);
+
+/// <summary>
+/// Reply from the hub's <c>Heartbeat</c>: whether this session still owns its scope. Null says nothing: from an older
+/// Queuey, or on a connection that has just reconnected and not yet claimed its scope again.
+/// </summary>
+internal sealed record ListenBeat(bool Owner);

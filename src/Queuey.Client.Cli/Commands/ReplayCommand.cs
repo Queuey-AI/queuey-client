@@ -67,7 +67,7 @@ internal static class ReplayCommand
 
         if (!r.ListenerConnected)
         {
-            Console.Error.WriteLine($"No listener connected. Run  queuey listen --forward-to <url> --queue {queue}  first, then replay.");
+            Console.Error.WriteLine($"No listener connected. Run  queuey listen --forward-to <origin> --queue {queue}  first, then replay.");
             return ExitCodes.RuntimeError;
         }
 

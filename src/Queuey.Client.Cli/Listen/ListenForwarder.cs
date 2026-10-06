@@ -7,18 +7,30 @@ using System.Threading.Tasks;
 
 namespace Queuey.Client.Cli;
 
+/// <summary>What happened when a forward was sent on to this machine.</summary>
+/// <param name="Status">The local response's status, or 502 when nothing answered.</param>
+/// <param name="Error">Why nothing answered, when nothing did.</param>
+internal sealed record LocalForwardResult(int Status, long DurationMs, Uri LocalUrl, string? Error);
+
 /// <summary>Replays a received envelope as a local HTTP request — faithful except the host, which becomes <c>--forward-to</c>.</summary>
 internal static class ListenForwarder
 {
+    /// <summary>
+    /// Where a forward goes on this machine: <paramref name="forwardTo"/> with the path and query of the queue's
+    /// endpoint after it, or <paramref name="forwardTo"/> as given when <paramref name="preservePath"/> is false.
+    /// </summary>
+    public static Uri LocalUrl(ListenEnvelope env, string forwardTo, bool preservePath = true)
+        => preservePath
+            ? new Uri(forwardTo.TrimEnd('/') + env.PathAndQuery, UriKind.Absolute)
+            : new Uri(forwardTo, UriKind.Absolute);
+
     /// <summary>Rebuilds the outbound request against the local base: same method, path+query, headers, and body.
     /// When <paramref name="preservePath"/> is false, forwards to <paramref name="forwardTo"/> VERBATIM (the
     /// original request path is ignored) — for bridging to a fixed local endpoint (e.g. a local ingress route)
     /// rather than replaying the webhook at its original path.</summary>
     public static HttpRequestMessage BuildLocalRequest(ListenEnvelope env, string forwardTo, bool preservePath = true)
     {
-        var url = preservePath
-            ? new Uri(forwardTo.TrimEnd('/') + env.PathAndQuery, UriKind.Absolute)
-            : new Uri(forwardTo, UriKind.Absolute);
+        var url = LocalUrl(env, forwardTo, preservePath);
         var body = Convert.FromBase64String(env.BodyBase64);
 
         var req = new HttpRequestMessage(new HttpMethod(env.Method), url)
@@ -45,12 +57,24 @@ internal static class ListenForwarder
         return req;
     }
 
-    public static async Task<(int Status, long Ms)> ForwardAsync(HttpClient http, ListenEnvelope env, string forwardTo, CancellationToken ct, bool preservePath = true)
+    /// <summary>
+    /// Sends the forward to this machine. A receiver that cannot be reached answers 502, so the delivery records the
+    /// failure honestly instead of Queuey waiting for an answer that never comes.
+    /// </summary>
+    public static async Task<LocalForwardResult> ForwardAsync(HttpClient http, ListenEnvelope env, string forwardTo, CancellationToken ct, bool preservePath = true)
     {
-        using HttpRequestMessage req = BuildLocalRequest(env, forwardTo, preservePath);
+        Uri localUrl = new(forwardTo, UriKind.Absolute);
         var sw = Stopwatch.StartNew();
-        using HttpResponseMessage res = await http.SendAsync(req, ct).ConfigureAwait(false);
-        sw.Stop();
-        return ((int)res.StatusCode, sw.ElapsedMilliseconds);
+        try
+        {
+            localUrl = LocalUrl(env, forwardTo, preservePath);
+            using HttpRequestMessage req = BuildLocalRequest(env, forwardTo, preservePath);
+            using HttpResponseMessage res = await http.SendAsync(req, ct).ConfigureAwait(false);
+            return new LocalForwardResult((int)res.StatusCode, sw.ElapsedMilliseconds, localUrl, null);
+        }
+        catch (Exception ex)
+        {
+            return new LocalForwardResult(502, sw.ElapsedMilliseconds, localUrl, ex.Message);
+        }
     }
 }
