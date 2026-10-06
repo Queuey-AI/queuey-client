@@ -197,6 +197,8 @@ public class DeploymentPlanHashTests
         {
             "GET /tenants/ten_abc/queues" => StubHttpMessageHandler.Json(HttpStatusCode.OK, Array.Empty<object>()),
             "GET /tenants/ten_abc/credentials" => StubHttpMessageHandler.Json(HttpStatusCode.OK, Array.Empty<object>()),
+            // En ny kø som videresender, leser miljøet workspacet har: bare et workspace merket dev videresender (Queuey, 2026-10-06).
+            "GET /tenants/ten_abc/config" => StubHttpMessageHandler.Json(HttpStatusCode.OK, new { environment = "dev" }),
             "PATCH /tenants/ten_abc/policy" => StubHttpMessageHandler.Json(HttpStatusCode.OK, new { dryRun = true, target = "workspace ten_abc", changes = Array.Empty<object>(), notes = Array.Empty<string>() }),
             "PUT /queues" => StubHttpMessageHandler.Json(HttpStatusCode.OK, new { dryRun = true, publicId = (string?)null, displayName = "stripe", created = true, hasDeliveryTarget = false }),
             string other => throw new InvalidOperationException("unexpected " + other),

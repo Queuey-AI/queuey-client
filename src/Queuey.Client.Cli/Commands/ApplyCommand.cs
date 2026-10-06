@@ -134,8 +134,16 @@ internal static class ApplyCommand
             foreach (PlannedChange change in step.Changes)
                 Console.WriteLine($"      ~ {change}");
             if (step.Error is { } error)
-                Console.WriteLine($"      ✗ {error.ErrorCode ?? "refused"}: {error.Message}");
+                WriteStepError(error);
         }
+    }
+
+    /// <summary>A refused step of a plan, as apply and plan write it: the code, Queuey's message, and the way out under it.</summary>
+    internal static void WriteStepError(QueueyException error)
+    {
+        Console.WriteLine($"      ✗ {TerminalText.Line(error.ErrorCode ?? "refused")}: {TerminalText.Line(error.Message)}");
+        if (error.SuggestedAction is { } action)
+            Console.WriteLine($"        → {TerminalText.Line(action)}");
     }
 
     /// <summary>
@@ -387,9 +395,10 @@ internal static class ApplyCommand
                 Console.WriteLine($"  ✗ {r.Name}\t{FormatError(r.Error)}");
 
             // Serverens forslag står under feilen den hører til. Før 2026-09-24 viste bare --plan og
-            // feil som stoppet hele kommandoen det; en vanlig apply mistet det.
+            // feil som stoppet hele kommandoen det; en vanlig apply mistet det. Teksten er Queueys, så den går gjennom
+            // TerminalText, som i CliErrors (local forwarding bare i dev, 2026-10-06: avslaget har veien ut her).
             if (!r.Succeeded && r.Error?.SuggestedAction is { } action)
-                Console.WriteLine($"      → {action}");
+                Console.WriteLine($"      → {TerminalText.Line(action)}");
         }
 
         foreach (string skipped in result.NotAttempted)
@@ -408,8 +417,8 @@ internal static class ApplyCommand
                           + (result.NotAttempted.Count > 0 ? " — re-run to converge (applying is idempotent)" : ""));
     }
 
-    private static string FormatError(QueueyException? e)
-        => e is null ? "failed" : $"{(e.StatusCode?.ToString() ?? "error")} {e.ErrorCode} {e.Message}".Replace("  ", " ").Trim();
+    internal static string FormatError(QueueyException? e)
+        => e is null ? "failed" : TerminalText.Line($"{(e.StatusCode?.ToString() ?? "error")} {e.ErrorCode} {e.Message}".Replace("  ", " ").Trim());
 
     /// <summary>
     /// The version of <c>apply --dry-run --json</c>'s shape. 1 was the bare array of queues that

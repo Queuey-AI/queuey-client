@@ -117,7 +117,12 @@ internal static class QueueCommand
             if (r.Succeeded)
                 Console.WriteLine($"  ✓ {r.Name}\t{r.PublicId}\t{(r.Created ? "created" : "exists")}{(r.PolicyApplied ? ", policy applied" : "")}");
             else
+            {
                 Console.WriteLine($"  ✗ {r.Name}\t{FormatError(r.Error)}");
+                // Veien ut under feilen, som i apply (local forwarding bare i dev, 2026-10-06).
+                if (r.Error?.SuggestedAction is { } action)
+                    Console.WriteLine($"      → {TerminalText.Line(action)}");
+            }
         }
 
         foreach (string skipped in result.NotAttempted)
@@ -179,8 +184,7 @@ internal static class QueueCommand
         return string.Join(" ", parts);
     }
 
-    private static string FormatError(QueueyException? e)
-        => e is null ? "failed" : $"{(e.StatusCode?.ToString() ?? "error")} {e.ErrorCode} {e.Message}".Replace("  ", " ").Trim();
+    private static string FormatError(QueueyException? e) => ApplyCommand.FormatError(e);
 
     private static object ToJsonPlan(QueueDefinition d) => new
     {

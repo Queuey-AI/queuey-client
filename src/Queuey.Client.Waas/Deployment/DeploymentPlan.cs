@@ -256,13 +256,24 @@ internal sealed class DeploymentPlanner
         foreach (PlannedWrite write in workspaceWrites)
             steps.Add(await StepAsync(write, answered, ct).ConfigureAwait(false));
 
+        // Queuey (vedtatt av Kenneth 2026-10-06): bare et workspace merket dev videresender til en lytter. En kø som finnes,
+        // spørres med dry run av leveringstypen, og svarer med Queueys avslag. En ny kø kan ikke tørrkjøres felt for felt, så
+        // planen leser miljøet workspacet får: det fila setter, ellers det workspacet har. Bare når en ny kø vil videresende.
+        ListenerEnvironment? listenerEnvironment = null;
+        if (planned.Any(p => p.Kind == DeploymentDeliveryKind.LocalForward && !existing.ContainsKey(p.Definition.Name)))
+        {
+            listenerEnvironment = !skipsWorkspace && file.Workspace?.EnvironmentToSend is { } declared
+                ? new ListenerEnvironment(declared, FromFile: true)
+                : new ListenerEnvironment((await _controlPlane.GetTenantConfigAsync(tenant, ct).ConfigureAwait(false)).Environment, FromFile: false);
+        }
+
         // Apply sender workspacets levering før køene, så en base-URL i fila er et mål for hver kø uten egen absolutt URL,
         // også når workspacet ikke har noen ennå. Planen ser bare det som er lagret, og avviste derfor en gyldig første
         // fil med deliver_without_destination (review 2026-10-05).
         bool workspaceBase = !string.IsNullOrWhiteSpace(file.Workspace?.Delivery?.BaseUrl);
 
         foreach (DeploymentQueuePlan plan in planned)
-            steps.AddRange(await PlanQueueAsync(plan, tenant, deliveries, storing, existing, answered, workspaceBase, ct).ConfigureAwait(false));
+            steps.AddRange(await PlanQueueAsync(plan, tenant, deliveries, storing, existing, answered, workspaceBase, listenerEnvironment, ct).ConfigureAwait(false));
 
         List<DeploymentPlanQueue> queues = plans.Select(p => new DeploymentPlanQueue
         {
@@ -399,7 +410,8 @@ internal sealed class DeploymentPlanner
 
     private async Task<IEnumerable<DeploymentPlanStep>> PlanQueueAsync(
         DeploymentQueuePlan plan, string tenant, ResolvedDeliveries deliveries, CredentialStoring storing,
-        Dictionary<string, QueueListItem> existing, Dictionary<string, DryRunAnswer> answered, bool workspaceBase, CancellationToken ct)
+        Dictionary<string, QueueListItem> existing, Dictionary<string, DryRunAnswer> answered, bool workspaceBase,
+        ListenerEnvironment? listenerEnvironment, CancellationToken ct)
     {
         string name = plan.Definition.Name;
         string target = $"queues.{name}";
@@ -444,7 +456,9 @@ internal sealed class DeploymentPlanner
             {
                 Target = target, Aspect = "queue", Creates = true, Notes = notes,
                 Desired = DesiredForNewQueue(plan, deliveries),
-                Error = plan.Mode == DeploymentQueueMode.Deliver && !hasDestination ? DeliverWithoutDestination(name) : null,
+                Error = forwards && listenerEnvironment is { AllowsLocalForward: false } environment
+                    ? LocalForwardNeedsDevWorkspace(name, tenant, environment)
+                    : plan.Mode == DeploymentQueueMode.Deliver && !hasDestination ? DeliverWithoutDestination(name) : null,
             });
             return steps;
         }
@@ -536,6 +550,28 @@ internal sealed class DeploymentPlanner
         $"Queue '{name}' declares \"mode\": \"deliver\" but has nowhere to deliver.", errorCode: "deliver_without_destination")
     {
         SuggestedAction = "Give it a delivery.url, or set workspace.delivery.baseUrl.",
+    };
+
+    /// <summary>The environment the workspace has after the apply, for a new queue that would forward: the file's, or the stored one.</summary>
+    private sealed record ListenerEnvironment(string? Value, bool FromFile)
+    {
+        /// <summary>Only a workspace marked dev forwards to a listener; one without an environment counts as prod.</summary>
+        public bool AllowsLocalForward => string.Equals(Value?.Trim(), "dev", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // Samme kode og samme vei ut som Queuey svarer med (local_forward_needs_dev_workspace), så planen sier det før apply lager
+    // køen og får avslaget på leveringstypen.
+    private static QueueyException LocalForwardNeedsDevWorkspace(string name, string tenant, ListenerEnvironment environment) => new QueueyConflictException(
+        $"Queue '{name}' would be created with \"kind\": \"localForward\", and only a workspace marked dev forwards to a local listener "
+        + $"(queuey listen): workspace {tenant} "
+        + (environment.Value is { } value
+            ? $"{(environment.FromFile ? "would be marked" : "is marked")} {value.Trim().ToLowerInvariant()}{(environment.FromFile ? " by this file" : "")}"
+            : "has no environment, which counts as prod")
+        + ". apply would create the queue, and Queuey would refuse its kind.", errorCode: "local_forward_needs_dev_workspace")
+    {
+        SuggestedAction = "Give the queue \"kind\": \"http\" where the workspace is not dev, or take the kind from a variable, such as "
+                          + $"${{{DeploymentTemplate.QueueKindVariable(name)}}}, set to http there. If the workspace is for development, a "
+                          + "person marks it dev with Set environment… on its page in the Queuey console.",
     };
 
     private static bool IsAbsoluteUrl(string? url)

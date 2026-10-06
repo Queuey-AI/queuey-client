@@ -605,7 +605,11 @@ belongs to its session (`--forward-to`) and never to the file, and the queue kee
 delivers over HTTP again. Omit `kind` to leave it as it is. A file applied to several workspaces takes it
 from a variable, such as `"kind": "${QUEUEY_STRIPE_DELIVERY_KIND}"`, set to `localForward` in development
 and `http` elsewhere; `pull --as` writes that variable for you. Routing a queue to a listener needs
-`queue.listen` on it.
+`queue.listen` on it, and a workspace marked `dev`: Queuey refuses `localForward` in any other workspace, and in
+one without an environment, which counts as prod (`local_forward_needs_dev_workspace`). `plan` says so before
+`apply`, also for a queue it would create, and `apply` shows Queuey's refusal with the way out. Queues that
+already forward are left as they are. Raising a workspace's environment above `dev` while a queue forwards is
+refused too (`local_forward_blocks_environment_raise`), with the queues to set to `http` first.
 
 **A delivery URL on your machine is refused.** Queuey's delivery never reaches `localhost`, `*.localhost`,
 a loopback address or a private one, so `plan`, `apply` and `apply --dry-run` refuse such a `url` or
