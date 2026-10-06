@@ -1085,6 +1085,12 @@ for prod: delivery over HTTP, `credentials request` for a secret, and Stripe's p
 that takes the environment from a variable without profiles, or whose profile already gives that variable another value.
 State `dev` in the intent for the dev path: a local listener, and Stripe's test mode.
 
+advise stops rather than guess. A file with profiles never gets a new one from an environment advise only assumes: with
+one profile the flow goes into it, and the commands take it with `--profile`; with several, the flow lists an
+`ambiguous` conflict, and the answer is `environment` in the intent. A queue the file already forwards to a listener
+(`"kind": "localForward"`) in a file without an environment is a conflict too: state `dev`, or give the queue
+`"kind": "http"`.
+
 **`infrastructure.content` is the whole file, to write as it is.** With a `queuey.deploy.json` already there, it is that
 file with the flow's queue and profile values merged in. The file wins over everything the intent does not state. A
 stated value the file contradicts, such as the same queue with another route, is a conflict rather than an overwrite,

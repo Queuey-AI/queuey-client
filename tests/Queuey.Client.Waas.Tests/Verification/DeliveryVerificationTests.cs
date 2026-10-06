@@ -324,23 +324,17 @@ public class DeliveryVerificationTests
         Assert.DoesNotContain("has no such route", v.SuggestedAction);
     }
 
-    [Theory]
-    [InlineData(null, "queuey credentials request <NAME> --type <type> prints a link", "--profile")]
-    [InlineData("prod", "queuey credentials request <NAME> --type <type> --profile prod prints a link", null)]
-    [InlineData("x;id", "queuey credentials request <NAME> --type <type> prints a link", "x;id")]   // ikke et profilnavn
-    public void Storing_a_new_secret_follows_the_storing_rule_and_takes_the_callers_profile(string? profile, string request, string? absent)
+    [Fact]
+    public void Storing_a_new_secret_follows_the_storing_rule()
     {
-        // Samme regel som plan og apply (review av #58, K2): verify kjenner ikke miljøet, så en person limer inn verdien. Med
-        // en profil tar kommandoene den (re-review av #58).
-        DeliveryVerification v = DeliveryVerifier.Judge("orders", Published,
-            Event(4, Attempt(401, "AuthenticationFailed", kind: "HoldEvent", reason: "target_requires_action_auth_failed")),
-            null, TimeSpan.FromSeconds(30), profile: profile);
+        // Samme regel som plan og apply (review av #58, K2): verify kjenner ikke miljøet, så en person limer inn verdien, og
+        // set nevnes for en verdi den som kjører, holder.
+        DeliveryVerification v = Judge(Event(4, Attempt(401, "AuthenticationFailed", kind: "HoldEvent", reason: "target_requires_action_auth_failed")));
 
-        Assert.Contains("Store a new secret under the same name. A person pastes the value", v.SuggestedAction);
-        Assert.Contains(request, v.SuggestedAction);
-        Assert.Contains("queuey credentials set", v.SuggestedAction);
-        if (absent is not null)
-            Assert.DoesNotContain(absent, v.SuggestedAction);
+        Assert.Contains("Store a new secret under the same name. A person pastes the value, so it never passes through you: queuey " +
+                        "credentials request <NAME> --type <type> prints a link", v.SuggestedAction);
+        Assert.Contains("queuey credentials set --name <NAME> --type <type> --from-env <VARIABLE>", v.SuggestedAction);
+        Assert.DoesNotContain("--profile", v.SuggestedAction);
     }
 
     [Fact]

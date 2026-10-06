@@ -131,6 +131,12 @@ public static class FlowDesigner
         private readonly SortedDictionary<string, (string Value, DesignSetting Setting)> _profile = new(StringComparer.Ordinal);
         private readonly string _profileFlag;
 
+        // Profilen verdiene går i, og som kommandoene tar med --profile (re-review av #59). Et oppgitt miljø, et fila sier, eller
+        // en ny fil gir profilen med miljøets navn. En fil som finnes med profiler, og et miljø ingen har oppgitt, får aldri en
+        // ny profil: den ene fila har (flere er en konflikt fra FlowAdvisor). Profilens navn er da ikke miljøet: en fil med bare
+        // profilen dev og uten miljø gjelder et workspace Queuey regner som prod.
+        private readonly string _profileName;
+
         public Builder(DesiredFlow flow, FlowFacts facts, Advice? sending)
         {
             _flow = flow;
@@ -143,34 +149,61 @@ public static class FlowDesigner
             _prefix = $"queues.{_queue}";
             _file = facts.DeployFile;
             _portable = _file is null || _file.Profiles.Count > 0;
-            _profileFlag = _portable ? $" --profile {_env}" : "";
+            bool literal = _file?.Environment is { } named && named.IndexOf("${", StringComparison.Ordinal) < 0;
+            _profileName = _file is null || flow.IsStated("environment") || literal || _file.Profiles.Count != 1 ? _env : _file.Profiles[0];
+            _profileFlag = _portable ? $" --profile {_profileName}" : "";
 
-            bool assumed = flow["environment"] is not { Provenance: not Provenance.Assumed };
-            string? variable = EnvironmentVariable(_file);
-            string environment = assumed && _portable && variable is not null && FileProfileValue(variable) is { } given
-                ? given.Trim().ToLowerInvariant()
-                : _env;
-            _devInPractice = environment == "dev";
+            // Miljøet er det FlowAdvisor kom fram til: oppgitt, i fila, i den ene profilen, eller antatt (dev for en ny fil, prod
+            // for en som finnes). Bare dev i praksis leverer til en lytter og gir Stripe sin testmodus.
+            _devInPractice = _env == "dev";
             _local = _devInPractice;
-            _assumedForUnmarkedFile = assumed && _file is not null && !(_portable && variable is not null);
-            _storing = new CredentialStoring(environment, _portable ? _env : null);
+            _assumedForUnmarkedFile = flow["environment"] is { Provenance: Provenance.Assumed } && _file is not null;
+            _storing = new CredentialStoring(_env, _portable ? _profileName : null);
         }
 
-        /// <summary>The variable a file takes the workspace's environment from, such as QUEUEY_WORKSPACE_ENVIRONMENT, or null.</summary>
-        private static string? EnvironmentVariable(ExistingDeployFile? file)
-            => file?.Environment is { } environment && environment.IndexOf("${", StringComparison.Ordinal) >= 0
-                ? DeploymentVariables.Referenced(environment).FirstOrDefault()
-                : null;
-
-        /// <summary>The value the file's profile for the flow's environment already gives <paramref name="variable"/>, or null.</summary>
+        /// <summary>The value the file's profile gives <paramref name="variable"/>, or null when it gives none.</summary>
         private string? FileProfileValue(string variable)
-            => Property((Property(_file?.Json, "profiles") as JsonObject)?[_env] as JsonObject, "variables") is JsonObject given
+            => Property((Property(_file?.Json, "profiles") as JsonObject)?[_profileName] as JsonObject, "variables") is JsonObject given
                && given[variable] is JsonValue value && value.TryGetValue(out string? text) && !string.IsNullOrWhiteSpace(text)
                 ? text
                 : null;
 
+        /// <summary>The queue's delivery kind in the file, lower case, read through the profile when it is a ${VAR}; null without one.</summary>
+        private string? FileQueueKind()
+        {
+            if ((Property(_file?.Json, "queues") as JsonObject)?[_queue] is not JsonObject queue
+                || Property(Property(queue, "delivery") as JsonObject, "kind") is not JsonValue value
+                || !value.TryGetValue(out string? kind) || string.IsNullOrWhiteSpace(kind))
+                return null;
+
+            if (kind.IndexOf("${", StringComparison.Ordinal) >= 0)
+                kind = _portable && DeploymentVariables.Referenced(kind).FirstOrDefault() is { } variable ? FileProfileValue(variable) : null;
+            return kind?.Trim().ToLowerInvariant();
+        }
+
+        /// <summary>
+        /// A queue the file already sends to a local listener, in a workspace advise only assumes is prod: a conflict. The
+        /// design for prod would point a real endpoint at a queue that delivers to a laptop, and nobody starts the listener.
+        /// </summary>
+        // Re-review av #59: en fil skrevet av en eldre advise kan ha kind localForward og ikke noe miljø. Fila vinner over det
+        // advise antar, så designet beholdt localForward, mens stegene var for prod. Det avgjør en person, ikke advise.
+        private void ForwardingInAssumedProd()
+        {
+            if (_devInPractice || !_assumedForUnmarkedFile || FileQueueKind() != "localforward")
+                return;
+
+            _conflicts.Add(new FlowConflict("ambiguous", "environment", null, JsonValue.Create("localForward"),
+                new[] { new FlowEvidence(_file!.File, null, $"queues.{_queue}.delivery.kind is localForward") },
+                $"{_file.File} forwards queues.{_queue} to a local listener, but it names no workspace environment, and Queuey counts " +
+                "such a workspace as prod.",
+                $"Is this flow for dev? State the environment dev in the intent. For prod, set queues.{_queue}.delivery.kind to http " +
+                $"in {_file.File}. Then run advise --intent again."));
+        }
+
         public FlowDesign? Build()
         {
+            ForwardingInAssumedProd();
+
             // 1. Forslaget for flyten: miljøet, køen og profilverdiene, hver innstilling med en grunn.
             var workspace = new JsonObject();
             var queue = new JsonObject();
@@ -363,8 +396,20 @@ public static class FlowDesigner
 
             if (variable is not null)
             {
-                // Fila tar miljøet fra en variabel. Med profiler gir profilen for miljøet verdien.
-                if (_portable)
+                // Fila tar miljøet fra en variabel, og apply nekter en den ikke får lese, som ${QUEUEY_STAGE} (#55).
+                if (DeploymentVariables.RefusalOf(variable) is { } refused)
+                {
+                    _conflicts.Add(new FlowConflict("unsupported", "environment", null, null,
+                        new[] { new FlowEvidence(_file!.File, null, $"the deployment file reads ${{{variable}}}") },
+                        $"{_file.File} takes the workspace's environment from ${{{variable}}}, which a deployment file may not read: {refused}.",
+                        $"Rename ${{{variable}}} in {_file.File} to a variable a deployment file may read, such as " +
+                        $"{DeploymentTemplate.EnvironmentVariable} or a name without QUEUEY_, then run advise --intent again."));
+                    return;
+                }
+
+                // Et oppgitt miljø går inn i profilen. Et antatt skrives ikke inn i en fil som finnes (re-review av #59): den ene
+                // profilen gir det, eller miljøet der apply kjører.
+                if (_portable && _flow.IsStated("environment"))
                     ProfileValue(variable, _env, Basis("environment"), EnvironmentBecause(), "environment");
                 return;
             }
@@ -405,7 +450,7 @@ public static class FlowDesigner
                 ProfileValue(DeploymentTemplate.BaseUrlVariable, baseUrl.AsString!.TrimEnd('/'), "stated",
                     $"Where the receiver is reachable over HTTP in {_env}, as the intent gives it.", "destination.baseUrl");
                 basis = "stated";
-                because = $"The handler's route, {_route}, on {DeploymentTemplate.BaseUrlVariable}, which the {_env} profile sets to the " +
+                because = $"The handler's route, {_route}, on {DeploymentTemplate.BaseUrlVariable}, which the {_profileName} profile sets to the " +
                           "base the intent gives. On the queue rather than as the workspace's base, so the workspace and its other " +
                           "queues are left alone.";
             }
@@ -458,7 +503,7 @@ public static class FlowDesigner
 
         /// <summary>A value for the flow's environment, under profiles.&lt;environment&gt;.variables.</summary>
         private void ProfileValue(string variable, string value, string basis, string because, params string[] from)
-            => _profile[variable] = (value, new DesignSetting($"profiles.{_env}.variables.{variable}", JsonValue.Create(value), basis, because, from));
+            => _profile[variable] = (value, new DesignSetting($"profiles.{_profileName}.variables.{variable}", JsonValue.Create(value), basis, because, from));
 
         /// <summary>Whether the design signs the queue's deliveries: only a Stripe queue does, in Stripe's format.</summary>
         private bool SignsDeliveries => _kind == "stripe" && _flow["requirements.verification"] is { AsString: "stripe-signature" };
@@ -564,7 +609,7 @@ public static class FlowDesigner
             var values = _profile.Where(p => referenced.Contains(p.Key)).ToArray();
             if (values.Length > 0)
             {
-                JsonObject variables = Child(Entry(Child(content, "profiles"), _env), "variables");
+                JsonObject variables = Child(Entry(Child(content, "profiles"), _profileName), "variables");
                 foreach ((string name, (string value, DesignSetting setting)) in values)
                 {
                     if (ProfileProblem(name, value) is { } problem)
@@ -710,7 +755,7 @@ public static class FlowDesigner
             {
                 DeploymentProfiles.Validate(new Dictionary<string, DeploymentProfile>(StringComparer.Ordinal)
                 {
-                    [_env] = new DeploymentProfile { Variables = new Dictionary<string, string>(StringComparer.Ordinal) { [name] = value } },
+                    [_profileName] = new DeploymentProfile { Variables = new Dictionary<string, string>(StringComparer.Ordinal) { [name] = value } },
                 });
                 return null;
             }
@@ -731,11 +776,11 @@ public static class FlowDesigner
                 "environment" when name != DeploymentTemplate.EnvironmentVariable =>
                     $"Rename ${{{name}}} in {(_file?.File ?? DeploymentFile.DefaultFileName)} to a variable a deployment file may read, such as " +
                     $"{DeploymentTemplate.EnvironmentVariable} or a name without QUEUEY_, then run advise --intent again.",
-                _ => $"Give {name} its value from the environment where plan and apply run, rather than from the {_env} profile.",
+                _ => $"Give {name} its value from the environment where plan and apply run, rather than from the {_profileName} profile.",
             };
             _conflicts.Add(new FlowConflict("unsupported", field, null, null,
                 _file is null ? Array.Empty<FlowEvidence>() : new[] { new FlowEvidence(_file.File, null, $"the deployment file reads ${{{name}}}") },
-                $"The {_env} profile cannot hold {name}: {problem}", question));
+                $"The {_profileName} profile cannot hold {name}: {problem}", question));
         }
 
         /// <summary>Every ${VAR} the file reads outside its profiles.</summary>
@@ -773,7 +818,7 @@ public static class FlowDesigner
         private IReadOnlyList<string> FromEnvironment(JsonObject content)
         {
             HashSet<string> referenced = Referenced(content);
-            if (Property((Property(content, "profiles") as JsonObject)?[_env] as JsonObject, "variables") is JsonObject given)
+            if (Property((Property(content, "profiles") as JsonObject)?[_profileName] as JsonObject, "variables") is JsonObject given)
                 referenced.ExceptWith(given.Select(v => v.Key));
             return referenced.OrderBy(n => n, StringComparer.Ordinal).ToArray();
         }
@@ -911,10 +956,10 @@ public static class FlowDesigner
                 // En ny fil har bare advise sine variabler, så den utvides med profilen, slik apply --profile gjør. Det profilen lar
                 // stå åpent, kommer fra miljøet: her en stedfortreder for basen. En fil som var der, kan lese variabler bare
                 // brukerens miljø kjenner, så den sjekkes uten å utvides.
-                if (_file is null && file.Profiles is { } profiles && profiles.ContainsKey(_env))
+                if (_file is null && file.Profiles is { } profiles && profiles.ContainsKey(_profileName))
                 {
-                    HashSet<string> given = profiles[_env].Variables?.Keys.ToHashSet(StringComparer.Ordinal) ?? new HashSet<string>();
-                    file.ForProfile(_env, name => name == DeploymentTemplate.BaseUrlVariable && !given.Contains(name)
+                    HashSet<string> given = profiles[_profileName].Variables?.Keys.ToHashSet(StringComparer.Ordinal) ?? new HashSet<string>();
+                    file.ForProfile(_profileName, name => name == DeploymentTemplate.BaseUrlVariable && !given.Contains(name)
                         ? "https://api.example.com"
                         : null).Resolve();
                 }
@@ -1128,12 +1173,12 @@ public static class FlowDesigner
                               ? $" {DeploymentTemplate.BaseUrlVariable} is where the receiver is reachable over HTTP, such as production's URL" +
                                 (_local ? "; while the queue forwards to a listener, Queuey sends nothing there and takes only the path." : ".")
                               : "") +
-                          (_portable ? $" A value that is the same every time can go under profiles.{_env}.variables instead." : ""));
+                          (_portable ? $" A value that is the same every time can go under profiles.{_profileName}.variables instead." : ""));
             }
 
             if (_portable)
-                _next.Add($"--profile {_env} takes your connection from ~/.queuey/config.json, never from the repository: " +
-                          $"profiles.{_env} there, with apiKey, license and tenant, readable only by you (chmod 600). The key is " +
+                _next.Add($"--profile {_profileName} takes your connection from ~/.queuey/config.json, never from the repository: " +
+                          $"profiles.{_profileName} there, with apiKey, license and tenant, readable only by you (chmod 600). The key is " +
                           "minted in the Queuey console.");
 
             // Bare der fila sier dev: en fil uten miljø senker ingenting, og apply har ingenting å nekte (B2).
