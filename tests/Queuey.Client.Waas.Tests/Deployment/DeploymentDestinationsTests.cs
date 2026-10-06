@@ -31,6 +31,103 @@ public class DeploymentDestinationsTests
         Assert.Contains("\"kind\": \"localForward\"", refusal);
     }
 
+    // Queuey F2.3-review (2026-10-06): de samme sperrede områdene som serveren etter #432 og #433. Vektorene er de samme
+    // som Queuey sine (IsBlockedIp-teoriene i SsrfEgressPolicyTests i Queuey), så de to sidene sperrer det samme.
+    [Theory]
+    [InlineData("127.0.0.1")]
+    [InlineData("127.9.9.9")]
+    [InlineData("10.0.0.1")]
+    [InlineData("10.255.255.255")]
+    [InlineData("172.16.0.1")]
+    [InlineData("172.31.255.255")]
+    [InlineData("192.168.1.1")]
+    [InlineData("169.254.0.1")]
+    [InlineData("169.254.169.254")]
+    [InlineData("100.64.0.1")]
+    [InlineData("100.127.255.255")]
+    [InlineData("0.0.0.0")]
+    [InlineData("255.255.255.255")]
+    [InlineData("224.0.0.1")]
+    [InlineData("198.18.0.1")]
+    [InlineData("::1")]
+    [InlineData("fe80::1")]
+    [InlineData("fc00::1")]
+    [InlineData("fd12:3456::1")]
+    [InlineData("::")]
+    [InlineData("::ffff:10.0.0.1")]
+    [InlineData("::ffff:169.254.169.254")]
+    [InlineData("::127.0.0.1")] // ::/96, IPv4-kompatibel
+    [InlineData("::10.0.0.1")]
+    [InlineData("::8.8.8.8")]
+    [InlineData("64:ff9b::a00:1")] // 64:ff9b::/96, NAT64: 10.0.0.1
+    [InlineData("64:ff9b::a9fe:a9fe")] // 169.254.169.254
+    [InlineData("64:ff9b::808:808")] // 8.8.8.8
+    [InlineData("64:ff9b:1::a00:1")] // 64:ff9b:1::/48, NAT64 til lokal bruk
+    [InlineData("64:ff9b:1:ffff::808:808")]
+    [InlineData("2002:a9fe:a9fe::1")] // 2002::/16, 6to4: 169.254.169.254
+    [InlineData("2002:7f00:1::1")] // 127.0.0.1
+    [InlineData("2002:808:808::1")] // 8.8.8.8
+    [InlineData("2001:0:4136:e378:8000:63bf:3fff:fdd2")] // 2001::/32, Teredo
+    [InlineData("2001::f5ff:fffe")] // klientens IPv4 10.0.0.1, XOR-tilslørt
+    [InlineData("168.63.129.16")] // Azure WireServer
+    [InlineData("::ffff:168.63.129.16")] // samme adresse, IPv4-mappet
+    [InlineData("100.100.100.200")] // Alibaba, i CGNAT
+    [InlineData("fd00:ec2::254")] // AWS IMDS over IPv6, unik-lokal
+    [InlineData("::ffff:0:a00:1")] // IPv4-oversatt (RFC 2765), verken mappet eller kompatibel
+    [InlineData("100::1")] // discard-only (RFC 6666)
+    [InlineData("fec0::1")] // site-lokal (foreldet)
+    [InlineData("ff02::1")] // multicast
+    [InlineData("1fff:ffff::1")] // rett under 2000::/3
+    [InlineData("4000::1")] // rett over 2000::/3
+    [InlineData("2001:1::1")] // 2001::/23: PCP-anycast
+    [InlineData("2001:1::2")] // TURN-anycast
+    [InlineData("2001:2::1")] // benchmarking (2001:2::/48)
+    [InlineData("2001:3::1")] // AMT
+    [InlineData("2001:4:112::1")] // AS112
+    [InlineData("2001:10::1")] // ORCHID (2001:10::/28)
+    [InlineData("2001:20::1")] // ORCHIDv2 (2001:20::/28)
+    [InlineData("2001:1ff:ffff::1")] // i den siste /32-en i 2001::/23
+    [InlineData("2001:db8::1")] // dokumentasjon
+    [InlineData("2001:db8:ffff:ffff::1")]
+    [InlineData("3ffe::1")] // 6bone
+    [InlineData("3ffe:ffff::1")]
+    [InlineData("3fff::1")] // dokumentasjon (3fff::/20)
+    [InlineData("3fff:fff:ffff::1")] // i den siste /32-en i 3fff::/20
+    [InlineData("192.0.2.1")] // TEST-NET-1
+    [InlineData("192.0.2.255")]
+    [InlineData("192.88.99.1")] // 6to4-reléet
+    [InlineData("198.51.100.1")] // TEST-NET-2
+    [InlineData("203.0.113.1")] // TEST-NET-3
+    [InlineData("203.0.113.255")]
+    [InlineData("::ffff:198.51.100.7")] // en TEST-NET-adresse, IPv4-mappet
+    public void An_address_queueys_egress_guard_blocks_is_refused_before_anything_is_sent(string address)
+        => Assert.NotNull(DeploymentDestinations.LocalTargetRefusal($"https://{UrlHost(address)}/hook"));
+
+    [Theory]
+    [InlineData("8.8.8.8")]
+    [InlineData("1.1.1.1")]
+    [InlineData("172.15.0.1")] // just below 172.16/12
+    [InlineData("172.32.0.1")] // just above 172.16/12
+    [InlineData("100.63.255.255")] // just below CGNAT /10
+    [InlineData("100.128.0.1")] // just above CGNAT /10
+    [InlineData("168.63.129.17")] // naboen til Azure WireServer er en vanlig offentlig adresse
+    [InlineData("192.0.3.1")] // rett over TEST-NET-1 (192.0.2.0/24)
+    [InlineData("192.88.100.1")] // rett over 6to4-reléet (192.88.99.0/24)
+    [InlineData("198.51.101.1")] // rett over TEST-NET-2
+    [InlineData("203.0.114.1")] // rett over TEST-NET-3
+    [InlineData("2606:4700:4700::1111")] // public v6 (Cloudflare)
+    [InlineData("2001:4860:4860::8888")] // offentlig v6 (Google) i 2001::/16, utenfor 2001::/23
+    [InlineData("2001:200::1")] // rett over 2001::/23 (APNIC)
+    [InlineData("2001:db9::1")] // rett over dokumentasjonsblokken 2001:db8::/32
+    [InlineData("2003::1")] // rett over 6to4 (2002::/16)
+    [InlineData("3fff:1000::1")] // rett over 3fff::/20
+    [InlineData("3ffd:ffff::1")] // rett under 6bone
+    public void An_address_queueys_egress_guard_lets_through_is_left_to_the_server(string address)
+        => Assert.Null(DeploymentDestinations.LocalTargetRefusal($"https://{UrlHost(address)}/hook"));
+
+    private static string UrlHost(string address)
+        => IPAddress.Parse(address).AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6 ? $"[{address}]" : address;
+
     [Theory]
     [InlineData(null)]
     [InlineData("/orders")]

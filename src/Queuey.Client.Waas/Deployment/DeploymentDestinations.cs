@@ -84,7 +84,9 @@ public static class DeploymentDestinations
             : null;
     }
 
-    // Samme områder som SsrfEgressPolicy i Queuey (2026-07-13).
+    // Samme områder som SsrfEgressPolicy.IsBlockedIp i Queuey etter #432 og #433 (2026-10-06), med de samme testvektorene
+    // (DeploymentDestinationsTests her, SsrfEgressPolicyTests i Queuey). Serveren avviser uansett når URL-en lagres, men
+    // CLI-en sier det før noe er sendt. En IPv4-mappet adresse er pakket ut før denne kalles (Where).
     private static bool IsBlocked(IPAddress ip)
     {
         byte[] b = ip.GetAddressBytes();
@@ -93,25 +95,34 @@ public static class DeploymentDestinations
             uint a = ((uint)b[0] << 24) | ((uint)b[1] << 16) | ((uint)b[2] << 8) | b[3];
             return InRange(a, 0x00000000, 8)      // 0.0.0.0/8
                 || InRange(a, 0x0A000000, 8)      // 10.0.0.0/8
-                || InRange(a, 0x64400000, 10)     // 100.64.0.0/10 CGNAT
+                || InRange(a, 0x64400000, 10)     // 100.64.0.0/10 CGNAT, also 100.100.100.200 metadata
                 || InRange(a, 0x7F000000, 8)      // 127.0.0.0/8
+                || InRange(a, 0xA83F8110, 32)     // 168.63.129.16 Azure WireServer
                 || InRange(a, 0xA9FE0000, 16)     // 169.254.0.0/16 link-local and metadata
                 || InRange(a, 0xAC100000, 12)     // 172.16.0.0/12
                 || InRange(a, 0xC0000000, 24)     // 192.0.0.0/24
+                || InRange(a, 0xC0000200, 24)     // 192.0.2.0/24 TEST-NET-1
+                || InRange(a, 0xC0586300, 24)     // 192.88.99.0/24 6to4 relay
                 || InRange(a, 0xC0A80000, 16)     // 192.168.0.0/16
                 || InRange(a, 0xC6120000, 15)     // 198.18.0.0/15
+                || InRange(a, 0xC6336400, 24)     // 198.51.100.0/24 TEST-NET-2
+                || InRange(a, 0xCB007100, 24)     // 203.0.113.0/24 TEST-NET-3
                 || InRange(a, 0xE0000000, 4)      // 224.0.0.0/4 multicast
                 || InRange(a, 0xF0000000, 4);     // 240.0.0.0/4 reserved
         }
 
         if (ip.AddressFamily == AddressFamily.InterNetworkV6)
         {
-            if (IPAddress.IPv6None.Equals(ip) || IPAddress.IPv6Loopback.Equals(ip))
+            // Bare 2000::/3 er global unicast. Utenfor ligger ::, ::1, IPv4-kompatibel ::/96, NAT64 64:ff9b::/96 og
+            // 64:ff9b:1::/48, unik-lokal fc00::/7, link-lokal, site-lokal og multicast. Et prefiks som bærer en IPv4-adresse,
+            // sperres helt, som i Queuey.
+            if ((b[0] & 0xE0) != 0x20)
                 return true;
-            return (b[0] & 0xFE) == 0xFC                      // fc00::/7 unique local
-                || (b[0] == 0xFE && (b[1] & 0xC0) == 0x80)    // fe80::/10 link-local
-                || b[0] == 0xFF                               // ff00::/8 multicast
-                || ip.IsIPv6SiteLocal;                        // fec0::/10, deprecated site-local
+            return (b[0] == 0x20 && b[1] == 0x01 && (b[2] & 0xFE) == 0x00)        // 2001::/23, Teredo among them
+                || (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x0D && b[3] == 0xB8) // 2001:db8::/32 documentation
+                || (b[0] == 0x20 && b[1] == 0x02)                                // 2002::/16 6to4
+                || (b[0] == 0x3F && b[1] == 0xFE)                                // 3ffe::/16 6bone
+                || (b[0] == 0x3F && b[1] == 0xFF && (b[2] & 0xF0) == 0x00);      // 3fff::/20 documentation
         }
 
         return true;
