@@ -21,12 +21,18 @@ internal sealed class CredentialResolver
 
     private readonly IQueueyManagement _management;
     private readonly string _tenantPublicId;
+    private readonly CredentialStoring _storing;
     private Dictionary<string, string>? _byName;
 
-    public CredentialResolver(IQueueyManagement management, string tenantPublicId)
+    /// <summary>
+    /// A resolver for <paramref name="tenantPublicId"/>, whose errors say how to store a missing credential the way
+    /// <paramref name="storing"/> does for where the file goes: a person pastes it outside dev.
+    /// </summary>
+    public CredentialResolver(IQueueyManagement management, string tenantPublicId, CredentialStoring storing)
     {
         _management = management;
         _tenantPublicId = tenantPublicId;
+        _storing = storing;
     }
 
     /// <summary>
@@ -40,13 +46,18 @@ internal sealed class CredentialResolver
         // Før 2026-09-24 ble en køs credential-navn slått opp først etter at køen var opprettet. Et navn
         // som manglet, feilet køen der og lot den ligge i logOnly, og neste apply beholdt modusen og ga
         // exit 0. Derfor slås alle navn opp her, før første skriving.
-        var references = new List<(string Name, string Where)>();
-        Collect(workspace?.CredentialRef, "workspace.delivery.credentialRef");
-        Collect(workspace?.Signing?.CredentialRef, "workspace.delivery.signing.credentialRef");
+        // Typen følger med navnet, så forslaget om å lagre det har riktig --type: authMode for leveransen, HmacSigning for
+        // signeringen. En kø uten egen authMode arver workspacets, og da er typen den.
+        var references = new List<(string Name, string Where, string? Type)>();
+        string? workspaceType = CredentialStoring.TypeForAuthMode(workspace?.AuthMode);
+        Collect(workspace?.CredentialRef, "workspace.delivery.credentialRef", workspaceType);
+        Collect(workspace?.Signing?.CredentialRef, "workspace.delivery.signing.credentialRef", CredentialStoring.RequestDefaultType);
         foreach (DeploymentQueuePlan plan in plans)
         {
-            Collect(plan.Delivery?.CredentialRef, $"queues.{plan.Definition.Name}.delivery.credentialRef");
-            Collect(plan.Delivery?.Signing?.CredentialRef, $"queues.{plan.Definition.Name}.delivery.signing.credentialRef");
+            Collect(plan.Delivery?.CredentialRef, $"queues.{plan.Definition.Name}.delivery.credentialRef",
+                plan.Delivery?.AuthMode is { } mode ? CredentialStoring.TypeForAuthMode(mode) : workspaceType);
+            Collect(plan.Delivery?.Signing?.CredentialRef, $"queues.{plan.Definition.Name}.delivery.signing.credentialRef",
+                CredentialStoring.RequestDefaultType);
         }
 
         if (references.Count > 0)
@@ -84,33 +95,52 @@ internal sealed class CredentialResolver
             queues,
             known);
 
-        void Collect(string? reference, string where)
+        void Collect(string? reference, string where, string? type)
         {
             if (string.IsNullOrWhiteSpace(reference)) return;
             string name = reference!.Trim();
             if (!name.StartsWith(IdPrefix, StringComparison.Ordinal))
-                references.Add((name, where));
+                references.Add((name, where, type));
         }
     }
 
-    private QueueyConfigurationException Missing(List<(string Name, string Where)> missing, Dictionary<string, string> byName)
+    private QueueyConfigurationException Missing(List<(string Name, string Where, string? Type)> missing, Dictionary<string, string> byName)
     {
         var names = missing.Select(m => m.Name).Distinct(StringComparer.Ordinal).ToList();
 
+        // Utenfor dev limer en person inn verdien (F2.9); før sto credentials set her også i prod. Ett navn får sin egen type,
+        // flere får plassholdere, siden typene kan være ulike. Navnene kommer fra fila uten noen formsjekk, så de vises bare i
+        // den trygge formen (review av #58, B1): før sto de rått i feilen og i kommandoen, forbi TerminalText.
+        string? type = missing.Select(m => m.Type).Distinct().Count() == 1 ? missing[0].Type : null;
         return new QueueyConfigurationException(
             (names.Count == 1
-                ? $"No credential named '{names[0]}' in workspace {_tenantPublicId}"
-                : $"No credentials named {string.Join(", ", names.Select(n => $"'{n}'"))} in workspace {_tenantPublicId}")
+                ? CredentialNameRules.Showable(names[0]) is { } shown
+                    ? $"No credential named '{shown}' in workspace {_tenantPublicId}"
+                    : $"No credential with the name the file gives in workspace {_tenantPublicId}"
+                : $"No credentials named {string.Join(", ", names.Select(Quoted))} in workspace {_tenantPublicId}")
             + $" ({string.Join("; ", missing.Select(m => m.Where))}). Nothing was changed. "
             + (names.Count == 1
-                ? $"Store it first: queuey credentials set --name {names[0]} --from-env <ENV_VAR>. "
-                : "Store each first: queuey credentials set --name <name> --from-env <ENV_VAR>. ")
+                ? $"Store it first. {_storing.HowToStore(names[0], type)} "
+                : $"Store each first. {_storing.HowToStore(CredentialStoring.Placeholder, null)}"
+                  + (names.Any(n => CredentialNameRules.Showable(n) is null) ? " " + CredentialStoring.NotShown : "") + " ")
             + Available(byName));
     }
 
-    private static string Available(Dictionary<string, string> byName) => byName.Count == 0
-        ? "This workspace has no credentials yet."
-        : $"Available: {string.Join(", ", byName.Keys.OrderBy(k => k, StringComparer.Ordinal))}.";
+    private static string Quoted(string name) => CredentialNameRules.Showable(name) is { } shown ? $"'{shown}'" : "a name that is not shown";
+
+    // Navnene workspacet har, er lagret av en med skrivetilgang: de vises i den trygge formen, og resten telles.
+    private static string Available(Dictionary<string, string> byName)
+    {
+        if (byName.Count == 0)
+            return "This workspace has no credentials yet.";
+
+        List<string> shown = byName.Keys.Select(CredentialNameRules.Showable).OfType<string>().OrderBy(k => k, StringComparer.Ordinal).ToList();
+        int hidden = byName.Count - shown.Count;
+        string others = hidden == 1 ? "1 whose name is not shown" : $"{hidden} whose names are not shown";
+        return hidden == 0 ? $"Available: {string.Join(", ", shown)}."
+            : shown.Count == 0 ? $"Available: {others}."
+            : $"Available: {string.Join(", ", shown)}, and {others}.";
+    }
 
     /// <summary>
     /// Resolves one reference. Null/blank passes through (blank means "keep the stored secret"), and
@@ -130,8 +160,10 @@ internal sealed class CredentialResolver
             return publicId;
 
         throw new QueueyConfigurationException(
-            $"No credential named '{name}' in workspace {_tenantPublicId}. " +
-            $"Store it first: queuey credentials set --name {name} --from-env <ENV_VAR>. " +
+            (CredentialNameRules.Showable(name) is { } shown
+                ? $"No credential named '{shown}' in workspace {_tenantPublicId}. "
+                : $"No credential with the name the file gives in workspace {_tenantPublicId}. ") +
+            $"Store it first. {_storing.HowToStore(name, null)} " +
             Available(byName));
     }
 

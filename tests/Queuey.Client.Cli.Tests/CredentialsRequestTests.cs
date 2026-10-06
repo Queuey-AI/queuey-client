@@ -312,7 +312,8 @@ public sealed class CredentialsRequestTests
 
         Assert.Equal(ExitCodes.Success, run.Exit);
         Assert.Contains("'stripe-whsec' (HmacSigning) already holds this value: its secret stays version 1, under the same id, and the "
-                        + "credential is usable, with no expiry.", run.Stdout);
+                        + "credential is usable. An expiry that has not passed stays.", run.Stdout);
+        Assert.DoesNotContain("no expiry", run.Stdout);
         Assert.DoesNotContain("Replaced", run.Stdout);
     }
 

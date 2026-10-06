@@ -327,6 +327,8 @@ public sealed class VerifyCommandTests : IDisposable
         { new[] { "orders", "--event", "evt_1", "--timeout", "soon" }, "invalid_value" },
         { new[] { "orders", "--event", "evt_1", "--timeout", "5", "--wait", "5" }, "conflicting_options" },
         { new[] { "orders", "--event", "evt_1", "--content-type", "text/plain" }, "unknown_option" },
+        { new[] { "orders", "--queue", "orders", "--event", "evt_1" }, "conflicting_options" },
+        { new[] { "--queue", "", "--event", "evt_1" }, "missing_argument" },
     };
 
     [Theory]
@@ -404,6 +406,19 @@ public sealed class VerifyCommandTests : IDisposable
 
         Assert.Equal(ExitCodes.Success, run.Exit);
         Assert.Equal(120, api.Requests.Single(r => r.Method == HttpMethod.Post).Json.GetProperty("timeoutSeconds").GetInt32());
+    }
+
+    [Fact]
+    public async Task Queue_is_the_other_name_for_the_queue_argument()
+    {
+        // Agentene som har lært av brukerhistoriene, skriver --queue (før tag, 2026-10-06). Det står nå i bruksteksten.
+        RecordingHandler api = Server(FlowAnswers.Verification("passed"));
+
+        CliRun run = await CliHarness.RunAsync(() => Verify("--queue", "orders", "--event", "evt_1", "--tenant", "ten_abc"), api);
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.Equal("evt_1", api.Requests.Single(r => r.Key == "POST /queues/que_orders/verifications").Json
+            .GetProperty("eventPublicId").GetString());
     }
 
     [Fact]

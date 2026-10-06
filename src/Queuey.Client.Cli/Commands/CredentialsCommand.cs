@@ -37,9 +37,9 @@ internal static class CredentialsCommand
 
     /// <summary>
     /// The type <c>credentials request</c> asks for without <c>--type</c>: a signing secret, which Queuey never sends as it is.
-    /// The same default as Queuey's.
+    /// The same default as Queuey's, and as the commands advise, plan and apply suggest (<see cref="CredentialStoring"/>).
     /// </summary>
-    internal const string RequestDefaultType = "HmacSigning";
+    internal const string RequestDefaultType = CredentialStoring.RequestDefaultType;
 
     /// <summary>The credential types Queuey stores. Mirrors the server's <c>CredentialType</c>.</summary>
     private static readonly string[] CredentialTypes =
@@ -154,12 +154,14 @@ internal static class CredentialsCommand
 
         // Queuey F2.9: et navn som finnes, får hemmeligheten som en ny versjon under samme id. En eldre Queuey sier ingenting
         // om det (Created er null), og da står meldingen som før. Verdien credentialen alt har, er ingen ny versjon (Queuey #446,
-        // M2), og gjør en utløpt credential brukbar igjen (L2). Navn og typer kommer fra serveren, så linjene går gjennom
+        // M2), og gjør en utløpt credential brukbar igjen (L2). Et utløp som ikke har passert, står (runde 3, L1), så meldingen
+        // lover ikke «no expiry». Navn og typer kommer fra serveren, så linjene går gjennom
         // TerminalText (F2.7-regelen, review av queuey-client#54, L3).
         Console.WriteLine(TerminalText.Line(created.Created == false
             ? created.SecretReplaced == false
                 ? $"'{created.Name}' ({created.Type}) already holds this value: its secret stays version {created.Version}, under the "
-                  + "same id, and the credential is usable, with no expiry. The value is encrypted and can't be read back."
+                  + "same id, and the credential is usable. An expiry that has not passed stays. The value is encrypted and can't be "
+                  + "read back."
                 : $"Replaced the secret of '{created.Name}' ({created.Type}): it holds version {created.Version} now, under the same "
                   + "id, so everything that refers to it uses the new value. The value is encrypted and can't be read back."
             : $"Stored '{created.Name}' ({created.Type}). Refer to it as credentialRef \"{created.Name}\" — "

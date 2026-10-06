@@ -565,9 +565,10 @@ development workspace its events go to your machine through a local listener rat
 ```bash
 queuey plan                    # shows the queue's ingress URL before it exists
 queuey apply                   # creates the queue; its ingress refuses every event until stripe-whsec is stored
-stripe listen --forward-to <ingress URL>        # prints a test signing secret, whsec_…
-STRIPE_WHSEC=whsec_… queuey credentials set --name stripe-whsec --type HmacSigning --key-id stripe-whsec --from-env STRIPE_WHSEC
+# POSIX sh, one command: the Stripe CLI's own test secret is never printed, and needs no variable from an earlier shell
+STRIPE_WHSEC="$(stripe listen --print-secret)" queuey credentials set --name stripe-whsec --type HmacSigning --key-id stripe-whsec --from-env STRIPE_WHSEC
                                # the ingress verifies with it at once (a Queuey that predates this: run apply again)
+stripe listen --forward-to <ingress URL>        # in the background: Stripe's test events, signed with that secret
 queuey listen --queue stripe --forward-to http://localhost:5000
 ```
 
@@ -586,7 +587,9 @@ username as they are.
 the ingress refuses every event until a credential by that name is stored. Storing it, with `credentials set`
 or by a person fulfilling `credentials request`, points the ingress at it at once; with a Queuey that predates
 credential requests, `apply` must run again to do that. The plan, `apply` and Queuey's setup review all say so, with the command that
-stores it, and `apply --check` reports drift once it is stored. `template` is one of Queuey's signed-request
+stores it, and `apply --check` reports drift once it is stored. Plan and `apply` suggest `credentials request`, where a person
+pastes the value, unless the file's `workspace.environment` is `dev`: there `credentials set --from-env` stores a value you
+hold. Each names the other way too, and so does a delivery credential plan and `apply` cannot find. `template` is one of Queuey's signed-request
 templates; `queuey` is Queuey's own scheme, which verifies with the sending API client's signing key and
 takes no `credentialRef`. A `signedRequest` is checked while `authMode` is `SignedRequest` or
 `ApiKeyAndSignedRequest`, so a file that declares one with `None` or `ApiKey` beside it is refused.
@@ -682,8 +685,9 @@ times and each attempt with what Queuey decided after it. The payload, header va
 responses are content: `--content` reveals them, only when the key has `event.payload.read` and the
 queue's payload visibility lets values out, and Queuey records every look.
 
-`<queue>` is the queue's name or its id (`que_…`). `verify` finds a name in the workspace by the same
-rule as `apply`: the deployment file's `tenant` when it names one, otherwise `--tenant`,
+`<queue>` is the queue's name or its id (`que_…`). `--queue <queue>` is another name for it, as in
+`queuey verify --queue orders --event evt_…`: give one or the other. `verify` finds a name in the
+workspace by the same rule as `apply`: the deployment file's `tenant` when it names one, otherwise `--tenant`,
 `QUEUEY_TENANT` or `queuey.json`. When `--tenant` or `QUEUEY_TENANT` names another workspace than the
 file, both commands fail and name the two, rather than guessing which one you meant. The output names
 the workspace. `verify` needs a key that may read the queue and its events (`queue.read`,
@@ -1102,8 +1106,10 @@ proposed, and the command exits 1. Answer them in the intent and run it again.
 
 `--json` prints `schemaVersion` 1, the `outcome` (`proposed` or `conflicts`), the enriched `flow`, `existing` (Queuey
 where the repository has it already: a package, a registration, a deployment file), `scanLimited`, `infrastructure` (the
-file, each setting with its basis and reason, and the credentials it names), `code` and `nextSteps`. Keep the flow
-beside the code or in the pull request: it explains `queuey.deploy.json`, and `apply` never reads it. Without
+file, each setting with its basis and reason, and the credentials it names), `code` and `nextSteps`. Each credential
+comes with the command that stores it: `credentials set --from-env` in dev, for a value you hold, such as the Stripe
+CLI's test secret, and `credentials request` elsewhere, where a person pastes the value so it never passes through you.
+Keep the flow beside the code or in the pull request: it explains `queuey.deploy.json`, and `apply` never reads it. Without
 `--intent`, `advise --json` lists the `candidates` the repository shows. advise reads the names in a `.env` file and
 never a value.
 

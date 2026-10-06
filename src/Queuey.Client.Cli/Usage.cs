@@ -83,7 +83,10 @@ ADVISE
                  it contradicts, or a file apply cannot read, is a conflict. So is a root
                  queuey.deploy.json advise does not read: a link, a folder, a file over 512 KiB,
                  one it may not open, or no regular file, such as a pipe. It is read before the
-                 scan, outside its limits.
+                 scan, outside its limits. infrastructure.credentials names each secret the
+                 file refers to, never its value, with the command that stores it:
+                 credentials set in dev, for a value you hold, such as the Stripe CLI's test
+                 secret, and credentials request elsewhere, where a person pastes it.
                  --json prints { ""schemaVersion"": 1, ""outcome"": ""proposed"" or ""conflicts"",
                  ""flow"", ""existing"", ""scanLimited"", ""infrastructure"", ""code"",
                  ""nextSteps"" }; check schemaVersion first. ""flow"" is the enriched Desired
@@ -160,8 +163,11 @@ APPLY
                  delivery never reaches it, and localForward is the way to your machine.
                  ingress.signedRequest { template, credentialRef } verifies a provider's
                  signature, such as Stripe's. A credential that is not stored yet is
-                 accepted: the ingress refuses every event until it is stored and apply runs
-                 again, and apply says so with the command that stores it.
+                 accepted: the ingress refuses every event until it is stored, and storing it
+                 points the ingress at it at once (a Queuey from before credential requests
+                 needs another apply). apply says so with the command that stores it:
+                 credentials request, where a person pastes the value, unless the file's
+                 workspace.environment is dev, where credentials set stores a value you hold.
                  The workspace is the file's ""tenant"" when it names one, else --tenant /
                  QUEUEY_TENANT / queuey.json. When --tenant or QUEUEY_TENANT names another
                  workspace than the file, apply fails and names both. plan and verify use the
@@ -242,15 +248,17 @@ VERIFY
                  ""verification"": { … } }: the verification in Queuey's own shape, with its
                  own schemaVersion; check schemaVersion first. Neither output shows a payload
                  value or a secret: the evidence is ids, statuses, times and header names.
-                 <queue> is the queue's name or its id (que_…). A name is looked up in the
-                 workspace by apply's rule: the deployment file's ""tenant"" (--deployment,
-                 default ./queuey.deploy.json) when it names one, else --tenant /
-                 QUEUEY_TENANT / queuey.json; when --tenant or QUEUEY_TENANT names another
-                 workspace than the file, verify fails and names both. Needs a key that may
-                 read the queue and its events (queue.read, event.read). Against a Queuey
-                 without flow verification, verify fails with flow_verification_unavailable
-                 and sends nothing. --file is the test event; a deployment file there is
-                 refused (name that one with --deployment).
+                 <queue> is the queue's name or its id (que_…). --queue <queue> is another
+                 name for it, as in queuey verify --queue orders --event <evt_…>: give one
+                 or the other. A name is looked up in the workspace by apply's rule: the
+                 deployment file's ""tenant"" (--deployment, default ./queuey.deploy.json)
+                 when it names one, else --tenant / QUEUEY_TENANT / queuey.json; when
+                 --tenant or QUEUEY_TENANT names another workspace than the file, verify
+                 fails and names both. Needs a key that may read the queue and its events
+                 (queue.read, event.read). Against a Queuey without flow verification,
+                 verify fails with flow_verification_unavailable and sends nothing. --file
+                 is the test event; a deployment file there is refused (name that one with
+                 --deployment).
 
 SCHEMA
   queuey schema [--flow] [--json]

@@ -227,6 +227,15 @@ public sealed class CommandOptionsTests : IDisposable
         Assert.True(missing.Count == 0, "documented but rejected: " + string.Join(", ", missing));
     }
 
+    [Fact]
+    public void Every_option_verify_takes_is_in_its_usage_text()
+    {
+        // verify tok imot --queue uten at VERIFY nevnte det (før tag, 2026-10-06). Agenter leser bruksteksten før de kjører.
+        string[] documented = OptionsIn(Section("VERIFY")).Concat(CommandOptions.Global).Append("help").ToArray();
+
+        Assert.Empty(VerifyCommand.Options.Valid.Select(o => o[2..]).Where(o => !documented.Contains(o)));
+    }
+
     private static string Section(string name)
     {
         string text = Usage.Text.Replace("\r\n", "\n");

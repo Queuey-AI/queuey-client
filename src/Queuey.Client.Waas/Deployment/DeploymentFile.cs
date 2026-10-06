@@ -120,8 +120,17 @@ public sealed class DeploymentFile
 
         DeploymentProfile values = DeploymentProfiles.Find(Profiles, profile);
         Func<string, string?> lookup = DeploymentProfiles.Lookup(profile, values, environment ?? Environment.GetEnvironmentVariable);
-        return ExpandCore(lookup, DeploymentProfiles.NotSetHint(profile));
+        DeploymentFile expanded = ExpandCore(lookup, DeploymentProfiles.NotSetHint(profile));
+        if (!ReferenceEquals(expanded, this))
+            expanded.ProfileName = profile;
+        return expanded;
     }
+
+    /// <summary>
+    /// The profile the file was expanded for by <see cref="ForProfile"/>, or null. The commands plan and apply suggest take it
+    /// with <c>--profile</c>, so they reach the workspace the file went to.
+    /// </summary>
+    internal string? ProfileName { get; private set; }
 
     /// <summary>
     /// Parses a deployment file. Throws <see cref="QueueyConfigurationException"/> on malformed JSON, on

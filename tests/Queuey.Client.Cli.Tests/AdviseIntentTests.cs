@@ -1110,6 +1110,175 @@ public sealed class AdviseIntentTests : IDisposable
         Assert.DoesNotContain("Exception", text.Stdout + text.Stderr, StringComparison.Ordinal);
     }
 
+    // ── hvem som lagrer hemmeligheten, og hva en lokal leveranse bærer (playbookene fra F2.11) ──
+    //
+    // F2.9: en hemmelighet agenten ikke skal holde, limer en person inn på siden credentials request åpner. Testhemmeligheten
+    // Stripe CLI-en gir, kan agenten holde, i en variabel og aldri i utdata. Før sa advise credentials set også for et ekte
+    // Stripe-endepunkt, og at en lokal leveranse bar Queuey sin signatur, i et Supabase-design uten signering.
+
+    [Fact]
+    public void A_real_stripe_endpoints_secret_is_asked_of_a_person_and_stored_before_the_endpoint_points_here()
+    {
+        Fixture("stripe-nextjs");
+
+        FlowDesign design = Advise("""
+            {
+              "environment": { "value": "prod", "provenance": "stated" },
+              "source": { "kind": { "value": "stripe", "provenance": "stated" } },
+              "destination": { "baseUrl": { "value": "https://shop.example.com/", "provenance": "stated" } }
+            }
+            """).Design!;
+
+        Assert.Equal("queuey credentials request stripe-whsec --profile prod", Assert.Single(design.Credentials).Store);
+        List<string> steps = design.NextSteps.ToList();
+        int request = steps.FindIndex(s => s.Contains("queuey credentials request stripe-whsec --profile prod prints a link where a person pastes it",
+            StringComparison.Ordinal));
+        int endpoint = steps.FindIndex(s => s.Contains("Stripe webhook endpoint", StringComparison.Ordinal));
+        Assert.True(request >= 0 && request < endpoint, string.Join(" | ", steps));
+        Assert.Contains("queuey credentials list --profile prod --json lists stripe-whsec", steps[request], StringComparison.Ordinal);
+        Assert.DoesNotContain(steps, s => s.Contains("STRIPE_WHSEC", StringComparison.Ordinal) || s.Contains("queuey credentials set", StringComparison.Ordinal));
+        Assert.Contains("credentials set --from-env is only for the test secret", steps[request], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Test_mode_stores_the_stripe_clis_own_secret_from_a_variable_and_says_a_real_endpoints_is_asked_for()
+    {
+        Fixture("stripe-aspnet");
+
+        FlowDesign design = Advise(StripeIntent).Design!;
+
+        string set = "queuey credentials set --profile dev --name stripe-whsec --type HmacSigning --key-id stripe-whsec --from-env STRIPE_WHSEC";
+        Assert.Equal(set, Assert.Single(design.Credentials).Store);
+        string step = Assert.Single(design.NextSteps, s => s.StartsWith("Test mode", StringComparison.Ordinal));
+        // Én kommando (K1 i runde 2 av #58): i et agentverktøy er hvert kall et nytt skall.
+        Assert.Contains("In a POSIX shell: STRIPE_WHSEC=\"$(stripe listen --print-secret)\" " + set + ".", step, StringComparison.Ordinal);
+        Assert.Contains("In PowerShell: $env:STRIPE_WHSEC = stripe listen --print-secret; " + set + ".", step, StringComparison.Ordinal);
+        Assert.Contains("so it stays out of the output", step, StringComparison.Ordinal);
+        Assert.Contains("A real endpoint's secret is never yours to hold: a person pastes it on the page queuey credentials request " +
+                        "stripe-whsec --profile dev opens", step, StringComparison.Ordinal);
+        Assert.DoesNotContain(design.NextSteps, s => s.Contains("prints this session's signing secret", StringComparison.Ordinal));
+    }
+
+    // Et umerket workspace er prod, og et antatt miljø skrives bare inn i en ny fil (review av #58, B2). En fil som finnes uten
+    // miljø, får derfor credentials request og et ekte endepunkt, som plan og apply gir, og testmodus bare når dev er oppgitt.
+
+    [Fact]
+    public void An_existing_file_without_an_environment_gets_a_real_endpoint_and_a_request_not_test_mode()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """{ "queues": {} }""");
+
+        FlowDesign design = Advise(StripeIntent).Design!;
+
+        Assert.Equal("queuey credentials request stripe-whsec", Assert.Single(design.Credentials).Store);
+        Assert.DoesNotContain(design.NextSteps, s => s.StartsWith("Test mode", StringComparison.Ordinal)
+                                                   || s.StartsWith("Apply it to a workspace set to dev", StringComparison.Ordinal)
+                                                   || s.Contains("queuey credentials set", StringComparison.Ordinal));
+        Assert.Contains(design.NextSteps, s => s.Contains("queuey credentials request stripe-whsec prints a link where a person pastes it",
+            StringComparison.Ordinal));
+        Assert.Contains(design.NextSteps, s => s.StartsWith("For test mode with stripe listen instead, state the environment dev in the " +
+                                                            "intent", StringComparison.Ordinal));
+        Assert.Contains(design.NextSteps, s => s.StartsWith("queuey listen --queue stripe", StringComparison.Ordinal));   // køen leverer lokalt
+    }
+
+    [Fact]
+    public void An_existing_file_without_an_environment_gets_test_mode_when_the_intent_states_dev()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """{ "queues": {} }""");
+
+        FlowDesign design = Advise("""
+            {
+              "environment": { "value": "dev", "provenance": "stated" },
+              "source": { "kind": { "value": "stripe", "provenance": "stated" } },
+              "destination": { "route": { "value": "/api/stripe", "provenance": "stated" } }
+            }
+            """).Design!;
+
+        Assert.Equal("queuey credentials set --name stripe-whsec --type HmacSigning --key-id stripe-whsec --from-env STRIPE_WHSEC",
+            Assert.Single(design.Credentials).Store);
+        Assert.Contains(design.NextSteps, s => s.StartsWith("Test mode", StringComparison.Ordinal));
+        Assert.DoesNotContain(design.NextSteps, s => s.StartsWith("For test mode", StringComparison.Ordinal));
+        Assert.Equal("dev", design.Content["workspace"]!["environment"]!.GetValue<string>());   // det oppgitte skrives inn
+    }
+
+    [Fact]
+    public void A_file_that_takes_its_environment_from_a_variable_without_profiles_is_not_taken_for_dev()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """{ "workspace": { "environment": "${QUEUEY_WORKSPACE_ENVIRONMENT}" }, "queues": {} }""");
+
+        FlowDesign design = Advise(StripeIntent).Design!;
+
+        Assert.Equal("queuey credentials request stripe-whsec", Assert.Single(design.Credentials).Store);
+        Assert.DoesNotContain(design.NextSteps, s => s.StartsWith("Test mode", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Outside_dev_the_secret_the_handler_checks_is_asked_of_a_person_with_its_type()
+    {
+        Fixture("supabase-db-webhook");
+
+        FlowDesign design = Advise("""
+            {
+              "environment": { "value": "prod", "provenance": "stated" },
+              "source": { "kind": { "value": "supabase", "provenance": "stated" } },
+              "destination": { "baseUrl": { "value": "https://abc.supabase.co", "provenance": "stated" } }
+            }
+            """).Design!;
+
+        // --type må med: uten den ber en forespørsel om en HmacSigning-hemmelighet, som Queuey aldri sender som den er.
+        string request = "queuey credentials request orders-webhook-secret --type ApiKeyHeader --profile prod";
+        Assert.Equal(request, Assert.Single(design.Credentials).Store);
+        string step = Assert.Single(design.NextSteps, s => s.StartsWith("Store the secret the handler checks", StringComparison.Ordinal));
+        Assert.Contains(request + " prints a link for them", step, StringComparison.Ordinal);
+        Assert.Contains("A value that is yours to hold goes in with queuey credentials set --profile prod --name orders-webhook-secret " +
+                        "--type ApiKeyHeader --from-env ORDERS_WEBHOOK_SECRET instead.", step, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void In_dev_the_secret_the_handler_checks_is_set_from_a_variable_or_asked_for_when_it_is_not_yours()
+    {
+        Fixture("supabase-db-webhook");
+
+        FlowDesign design = Advise("""{ "source": { "kind": { "value": "supabase", "provenance": "stated" } } }""").Design!;
+
+        string step = Assert.Single(design.NextSteps, s => s.StartsWith("Store the secret the handler checks", StringComparison.Ordinal));
+        Assert.Contains("Run queuey credentials set --profile dev --name orders-webhook-secret --type ApiKeyHeader --from-env " +
+                        "ORDERS_WEBHOOK_SECRET from a shell where ORDERS_WEBHOOK_SECRET holds the value", step, StringComparison.Ordinal);
+        Assert.Contains("a person pastes it instead: queuey credentials request orders-webhook-secret --type ApiKeyHeader --profile dev",
+            step, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_local_delivery_to_a_handler_that_checks_a_header_is_not_said_to_carry_a_signature_the_design_does_not_turn_on()
+    {
+        // T27: queuey listen sender ingen autentiseringshoder videre. Designet slår ikke på signering, så advise sier hva som
+        // faktisk skjer: hodesjekken avviser lokale leveranser, og flyten bevises mot den deployede mottakeren.
+        Fixture("supabase-db-webhook");
+
+        FlowDesign design = Advise("""{ "source": { "kind": { "value": "supabase", "provenance": "stated" } } }""").Design!;
+
+        Assert.Null(design.Content["queues"]!["orders"]!["delivery"]!["signing"]);
+        CodeStep local = Assert.Single(design.Code, c => c.Action == "configure" && c.What.Contains("queuey listen does not pass", StringComparison.Ordinal));
+        Assert.Contains("Prove the flow against the deployed receiver instead", local.What, StringComparison.Ordinal);
+        Assert.Contains("only for a queue that signs its deliveries", local.Why, StringComparison.Ordinal);
+        Assert.DoesNotContain("signature instead", local.Why, StringComparison.Ordinal);
+        DesignSetting url = Assert.Single(design.Settings, s => s.Path == "queues.orders.delivery.url");
+        Assert.DoesNotContain("Queuey signs a delivery for a listener", url.Because, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_local_stripe_delivery_keeps_the_rule_for_when_a_listener_gets_the_signature()
+    {
+        Fixture("stripe-aspnet");
+
+        FlowDesign design = Advise(StripeIntent).Design!;
+
+        DesignSetting url = Assert.Single(design.Settings, s => s.Path == "queues.stripe.delivery.url");
+        Assert.Contains("Queuey signs a delivery for a listener only when its URL is absolute", url.Because, StringComparison.Ordinal);
+    }
+
     // ── rekkefølgen på stegene (S2) ──────────────────────────────────────
 
     [Fact]

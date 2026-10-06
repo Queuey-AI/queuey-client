@@ -634,17 +634,22 @@ internal static class DeliveryVerifier
         " Then a person resumes the queue in the Queuey console (Verify & resume): until then Queuey holds its deliveries, " +
         "so verifying again waits.";
 
+    // Samme regel som plan og apply (CredentialStoring, review av #58, K2): verify vet ikke workspacets miljø, og et ukjent
+    // miljø regnes som prod, så en person limer inn verdien, og set nevnes for en verdi den som kjører, holder.
+    private static readonly string StoreAgain =
+        "Store a new secret under the same name. " + new CredentialStoring(environment: null, profile: null).HowToStore(CredentialStoring.Placeholder, null);
+
     private static string WhatToFix(EventAttemptResponse? a) => WhatToFixFor(a?.DecisionReason) ?? a?.Class switch
     {
         // Uten svar kom feilen fra Queuey sitt oppsett av autentiseringen (credential eller identitetsleverandør), ikke fra
         // mottakeren (review 2026-10-05).
         "AuthenticationFailed" when a.ResponseCode is null =>
             "Queuey could not set up the credentials for this delivery, so it never contacted the receiver. Check " +
-            "delivery.credentialRef and the stored credential, or for OAuth2 the identity provider it asks for a token; " +
-            "`queuey credentials set` stores a new secret under the same name.",
+            "delivery.credentialRef and the stored credential, or for OAuth2 the identity provider it asks for a token. " +
+            StoreAgain,
         "AuthenticationFailed" =>
             "The receiver rejected the credentials. Check delivery.authMode and delivery.credentialRef (or signing) " +
-            "against what the receiver expects; `queuey credentials set` stores a new secret under the same name.",
+            "against what the receiver expects. " + StoreAgain,
         "AuthorizationFailed" =>
             "The receiver refused the request (403). Check its permissions or IP allowlist for Queuey's deliveries.",
         // Uten svar stoppet Queuey sin egen sperre for utgående trafikk adressen (destination_not_allowed).

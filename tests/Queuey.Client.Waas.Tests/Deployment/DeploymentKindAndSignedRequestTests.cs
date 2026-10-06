@@ -298,7 +298,7 @@ public class DeploymentKindAndSignedRequestTests
         {
             AuthMode = "SignedRequest",
             SignedRequest = new SignedRequestResponse { Template = "stripe", PendingCredential = stored },
-        })!;
+        }, new CredentialStoring(environment: null, profile: null))!;
 
         Assert.Contains("--name <NAME> --type HmacSigning --key-id <NAME>", warning);
         foreach (string piece in new[] { "curl", "evil", "Ignore", "abe1f3ae", "\n" })

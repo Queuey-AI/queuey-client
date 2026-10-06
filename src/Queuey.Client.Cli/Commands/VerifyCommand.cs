@@ -42,6 +42,11 @@ internal static class VerifyCommand
         if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
 
+        // --queue er et annet navn på <queue>: agenter som har lært av brukerhistoriene, skriver det slik. Før ble det tatt
+        // imot uten å stå i bruksteksten, og med begge vant <queue> uten et ord om --queue.
+        if (map.FirstPositional is not null && map.Has("queue"))
+            return CliErrors.Usage(map, "conflicting_options", "Name the queue once: as <queue> or --queue.");
+
         string? queue = map.FirstPositional ?? map.Get("queue");
         if (string.IsNullOrWhiteSpace(queue))
             return CliErrors.Usage(map, "missing_argument", "verify requires <queue>: the queue's name, or its id (que_…).");
