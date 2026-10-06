@@ -60,6 +60,35 @@ public interface IQueueyManagement
     Task<IReadOnlyList<CredentialResult>> ListCredentialsAsync(string tenantPublicId, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Asks for the secret of a credential by name, so it never passes through the caller (<c>POST /tenants/{ten}/credential-requests</c>):
+    /// Queuey opens a one-time request and answers with the console page where a signed-in person who may manage the
+    /// workspace's credentials pastes the value. It is stored encrypted under <paramref name="name"/>, as a new credential or
+    /// as a new version of the secret of the one that has the name (whose key id and username stay), and a deployment file's
+    /// <c>credentialRef</c> that waits for the name verifies with it at once. Nothing here takes or returns a value, no API
+    /// returns it, and Queuey uses it only where the workspace's configuration does. Asking again for the same name and type
+    /// while a request is open answers with that request. A request expires a day after it was made.
+    /// </summary>
+    /// <param name="tenantPublicId">The workspace (<c>ten_…</c>).</param>
+    /// <param name="name">The name the credential is stored under, in the shape a deployment file's <c>credentialRef</c> has.</param>
+    /// <param name="type">
+    /// The credential's type; Queuey asks for <c>HmacSigning</c>, a signing secret it never sends as it is, when null. A secret
+    /// Queuey sends to a receiver as it is (<c>ApiKeyHeader</c>, <c>BearerToken</c>, <c>BasicPassword</c>,
+    /// <c>OAuth2ClientSecret</c>) is asked for by its type. <c>OAuth2Certificate</c> is refused.
+    /// </param>
+    /// <param name="keyId">The key id of an <c>HmacSigning</c> credential; a new one gets the name when null.</param>
+    /// <param name="username">The username of a <c>BasicPassword</c> credential; required for a new one.</param>
+    /// <param name="cancellationToken">Cancellation.</param>
+    /// <exception cref="QueueyConflictException">
+    /// <c>credential_type_mismatch</c> when a credential of another type has the name, <c>credential_details_differ</c> when it
+    /// has another key id or username than the request asks for (a request only replaces the secret), or
+    /// <c>credential_request_conflict</c> when a request for it is open for something else.
+    /// </exception>
+    /// <exception cref="QueueyNotFoundException">With no error code: the Queuey instance predates credential requests.</exception>
+    Task<CredentialRequestResult> RequestCredentialAsync(
+        string tenantPublicId, string name, string? type = null, string? keyId = null, string? username = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Mints an ingress signing key for a queue, so producers can publish with HMAC instead of an API
     /// key. The secret is returned <b>once</b>.
     /// </summary>

@@ -131,7 +131,7 @@ public sealed class CommandOptionsTests : IDisposable
     {
         new[] { "advise" }, new[] { "whoami" }, new[] { "sync" }, new[] { "queue", "plan" }, new[] { "queue", "sync" },
         new[] { "apply" }, new[] { "plan" }, new[] { "verify", "orders" }, new[] { "schema" }, new[] { "pull" },
-        new[] { "keys", "mint" }, new[] { "credentials", "set" }, new[] { "credentials", "list" },
+        new[] { "keys", "mint" }, new[] { "credentials", "set" }, new[] { "credentials", "request" }, new[] { "credentials", "list" },
         new[] { "publish", "orders" }, new[] { "create-tenant" }, new[] { "create-queue" }, new[] { "metrics" },
         new[] { "issues" }, new[] { "listen" }, new[] { "replay" },
         new[] { "edge", "status" }, new[] { "edge", "publish", "orders" }, new[] { "edge", "run" }, new[] { "edge", "kick" },
@@ -201,7 +201,7 @@ public sealed class CommandOptionsTests : IDisposable
             ["SCHEMA"] = new[] { SchemaCommand.Options },
             ["PULL"] = new[] { PullCommand.Options },
             ["KEYS"] = new[] { KeysCommand.MintOptions },
-            ["CREDENTIALS"] = new[] { CredentialsCommand.SetOptions, CredentialsCommand.ListOptions },
+            ["CREDENTIALS"] = new[] { CredentialsCommand.SetOptions, CredentialsCommand.RequestOptions, CredentialsCommand.ListOptions },
             ["PUBLISH"] = new[] { PublishCommand.Options },
             ["EVENTS"] = new[] { EventsCommand.GetOptions },
             ["CREATE-TENANT"] = new[] { CreateTenantCommand.Options },

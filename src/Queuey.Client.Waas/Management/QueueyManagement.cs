@@ -125,6 +125,43 @@ internal sealed class QueueyManagement : IQueueyManagement
         return rows.Select(ToResult).ToArray();
     }
 
+    public async Task<CredentialRequestResult> RequestCredentialAsync(
+        string tenantPublicId, string name, string? type = null, string? keyId = null, string? username = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(tenantPublicId)) throw new ArgumentException("A tenant public id is required.", nameof(tenantPublicId));
+        if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("A credential name is required.", nameof(name));
+
+        CredentialRequestWireResponse r = await _controlPlane.RequestCredentialAsync(tenantPublicId, new CreateCredentialRequestWireRequest
+        {
+            Name = name.Trim(),
+            Type = string.IsNullOrWhiteSpace(type) ? null : type!.Trim(),
+            KeyId = string.IsNullOrWhiteSpace(keyId) ? null : keyId!.Trim(),
+            Username = string.IsNullOrWhiteSpace(username) ? null : username!.Trim(),
+        }, cancellationToken).ConfigureAwait(false);
+
+        return new CredentialRequestResult
+        {
+            RequestId = r.RequestId,
+            WorkspaceId = r.WorkspaceId,
+            WorkspaceName = r.WorkspaceName,
+            OrganizationName = r.OrganizationName,
+            Name = r.Name,
+            Type = r.Type,
+            KeyId = r.KeyId,
+            Username = r.Username,
+            Status = r.Status,
+            Url = r.Url,
+            RequestedBy = r.RequestedBy,
+            CreatedAt = r.CreatedAt,
+            ExpiresAt = r.ExpiresAt,
+            FulfilledAt = r.FulfilledAt,
+            CredentialId = r.CredentialId,
+            CredentialVersion = r.CredentialVersion,
+            ReplacesCredentialId = r.ReplacesCredentialId,
+        };
+    }
+
     public async Task<IngressSigningKey> MintIngressKeyAsync(string queuePublicId, string name, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(queuePublicId)) throw new ArgumentException("A queue public id is required.", nameof(queuePublicId));
@@ -202,7 +239,12 @@ internal sealed class QueueyManagement : IQueueyManagement
         };
 
     private static CredentialResult ToResult(CredentialWireResponse r)
-        => new() { PublicId = r.PublicId, Name = r.Name, Type = r.Type, KeyId = r.KeyId };
+        => new()
+        {
+            PublicId = r.PublicId, Name = r.Name, Type = r.Type, KeyId = r.KeyId,
+            Version = r.Version, Created = r.Created, BoundWorkspace = r.BoundWorkspace, BoundQueues = r.BoundQueues,
+            SecretReplaced = r.Created == false ? r.SecretReplaced : null,
+        };
 
     private static PatchSigningWire? ToWire(DeliverySigning? s)
         => s is null ? null : new PatchSigningWire { Enabled = s.Enabled, CredentialRef = s.CredentialRef, TemplateKey = s.TemplateKey };

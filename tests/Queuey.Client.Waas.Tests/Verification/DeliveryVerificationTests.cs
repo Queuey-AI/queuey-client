@@ -263,6 +263,7 @@ public class DeliveryVerificationTests
     [InlineData("no_retry_origin_no_ingress_record", "it has no record of which secret verified this one", "`stripe events resend`")]
     [InlineData("no_retry_origin_other_secret", "verified with an earlier Stripe secret of the queue's ingress, and that secret can no longer be used", "`stripe events resend`")]
     [InlineData("no_retry_origin_test_event", "a test or sandbox event that never came through the queue's ingress", "have Stripe send an event to the queue's ingress")]
+    [InlineData("no_retry_origin_secret_replaced", "has had its secret replaced since", "`stripe events resend`")]
     public void Origin_not_verified_says_why_by_its_reason_and_that_the_event_is_sent_from_Stripe_again(string reason, string why, string remedy)
     {
         DeliveryVerification v = Judge(Event(6, Attempt(null, "OriginNotVerified", "Not signed as Stripe.", kind: "MoveToDlq", reason: reason)));

@@ -268,6 +268,23 @@ internal sealed class QueueyControlPlaneClient
             HttpMethod.Post, uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Asks for the secret of a credential that a signed-in person pastes in the console
+    /// (<c>POST /tenants/{ten}/credential-requests</c>). 201 for a new request, 200 for the one open for the same name.
+    /// </summary>
+    public async Task<CredentialRequestWireResponse> RequestCredentialAsync(
+        string tenantPublicId, CreateCredentialRequestWireRequest request, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "credential-requests");
+        byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
+
+        return await _connection.SendForJsonAsync<CredentialRequestWireResponse>(
+            HttpMethod.Post, uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Lists a workspace's delivery credentials — labels only (<c>GET /tenants/{ten}/credentials</c>).</summary>
     public async Task<List<CredentialWireResponse>> ListCredentialsAsync(string tenantPublicId, CancellationToken cancellationToken)
     {

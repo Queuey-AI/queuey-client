@@ -18,7 +18,7 @@ COMMANDS
   verify         Verify a queue's flow with Queuey, step by step from the ingress to the final state.
   schema         Print the JSON Schema for queuey.deploy.json, or a Desired Flow's. Reads nothing, needs no credentials.
   pull           Read a workspace back into a deployment file (the inverse of apply).
-  credentials    Store delivery secrets a deployment file refers to: credentials set | list.
+  credentials    Store delivery secrets a deployment file refers to: credentials set | request | list.
   keys           Mint an ingress signing key for a queue: keys mint.
   publish        Publish one event to a queue the way a producer does, and print its id for verify.
   events         Read one event's status and attempts as Queuey serves them: events get.
@@ -291,7 +291,29 @@ CREDENTIALS
                  Stores a delivery secret under the workspace and names it, so a deployment
                  file can refer to it as credentialRef. The value is read from the
                  environment — never an argument, which would land in shell history and CI
-                 logs — is encrypted at rest, and is never readable again.
+                 logs — is encrypted at rest, and is never readable again. A name the
+                 workspace has gets the value as a new version of its secret, under the
+                 same id (the value it already holds keeps its version), and an ingress
+                 that waits for the name verifies with it at once.
+  queuey credentials request <name> [--type <type>] [--key-id <id>] [--username <u>]
+                [--profile <name>] [--json]
+                 Asks a person for a secret, so it never passes through this terminal or a
+                 conversation: Queuey opens a one-time request and prints the console link
+                 where a person who can manage the workspace's credentials signs in and
+                 pastes the value. No API returns it, and Queuey uses it only where the
+                 workspace's configuration does. Without --type it asks for an HmacSigning
+                 secret, which Queuey never sends as it is; a key or token Queuey sends to
+                 a receiver is asked for with its --type. The link works once, for a day,
+                 and asking again for the same name while it is open prints the same link.
+                 A new HmacSigning credential gets the name as its key id unless --key-id
+                 is given, and a new BasicPassword needs --username. For a name the
+                 workspace has, only the secret is replaced: another key id or username is
+                 refused, and credentials set changes them. OAuth2Certificate is refused: a
+                 certificate is uploaded in the Queuey console. --json prints
+                 { ""schemaVersion"": 1, ""requestId"", ""workspaceId"", ""workspaceName"",
+                 ""organizationName"", ""name"", ""type"", ""keyId"", ""username"", ""status"",
+                 ""url"", ""expiresAt"", ""replacesCredentialId"" }; replacesCredentialId names
+                 the credential whose secret the value replaces, when the name has one.
   queuey credentials list [--profile <name>] [--json]
 
 PUBLISH

@@ -710,6 +710,12 @@ internal static class DeliveryVerifier
             "This event was verified with an earlier Stripe secret of the queue's ingress, and that secret can no longer be " +
             "used: it was deleted, revoked or has expired. Queuey signs an event only with the secret that verified it. " +
             ResendFromStripe + " It arrives again, verified with the secret the ingress has now.",
+        // Queuey F2.9: credentialen som verifiserte eventet, har fått en ny hemmelighet under samme id siden, så Queuey
+        // signerer det ikke med den som står nå.
+        "no_retry_origin_secret_replaced" =>
+            "The credential that verified this event at the queue's ingress has had its secret replaced since, so the secret it " +
+            "holds now is not the one that verified the event, and Queuey signs an event only with that one. " + ResendFromStripe +
+            " It arrives again, verified with the secret the credential holds now.",
         "no_retry_origin_test_event" =>
             "This is a test or sandbox event that never came through the queue's ingress, so Stripe never sent it and Queuey " +
             "does not sign it as Stripe. To try the receiver, have Stripe send an event to the queue's ingress, for example " +
