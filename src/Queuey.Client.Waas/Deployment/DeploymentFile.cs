@@ -96,6 +96,34 @@ public sealed class DeploymentFile
     public Dictionary<string, DeploymentQueue> Queues { get; set; } = new(StringComparer.Ordinal);
 
     /// <summary>
+    /// The values this file takes per environment, by profile name (<c>dev</c>, <c>prod</c> …): what its <c>${VAR}</c>
+    /// references expand to with <c>--profile &lt;name&gt;</c>, so promoting a change is a pull request against the file.
+    /// The connection (the key, the license, the hosts) is never here: it lives with the user, in the profile of the same
+    /// name in <c>~/.queuey/config.json</c>.
+    /// </summary>
+    public Dictionary<string, DeploymentProfile>? Profiles { get; set; }
+
+    /// <summary>
+    /// The file with every <c>${VAR}</c> expanded for <paramref name="profile"/>: the profile's value, else the environment's,
+    /// and an error for a variable both set to different values. Throws <see cref="QueueyConfigurationException"/> when the
+    /// file has no such profile, naming those it has.
+    /// </summary>
+    /// <param name="profile">The profile's name, as <c>--profile</c> takes it.</param>
+    /// <param name="environment">Variable resolver for what the profile leaves out; defaults to the process environment.</param>
+    public DeploymentFile ForProfile(string profile, Func<string, string?>? environment = null)
+    {
+        if (!DeploymentProfiles.IsName(profile))
+            throw new ArgumentException(
+                "A profile name is lowercase letters, digits, '.', '-' and '_', starting with a letter or digit, and not shaped like a " +
+                "key. The value is not shown.",
+                nameof(profile));
+
+        DeploymentProfile values = DeploymentProfiles.Find(Profiles, profile);
+        Func<string, string?> lookup = DeploymentProfiles.Lookup(profile, values, environment ?? Environment.GetEnvironmentVariable);
+        return ExpandCore(lookup, DeploymentProfiles.NotSetHint(profile));
+    }
+
+    /// <summary>
     /// Parses a deployment file. Throws <see cref="QueueyConfigurationException"/> on malformed JSON, on
     /// a field the file does not have, on a top-level field it names twice, and on <c>maxAttempts</c> or
     /// <c>dlqAfterAttempts</c>, which it no longer has: the number of attempts is not a setting.
@@ -173,7 +201,13 @@ public sealed class DeploymentFile
         if (element.ValueKind != JsonValueKind.Object)
             return;
 
-        bool queueNames = string.Equals(path, "queues", StringComparison.OrdinalIgnoreCase);
+        // Kønavn, profilnavn og variabelnavn er nøkler, ikke felt, så de sammenlignes nøyaktig. Variablene står på
+        // profiles.<navn>.variables, og en profil som heter «variables», er ikke variablene sine.
+        bool queueNames = string.Equals(path, "queues", StringComparison.OrdinalIgnoreCase)
+                          || string.Equals(path, "profiles", StringComparison.OrdinalIgnoreCase)
+                          || (path is not null && path.Length > "profiles..variables".Length
+                              && path.StartsWith("profiles.", StringComparison.OrdinalIgnoreCase)
+                              && path.EndsWith(".variables", StringComparison.OrdinalIgnoreCase));
         var seen = new Dictionary<string, string>(queueNames ? StringComparer.Ordinal : StringComparer.OrdinalIgnoreCase);
         foreach (JsonProperty property in element.EnumerateObject())
         {
@@ -256,26 +290,32 @@ public sealed class DeploymentFile
     /// <see cref="DeploymentVariables"/> for why that is not an empty string.
     /// </summary>
     /// <param name="lookup">Variable resolver; defaults to the process environment.</param>
-    public DeploymentFile Expand(Func<string, string?>? lookup = null)
+    public DeploymentFile Expand(Func<string, string?>? lookup = null) => ExpandCore(lookup, notSetHint: null);
+
+    private DeploymentFile ExpandCore(Func<string, string?>? lookup, string? notSetHint)
     {
+        string? E(string? value, string context) => DeploymentVariables.Expand(value, lookup, context, notSetHint);
+
         var expanded = new DeploymentFile
         {
             Schema = Schema,
-            Tenant = DeploymentVariables.Expand(Tenant, lookup, "tenant"),
+            Tenant = E(Tenant, "tenant"),
+            // Profilene følger med (F2.7), så Resolve sjekker dem også i en utvidet fil. Verdiene deres utvides aldri.
+            Profiles = Profiles,
             Workspace = Workspace is null ? null : new DeploymentWorkspace
             {
-                Environment = DeploymentVariables.Expand(Workspace.Environment, lookup, "workspace.environment"),
+                Environment = E(Workspace.Environment, "workspace.environment"),
                 Ordering = Workspace.Ordering,
                 DlqEnabled = Workspace.DlqEnabled,
                 RetentionDays = Workspace.RetentionDays,
                 Idempotent = Workspace.Idempotent,
                 Backoff = Workspace.Backoff,
-                Ingress = ExpandIngress(Workspace.Ingress, lookup, "workspace.ingress"),
+                Ingress = ExpandIngress(Workspace.Ingress, lookup, notSetHint, "workspace.ingress"),
                 Delivery = Workspace.Delivery is null ? null : new WorkspaceDelivery
                 {
-                    BaseUrl = DeploymentVariables.Expand(Workspace.Delivery.BaseUrl, lookup, "workspace.delivery.baseUrl"),
+                    BaseUrl = E(Workspace.Delivery.BaseUrl, "workspace.delivery.baseUrl"),
                     AuthMode = Workspace.Delivery.AuthMode,
-                    CredentialRef = DeploymentVariables.Expand(Workspace.Delivery.CredentialRef, lookup, "workspace.delivery.credentialRef"),
+                    CredentialRef = E(Workspace.Delivery.CredentialRef, "workspace.delivery.credentialRef"),
                     AuthHeaderName = Workspace.Delivery.AuthHeaderName,
                     Method = Workspace.Delivery.Method,
                     TimeoutMs = Workspace.Delivery.TimeoutMs,
@@ -299,14 +339,14 @@ public sealed class DeploymentFile
                 Filter = q.Filter,
                 // Ingress på kø-nivå ble ikke kopiert her før (2026-09-23), så apply, check og
                 // dry-run droppet den stille: alle tre ekspanderer fila først.
-                Ingress = ExpandIngress(q.Ingress, lookup, $"queues.{entry.Key}.ingress"),
+                Ingress = ExpandIngress(q.Ingress, lookup, notSetHint, $"queues.{entry.Key}.ingress"),
                 Delivery = q.Delivery is null ? null : new QueueDelivery
                 {
-                    Kind = DeploymentVariables.Expand(q.Delivery.Kind, lookup, $"queues.{entry.Key}.delivery.kind"),
-                    Url = DeploymentVariables.Expand(q.Delivery.Url, lookup, $"queues.{entry.Key}.delivery.url"),
+                    Kind = E(q.Delivery.Kind, $"queues.{entry.Key}.delivery.kind"),
+                    Url = E(q.Delivery.Url, $"queues.{entry.Key}.delivery.url"),
                     Inherit = q.Delivery.Inherit,
                     AuthMode = q.Delivery.AuthMode,
-                    CredentialRef = DeploymentVariables.Expand(q.Delivery.CredentialRef, lookup, $"queues.{entry.Key}.delivery.credentialRef"),
+                    CredentialRef = E(q.Delivery.CredentialRef, $"queues.{entry.Key}.delivery.credentialRef"),
                     AuthHeaderName = q.Delivery.AuthHeaderName,
                     TimeoutMs = q.Delivery.TimeoutMs,
                     Signing = q.Delivery.Signing,
@@ -320,7 +360,7 @@ public sealed class DeploymentFile
 
     // Kilden til en signert forespørsel er en credential per workspace, så navnet kan komme fra en variabel, som for levering.
     // Resten av ingressen reiser uendret mellom miljøene.
-    private static DeploymentIngress? ExpandIngress(DeploymentIngress? ingress, Func<string, string?>? lookup, string where)
+    private static DeploymentIngress? ExpandIngress(DeploymentIngress? ingress, Func<string, string?>? lookup, string? notSetHint, string where)
         => ingress?.SignedRequest is not { } signed ? ingress : new DeploymentIngress
         {
             AuthMode = ingress.AuthMode,
@@ -330,7 +370,7 @@ public sealed class DeploymentFile
             SignedRequest = new DeploymentSignedRequest
             {
                 Template = signed.Template,
-                CredentialRef = DeploymentVariables.Expand(signed.CredentialRef, lookup, $"{where}.signedRequest.credentialRef"),
+                CredentialRef = DeploymentVariables.Expand(signed.CredentialRef, lookup, $"{where}.signedRequest.credentialRef", notSetHint),
             },
         };
 
@@ -366,6 +406,9 @@ public sealed class DeploymentFile
     public IReadOnlyList<DeploymentQueuePlan> Resolve()
     {
         var plans = new List<DeploymentQueuePlan>();
+
+        // Profilene sjekkes som resten av fila, også når ingen er valgt (F2.7): en hemmelighet i en profil står i repoet uansett.
+        DeploymentProfiles.Validate(Profiles);
 
         // F2.7 (2026-10-06): tenant er en ten_-id, sjekket her for hver kommando som leser fila. Før ble den sjekket bare når
         // --tenant eller QUEUEY_TENANT navnga et annet workspace, så en API-nøkkel limt inn som tenant gikk ellers ut i

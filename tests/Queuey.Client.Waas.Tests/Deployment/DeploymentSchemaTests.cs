@@ -139,6 +139,23 @@ public class DeploymentSchemaTests
         Assert.Contains("handles the same event twice", queue["properties"]!["idempotent"]!["description"]!.GetValue<string>());
         Assert.DoesNotContain("idempotency key", schema.ToJsonString());
 
+        // Profilene (F2.7): navnene og variabelnavnene har formen sin, og en verdi refererer aldri til en annen variabel.
+        JsonNode profiles = schema["properties"]!["profiles"]!;
+        var profileName = new Regex(profiles["propertyNames"]!["pattern"]!.GetValue<string>());
+        Assert.Matches(profileName, "dev");
+        Assert.Matches(profileName, "eu-west.prod_2");
+        Assert.DoesNotMatch(profileName, "Prod");
+        Assert.DoesNotMatch(profileName, "-dev");
+        JsonNode variables = Defs(schema, profiles["additionalProperties"]!)["properties"]!["variables"]!;
+        var variableName = new Regex(variables["propertyNames"]!["pattern"]!.GetValue<string>());
+        Assert.Matches(variableName, "QUEUEY_TENANT");
+        Assert.DoesNotMatch(variableName, "1TENANT");
+        Assert.DoesNotMatch(variableName, "QUEUEY-TENANT");
+        var expandsAgain = new Regex(variables["additionalProperties"]!["not"]!["pattern"]!.GetValue<string>());
+        Assert.Matches(expandsAgain, "https://${HOST}/hooks");
+        Assert.DoesNotMatch(expandsAgain, "https://hooks.example.com");
+        Assert.Contains("--profile", profiles["description"]!.GetValue<string>());
+
         // Strengt som parseren: et felt med skrivefeil er en feil, ikke noe som ignoreres.
         Assert.False(queue["additionalProperties"]!.GetValue<bool>());
         Assert.Contains("logs events until it", queue["properties"]!["mode"]!["description"]!.GetValue<string>());
@@ -313,6 +330,17 @@ public class DeploymentSchemaTests
             ["pattern"] = "^[a-z0-9][a-z0-9._-]*$",
             ["maxLength"] = QueueyName.MaxLength,
         };
+
+        // Profilene (F2.7): navnet er det --profile tar, variabelnavnene det ${VAR} tar, og en verdi er tekst som aldri
+        // utvides igjen. At en verdi ikke er en hemmelighet, sjekker valideringen; et mønster kan ikke si det.
+        var profiles = (JsonObject)schema["properties"]!["profiles"]!;
+        profiles["propertyNames"] = new JsonObject { ["pattern"] = DeploymentProfiles.NamePattern };
+        var profile = (JsonObject)Defs(schema, profiles["additionalProperties"]!);
+        var variables = (JsonObject)profile["properties"]!["variables"]!;
+        variables["propertyNames"] = new JsonObject { ["pattern"] = DeploymentProfiles.VariableNamePattern };
+        var value = (JsonObject)variables["additionalProperties"]!;
+        value["minLength"] = 1;
+        value["not"] = new JsonObject { ["pattern"] = @"\$\{" };
 
         return schema.ToJsonString(new JsonSerializerOptions { WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping }) + "\n";
     }

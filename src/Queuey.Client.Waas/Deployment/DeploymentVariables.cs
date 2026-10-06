@@ -28,6 +28,13 @@ public static class DeploymentVariables
     /// <param name="lookup">Variable resolver; defaults to the process environment.</param>
     /// <param name="context">What is being expanded, for the error message (e.g. <c>workspace.delivery.baseUrl</c>).</param>
     public static string? Expand(string? value, Func<string, string?>? lookup = null, string? context = null)
+        => Expand(value, lookup, context, notSetHint: null);
+
+    /// <summary>
+    /// <see cref="Expand(string?, Func{string, string?}?, string?)"/> with <paramref name="notSetHint"/> added to the error for
+    /// a variable that is not set: where else it could have come from, such as a deployment file's profile.
+    /// </summary>
+    internal static string? Expand(string? value, Func<string, string?>? lookup, string? context, string? notSetHint)
     {
         if (string.IsNullOrEmpty(value) || value!.IndexOf("${", StringComparison.Ordinal) < 0)
             return value;
@@ -54,7 +61,7 @@ public static class DeploymentVariables
             sb.Append(value, i, start - i);
 
             string token = value.Substring(start + 2, end - start - 2);
-            sb.Append(Resolve(token, lookup, context, value));
+            sb.Append(Resolve(token, lookup, context, value, notSetHint));
             i = end + 1;
         }
 
@@ -84,7 +91,7 @@ public static class DeploymentVariables
         return names;
     }
 
-    private static string Resolve(string token, Func<string, string?> lookup, string? context, string whole)
+    private static string Resolve(string token, Func<string, string?> lookup, string? context, string whole, string? notSetHint)
     {
         int sep = token.IndexOf(":-", StringComparison.Ordinal);
         string name = (sep < 0 ? token : token.Substring(0, sep)).Trim();
@@ -103,6 +110,7 @@ public static class DeploymentVariables
 
         throw new QueueyConfigurationException(
             $"Environment variable '{name}' is referenced by {context ?? "the deployment file"} " +
-            $"('{whole}') but is not set. Set it, or give it a default with ${{{name}:-value}}.");
+            $"('{whole}') but is not set. Set it, or give it a default with ${{{name}:-value}}." +
+            (notSetHint is null ? "" : " " + notSetHint));
     }
 }

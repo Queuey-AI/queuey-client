@@ -51,6 +51,8 @@ public static class DeploymentTemplate
             // already knows its own from --tenant / QUEUEY_TENANT / queuey.json.
             Tenant = null,
             Schema = file.Schema,
+            // Profilene gir verdier til variablene malen skriver (F2.7), så de følger med som de står.
+            Profiles = file.Profiles,
             Workspace = file.Workspace is null ? null : new DeploymentWorkspace
             {
                 // Miljø-merket er det som skiller miljøene (Queuey F2.2), så det blir en variabel som vertene.
