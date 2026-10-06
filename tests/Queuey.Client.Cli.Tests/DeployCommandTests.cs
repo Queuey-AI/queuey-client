@@ -182,14 +182,14 @@ public sealed class DeployCommandTests : IDisposable
     [Fact]
     public async Task A_dry_run_shows_a_variable_as_written_in_json_and_in_text()
     {
-        // Review 2026-10-05: --json skrev de utvidede verdiene, mens teksten viste fila. Den gang var det et token i en ?code=;
-        // en variabel som heter TOKEN, leses ikke lenger (herding før tag, 2026-10-06), så verdien her er en vert.
-        Environment.SetEnvironmentVariable("TEST_HOOK_HOST_F27", "hooks-internal.example.com");
+        // Review 2026-10-05: --json skrev de utvidede verdiene, også et token i en ?code=, mens teksten viste fila. Variabelen
+        // het QUEUEY_TEST_HOOK_TOKEN; CLI-ens egne QUEUEY_-navn leses ikke av en deploy-fil (herding før tag, 2026-10-06).
+        Environment.SetEnvironmentVariable("TEST_HOOK_TOKEN", "s3cr3t-token");
         try
         {
             string path = DeployFile("""
-                { "workspace": { "delivery": { "baseUrl": "https://${TEST_HOOK_HOST_F27}/in" } },
-                  "queues": { "orders": { "delivery": { "url": "https://${TEST_HOOK_HOST_F27}/orders" } } } }
+                { "workspace": { "delivery": { "baseUrl": "https://hooks.example.com/in?code=${TEST_HOOK_TOKEN}" } },
+                  "queues": { "orders": { "delivery": { "url": "https://other.example.com/orders?code=${TEST_HOOK_TOKEN}" } } } }
                 """);
 
             CliRun json = await CliHarness.RunAsync(() => ApplyCommand.RunAsync(new[] { "--file", path, "--dry-run", "--json" }));
@@ -198,28 +198,28 @@ public sealed class DeployCommandTests : IDisposable
             Assert.Equal(ExitCodes.Success, json.Exit);
             Assert.Equal(ExitCodes.Success, text.Exit);
             JsonElement root = JsonDocument.Parse(json.Stdout).RootElement;
-            Assert.Equal("https://${TEST_HOOK_HOST_F27}/in",
+            Assert.Equal("https://hooks.example.com/in?code=${TEST_HOOK_TOKEN}",
                 root.GetProperty("workspace").GetProperty("delivery").GetProperty("baseUrl").GetString());
-            Assert.Equal("https://${TEST_HOOK_HOST_F27}/orders",
+            Assert.Equal("https://other.example.com/orders?code=${TEST_HOOK_TOKEN}",
                 root.GetProperty("queues")[0].GetProperty("delivery").GetProperty("url").GetString());
-            Assert.DoesNotContain("hooks-internal", json.Stdout + text.Stdout);
-            Assert.Contains("${TEST_HOOK_HOST_F27}", text.Stdout);
+            Assert.DoesNotContain("s3cr3t-token", json.Stdout + text.Stdout);
+            Assert.Contains("${TEST_HOOK_TOKEN}", text.Stdout);
         }
         finally
         {
-            Environment.SetEnvironmentVariable("TEST_HOOK_HOST_F27", null);
+            Environment.SetEnvironmentVariable("TEST_HOOK_TOKEN", null);
         }
     }
 
     [Fact]
     public async Task A_dry_run_still_fails_on_a_variable_that_is_not_set()
     {
-        string path = DeployFile("""{ "workspace": { "delivery": { "baseUrl": "${TEST_NOT_SET_ANYWHERE_HOST}" } } }""");
+        string path = DeployFile("""{ "workspace": { "delivery": { "baseUrl": "${TEST_NOT_SET_ANYWHERE}" } } }""");
 
         var ex = await Assert.ThrowsAsync<Queuey.Client.QueueyConfigurationException>(
             () => CliHarness.RunAsync(() => ApplyCommand.RunAsync(new[] { "--file", path, "--dry-run", "--json" })));
 
-        Assert.Contains("TEST_NOT_SET_ANYWHERE_HOST", ex.Message);
+        Assert.Contains("TEST_NOT_SET_ANYWHERE", ex.Message);
     }
 
     [Fact]

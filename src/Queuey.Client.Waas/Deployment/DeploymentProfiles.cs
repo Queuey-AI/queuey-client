@@ -108,7 +108,7 @@ internal static class DeploymentProfiles
                         $"{where}.variables.{variable.Key} is a variable a deployment file may not read: {refused}. A profile cannot " +
                         "give it a value either.")
                     {
-                        SuggestedAction = DeploymentVariables.RefusalAction(variable.Key),
+                        SuggestedAction = DeploymentVariables.RefusalAction,
                     };
 
                 if (ValueRefusal(variable.Value) is { } why)
