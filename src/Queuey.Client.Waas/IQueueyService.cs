@@ -172,6 +172,46 @@ public interface IQueueyService
         string queue, FlowVerificationRequest request, IProgress<FlowVerification>? progress = null, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Publishes one event to a queue the way a producer does: with this client's key, to the queue's ingress URL
+    /// (<c>POST /events/{workspace}/{queue}</c>). Follow it with <see cref="VerifyFlowAsync"/> and
+    /// <see cref="FlowVerificationRequest.FollowEvent"/>, using <see cref="QueuePublishResult.EventPublicId"/>.
+    /// </summary>
+    /// <param name="queue">The queue's name in the configured workspace, or its id (<c>que_…</c>).</param>
+    /// <param name="payload">The event, sent as it is.</param>
+    /// <param name="options">The idempotency key and the rest; a fixed idempotency key makes the event recognizable.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <remarks>
+    /// When the key may read the queue (<c>queue.read</c>), what the ingress requires is read first, and a publish this
+    /// client cannot make is refused before anything is sent, saying what is required: an API key it does not have, a
+    /// provider's signature (an event from Stripe comes from Stripe), Queuey's signature when it is not set up to sign
+    /// (<see cref="QueueyOptions.SigningKeyId"/> without <see cref="QueueyOptions.ApiKey"/>), or a key and a signature
+    /// together. A key that may only publish skips that read, and the ingress decides. The result never holds the payload
+    /// or a key.
+    /// </remarks>
+    /// <exception cref="QueueyException">
+    /// With code <c>ingress_requires_signature</c> or <c>ingress_requires_api_key</c> when nothing was sent;
+    /// <c>ingress_closed</c> when the queue takes no new events; <c>queue_not_found</c> when the workspace has no such queue;
+    /// and Queuey's own code when the ingress refused the event.
+    /// </exception>
+    Task<QueuePublishResult> PublishToQueueAsync(
+        string queue, byte[] payload, QueuePublishOptions? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reads one event as Queuey's REST API serves it (<c>GET /events/{que}/{evt}</c>): its status, timings, attempts and
+    /// their decisions. The content — the payload, the resolved header values and the receiver's responses — is read only
+    /// when <paramref name="revealContent"/> asks for it and Queuey allows it (<c>event.payload.read</c>, and a payload
+    /// visibility that lets values out); Queuey records that look before it answers.
+    /// </summary>
+    /// <param name="queue">The queue's id (<c>que_…</c>), or its name in the configured workspace.</param>
+    /// <param name="eventPublicId">The event's id (<c>evt_…</c>).</param>
+    /// <param name="revealContent">Also read the content. Refused, with nothing read, when the envelope says it may not be revealed.</param>
+    /// <param name="cancellationToken">Cancels the call.</param>
+    /// <exception cref="QueueyForbiddenException">
+    /// With code <c>payload_visibility_shape_only</c> or <c>payload_read_not_allowed</c> when the content may not be revealed.
+    /// </exception>
+    Task<EventRead> GetEventAsync(string queue, string eventPublicId, bool revealContent = false, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Applies queues, then streams. Queues go first because a stream is published on top of one, so a
     /// queue failure stops the run before any stream is touched.
     /// </summary>

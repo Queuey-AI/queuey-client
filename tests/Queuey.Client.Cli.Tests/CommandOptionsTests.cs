@@ -203,6 +203,7 @@ public sealed class CommandOptionsTests : IDisposable
             ["KEYS"] = new[] { KeysCommand.MintOptions },
             ["CREDENTIALS"] = new[] { CredentialsCommand.SetOptions, CredentialsCommand.ListOptions },
             ["PUBLISH"] = new[] { PublishCommand.Options },
+            ["EVENTS"] = new[] { EventsCommand.GetOptions },
             ["CREATE-TENANT"] = new[] { CreateTenantCommand.Options },
             ["CREATE-QUEUE"] = new[] { CreateQueueCommand.Options },
             ["METRICS"] = new[] { MetricsCommand.Options },

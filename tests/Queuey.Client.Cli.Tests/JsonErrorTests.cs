@@ -46,7 +46,8 @@ public sealed class JsonErrorTests : IDisposable
         { new[] { "verify", "--json" }, "missing_argument", ExitCodes.Usage },
         { new[] { "verify", "orders", "--data", "{}", "--json" }, "send_required", ExitCodes.Usage },
         { new[] { "verify", "orders", "--event", "evt_1", "--timeout", "0", "--json" }, "invalid_value", ExitCodes.Usage },
-        { new[] { "publish", "orders", "--json" }, "missing_argument", ExitCodes.Usage },
+        // F2.7: --event er valgfri, så det som mangler, er eventen.
+        { new[] { "publish", "orders", "--json" }, "missing_body", ExitCodes.Usage },
         { new[] { "credentials", "nope", "--json" }, "unknown_subcommand", ExitCodes.Usage },
         { new[] { "plna", "--json" }, "unknown_command", ExitCodes.Usage },
     };

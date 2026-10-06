@@ -712,6 +712,25 @@ public sealed class QueueyService : IQueueyService
     }
 
     /// <inheritdoc />
+    public Task<QueuePublishResult> PublishToQueueAsync(
+        string queue, byte[] payload, QueuePublishOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(queue)) throw new ArgumentException("A queue, its name or its id, is required.", nameof(queue));
+        if (payload is null) throw new ArgumentNullException(nameof(payload));
+
+        return QueuePublisher.RunAsync(Client, _controlPlane, Management, _options, queue.Trim(), payload, options ?? new QueuePublishOptions(), cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public Task<EventRead> GetEventAsync(string queue, string eventPublicId, bool revealContent = false, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(queue)) throw new ArgumentException("A queue, its name or its id, is required.", nameof(queue));
+        if (string.IsNullOrWhiteSpace(eventPublicId)) throw new ArgumentException("An event id (evt_…) is required.", nameof(eventPublicId));
+
+        return EventReader.RunAsync(_controlPlane, Management, _options.TenantPublicId, queue.Trim(), eventPublicId.Trim(), revealContent, cancellationToken);
+    }
+
+    /// <inheritdoc />
     public async Task<QueueSyncResult> ApplyDeploymentAsync(
         DeploymentFile file, SyncOptions? options = null, CancellationToken cancellationToken = default)
     {

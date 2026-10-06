@@ -1,6 +1,6 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -10,55 +10,119 @@ using Queuey.Client.Waas;
 
 namespace Queuey.Client.Cli;
 
+/// <summary>
+/// <c>queuey publish</c> — publishes one event to a queue the way a producer does: with the configured key, to the queue's
+/// ingress URL. The answer has the event's id, so <c>queuey verify &lt;queue&gt; --event &lt;id&gt;</c> can follow it.
+/// </summary>
+// F2.7 (2026-10-06): publish gikk bare til streams og krevde --event. En stream er en kø på ingressen, så det er samme
+// kall; nå er hendelsestypen valgfri, og publish går til hvilken som helst kø. Svaret er versjonert og har eventPublicId,
+// aldri payloaden eller en nøkkel. Workspacet følger samme regel som apply og verify, så verify finner køen publish brukte.
 internal static class PublishCommand
 {
     internal static readonly CommandOptions Options = new(
         "publish",
         flags: new[] { "stdin", "json" },
-        values: new[] { "event", "key", "data", "file", "idempotency-key", "stream" },
+        values: new[] { "event", "key", "data", "file", "idempotency-key", "content-type", "stream", "queue", "deployment" },
         positionals: 1);
+
+    // Kildene til eventen. Én av dem.
+    private static readonly string[] BodySources = { "data", "file", "stdin" };
+
+    /// <summary>The version of <c>publish --json</c>'s shape; a script checks it first, as for the other commands.</summary>
+    internal const int JsonSchemaVersion = 1;
 
     public static async Task<int> RunAsync(string[] args)
     {
         if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
 
-        string? stream = map.FirstPositional ?? map.Get("stream");
-        string? eventType = map.Get("event");
-        if (string.IsNullOrWhiteSpace(stream) || string.IsNullOrWhiteSpace(eventType))
-            return CliErrors.Usage(map, "missing_argument", "publish requires <stream> and --event <type>.");
+        string[] named = new[] { "queue", "stream" }.Where(map.Has).ToArray();
+        if (named.Length > 1 || (named.Length == 1 && map.FirstPositional is not null))
+            return CliErrors.Usage(map, "conflicting_options", "Name the queue once: as <queue>, --queue or --stream.");
+
+        string? queue = map.FirstPositional ?? map.Get("queue") ?? map.Get("stream");
+        if (string.IsNullOrWhiteSpace(queue))
+            return CliErrors.Usage(map, "missing_argument", "publish requires <queue>: the queue's name, as its ingress URL has it, or its id (que_…).");
+
+        foreach (string option in new[] { "event", "key", "idempotency-key", "content-type" })
+        {
+            if (map.Has(option) && string.IsNullOrWhiteSpace(map.Get(option)))
+                return CliErrors.Usage(map, "missing_value", $"--{option} takes a value.");
+        }
 
         byte[]? body = ReadBody(map, out string? bodyCode, out string? bodyError);
         if (bodyError != null)
             return CliErrors.Usage(map, bodyCode!, bodyError);
 
-        ResolvedConfig config = CliHost.Resolve(map);
+        // Workspacet etter samme regel som apply og verify: fila sin tenant, ellers den konfigurerte, og feil når --tenant
+        // eller QUEUEY_TENANT navngir et annet enn fila. Ellers kunne verify lete etter køen i et annet workspace.
+        (string? fileTenant, string filePath) = DeploymentTenant.FromDeploymentOption(map);
+        ResolvedConfig config = CliHost.ResolveForDeployment(map, fileTenant, filePath);
+
         using ServiceProvider provider = CliHost.BuildProvider(config);
         var service = provider.GetRequiredService<IQueueyService>();
 
-        PublishResult result = await service.PushEventAsync(
-            stream!,
-            eventType!,
-            map.Get("key"),
-            body ?? Array.Empty<byte>(),
-            new PublishOptions
-            {
-                IdempotencyKey = map.Get("idempotency-key"),
-                Source = map.Get("source"),
-                ContentType = "application/json",
-            });
+        QueuePublishResult result = await service.PublishToQueueAsync(queue!.Trim(), body!, new QueuePublishOptions
+        {
+            EventType = map.Get("event"),
+            GroupKey = map.Get("key"),
+            IdempotencyKey = map.Get("idempotency-key"),
+            ContentType = map.Get("content-type"),
+            Source = map.Get("source"),
+        });
 
         if (map.Has("json"))
-            Console.WriteLine(JsonSerializer.Serialize(result, CliHost.JsonOut));
+            Console.WriteLine(JsonSerializer.Serialize(ToJson(result), CliHost.JsonOut));
         else
-            Console.WriteLine($"Published {result.EventId} → {result.QueuePublicId} (mode={result.Mode}, replayed={result.Replayed})");
+            WriteHuman(result);
 
         return ExitCodes.Success;
+    }
+
+    /// <summary>The command that follows the event, or null when the ingress gave no id.</summary>
+    internal static string? VerifyCommandFor(QueuePublishResult result)
+        => result.EventPublicId is { } id ? $"queuey verify {result.Queue} --event {id}" : null;
+
+    private static object ToJson(QueuePublishResult r) => new
+    {
+        schemaVersion = JsonSchemaVersion,
+        tenant = r.TenantPublicId,
+        queue = r.Queue,
+        queuePublicId = r.QueuePublicId,
+        eventPublicId = r.EventPublicId,
+        receivedAtUtc = r.ReceivedAtUtc,
+        mode = r.Mode,
+        replayed = r.Replayed,
+        verify = VerifyCommandFor(r),
+    };
+
+    private static void WriteHuman(QueuePublishResult r)
+    {
+        string where = r.QueuePublicId is null ? r.Queue : $"{r.Queue} ({r.QueuePublicId})";
+        if (r.EventPublicId is null)
+        {
+            Console.WriteLine($"Published to {where} in {r.TenantPublicId}. Its ingress answered without a receipt (it answers 204), so the event's id is unknown.");
+            Console.WriteLine($"  → To follow it, wait for it with `queuey verify {r.Queue} --event-type <type>` and publish again.");
+            return;
+        }
+
+        Console.WriteLine($"Published {r.EventPublicId} to {where} in {r.TenantPublicId}{(r.Mode is null ? "" : $", mode {r.Mode}")}.");
+        if (r.Replayed)
+            Console.WriteLine("  The idempotency key matched an earlier event, so this is that event: nothing new was stored.");
+        Console.WriteLine($"  → Follow it: {VerifyCommandFor(r)}");
     }
 
     private static byte[]? ReadBody(ArgMap map, out string? code, out string? error)
     {
         code = error = null;
+
+        string[] given = BodySources.Where(map.Has).ToArray();
+        if (given.Length > 1)
+        {
+            code = "conflicting_options";
+            error = $"Give the event once: {string.Join(", ", given.Select(o => "--" + o))} were all given.";
+            return null;
+        }
 
         if (map.Has("stdin"))
             return Encoding.UTF8.GetBytes(Console.In.ReadToEnd());
@@ -75,7 +139,7 @@ internal static class PublishCommand
             return Encoding.UTF8.GetBytes(data);
 
         code = "missing_body";
-        error = "publish requires a body: --data <json>, --file <path>, or --stdin.";
+        error = "publish requires the event: --data <json>, --file <path>, or --stdin.";
         return null;
     }
 }
