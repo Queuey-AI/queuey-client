@@ -1,4 +1,5 @@
 using System;
+using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text.Json;
@@ -36,7 +37,7 @@ internal sealed class QueueyHttpConnection
         };
 
         if (!string.IsNullOrWhiteSpace(contentType))
-            request.Content.Headers.ContentType = MediaTypeHeaderValue.Parse(contentType);
+            request.Content.Headers.ContentType = ContentType(contentType!);
 
         configureHeaders?.Invoke(request.Headers);
 
@@ -71,7 +72,7 @@ internal sealed class QueueyHttpConnection
         };
 
         if (!string.IsNullOrWhiteSpace(contentType))
-            request.Content.Headers.ContentType = MediaTypeHeaderValue.Parse(contentType);
+            request.Content.Headers.ContentType = ContentType(contentType!);
 
         configureHeaders?.Invoke(request.Headers);
         await authenticator.AuthenticateAsync(request, payload, cancellationToken).ConfigureAwait(false);
@@ -82,6 +83,88 @@ internal sealed class QueueyHttpConnection
 
         if (!response.IsSuccessStatusCode)
             throw await QueueyErrorMapper.CreateAsync(response, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// As <see cref="SendForJsonAsync{T}"/>, for an answer that may come without a body: a 204, or a 2xx with an empty
+    /// body, is null. A 2xx whose body is not JSON throws, since it is not Queuey's answer, and whether the request was
+    /// taken is unknown.
+    /// </summary>
+    // F2.7-review (2026-10-06): en ingress som svarer 204, sender ingen kvittering, og SendForJsonAsync kastet JsonException.
+    // Den som publiserer, må skille det fra et 2xx med HTML fra en proxy, som ikke er et svar fra Queuey.
+    public async Task<T?> SendForOptionalJsonAsync<T>(
+        HttpMethod method,
+        Uri uri,
+        byte[]? body,
+        string? contentType,
+        IQueueyAuthenticator authenticator,
+        Action<HttpRequestHeaders>? configureHeaders,
+        CancellationToken cancellationToken)
+        where T : class
+    {
+        byte[] payload = body ?? Array.Empty<byte>();
+
+        using var request = new HttpRequestMessage(method, uri)
+        {
+            Content = new ByteArrayContent(payload),
+        };
+
+        if (!string.IsNullOrWhiteSpace(contentType))
+            request.Content.Headers.ContentType = ContentType(contentType!);
+
+        configureHeaders?.Invoke(request.Headers);
+        await authenticator.AuthenticateAsync(request, payload, cancellationToken).ConfigureAwait(false);
+
+        using HttpResponseMessage response = await _client
+            .SendAsync(request, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!response.IsSuccessStatusCode)
+            throw await QueueyErrorMapper.CreateAsync(response, cancellationToken).ConfigureAwait(false);
+
+        if (response.StatusCode == HttpStatusCode.NoContent || response.Content is null)
+            return null;
+
+#if NET8_0_OR_GREATER
+        byte[] bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+#else
+        byte[] bytes = await response.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+#endif
+        if (IsBlank(bytes))
+            return null;
+
+        int status = (int)response.StatusCode;
+        try
+        {
+            return JsonSerializer.Deserialize<T>(bytes, QueueyJson.Options);
+        }
+        catch (JsonException)
+        {
+            // Kroppen vises ikke: den kan være hva som helst en proxy svarte med.
+            throw new QueueyException(
+                FormattableString.Invariant($"Queuey's address answered {status} with a body that is not JSON, so it is not Queuey's answer, and whether the request was taken is unknown."),
+                status, "unreadable_response")
+            {
+                SuggestedAction = "Check that the base address points at Queuey, not at a proxy or a login page, and look the request up in Queuey before sending it again.",
+            };
+        }
+    }
+
+    // Verdien vises ikke i feilen: MediaTypeHeaderValue.Parse gjentok den, og den kommer fra den som kaller.
+    private static MediaTypeHeaderValue ContentType(string contentType)
+        => MediaTypeHeaderValue.TryParse(contentType, out MediaTypeHeaderValue? parsed) && parsed is not null
+            ? parsed
+            : throw new ArgumentException("The content type is not a media type, such as application/json. Its value is not shown.", nameof(contentType));
+
+    private static bool IsBlank(byte[] bytes)
+    {
+        foreach (byte b in bytes)
+        {
+            if (b is not ((byte)' ' or (byte)'\t' or (byte)'\r' or (byte)'\n'))
+                return false;
+        }
+
+        return true;
     }
 
     private static async Task<T> ReadJsonAsync<T>(HttpResponseMessage response, CancellationToken cancellationToken)

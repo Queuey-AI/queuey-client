@@ -91,6 +91,22 @@ public static class QueueyName
     }
 
     /// <summary>
+    /// <paramref name="value"/> as an error may show it when it may be something else than a name, such as a secret pasted
+    /// in its place: its first three characters, cut sooner at a character a name does not have, and "…" for the rest.
+    /// The same rule the CLI uses for a word it does not know.
+    /// </summary>
+    internal static string Shown(string? value)
+    {
+        string text = value?.Trim() ?? string.Empty;
+        int safe = 0;
+        while (safe < text.Length && safe < 3 && IsNameCharacter(text[safe]))
+            safe++;
+        return safe == text.Length ? text : text.Substring(0, safe) + "…";
+
+        static bool IsNameCharacter(char c) => (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-';
+    }
+
+    /// <summary>
     /// Derives a valid name from an arbitrary string — used for the convention fallback, where a
     /// stream or queue takes its name from a CLR type. PascalCase and acronym boundaries become
     /// hyphens (<c>OrderCreated</c> → <c>order-created</c>, <c>HTTPOrderCreated</c> →

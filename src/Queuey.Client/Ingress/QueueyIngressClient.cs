@@ -53,6 +53,34 @@ internal sealed class QueueyIngressClient : IQueueyIngress
             options?.EventType, options?.GroupKey, options?.IdempotencyKey, options?.Source,
             cancellationToken);
 
+    /// <summary>
+    /// <see cref="PublishAsync(string, byte[], PublishOptions?, CancellationToken)"/> for a caller that must tell an event the
+    /// ingress took without a receipt (a queue whose ingress answers 204) from one with: null for none. A 2xx whose body is
+    /// not Queuey's receipt throws, rather than passing for a publish that worked.
+    /// </summary>
+    internal async Task<PublishResult?> PublishForReceiptAsync(string queueName, byte[] payload, PublishOptions? options, CancellationToken cancellationToken)
+    {
+        PublishResult? receipt = await SendCoreAsync(
+            queueName,
+            payload ?? Array.Empty<byte>(),
+            options?.ContentType ?? OctetStreamContentType,
+            sandbox: false,
+            query: null,
+            options?.EventType, options?.GroupKey, options?.IdempotencyKey, options?.Source,
+            receiptOptional: true,
+            cancellationToken).ConfigureAwait(false);
+
+        if (receipt is not null && string.IsNullOrWhiteSpace(receipt.EventId))
+            throw new QueueyException(
+                "The ingress answered with JSON that is not Queuey's receipt (it has no event id), so whether the event was taken is unknown.",
+                errorCode: "unreadable_response")
+            {
+                SuggestedAction = "Check that the ingress base address points at Queuey's ingress, not at a proxy, and look the event up in Queuey before sending it again.",
+            };
+
+        return receipt;
+    }
+
     public Task<PublishResult> PublishSandboxAsync(string queueName, byte[] payload, SandboxPublishOptions? options = null, CancellationToken cancellationToken = default)
         => SendAsync(
             queueName,
@@ -84,6 +112,21 @@ internal sealed class QueueyIngressClient : IQueueyIngress
         string? idempotencyKey,
         string? source,
         CancellationToken cancellationToken)
+        => (await SendCoreAsync(queueName, body, contentType, sandbox, query, eventType, groupKey, idempotencyKey, source,
+            receiptOptional: false, cancellationToken).ConfigureAwait(false))!;
+
+    private async Task<PublishResult?> SendCoreAsync(
+        string queueName,
+        byte[] body,
+        string contentType,
+        bool sandbox,
+        string? query,
+        string? eventType,
+        string? groupKey,
+        string? idempotencyKey,
+        string? source,
+        bool receiptOptional,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(queueName))
             throw new ArgumentException("A queue name is required.", nameof(queueName));
@@ -106,8 +149,11 @@ internal sealed class QueueyIngressClient : IQueueyIngress
 
         try
         {
-            return await _connection.SendForJsonAsync<PublishResult>(
-                HttpMethod.Post, uri, body, contentType, _authenticator, Configure, cancellationToken).ConfigureAwait(false);
+            return receiptOptional
+                ? await _connection.SendForOptionalJsonAsync<PublishResult>(
+                    HttpMethod.Post, uri, body, contentType, _authenticator, Configure, cancellationToken).ConfigureAwait(false)
+                : await _connection.SendForJsonAsync<PublishResult>(
+                    HttpMethod.Post, uri, body, contentType, _authenticator, Configure, cancellationToken).ConfigureAwait(false);
         }
         catch (QueueyNotFoundException ex) when (!QueueyName.IsValid(queueName))
         {
@@ -115,9 +161,11 @@ internal sealed class QueueyIngressClient : IQueueyIngress
             // that predate its own name validator, and the SDK must not refuse a queue Queuey accepts.
             // But when the route 404s AND the name could never have been created, say so — that is the
             // typo case, and the bare "not found" sends people hunting in the console.
+            // F2.7-review (2026-10-06): høyst tre tegn av navnet, og ikke forslaget, som er navnet med små bokstaver. Verdien
+            // kan være en hemmelighet limt inn der kønavnet skulle stå (`queuey publish "$QUEUEY_API_KEY"`).
             throw new QueueyNotFoundException(
-                $"{ex.Message} The queue name '{queueName}' also breaks Queuey's naming rules, so it is " +
-                $"unlikely to exist: {QueueyName.Hint(queueName)}",
+                $"{ex.Message} The queue name ('{QueueyName.Shown(queueName)}') also breaks Queuey's naming rules, so it is " +
+                $"unlikely to exist: {QueueyName.Validate(queueName)}",
                 ex.ErrorCode);
         }
     }
