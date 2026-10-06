@@ -76,11 +76,11 @@ public static class FlowDesigner
     public const string StripeCredential = "stripe-whsec";
 
     /// <summary>The design, or null when it gives the flow a conflict: the flow then says what stands in the way.</summary>
-    public static FlowDesign? Design(DesiredFlow flow, FlowFacts facts, Advice? sending = null)
+    public static FlowDesign? Design(DesiredFlow flow, FlowFacts facts, Advice? sending = null, string? profile = null)
     {
         if (flow.Conflicts.Count > 0)
             throw new InvalidOperationException("A flow with conflicts gets no design.");
-        return new Builder(flow, facts, sending).Build();
+        return new Builder(flow, facts, sending, profile).Build();
     }
 
     private sealed class Builder
@@ -137,7 +137,10 @@ public static class FlowDesigner
         // miljøet: en fil med bare profilen dev og uten miljø gjelder et workspace Queuey regner som prod.
         private readonly string _profileName;
 
-        public Builder(DesiredFlow flow, FlowFacts facts, Advice? sending)
+        // En fil uten profiler som tar miljøet fra en variabel: leveringstypen tar da også en (review av #60, B1).
+        private readonly bool _environmentFromVariable;
+
+        public Builder(DesiredFlow flow, FlowFacts facts, Advice? sending, string? profile)
         {
             _flow = flow;
             _facts = facts;
@@ -149,7 +152,9 @@ public static class FlowDesigner
             _prefix = $"queues.{_queue}";
             _file = facts.DeployFile;
             _portable = _file is null || _file.Profiles.Count > 0;
-            _profileName = _file is { Profiles.Count: > 0 } && FileEnvironments.Choose(_file, _env) is { } chosen ? chosen : _env;
+            // advise --profile velger profilen selv (review av #60): en profil fila har, eller navnet på den første i en ny fil.
+            _profileName = profile ?? (_file is { Profiles.Count: > 0 } && FileEnvironments.Choose(_file, _env) is { } chosen ? chosen : _env);
+            _environmentFromVariable = !_portable && _file is not null && FileEnvironments.Variable(_file) is not null;
             _profileFlag = _portable ? $" --profile {_profileName}" : "";
 
             // Miljøet er det FlowAdvisor kom fram til: oppgitt, i fila, i den ene profilen, eller antatt (dev for en ny fil, prod
@@ -192,7 +197,7 @@ public static class FlowDesigner
             if ((Property(_file?.Json, "queues") as JsonObject)?[_queue] is JsonObject queue
                 && Property(Property(queue, "delivery") as JsonObject, "kind") is JsonValue value && value.TryGetValue(out string? kind))
                 return FileEnvironments.ParseVariable(kind)?.Name;
-            return _portable ? DeploymentTemplate.QueueKindVariable(_queue) : null;
+            return _portable || _environmentFromVariable ? DeploymentTemplate.QueueKindVariable(_queue) : null;
         }
 
         /// <summary>
@@ -513,6 +518,18 @@ public static class FlowDesigner
                     "environment");
                 // Leveringstypen følger miljøet som en standard, ikke som noe intensjonen sier: en fil som har en, beholder den.
                 ProfileValue(variable, kind, "default", kindBecause, "environment");
+            }
+            else if (_environmentFromVariable)
+            {
+                // Review av #60, B1: en fil uten profiler som tar miljøet fra en variabel, som ${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}
+                // så CI kan sette prod, fikk kind localForward som fast verdi, og køen ble opprettet i prod med localForward. Nå
+                // tar kind også en variabel, uten standardverdi, som pull --as skriver den: glemmer CI den, stopper apply.
+                string variable = DeploymentTemplate.QueueKindVariable(_queue);
+                Put(delivery, "kind", "${" + variable + "}", $"{_prefix}.delivery.kind", "recommendation",
+                    $"The file takes the workspace's environment from a variable, so where the queue delivers does too: {variable} " +
+                    "is localForward in dev and http elsewhere, set where plan and apply run, without a default, so apply stops " +
+                    "rather than guess.",
+                    "environment");
             }
             else
             {

@@ -36,7 +36,7 @@ namespace Queuey.Client.Cli;
 internal static class AdviseCommand
 {
     internal static readonly CommandOptions Options = new(
-        "advise", flags: new[] { "json", "write-files", "apply", "force" }, values: new[] { "path", "queue", "intent" }, positionals: 1);
+        "advise", flags: new[] { "json", "write-files", "apply", "force" }, values: new[] { "path", "queue", "intent", "profile" }, positionals: 1);
 
     /// <summary>The version of advise's --json output. Version 1 added it, with the candidate flows and --intent.</summary>
     internal const int SchemaVersion = 1;
@@ -59,6 +59,12 @@ internal static class AdviseCommand
                     "Write infrastructure.content to queuey.deploy.json yourself, then run queuey plan and queuey apply.");
             return Intent(map, root, intentPath);
         }
+
+        // --profile velger deploy-filas profil for flyten (review av #60), og hører bare til --intent.
+        if (map.Has("profile"))
+            return CliErrors.Usage(map, "profile_needs_intent",
+                "advise --profile chooses the deployment file's profile for a flow, so it goes with --intent.",
+                "Run advise --intent <flow.json> --profile <name>, or leave --profile out.");
 
         RepoFacts facts;
         FlowFacts flowFacts;
@@ -131,6 +137,14 @@ internal static class AdviseCommand
                 "Write the intent as queuey schema --flow describes: each field an object with value and provenance.");
         }
 
+        // Navnet havner i kommandoer advise foreslår (--profile <navn>), så det må ha formen til et profilnavn.
+        string? profile = map.Get("profile");
+        if (map.Has("profile") && !DeploymentProfiles.IsName(profile))
+            return CliErrors.Usage(map, "invalid_value",
+                "--profile is not a profile name: lowercase letters, digits, '.', '-' and '_', starting with a letter or digit. " +
+                "The value is not shown.",
+                "Name one of the deployment file's profiles.");
+
         FlowFacts facts;
         RepoFacts repo;
         try
@@ -144,7 +158,7 @@ internal static class AdviseCommand
         }
 
         string? queue = map.Get("queue") is { } requested ? ScaffoldPlan.DefaultQueueName(root, requested) : null;
-        FlowAdvice advice = FlowAdvisor.Advise(intent, facts, root, queue, Recommendation.For(repo));
+        FlowAdvice advice = FlowAdvisor.Advise(intent, facts, root, queue, Recommendation.For(repo), profile);
 
         IReadOnlyList<string> limits = RepoWalk.Union(facts.Limits, repo.ScanLimits);
         if (map.Has("json"))

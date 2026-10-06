@@ -740,7 +740,8 @@ public sealed class AdviseIntentTests : IDisposable
         FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
         Assert.Equal(("ambiguous", "environment"), (conflict.Kind, conflict.Field));
         Assert.Contains("has 2 profiles that give dev (laptop, local)", conflict.Message, StringComparison.Ordinal);
-        Assert.Contains("Give each profile its own environment in QUEUEY_WORKSPACE_ENVIRONMENT", conflict.Question, StringComparison.Ordinal);
+        Assert.Contains("Name it with advise --profile (laptop, local).", conflict.Question, StringComparison.Ordinal);
+        Assert.Contains("give each profile its own environment in QUEUEY_WORKSPACE_ENVIRONMENT", conflict.Question, StringComparison.Ordinal);
         Assert.Null(advice.Design);
     }
 
@@ -761,7 +762,8 @@ public sealed class AdviseIntentTests : IDisposable
 
         FlowConflict unstated = Assert.Single(Advise(StripeIntent).Flow.Conflicts);
         Assert.Equal(("ambiguous", "{\"dev\":null,\"prod\":null}"), (unstated.Kind, unstated.Found!.ToJsonString()));
-        Assert.Contains("Take workspace.environment from ${QUEUEY_WORKSPACE_ENVIRONMENT}", unstated.Question, StringComparison.Ordinal);
+        Assert.Contains("Name it with advise --profile (dev, prod).", unstated.Question, StringComparison.Ordinal);
+        Assert.Contains("take workspace.environment from ${QUEUEY_WORKSPACE_ENVIRONMENT}", unstated.Question, StringComparison.Ordinal);
 
         FlowConflict stated = Assert.Single(Advise(StripeIntentFor("prod")).Flow.Conflicts);
         Assert.Equal(("contradiction", "environment"), (stated.Kind, stated.Field));
@@ -816,6 +818,149 @@ public sealed class AdviseIntentTests : IDisposable
         Assert.Equal(("dev", Provenance.Evidence), (advice.Flow.String("environment"), advice.Flow["environment"]!.Provenance));
         Assert.Contains(design.NextSteps, s => s.StartsWith("Test mode", StringComparison.Ordinal));
         Assert.StartsWith("queuey credentials set ", Assert.Single(design.Credentials).Store, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}", false, "localForward")]
+    [InlineData("${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}", true, "localForward")]
+    [InlineData("${QUEUEY_WORKSPACE_ENVIRONMENT}", false, "http")]
+    public void A_file_without_profiles_that_takes_its_environment_from_a_variable_takes_the_kind_from_one_too(
+        string environment, bool devStated, string kind)
+    {
+        // Review av #60, B1: med ${VAR:-dev} så CI kan sette prod, skrev advise kind localForward som fast verdi, og køen ble
+        // opprettet i prod med localForward. Nå tar kind en variabel uten standardverdi: glemmer CI den, stopper apply.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", "{ \"workspace\": { \"environment\": \"" + environment + "\" }, \"queues\": {} }");
+
+        FlowDesign design = Advise(devStated ? StripeIntentFor("dev") : StripeIntent).Design!;
+
+        Assert.Equal("${QUEUEY_STRIPE_DELIVERY_KIND}", design.Content["queues"]!["stripe"]!["delivery"]!["kind"]!.GetValue<string>());
+        Assert.Null(design.Content["profiles"]);
+        Assert.Contains(design.NextSteps, s => s.StartsWith("Set ", StringComparison.Ordinal)
+                                               && s.Contains($"QUEUEY_STRIPE_DELIVERY_KIND={kind}", StringComparison.Ordinal)
+                                               && s.Contains("where plan and apply run", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("${QUEUEY_WORKSPACE_ENVIRONMENT}", "\"local\": { \"variables\": { \"QUEUEY_WORKSPACE_ENVIRONMENT\": \"development\" } }",
+        "profiles.local.variables.QUEUEY_WORKSPACE_ENVIRONMENT in queuey.deploy.json is \"development\", which apply refuses")]
+    [InlineData("${QUEUEY_WORKSPACE_ENVIRONMENT:-development}", null,
+        "the default in workspace.environment (${QUEUEY_WORKSPACE_ENVIRONMENT:-…}) in queuey.deploy.json is \"development\", which apply refuses")]
+    public void An_environment_apply_would_refuse_is_a_conflict_not_a_fallback(string environment, string? profile, string message)
+    {
+        // Review av #60: en ugyldig profilverdi falt tilbake på standardverdien, mens plan og apply bruker profilverdien og nekter.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", "{ \"workspace\": { \"environment\": \"" + environment + "\" }, \"queues\": {}" +
+                                    (profile is null ? "" : ", \"profiles\": { " + profile + " }") + " }");
+
+        FlowAdvice advice = Advise(StripeIntent);
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("unsupported", "environment"), (conflict.Kind, conflict.Field));
+        Assert.Contains(message, conflict.Message, StringComparison.Ordinal);
+        Assert.Contains("Set it to one of dev, test, staging, prod", conflict.Question, StringComparison.Ordinal);
+        Assert.Null(advice.Design);
+    }
+
+    [Theory]
+    [InlineData("${ENV_A}x")]
+    [InlineData("${ENV_A}${ENV_B}")]
+    public void An_environment_that_is_not_one_variable_or_a_fixed_value_is_a_conflict(string environment)
+    {
+        // Review av #60: advise leste den første variabelen og så bort fra resten.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", "{ \"workspace\": { \"environment\": \"" + environment + "\" }, \"queues\": {} }");
+
+        FlowConflict conflict = Assert.Single(Advise(StripeIntent).Flow.Conflicts);
+
+        Assert.Equal(("unsupported", "environment"), (conflict.Kind, conflict.Field));
+        Assert.Contains("reads variables in a form advise cannot follow", conflict.Message, StringComparison.Ordinal);
+    }
+
+    // ── advise --profile (review av #60) ─────────────────────────────────
+    //
+    // Profiler som deler et miljø, som eu og us i prod, kan ikke skilles av et oppgitt miljø, og spørsmålet ba om det.
+
+    private const string EuAndUs = """
+        {
+          "workspace": { "environment": "prod" },
+          "queues": {},
+          "profiles": {
+            "eu": { "variables": { "ORDERS_HOST": "eu.example.com" } },
+            "us": { "variables": { "ORDERS_HOST": "us.example.com" } }
+          }
+        }
+        """;
+
+    [Fact]
+    public void Profiles_that_share_an_environment_ask_for_the_profile_by_name()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", EuAndUs);
+
+        FlowConflict conflict = Assert.Single(Advise(StripeIntent).Flow.Conflicts);
+
+        Assert.Equal(("ambiguous", "environment"), (conflict.Kind, conflict.Field));
+        Assert.Contains("Every profile gives prod, so the environment cannot tell them apart: name the profile with advise --profile (eu, us).",
+            conflict.Question, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Advise_profile_names_the_profile_and_its_environment_decides_the_rest()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", EuAndUs);
+
+        FlowAdvice advice = Advise(StripeIntent, profile: "us");
+        FlowDesign design = advice.Design!;
+
+        Assert.Equal(("prod", Provenance.Evidence), (advice.Flow.String("environment"), advice.Flow["environment"]!.Provenance));
+        Assert.Equal(new[] { "eu", "us" }, design.Content["profiles"]!.AsObject().Select(p => p.Key).ToArray());
+        Assert.Equal("http", design.Content["profiles"]!["us"]!["variables"]!["QUEUEY_STRIPE_DELIVERY_KIND"]!.GetValue<string>());
+        Assert.Equal("queuey credentials request stripe-whsec --profile us", Assert.Single(design.Credentials).Store);
+        Assert.Contains(design.NextSteps, s => s.StartsWith("queuey apply --profile us.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Advise_profile_must_name_a_profile_the_file_has()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", EuAndUs);
+
+        FlowConflict conflict = Assert.Single(Advise(StripeIntent, profile: "asia").Flow.Conflicts);
+
+        Assert.Equal(("missing", "environment"), (conflict.Kind, conflict.Field));
+        Assert.Contains("--profile asia names a profile queuey.deploy.json does not have: it has eu (prod), us (prod).", conflict.Message,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Advise_profile_names_the_first_profile_of_a_new_file()
+    {
+        Fixture("stripe-aspnet");
+
+        FlowDesign design = Advise(StripeIntent, profile: "laptop").Design!;
+
+        Assert.Equal(new[] { "laptop" }, design.Content["profiles"]!.AsObject().Select(p => p.Key).ToArray());
+        Assert.Equal("dev", design.Content["profiles"]!["laptop"]!["variables"]!["QUEUEY_WORKSPACE_ENVIRONMENT"]!.GetValue<string>());
+        Assert.Contains(design.NextSteps, s => s.StartsWith("queuey apply --profile laptop.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Advise_profile_goes_with_intent_and_takes_a_profile_name()
+    {
+        Fixture("stripe-aspnet");
+        File_("flow.json", StripeIntent);
+
+        CliRun alone = await CliHarness.RunAsync(() => AdviseCommand.RunAsync(new[] { _root, "--profile", "eu", "--json" }));
+        CliRun bad = await CliHarness.RunAsync(() => AdviseCommand.RunAsync(
+            new[] { _root, "--intent", Path.Combine(_root, "flow.json"), "--profile", "qak_kid.secret", "--json" }));
+
+        Assert.Equal(ExitCodes.Usage, alone.Exit);
+        Assert.Equal("profile_needs_intent", JsonDocument.Parse(alone.Stdout).RootElement.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal(ExitCodes.Usage, bad.Exit);
+        Assert.Equal("invalid_value", JsonDocument.Parse(bad.Stdout).RootElement.GetProperty("error").GetProperty("code").GetString());
+        Assert.DoesNotContain("qak_kid", bad.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1692,7 +1837,8 @@ public sealed class AdviseIntentTests : IDisposable
 
     // ── hjelpere ─────────────────────────────────────────────────────────
 
-    private FlowAdvice Advise(string intent) => FlowAdvisor.Advise(DesiredFlow.Parse(intent), FlowScan.Scan(_root), _root);
+    private FlowAdvice Advise(string intent, string? profile = null)
+        => FlowAdvisor.Advise(DesiredFlow.Parse(intent), FlowScan.Scan(_root), _root, profile: profile);
 
     private void Fixture(string name)
     {

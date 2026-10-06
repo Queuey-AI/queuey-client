@@ -1089,9 +1089,18 @@ and Stripe's test mode.
 advise stops rather than guess. A file with profiles never gets a new one: advise picks a profile by the environment it
 gives, never by its name. Without an environment in the intent, one profile takes the flow, and several are an
 `ambiguous` conflict that names what each gives. With one, the profile that gives it takes the flow, and the commands
-take it with `--profile`; when no profile gives it, or several do, the flow has a conflict that says what to change. A
-queue the file already forwards to a listener (`"kind": "localForward"`, directly or through its profile) outside dev is
-a conflict too: state `dev`, or give it `http` where the file sets it.
+take it with `--profile`; the file's only profile also takes it when that profile gives no environment, and gets it
+written in. When no profile gives it, or several do, the flow has a conflict that says what to change. Profiles that
+share an environment, such as `eu` and `us` in prod, are told apart with `advise --intent … --profile <name>`, which
+names a profile the file has (or the first one, in a new file); its environment still decides the rest. A queue the
+file already forwards to a listener (`"kind": "localForward"`, directly or through its profile) outside dev is a
+conflict too: state `dev`, or give it `http` where the file sets it. So is an environment apply would refuse, such as
+`"development"` in a profile, and a `workspace.environment` that is not one fixed value or exactly one `${VAR}`.
+
+A file without profiles that takes its environment from a variable, such as `${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}` so CI
+can set prod, gets the delivery kind from a variable too, `${QUEUEY_<QUEUE>_DELIVERY_KIND}` without a default, and the
+next steps say to set it to `localForward` in dev and `http` elsewhere. If CI forgets it, `apply` stops rather than
+create the queue in prod with a local listener.
 
 **`infrastructure.content` is the whole file, to write as it is.** With a `queuey.deploy.json` already there, it is that
 file with the flow's queue and profile values merged in. The file wins over everything the intent does not state. A

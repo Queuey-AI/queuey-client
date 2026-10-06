@@ -33,7 +33,7 @@ COMMANDS
 
 ADVISE
   queuey advise [<path>] [--queue <name>] [--write-files [--force]] [--apply] [--json]
-  queuey advise [<path>] --intent <flow.json> [--queue <name>] [--json]
+  queuey advise [<path>] --intent <flow.json> [--queue <name>] [--profile <name>] [--json]
                  Reads the repository (default: the current directory) and recommends how to
                  publish from it — and, when it finds an endpoint that takes webhooks, how to
                  receive safely. Every conclusion names the file it came from, so you can
@@ -82,8 +82,13 @@ ADVISE
                  and a real Stripe endpoint. State dev for a local listener and test mode.
                  A file with profiles gets no new profile: the profile that gives the
                  environment takes the flow, chosen by that and never by its name. Without
-                 one stated, one profile takes it, and several are a conflict. So is a queue
-                 the file forwards to a listener outside dev.
+                 one stated, one profile takes it, and several are a conflict. One profile
+                 that gives none takes a stated environment. --profile <name> names the
+                 profile instead, for profiles that share an environment; the file must have
+                 it, unless advise proposes a new file. A queue the file forwards to a
+                 listener outside dev is a conflict, and so is an environment apply refuses.
+                 A file without profiles that takes its environment from a variable gets the
+                 delivery kind from one too, without a default.
                  The schema command prints the Desired Flow's schema (see SCHEMA).
                  infrastructure.content is the whole deployment file, to write as it is: with a
                  queuey.deploy.json there, that file with the flow's queue and profile values

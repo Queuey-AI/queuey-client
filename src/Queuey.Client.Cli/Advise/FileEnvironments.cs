@@ -22,27 +22,67 @@ internal static class FileEnvironments
     /// <summary>The variable <c>workspace.environment</c> comes from, and its <c>${VAR:-default}</c>; null for a fixed one or none.</summary>
     internal static (string Name, string? Default)? Variable(ExistingDeployFile file) => ParseVariable(file.Environment);
 
-    /// <summary>The first <c>${VAR}</c> in <paramref name="text"/>, and its <c>${VAR:-default}</c>, as plan and apply read it; else null.</summary>
+    /// <summary>
+    /// The variable <paramref name="text"/> is, and its <c>${VAR:-default}</c>, as plan and apply read it: only a text that
+    /// is exactly one <c>${…}</c>. Null otherwise, also for <c>${A}x</c> or <c>${A}${B}</c>, which give no single variable.
+    /// </summary>
     internal static (string Name, string? Default)? ParseVariable(string? text)
     {
-        int start = text?.IndexOf("${", StringComparison.Ordinal) ?? -1;
-        int end = start < 0 ? -1 : text!.IndexOf('}', start + 2);
-        if (end < 0)
+        string? whole = text?.Trim();
+        if (whole is null || !whole.StartsWith("${", StringComparison.Ordinal) || !whole.EndsWith("}", StringComparison.Ordinal)
+            || whole.IndexOf('}') != whole.Length - 1 || whole.IndexOf("${", 2, StringComparison.Ordinal) >= 0)
             return null;
 
-        string token = text!.Substring(start + 2, end - start - 2);
+        string token = whole.Substring(2, whole.Length - 3);
         int separator = token.IndexOf(":-", StringComparison.Ordinal);
         string name = (separator < 0 ? token : token.Substring(0, separator)).Trim();
         return name.Length == 0 ? null : (name, separator < 0 ? null : token.Substring(separator + 2));
+    }
+
+    /// <summary>
+    /// Whether <c>workspace.environment</c> reads variables in a form advise cannot follow, such as <c>${A}x</c> or
+    /// <c>${A}${B}</c>: it is neither a fixed environment nor exactly one <c>${VAR}</c>.
+    /// </summary>
+    internal static bool Unreadable(ExistingDeployFile file)
+        => file.Environment is { } environment && environment.IndexOf("${", StringComparison.Ordinal) >= 0 && Variable(file) is null;
+
+    /// <summary>
+    /// A value the file gives the environment that apply would refuse: where it is, and the value. A profile's value counts
+    /// when it is not empty, as plan and apply read it; the <c>${VAR:-default}</c> only otherwise. Null when all are valid.
+    /// </summary>
+    // Review av #60: en ugyldig profilverdi falt tilbake på standardverdien, mens plan og apply bruker profilverdien og nekter.
+    internal static (string Where, string Value)? Refused(ExistingDeployFile file)
+    {
+        if (Fixed(file) is not null || Variable(file) is not { } variable)
+            return null;
+
+        foreach (string profile in file.Profiles)
+        {
+            if (ProfileValue(file, profile, variable.Name) is { Length: > 0 } value && Valid(value) is null)
+                return ($"profiles.{profile}.variables.{variable.Name}", value);
+        }
+
+        return variable.Default is { Length: > 0 } fallback && Valid(fallback) is null
+            ? ($"the default in workspace.environment (${{{variable.Name}:-…}})", fallback)
+            : null;
     }
 
     /// <summary>The fixed environment the file names, lower case; null for one from a variable, none, or one apply refuses.</summary>
     internal static string? Fixed(ExistingDeployFile file)
         => file.Environment is { } environment && environment.IndexOf("${", StringComparison.Ordinal) < 0 ? Valid(environment) : null;
 
-    /// <summary>The environment the file gives with <paramref name="profile"/>: fixed, the profile's value, or the default; else null.</summary>
+    /// <summary>
+    /// The environment the file gives with <paramref name="profile"/>: fixed, the profile's value when it is not empty, or
+    /// else the default, as plan and apply read it; null when that is none, or one apply refuses (<see cref="Refused"/>).
+    /// </summary>
     internal static string? GivenBy(ExistingDeployFile file, string profile)
-        => Fixed(file) ?? (Variable(file) is { } variable ? Valid(ProfileValue(file, profile, variable.Name)) ?? Valid(variable.Default) : null);
+    {
+        if (Fixed(file) is { } fixedEnvironment)
+            return fixedEnvironment;
+        if (Variable(file) is not { } variable)
+            return null;
+        return ProfileValue(file, profile, variable.Name) is { Length: > 0 } value ? Valid(value) : Valid(variable.Default);
+    }
 
     /// <summary>The environment the file gives without a profile: fixed, or the variable's default; else null.</summary>
     internal static string? WithoutProfile(ExistingDeployFile file)
@@ -55,7 +95,7 @@ internal static class FileEnvironments
             return $"the deployment file's workspace is {fixedEnvironment}";
         if (Variable(file) is not { } variable)
             return "the deployment file names no environment";
-        return profile is not null && Valid(ProfileValue(file, profile, variable.Name)) is { } given
+        return profile is not null && ProfileValue(file, profile, variable.Name) is { Length: > 0 } value && Valid(value) is { } given
             ? $"profiles.{profile}.variables.{variable.Name} is {given}"
             : $"${{{variable.Name}}} defaults to {Valid(variable.Default)}";
     }
