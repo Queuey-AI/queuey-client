@@ -80,7 +80,10 @@ ADVISE
                  infrastructure.content is the whole deployment file, to write as it is: with a
                  queuey.deploy.json there, that file with the flow's queue and profile values
                  merged in. The file wins over what the intent does not state; a stated value
-                 it contradicts, or a file apply cannot read, is a conflict.
+                 it contradicts, or a file apply cannot read, is a conflict. So is a root
+                 queuey.deploy.json advise does not read: a link, a folder, a file over 512 KiB,
+                 one it may not open, or no regular file, such as a pipe. It is read before the
+                 scan, outside its limits.
                  --json prints { ""schemaVersion"": 1, ""outcome"": ""proposed"" or ""conflicts"",
                  ""flow"", ""existing"", ""scanLimited"", ""infrastructure"", ""code"",
                  ""nextSteps"" }; check schemaVersion first. ""flow"" is the enriched Desired

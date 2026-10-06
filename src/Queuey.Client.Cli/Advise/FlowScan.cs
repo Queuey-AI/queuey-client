@@ -72,6 +72,16 @@ public sealed class ExistingDeployFile
     /// <summary>Null when the file parses and holds together; otherwise why it does not, in the parser's words.</summary>
     public string? Problem { get; init; }
 
+    /// <summary>
+    /// Why advise did not read the file that is there, as the end of a sentence, when it is in a form advise does not read: a
+    /// link, a folder, larger than it reads, or unreadable. Null when it was read. advise then proposes nothing for it: a new
+    /// file would replace the one that is there (review of #56, B-1).
+    /// </summary>
+    public string? Unread { get; init; }
+
+    /// <summary>What to do about a file advise did not read, for the conflict it gives.</summary>
+    public string? WayOut { get; init; }
+
     public string? Environment { get; init; }
 
     public string? BaseUrl { get; init; }
@@ -149,13 +159,18 @@ public static class FlowScan
 
     public static FlowFacts Scan(string root) => Scan(root, ScanBudget.Default);
 
+    /// <summary>How long opening the root's deployment file may take: a pipe swapped in for it waits for a writer.</summary>
+    internal static readonly TimeSpan DeployFileOpenTimeout = TimeSpan.FromSeconds(5);
+
     /// <summary>Scans within <paramref name="budget"/>: a limit it reaches stops the scan and is named in <see cref="FlowFacts.Limits"/>.</summary>
-    public static FlowFacts Scan(string root, ScanBudget budget)
+    public static FlowFacts Scan(string root, ScanBudget budget) => Scan(root, budget, DeployFileOpenTimeout);
+
+    internal static FlowFacts Scan(string root, ScanBudget budget, TimeSpan deployFileOpenTimeout)
     {
         if (string.IsNullOrWhiteSpace(root)) throw new ArgumentException("A repository path is required.", nameof(root));
         if (!Directory.Exists(root)) throw new DirectoryNotFoundException($"No such directory: {root}");
 
-        var scan = new Scanner(Path.GetFullPath(root), budget);
+        var scan = new Scanner(Path.GetFullPath(root), budget, deployFileOpenTimeout);
         scan.Run();
         return scan.Facts();
     }
@@ -189,15 +204,22 @@ public static class FlowScan
         private readonly List<Finding> _queuey = new();
         private ExistingDeployFile? _deployFile;
 
-        public Scanner(string root, ScanBudget budget)
+        private readonly TimeSpan _deployFileOpenTimeout;
+
+        public Scanner(string root, ScanBudget budget, TimeSpan deployFileOpenTimeout)
         {
             _root = root;
             _budget = budget;
+            _deployFileOpenTimeout = deployFileOpenTimeout;
             _walk = new RepoWalk(root, budget, SkipDirectory, IsInteresting);
         }
 
         public void Run()
         {
+            // queuey.deploy.json i roten avgjør om forslaget er en ny fil eller den som er der. Den sjekkes for seg, med lstat,
+            // og leses før og utenfor budsjettet: en lenke, en frist som gikk ut eller et brukt budsjett ga før «ingen fil», og
+            // agenten fikk beskjed om å skrive en ny fil over den som var der (review av #56, B-1).
+            _deployFile = RootDeployFile();
             _files.AddRange(_walk.Files());
             var texts = new Dictionary<string, string>(StringComparer.Ordinal);
 
@@ -259,8 +281,6 @@ public static class FlowScan
                 ReadSupabaseConfig(relative, lines);
             else if (name.EndsWith(".sql", StringComparison.OrdinalIgnoreCase))
                 ReadSql(relative, text, lines);
-            else if (relative == DeploymentFile.DefaultFileName)
-                ReadDeployFile(relative, text);
             else if (SourceExtensions.Any(e => name.EndsWith(e, StringComparison.OrdinalIgnoreCase)))
                 ReadSource(relative, name, lines);
         }
@@ -621,6 +641,126 @@ public static class FlowScan
             }
         }
 
+        /// <summary>The most of the root's deployment file advise reads.</summary>
+        internal const int MaxDeployFileBytes = 512 * 1024;
+
+        /// <summary>
+        /// The deployment file in the root, checked on its own: null when there is none, a file advise did not read (with why
+        /// and what to do) when it is a link, a folder, too large, unreadable, not a regular file, slow to open or a link by the
+        /// time it was read, and otherwise the file as it reads.
+        /// </summary>
+        private ExistingDeployFile? RootDeployFile()
+        {
+            const string name = DeploymentFile.DefaultFileName;
+            string path = Path.Combine(_root, name);
+            var info = new FileInfo(path);
+
+            string? target;
+            try
+            {
+                target = info.LinkTarget;   // readlink på selve oppføringen; lenken følges ikke
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return Unread(name, $"could not be checked ({ex.Message}), so advise cannot merge the flow into it.",
+                    "Check that this user can read it, then run advise --intent again.");
+            }
+
+            if (target is not null)
+                return LinkedDeployFile(name, target);
+
+            if (Directory.Exists(path))
+                return Unread(name, "is a folder, not a file.",
+                    "apply reads a file by that name: move the folder, then run advise --intent again.");
+
+            if (!info.Exists)
+                return null;
+
+            string tooLarge = $"is larger than {RepoWalk.SizeText(MaxDeployFileBytes)}, the most advise reads of it, so it cannot merge " +
+                              "the flow into it.";
+            string tooLargeWayOut = "Check that it is the file apply should read, since a deployment file is rarely that large. Or add the " +
+                                    "flow's queue to it by hand.";
+            if (info.Length > MaxDeployFileBytes)
+                return Unread(name, tooLarge, tooLargeWayOut);
+
+            string? text;
+            ReadRefusal refusal;
+            try
+            {
+                // Det som åpnes, kan være noe annet enn det som ble sjekket: åpningen har en tidsgrense, og en strøm som ikke
+                // kan søke (et rør), avvises før noe leses (review av #57, K-a).
+                text = RepoWalk.ReadBounded(path, MaxDeployFileBytes, _deployFileOpenTimeout, out refusal);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return Unread(name, $"could not be read ({ex.Message}), so advise cannot merge the flow into it.",
+                    "Check that this user can read it, then run advise --intent again.");
+            }
+
+            switch (refusal)
+            {
+                case ReadRefusal.TooLarge:
+                    return Unread(name, tooLarge, tooLargeWayOut);
+                case ReadRefusal.NotRegular:
+                    return Unread(name, "is not a regular file (a pipe or a socket, for instance), so advise cannot merge the flow into it.",
+                        $"Put the deployment file itself at {name}, then run advise --intent again.");
+                case ReadRefusal.TimedOut:
+                    return Unread(name, $"did not open within {RepoWalk.DurationText(_deployFileOpenTimeout)}, as a pipe without a " +
+                                        "writer never does, so advise cannot merge the flow into it.",
+                        $"Put the deployment file itself at {name}. If it is there and the disk was only slow, run advise --intent again.");
+            }
+
+            // Ble fila byttet ut med en lenke mens den ble lest, er det som ble lest, ikke fila som står der nå.
+            try
+            {
+                if (new FileInfo(path).LinkTarget is { } swapped)
+                    return LinkedDeployFile(name, swapped);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return Unread(name, $"could not be checked ({ex.Message}), so advise cannot merge the flow into it.",
+                    "Check that this user can read it, then run advise --intent again.");
+            }
+
+            ReadDeployFile(name, text!);
+            return _deployFile;
+        }
+
+        /// <summary>A link where the deployment file is: never followed, and named by where it points when that is in the repository.</summary>
+        private ExistingDeployFile LinkedDeployFile(string name, string target)
+        {
+            string resolved = Path.GetFullPath(Path.IsPathRooted(target) ? target : Path.Combine(_root, target));
+            string? inside = resolved.StartsWith(_root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.Ordinal)
+                ? Relative(resolved)
+                : null;
+
+            // Målet står i en vei ut en agent kan lime inn i et skall (review av #57, K-b, skallregelen fra #52). Bare en vanlig
+            // sti vises: bokstaver, sifre og . _ / -, uten .. som ledd og uten - først, så ln og cp aldri leser den som et
+            // flagg. Et annet mål regnes som en lenke ut av repoet.
+            if (inside is not null && !IsPlainPath(inside))
+                inside = null;
+
+            return inside is null
+                ? Unread(name, "is a symbolic link out of the repository, and advise follows no link, so it cannot read the file it " +
+                               "would merge the flow into.",
+                    $"Put the deployment file itself at {name}, then run advise --intent again.")
+                : Unread(name, $"is a symbolic link to {inside}, and advise follows no link, so it cannot read the file it would merge " +
+                               "the flow into.",
+                    $"Put a copy of {inside} in the link's place while advise runs, write the content it proposes to {inside}, and " +
+                    $"bring the link back: git checkout -- {name} when git tracks it, or ln -sf {inside} {name} when it does not. Or " +
+                    $"add the flow's queue to {inside} by hand.");
+        }
+
+        /// <summary>A path a shell reads as it is and a command never as a flag: letters, digits and . _ / -, without .. as a segment, not starting with -.</summary>
+        private static bool IsPlainPath(string path)
+            => PlainPath.IsMatch(path) && !path.StartsWith('-') && !path.Split('/').Contains("..");
+
+        private ExistingDeployFile Unread(string name, string reason, string wayOut)
+        {
+            _queuey.Add(new Finding(name, 1, "a deployment file advise did not read"));
+            return new ExistingDeployFile { File = name, Unread = reason, WayOut = wayOut };
+        }
+
         private void ReadDeployFile(string relative, string text)
         {
             try
@@ -634,12 +774,15 @@ public static class FlowScan
                     BaseUrl = file.Workspace?.Delivery?.BaseUrl,
                     Queues = file.Queues.ToDictionary(q => q.Key, q => q.Value?.Ingress?.SignedRequest?.Template, StringComparer.Ordinal),
                     Profiles = file.Profiles?.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray() ?? Array.Empty<string>(),
-                    Json = JsonNode.Parse(text, documentOptions: new JsonDocumentOptions
-                    {
-                        CommentHandling = JsonCommentHandling.Skip,
-                        AllowTrailingCommas = true,
-                    }) as JsonObject,
-                    HasComments = !IsPlainJson(text),
+                    // En tom fil er en deploy-fil uten innhold for leseren, og et tomt objekt her.
+                    Json = string.IsNullOrWhiteSpace(text)
+                        ? new JsonObject()
+                        : JsonNode.Parse(text, documentOptions: new JsonDocumentOptions
+                        {
+                            CommentHandling = JsonCommentHandling.Skip,
+                            AllowTrailingCommas = true,
+                        }) as JsonObject,
+                    HasComments = !string.IsNullOrWhiteSpace(text) && !IsPlainJson(text),
                 };
                 _queuey.Add(new Finding(relative, 1, file.Queues.Count == 0
                     ? "a deployment file that declares no queues"
@@ -755,7 +898,6 @@ public static class FlowScan
                || name.Equals("package.json", StringComparison.OrdinalIgnoreCase)
                || name.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase)
                || name is "pyproject.toml" or "requirements.txt" or "go.mod" or "launchSettings.json" or "config.toml"
-               || name == DeploymentFile.DefaultFileName
                || name.EndsWith(".sql", StringComparison.OrdinalIgnoreCase)
                || SourceExtensions.Any(e => name.EndsWith(e, StringComparison.OrdinalIgnoreCase));
 
@@ -1038,6 +1180,7 @@ public static class FlowScan
     private static readonly TimeSpan MatchTimeout = TimeSpan.FromMilliseconds(250);
     private static readonly Regex OrSeparator = new(@"\s+or\s+", CompiledIgnoreCase, MatchTimeout);
     private static readonly Regex FunctionName = new(@"^[A-Za-z0-9_-]{1,64}$", Compiled, MatchTimeout);
+    private static readonly Regex PlainPath = new(@"^[A-Za-z0-9._/-]+$", Compiled, MatchTimeout);
     private static readonly Regex FileNameEnding = new(
         @"\.(js|mjs|cjs|ts|tsx|jsx|json|cs|py|go|html|css|md|txt|ya?ml|sql|toml|env|lock|config)$", Compiled, MatchTimeout);
 
