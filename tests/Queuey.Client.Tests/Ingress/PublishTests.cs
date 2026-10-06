@@ -177,9 +177,27 @@ public class PublishTests
 
         Assert.Contains("Queue not found.", ex.Message);      // the server's own message survives
         Assert.Contains("naming rules", ex.Message);
-        Assert.Contains("Did you mean 'order-events'?", ex.Message);
+        Assert.Contains("The queue name ('Ord…') also breaks", ex.Message);
         Assert.Equal("queue_not_found", ex.ErrorCode);
         Assert.Equal(404, ex.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("qak_kid.s3cr3tVALUE")]
+    [InlineData("sk_live_FAKEs3cr3t")]
+    public async Task Not_found_shows_at_most_three_characters_of_a_name_that_may_be_a_secret(string pasted)
+    {
+        // F2.7-review (2026-10-06): `queuey publish "$QUEUEY_API_KEY"` gjentok hele nøkkelen, også som forslag med små bokstaver.
+        var handler = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(
+            HttpStatusCode.NotFound,
+            new { error = new { code = "not_found", message = "Queue not found." } }));
+        using var client = new QueueyClient(ApiKeyOptions(), new HttpClient(handler));
+
+        QueueyNotFoundException ex = await Assert.ThrowsAsync<QueueyNotFoundException>(
+            () => client.Ingress.PublishAsync(pasted, new { x = 1 }));
+
+        Assert.DoesNotContain(pasted.Substring(3), ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("Did you mean", ex.Message);
     }
 
     [Fact]

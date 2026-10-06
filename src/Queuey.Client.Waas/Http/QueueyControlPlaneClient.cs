@@ -391,6 +391,34 @@ internal sealed class QueueyControlPlaneClient
     }
 
     /// <summary>
+    /// One event's envelope as Queuey's REST API answers it (<c>GET /events/{que}/{evt}</c>): status, timings, attempts
+    /// and their decisions, and whether its content may be revealed. Never content: Queuey leaves it out for everyone.
+    /// Needs <c>event.read</c>.
+    /// </summary>
+    public async Task<JsonElement> GetEventEnvelopeJsonAsync(string queuePublicId, string eventPublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "events", queuePublicId, eventPublicId);
+        return await _connection.SendForJsonAsync<JsonElement>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// One event's content (<c>GET /events/{que}/{evt}/content</c>): the payload, the resolved header values and the
+    /// receiver's responses. Queuey serves it only with <c>event.payload.read</c> and a payload visibility that lets values
+    /// out, and records every look before it answers.
+    /// </summary>
+    public async Task<JsonElement> GetEventContentJsonAsync(string queuePublicId, string eventPublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "events", queuePublicId, eventPublicId, "content");
+        return await _connection.SendForJsonAsync<JsonElement>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// A write sent as a dry run (<c>?dryRun=true</c>): the server runs it the same way, stops before it
     /// stores anything, and answers with what it would have done. Refusals come back as they would.
     /// </summary>

@@ -264,16 +264,21 @@ public sealed class SecretEchoTests : IDisposable
         Assert.Equal("ten_abc", JsonDocument.Parse(run.Stdout).RootElement.GetProperty("tenant").GetString());
     }
 
-    [Fact]
-    public async Task A_tenant_in_the_file_that_is_not_a_workspace_id_is_not_shown_either()
+    // F2.7 (2026-10-06): fila sin tenant sjekkes når fila leses (DeploymentFile.Resolve), ikke bare når --tenant navngir et
+    // annet workspace. Uten --tenant gikk verdien ellers ut i URL-ene.
+    [Theory]
+    [InlineData("apply", "--tenant", "ten_flag")]
+    [InlineData("apply")]
+    [InlineData("plan")]
+    public async Task A_tenant_in_the_file_that_is_not_a_workspace_id_is_refused_without_showing_it(params string[] command)
     {
         string path = DeployFile("sk_live_FAKEsecret");
 
         CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With(
-            "apply", "--file", path, "--tenant", "ten_flag", "--json")));
+            new[] { command[0], "--file", path }.Concat(command.Skip(1)).Append("--json").ToArray())));
 
         Assert.Equal(ExitCodes.Configuration, run.Exit);
-        Assert.StartsWith($"{path} names a tenant that is not a workspace id, but --tenant names ten_flag.",
+        Assert.Equal($"{path}: The deployment file's tenant is not a workspace id. Its value is not shown, since it may be a secret.",
             JsonDocument.Parse(run.Stdout).RootElement.GetProperty("error").GetProperty("message").GetString());
         Assert.DoesNotContain("FAKEsecret", run.Stdout + run.Stderr);
     }

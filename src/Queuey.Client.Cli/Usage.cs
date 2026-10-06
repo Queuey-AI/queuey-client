@@ -19,7 +19,8 @@ COMMANDS
   pull           Read a workspace back into a deployment file (the inverse of apply).
   credentials    Store delivery secrets a deployment file refers to: credentials set | list.
   keys           Mint an ingress signing key for a queue: keys mint.
-  publish        Publish an event to a stream.
+  publish        Publish one event to a queue the way a producer does, and print its id for verify.
+  events         Read one event's status and attempts as Queuey serves them: events get.
   create-tenant  Create a tenant under the current license.
   create-queue   Create a queue under a tenant.
   metrics        Show a queue's traffic snapshot.
@@ -248,9 +249,51 @@ CREDENTIALS
   queuey credentials list [--json]
 
 PUBLISH
-  queuey publish <stream> --event <type> [--key <k>]
-                 (--data <json> | --file <path> | --stdin)
-                 [--idempotency-key <k>] [--source <s>] [--json]
+  queuey publish <queue> (--data <json> | --file <path> | --stdin)
+                 [--idempotency-key <k>] [--event <type>] [--key <group-key>]
+                 [--content-type <ct>] [--source <s>] [--deployment queuey.deploy.json] [--json]
+                 Publishes ONE event to the queue the way a producer does: with the
+                 configured key, to the queue's ingress URL. A fixed --idempotency-key
+                 makes the event recognizable: publishing it again answers with the same
+                 event (replayed), and nothing new is stored. --event and --key set the
+                 event type and the group key for a queue that reads them, as a stream does.
+                 The answer has the event's id: follow it with
+                 `queuey verify <queue> --event <evt_…>`.
+                 When the key may read the queue, what its ingress requires is read first.
+                 An ingress that verifies a provider's signature (such as Stripe's) or
+                 Queuey's own, or wants a key and a signature together, is refused before
+                 anything is sent, saying what it requires: such an event comes from the
+                 provider or from the producer that signs it. A key that may only publish
+                 skips that read, and the ingress decides; a queue name that starts like a
+                 secret (qak_, whsec_, sk_, rk_) is then refused before anything is sent.
+                 --json prints { ""schemaVersion"": 1, ""tenant"", ""tenantFrom"", ""queue"",
+                 ""queuePublicId"", ""eventPublicId"", ""receivedAtUtc"", ""mode"", ""replayed"",
+                 ""verify"" }, never the payload or a key. eventPublicId and verify are null
+                 when the ingress answered without a receipt, as a queue whose ingress
+                 answers 204 does; any other answer that is not Queuey's receipt is an error.
+                 0.1.0-preview.8 printed the bare receipt, with eventId, and needed --event.
+                 <queue> is the queue's name, or its id (que_…) when the key may read the
+                 workspace's queues. The workspace follows apply's rule: the deployment
+                 file's ""tenant"" (--deployment, default ./queuey.deploy.json) when it names
+                 one, else --tenant / QUEUEY_TENANT / queuey.json, so verify finds the queue.
+                 When the deployment file decides it, publish says so before it sends, and
+                 tenantFrom names the file.
+
+EVENTS
+  queuey events get <evt_…> --queue <queue> [--content] [--deployment queuey.deploy.json] [--json]
+                 Reads one event as Queuey's REST API serves it (GET /events/{queue}/{event}):
+                 its status, its times and each attempt with what Queuey decided after it.
+                 --queue is the queue's name or its id (que_…): Queuey reads an event within
+                 its queue, and publish and verify print the queue's id beside the event's.
+                 The payload, the header values and the receiver's responses are the event's
+                 content. --content reveals it, only when the key has event.payload.read and
+                 the queue's payload visibility lets values out, and Queuey records every
+                 look before it answers. Without --content, none of it is read.
+                 --json prints { ""schemaVersion"": 1, ""queuePublicId"", ""eventPublicId"", ""status"",
+                 ""payloadVisibility"", ""canRevealContent"", ""event"", ""content"" }: event is the
+                 envelope as REST returns it, and content is null unless revealed. Needs a key
+                 that may read the queue's events (event.read). A queue named by name is found
+                 in the workspace by apply's rule, as for publish.
 
 CREATE-TENANT
   queuey create-tenant --name <display> [--as-producer] [--with-default-queue] [--json]

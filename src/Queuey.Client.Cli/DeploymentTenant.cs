@@ -67,6 +67,25 @@ internal static class DeploymentTenant
     }
 
     /// <summary>
+    /// The tenant of the deployment file a command acts by when it needs nothing else from the file — the one
+    /// <c>--deployment</c> names, or the default one here when there is one — and the file's path. For <c>verify</c>,
+    /// <c>publish</c> and <c>events get</c>, so they reach the workspace apply writes to.
+    /// </summary>
+    public static (string? Tenant, string Path) FromDeploymentOption(ArgMap map)
+    {
+        string? named = map.Get("deployment");
+        string path = named ?? DeploymentFile.DefaultFileName;
+        if (!System.IO.File.Exists(path))
+        {
+            if (named is not null)
+                throw new QueueyConfigurationException($"No deployment file at '{path}'.");
+            return (null, path);
+        }
+
+        return (ReadFromFile(CliFiles.ReadAllText(path), path), path);
+    }
+
+    /// <summary>
     /// The tenant a deployment file names, with its <c>${VAR}</c> expanded, read without the rest of the
     /// file. For <c>verify</c>, which needs nothing else from it. Null when the file names none.
     /// </summary>
@@ -103,12 +122,25 @@ internal static class DeploymentTenant
             if (tenants.Length == 0)
                 return null;
 
-            return tenants[0].Value.ValueKind switch
+            string? tenant = tenants[0].Value.ValueKind switch
             {
                 JsonValueKind.String => DeploymentVariables.Expand(tenants[0].Value.GetString(), null, "tenant"),
                 JsonValueKind.Null => null,
                 _ => throw new QueueyConfigurationException($"{path}: tenant is a workspace id in quotes, like \"ten_…\"."),
             };
+
+            // Samme regel som når apply leser hele fila (DeploymentFile.Resolve, F2.7): verify og publish leser bare tenant,
+            // og sendte den ellers i URL-ene uten at noen hadde sjekket den.
+            try
+            {
+                DeploymentFile.EnsureWorkspaceId(tenant);
+            }
+            catch (QueueyConfigurationException ex)
+            {
+                throw new QueueyConfigurationException($"{path}: {ex.Message}") { SuggestedAction = ex.SuggestedAction };
+            }
+
+            return tenant;
         }
     }
 

@@ -6,7 +6,8 @@ namespace Queuey.Client.Waas.Tests;
 /// Reglene for navnet en signert forespørsel venter på (Queuey F2.3-review, 2026-10-06): formen som er trygg i en
 /// shell-kommando og i tekst en agent leser, anslaget som holder en limt inn hemmelighet ute, og den ene måten et navn Queuey
 /// rapporterer, settes inn i tekst på. Vektorene er de samme som Queuey sine (CredentialNameRulesTests i Queuey), så de to
-/// sidene sier det samme.
+/// sidene sier det samme. scripts/check-queuey-vectors.sh sammenligner dem metode for metode før en tag (F2.7), så
+/// metodenavnene her og der må være de samme.
 /// </summary>
 public sealed class CredentialNameRulesTests
 {

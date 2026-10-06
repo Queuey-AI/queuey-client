@@ -53,6 +53,7 @@ internal static class CliEntry
                 "keys" => await KeysCommand.RunAsync(rest),
                 "credentials" => await CredentialsCommand.RunAsync(rest),
                 "publish" => await PublishCommand.RunAsync(rest),
+                "events" => await EventsCommand.RunAsync(rest),
                 "create-tenant" => await CreateTenantCommand.RunAsync(rest),
                 "create-queue" => await CreateQueueCommand.RunAsync(rest),
                 "metrics" => await MetricsCommand.RunAsync(rest),

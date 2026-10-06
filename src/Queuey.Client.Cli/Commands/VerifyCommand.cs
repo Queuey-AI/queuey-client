@@ -54,7 +54,7 @@ internal static class VerifyCommand
 
         // Workspacet apply skrev til, etter samme regel som apply: fila sin tenant, ellers den konfigurerte, og feil når
         // --tenant eller QUEUEY_TENANT navngir et annet enn fila. Det trengs for å finne køen ved navn.
-        (string? fileTenant, string filePath) = DeploymentFileTenant(map);
+        (string? fileTenant, string filePath) = DeploymentTenant.FromDeploymentOption(map);
         ResolvedConfig config = CliHost.ResolveForDeployment(map, fileTenant, filePath);
 
         using ServiceProvider provider = CliHost.BuildProvider(config);
@@ -203,21 +203,6 @@ internal static class VerifyCommand
 
         value = null;
         return CliErrors.Usage(map, "missing_value", $"--{option} takes a value: {what}.");
-    }
-
-    /// <summary>The deployment file's tenant, when there is a file — named by --deployment, or the default one here.</summary>
-    private static (string? Tenant, string Path) DeploymentFileTenant(ArgMap map)
-    {
-        string? named = map.Get("deployment");
-        string path = named ?? DeploymentFile.DefaultFileName;
-        if (!File.Exists(path))
-        {
-            if (named is not null)
-                throw new QueueyConfigurationException($"No deployment file at '{path}'.");
-            return (null, path);
-        }
-
-        return (DeploymentTenant.ReadFromFile(CliFiles.ReadAllText(path), path), path);
     }
 
     /// <summary>The line verify writes to stderr once Queuey follows an event, so a person knows to trigger it.</summary>

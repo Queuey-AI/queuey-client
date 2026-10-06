@@ -604,12 +604,14 @@ verify the queue's flow with the producer's own events, and reads the verificati
 settled it: each step from the ingress to the final state, with its evidence.
 
 ```bash
-queuey verify orders --event evt_…     # an event the producer published: did it arrive?
+queuey publish orders --data '{"orderId":"A-1","test":true}' --idempotency-key order-A-1 --json
+queuey verify orders --event evt_…     # the event publish answered: did it arrive?
 queuey verify payments --event-type payment_intent.succeeded --ingress-auth stripe   # waits; trigger it now
 ```
 
 - `--event` follows an event that is already in the queue: publish one the way the producer does, with
-  its key, and pass the event id the ingress answered.
+  its key, and pass the event id the ingress answered. `queuey publish` does that and prints the id, and
+  the `verify` command that follows it.
 - `--event-type` waits for the next event the ingress takes with that type, from the moment `verify`
   says it is waiting: trigger it then, for example with `stripe trigger payment_intent.succeeded`.
   `--ingress-auth` adds that the ingress verified it with that signed-request template, so a Stripe flow
@@ -652,6 +654,21 @@ exit 1 with Queuey's summary, and a refusal exits 1 with Queuey's message. With 
 `{ "schemaVersion": 2, "tenant", "queue", "queuePublicId", "verification": { … } }`: the verification in
 Queuey's own shape, with its own `schemaVersion`, the same one Queuey's agent tools answer with. Neither
 output shows a payload value or a secret: the evidence is ids, statuses, times and header names.
+
+`queuey publish <queue>` publishes one event the way a producer does: with the configured key, to the
+queue's ingress URL. A fixed `--idempotency-key` makes the event recognizable: publishing it again answers
+with the same event (`replayed`), and nothing new is stored. When the key may read the queue, publish
+reads what its ingress requires first, and refuses before anything is sent what it cannot give, saying
+what is required: a provider's signature (Stripe's event comes from Stripe), Queuey's own signature, or a
+key and a signature together. `--json` prints `{ "schemaVersion": 1, "tenant", "tenantFrom", "queue",
+"queuePublicId", "eventPublicId", "receivedAtUtc", "mode", "replayed", "verify" }`, never the payload or a
+key. When the deployment file decides the workspace, publish says so before it sends, and `tenantFrom`
+names the file.
+
+`queuey events get <evt_…> --queue <queue>` reads the event as Queuey's REST API serves it: its status,
+times and each attempt with what Queuey decided after it. The payload, header values and the receiver's
+responses are content: `--content` reveals them, only when the key has `event.payload.read` and the
+queue's payload visibility lets values out, and Queuey records every look.
 
 `<queue>` is the queue's name or its id (`que_…`). `verify` finds a name in the workspace by the same
 rule as `apply`: the deployment file's `tenant` when it names one, otherwise `--tenant`,
@@ -791,7 +808,8 @@ carries the per-flag detail this table leaves out.
 
 | Command | What it does |
 | --- | --- |
-| `publish` | Publish an event to a queue |
+| `publish <queue>` | Publish one event the way a producer does, and print its id for `verify --event` |
+| `events get <evt_…>` | Read an event's status and attempts as Queuey serves them; `--content` reveals its payload where allowed |
 | `listen` | Receive deliveries on your machine over an outbound session |
 | `replay <evt_…>` | Re-send one existing event to your listener (read-only) |
 | `metrics <que_…>` | A queue's traffic snapshot |
@@ -821,7 +839,8 @@ queuey credentials set --name partner-key --from-env PARTNER_KEY
 queuey apply --dry-run            # catch typos with no credentials and no network
 queuey plan                       # what would change, and would Queuey accept it?
 queuey apply
-queuey verify orders --event evt_…   # publish one order as the service does, then: did it arrive?
+queuey publish orders --data '{"orderId":"A-1","test":true}' --idempotency-key order-A-1   # prints evt_…
+queuey verify orders --event evt_…   # did it arrive?
 ```
 
 **Adopt a workspace someone configured in the console**

@@ -33,6 +33,8 @@ public class DeploymentDestinationsTests
 
     // Queuey F2.3-review (2026-10-06): de samme sperrede områdene som serveren etter #432 og #433. Vektorene er de samme
     // som Queuey sine (IsBlockedIp-teoriene i SsrfEgressPolicyTests i Queuey), så de to sidene sperrer det samme.
+    // scripts/check-queuey-vectors.sh sammenligner dem før en tag (F2.7): de to teoriene her og IsBlockedIp_blocks_* og
+    // IsBlockedIp_allows_*/IsBlockedIp_lets_* der. Endres et navn, må skriptet følge.
     [Theory]
     [InlineData("127.0.0.1")]
     [InlineData("127.9.9.9")]
