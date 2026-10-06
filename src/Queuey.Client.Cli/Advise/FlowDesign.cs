@@ -90,6 +90,10 @@ public static class FlowDesigner
         private readonly Advice? _sending;
         private readonly List<DesignSetting> _settings = new();
         private readonly List<CredentialNeed> _credentials = new();
+
+        // To måter å lagre en credential på (F2.9, playbookene fra F2.11, 2026-10-06): set leser en verdi den som kjører,
+        // holder, fra miljøet; request skriver ut en lenke der en person limer inn en verdi agenten aldri skal se.
+        private readonly Dictionary<string, (string Set, string Request)> _storeCommands = new(StringComparer.Ordinal);
         private readonly List<CodeStep> _code = new();
         private readonly List<string> _next = new();
         private readonly List<FlowConflict> _conflicts = new();
@@ -211,10 +215,12 @@ public static class FlowDesigner
                 "--event-type and the console filter on.",
                 "source.kind");
 
-            _credentials.Add(new CredentialNeed(StripeCredential, "HmacSigning",
-                "Stripe's webhook signing secret (whsec_…). Testing locally, it is the one stripe listen prints; for an endpoint " +
-                "in Stripe's dashboard, that endpoint's own.",
-                $"queuey credentials set{_profileFlag} --name {StripeCredential} --type HmacSigning --key-id {StripeCredential} --from-env STRIPE_WHSEC",
+            _credentials.Add(Credential(StripeCredential, "HmacSigning",
+                "Stripe's webhook signing secret (whsec_…). Testing locally, it is the Stripe CLI's own, which stripe listen " +
+                "--print-secret prints; for an endpoint in Stripe's dashboard, that endpoint's own, which a person pastes.",
+                set: $"queuey credentials set{_profileFlag} --name {StripeCredential} --type HmacSigning --key-id {StripeCredential} --from-env STRIPE_WHSEC",
+                // Uten --type ber en forespørsel om en HmacSigning-hemmelighet, og en ny får navnet som nøkkel-id, som over.
+                request: $"queuey credentials request {StripeCredential}{_profileFlag}",
                 "ingress"));
         }
 
@@ -393,8 +399,8 @@ public static class FlowDesigner
             }
 
             if (_local)
-                because += " A local listener forwards each delivery to this path on your machine, and Queuey signs a delivery for " +
-                           "a listener only when its URL is absolute.";
+                because += " A local listener forwards each delivery to this path on your machine" +
+                           (SignsDeliveries ? ", and Queuey signs a delivery for a listener only when its URL is absolute." : ".");
 
             Put(delivery, "url", url, $"{_prefix}.delivery.url", basis, because, "destination.route", "destination.baseUrl");
 
@@ -421,6 +427,9 @@ public static class FlowDesigner
         /// <summary>A value for the flow's environment, under profiles.&lt;environment&gt;.variables.</summary>
         private void ProfileValue(string variable, string value, string basis, string because, params string[] from)
             => _profile[variable] = (value, new DesignSetting($"profiles.{_env}.variables.{variable}", JsonValue.Create(value), basis, because, from));
+
+        /// <summary>Whether the design signs the queue's deliveries: only a Stripe queue does, in Stripe's format.</summary>
+        private bool SignsDeliveries => _kind == "stripe" && _flow["requirements.verification"] is { AsString: "stripe-signature" };
 
         private void StripeSigning(JsonObject delivery)
         {
@@ -462,11 +471,24 @@ public static class FlowDesigner
                 "requirements.verification");
 
             string variable = check.SecretName is { } name && !name.Contains(':') && !name.Contains('.') ? name : "WEBHOOK_SECRET";
-            _credentials.Add(new CredentialNeed(credential, type,
+            _credentials.Add(Credential(credential, type,
                 $"The secret the handler compares the {check.Header} header with" +
                 (check.SecretName is { } secretName ? $" ({secretName})." + EnvNote(secretName) : "."),
-                $"queuey credentials set{_profileFlag} --name {credential} --type {type} --from-env {variable}",
+                set: $"queuey credentials set{_profileFlag} --name {credential} --type {type} --from-env {variable}",
+                // --type må med: uten den ber en forespørsel om en HmacSigning-hemmelighet, som Queuey aldri sender som den er.
+                request: $"queuey credentials request {credential} --type {type}{_profileFlag}",
                 "delivery"));
+        }
+
+        /// <summary>
+        /// A credential the file names, stored the way its environment calls for: in dev, <paramref name="set"/>, which reads a
+        /// value the caller holds, such as the Stripe CLI's test secret; elsewhere <paramref name="request"/>, which prints a
+        /// link where a person pastes a value the caller never holds (F2.9).
+        /// </summary>
+        private CredentialNeed Credential(string name, string type, string holds, string set, string request, string @for)
+        {
+            _storeCommands[name] = (set, request);
+            return new CredentialNeed(name, type, holds, _local ? set : request, @for);
         }
 
         /// <summary>The check behind a shared-secret verification: the header, and where the secret comes from.</summary>
@@ -908,7 +930,7 @@ public static class FlowDesigner
                         ? new CodeStep(call.File, call.SecretLine, "configure",
                             $"Give {secret} the same secret Queuey stores as {StripeCredential}.",
                             "Queuey signs deliveries with the secret its ingress verifies Stripe's events with. Testing locally, " +
-                            "that is the one stripe listen prints." + EnvNote(secret), "evidence")
+                            "that is the Stripe CLI's own, which stripe listen --print-secret prints." + EnvNote(secret), "evidence")
                         : new CodeStep(call.File, call.Line, "configure",
                             $"Give the handler's signing secret the same value Queuey stores as {StripeCredential}.",
                             "Queuey signs deliveries with the secret its ingress verifies Stripe's events with.", "evidence"));
@@ -960,8 +982,8 @@ public static class FlowDesigner
             if (SecretCheck() is null && _flow.String("requirements.verification") == "none")
             {
                 _code.Add(new CodeStep(HandlerFile(), payload?.Line, "add",
-                    "Check what reaches the handler: compare a header with a secret, or verify Queuey's signature as " +
-                    "https://queuey.ai/docs/how-to/verify-deliveries shows.",
+                    "Check what reaches the handler: compare a header with a secret Queuey sends, or sign the queue's deliveries " +
+                    "(delivery.signing) and verify Queuey's signature, as https://queuey.ai/docs/how-to/verify-deliveries shows.",
                     "The handler's URL is public, and without a check anyone who finds it can post a row change.", "recommendation"));
             }
 
@@ -994,13 +1016,17 @@ public static class FlowDesigner
             _code.Add(new CodeStep(check.File, check.Line, "keep", $"Keep the {check.Header} check.",
                 $"Queuey sends that header with the secret stored as {_queue}-webhook-secret on every delivery over HTTP.",
                 "evidence"));
+            // advise slår ikke på signering for en hodesjekk, så en lokal leveranse har verken hodet eller, uten signering fra
+            // fila, en signatur. Før 2026-10-06 sto det at den bar Queuey sin signatur. Playbooken for Supabase sier det samme:
+            // bevis flyten mot den deployede mottakeren, eller godta signaturen for en kø som signerer.
             if (_local)
                 _code.Add(new CodeStep(check.File, check.Line, "configure",
                     $"While you develop, expect the {check.Header} check to refuse local deliveries: queuey listen does not pass " +
-                    "the header on. Verify Queuey's signature instead, as https://queuey.ai/docs/how-to/verify-deliveries " +
-                    "shows, or test the check against the deployed receiver.",
-                    "Queuey never sends a credential to a developer's machine. A local delivery carries Queuey's signature " +
-                    "instead.", "evidence"));
+                    "the header on, so the receiver refuses each one and the event goes to the dead-letter queue. Prove the flow " +
+                    "against the deployed receiver instead, or let the handler accept Queuey's signature once the queue signs " +
+                    "its deliveries (delivery.signing), as https://queuey.ai/docs/how-to/verify-deliveries shows.",
+                    "Queuey never sends a credential to a developer's machine. A local delivery carries Queuey's signature only " +
+                    "for a queue that signs its deliveries, and advise does not turn that on for a header check.", "evidence"));
         }
 
         private void AppCode()
@@ -1087,7 +1113,16 @@ public static class FlowDesigner
 
             // En leveranse-credential slås opp av plan og apply, som stopper uten den. Stripe sin på ingressen kan vente (F2.3).
             foreach (CredentialNeed credential in _credentials.Where(c => c.For == "delivery"))
-                _next.Add($"Store the secret the handler checks before plan and apply, which look {credential.Name} up: {credential.Store}.");
+            {
+                (string set, string request) = _storeCommands[credential.Name];
+                _next.Add(_local
+                    ? $"Store the secret the handler checks before plan and apply, which look {credential.Name} up: {set}, from a " +
+                      "shell where the variable holds it, and never print it. When the value is not yours to hold, a person " +
+                      $"pastes it instead: {request}."
+                    : $"Store the secret the handler checks before plan and apply, which look {credential.Name} up. A person pastes " +
+                      $"it, so it never passes through you: {request} prints the link, and queuey credentials list{_profileFlag} " +
+                      $"--json lists {credential.Name} once it is stored. Only a value that is yours to hold goes in with {set}.");
+            }
 
             _next.Add($"queuey apply --dry-run{_profileFlag} checks the file and sends nothing. queuey plan{_profileFlag} asks Queuey " +
                       "what would change, and shows the queue's ingress URL.");
@@ -1099,13 +1134,17 @@ public static class FlowDesigner
             switch (_kind)
             {
                 case "stripe":
-                    CredentialNeed ingress = _credentials.First(c => c.For == "ingress");
+                    (string set, string request) = _storeCommands[StripeCredential];
                     _next.Add($"queuey apply{_profileFlag}. Until {StripeCredential} is stored, the ingress refuses every event.");
                     if (_local)
                     {
-                        _next.Add("stripe listen --forward-to <ingress URL>. It prints this session's signing secret (whsec_…). Put it " +
-                                  $"in STRIPE_WHSEC and store it: {ingress.Store}. Then run queuey apply{_profileFlag} again, " +
-                                  "which points the ingress at it.");
+                        // Testmodus: Stripe CLI-ens egen hemmelighet er en testhemmelighet agenten kan holde, i variabelen og
+                        // aldri i utdata. Et ekte endepunkts hemmelighet limer en person inn (F2.9, playbooken fra F2.11).
+                        _next.Add("Test mode, with Stripe's own CLI: export STRIPE_WHSEC=\"$(stripe listen --print-secret)\" holds the " +
+                                  "secret it signs with, a test secret you may hold. Keep it in the variable, never in the output, and " +
+                                  $"store it: {set}. Then run queuey apply{_profileFlag} again, which points the ingress at it, and " +
+                                  "stripe listen --forward-to <ingress URL> in the background. A real endpoint's secret is never " +
+                                  $"yours to hold: a person pastes it on the page {request} opens.");
                         _next.Add(SecretName() is { } secret
                             ? $"Run the app with {secret} set to that same secret."
                             : "Run the app with its signing secret set to that same secret.");
@@ -1116,9 +1155,15 @@ public static class FlowDesigner
                     }
                     else
                     {
-                        _next.Add("Point the Stripe webhook endpoint at the queue's ingress URL, in the dashboard or with Stripe's API. " +
-                                  "Changing the URL of an endpoint that exists keeps its secret, which the handler has. Put that secret " +
-                                  $"in STRIPE_WHSEC and store it: {ingress.Store}. Then run queuey apply{_profileFlag} again.");
+                        // Et ekte endepunkt: hemmeligheten går aldri gjennom agenten (F2.9). Den lagres før endepunktet pekes hit,
+                        // ellers avviser ingressen Stripe sine eventer til den er der.
+                        _next.Add("A real endpoint's signing secret never passes through you or this conversation: " +
+                                  $"{request} prints a link where a person pastes it, and queuey credentials list{_profileFlag} " +
+                                  $"--json lists {StripeCredential} once it is stored. credentials set --from-env is only for the " +
+                                  "test secret stripe listen --print-secret gives, in dev.");
+                        _next.Add("Then point the Stripe webhook endpoint at the queue's ingress URL, in the dashboard or with Stripe's " +
+                                  "API. Changing the URL of an endpoint that exists keeps its secret, which the handler has. A new " +
+                                  "endpoint has a secret of its own: the person pastes that one, and gives the handler the same.");
                         _next.Add($"queuey verify {_queue}{_profileFlag} --event-type {type} --ingress-auth stripe --json, and send that " +
                                   "event from Stripe while it waits.");
                     }
