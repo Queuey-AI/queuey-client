@@ -94,11 +94,7 @@ internal static class PlanCommand
             foreach (string note in step.Notes)
                 Console.WriteLine($"      · {note}");
             if (step.Error is { } error)
-            {
-                Console.WriteLine($"      ✗ {error.ErrorCode ?? "refused"}: {error.Message}");
-                if (error.SuggestedAction is { } action)
-                    Console.WriteLine($"        → {action}");
-            }
+                ApplyCommand.WriteStepError(error);
         }
 
         // Løsrevet av en person (Queuey F2.4): ingen steg, fordi apply lar det være.

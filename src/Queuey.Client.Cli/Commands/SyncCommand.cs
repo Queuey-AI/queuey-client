@@ -94,7 +94,12 @@ internal static class SyncCommand
             if (r.Succeeded)
                 Console.WriteLine($"  {(r.DryRun ? "•" : "✓")} {r.Name}\t{r.PublicId ?? "(dry-run)"}\t{r.Status}".TrimEnd());
             else
+            {
                 Console.WriteLine($"  ✗ {r.Name}\t{FormatError(r.Error)}");
+                // Veien ut under feilen, som i apply (local forwarding bare i dev, 2026-10-06).
+                if (r.Error?.SuggestedAction is { } action)
+                    Console.WriteLine($"      → {TerminalText.Line(action)}");
+            }
         }
 
         foreach (string skipped in result.NotAttempted)
@@ -113,8 +118,7 @@ internal static class SyncCommand
         return def => names.Contains(def.Name);
     }
 
-    private static string FormatError(QueueyException? e)
-        => e is null ? "failed" : $"{(e.StatusCode?.ToString() ?? "error")} {e.ErrorCode} {e.Message}".Replace("  ", " ").Trim();
+    private static string FormatError(QueueyException? e) => ApplyCommand.FormatError(e);
 
     private static object ToJson(SyncResult result, ResolvedConfig config, bool dryRun) => new
     {

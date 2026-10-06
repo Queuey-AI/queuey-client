@@ -174,7 +174,9 @@ APPLY
                  before anything is sent. `queuey schema` lists every field and the values
                  it accepts.
                  A queue's delivery.kind is http, or localForward to send its events to a
-                 connected `queuey listen` session (they wait while none is). The listener's
+                 connected `queuey listen` session (they wait while none is), only in a
+                 workspace marked dev: Queuey refuses it elsewhere, and plan says so first,
+                 also for a queue it would create. The listener's
                  address belongs to the session, never to the file. A delivery URL on this
                  machine or a private network is refused before anything is sent: Queuey's
                  delivery never reaches it, and localForward is the way to your machine.
