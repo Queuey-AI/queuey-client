@@ -408,6 +408,16 @@ public class ManagedResourcesTests
         => Assert.Null(DeploymentFileSource.CleanRepo("https://github.com/" + new string('a', 600)));
 
     [Fact]
+    public void The_adopt_hint_for_a_queue_named_workspace_takes_back_the_queue_and_not_the_workspace()
+    {
+        Assert.Equal("orders", new SkippedResource { Target = "queues.orders", QueueName = "orders", Management = new DeploymentManagementInfo() }.AdoptAs);
+        Assert.Equal("queue:workspace", new SkippedResource { Target = "queues.workspace", QueueName = "workspace", Management = new DeploymentManagementInfo() }.AdoptAs);
+        Assert.Equal("workspace", new SkippedResource { Target = "workspace", Management = new DeploymentManagementInfo() }.AdoptAs);
+        // Og verdien tilbake gjennom --adopt tar køen, ikke workspacet.
+        Assert.Equal("queues.workspace", DeploymentAdopt.TargetOf(DeploymentAdopt.Parse("queue:workspace").Single()));
+    }
+
+    [Fact]
     public void Adopt_takes_queues_and_the_workspace_and_a_queue_named_workspace_by_its_prefix()
     {
         Assert.Equal(new[] { "orders", "workspace", "invoices" }, DeploymentAdopt.Parse("orders, Workspace,,queue:invoices,orders"));

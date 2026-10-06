@@ -226,8 +226,13 @@ public sealed class SkippedResource
     /// <summary>The management Queuey read, with who detached it, when and why.</summary>
     public DeploymentManagementInfo Management { get; init; } = default!;
 
-    /// <summary>How to take it back: the <c>--adopt</c> value.</summary>
-    public string AdoptAs => QueueName ?? "workspace";
+    /// <summary>
+    /// How to take it back: the <c>--adopt</c> value. A queue named <c>workspace</c> is <c>queue:workspace</c>, or the
+    /// hint would take back the workspace instead (re-review of Queuey F2.4, 2026-10-06).
+    /// </summary>
+    public string AdoptAs => QueueName is null
+        ? DeploymentAdopt.Workspace
+        : string.Equals(QueueName, DeploymentAdopt.Workspace, StringComparison.OrdinalIgnoreCase) ? "queue:" + QueueName : QueueName;
 
     /// <inheritdoc />
     public override string ToString() => $"{Target}: {Management.DetachedText()}";
