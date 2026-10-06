@@ -379,6 +379,63 @@ public sealed class ListenCommandTests
         Assert.Equal("closed", line.GetProperty("type").GetString());
     }
 
+    [Fact]
+    public async Task A_file_that_stdout_and_stderr_both_go_to_keeps_every_line_whole()
+    {
+        // Re-review av #50, K9: FileStream skriver en vanlig fil med pwrite fra en offset den leste én gang, mens stderr skriver
+        // med write() på den delte offseten, så med `> listen.log 2>&1` skrev den ene over den andre. CLI-en går her som egen
+        // prosess med begge til samme fil: en notis på stderr (--forward-to har en sti), så en refused-linje på stdout.
+        if (OperatingSystem.IsWindows())
+            return;
+
+        string cli = Path.Combine(AppContext.BaseDirectory, "Queuey.Client.Cli.dll");
+        string log = Path.Combine(Path.GetTempPath(), $"queuey-listen-{Guid.NewGuid():N}.log");
+        string noConfig = Path.Combine(Path.GetTempPath(), "queuey-cli-tests-no-config.json");
+        var start = new ProcessStartInfo("/bin/sh") { UseShellExecute = false };
+        start.ArgumentList.Add("-c");
+        start.ArgumentList.Add("exec \"$0\" \"$1\" listen --json --forward-to http://localhost:5000/hooks --queue que_x "
+                               + "--api-key qak_kid.secret --api-base http://127.0.0.1:9 --config \"$2\" > \"$3\" 2>&1");
+        start.ArgumentList.Add(Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "dotnet");
+        start.ArgumentList.Add(cli);
+        start.ArgumentList.Add(noConfig);
+        start.ArgumentList.Add(log);
+        foreach (string name in start.Environment.Keys.Where(k => k.StartsWith("QUEUEY_", StringComparison.Ordinal)).ToList())
+            start.Environment.Remove(name);
+
+        try
+        {
+            using var process = Process.Start(start)!;
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(60));
+
+            string[] lines = File.ReadAllLines(log).Where(line => line.Length > 0).ToArray();
+            Assert.True(lines.Length == 2, "expected the note and the refused line, got:\n" + string.Join("\n", lines));
+            Assert.StartsWith("Note: --forward-to has a path", lines[0]);
+            JsonElement refused = JsonDocument.Parse(lines[1]).RootElement;
+            Assert.Equal("refused", refused.GetProperty("type").GetString());
+            Assert.Equal(ExitCodes.RuntimeError, process.ExitCode);
+        }
+        finally
+        {
+            File.Delete(log);
+        }
+    }
+
+    [Fact]
+    public void A_session_that_lost_its_connection_tries_four_times_while_queuey_keeps_its_queue()
+    {
+        // Re-review av #50: Queuey holder kravet i 10 s. Standardplanen (0, 2, 10, 30 s) nådde fram to ganger innen da.
+        TimeSpan at = TimeSpan.Zero;
+        int withinGrace = 0;
+        foreach (TimeSpan delay in ListenCommand.ReconnectDelays)
+        {
+            at += delay;
+            if (at < TimeSpan.FromSeconds(10))
+                withinGrace++;
+        }
+
+        Assert.True(withinGrace >= 4, $"{withinGrace} attempts within the grace");
+    }
+
     /// <summary>A reader that never takes anything: every write waits until the writer is disposed.</summary>
     private sealed class StuckWriter : TextWriter
     {

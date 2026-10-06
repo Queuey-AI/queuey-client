@@ -84,15 +84,11 @@ internal sealed class ListenOutput
             return;
         }
 
-        lock (_gate)
-        {
-            if (tookOver)
-                _line("Took the queue over from the session that listened on it.");
-            string what = target.Name is null ? $"{target.Kind} {target.Id}" : $"{target.Kind} {target.Name} ({target.Id})";
-            _line($"Listening on {what} → forwarding to {forwardTo}");
-            _line("Only a queue set to forward to a local listener (Local forward) sends events here. Press Ctrl-C to stop.");
-            _line(string.Empty);
-        }
+        string what = target.Name is null ? $"{target.Kind} {target.Id}" : $"{target.Kind} {target.Name} ({target.Id})";
+        Out(tookOver ? "Took the queue over from the session that listened on it." : null,
+            $"Listening on {what} → forwarding to {forwardTo}",
+            "Only a queue set to forward to a local listener (Local forward) sends events here. Press Ctrl-C to stop.",
+            string.Empty);
     }
 
     public void Delivery(ListenEnvelope env, LocalForwardResult result)
@@ -121,13 +117,10 @@ internal sealed class ListenOutput
         }
 
         string label = string.Join(" ", new[] { env.EventType, env.EventId }.Where(s => !string.IsNullOrEmpty(s)));
-        lock (_gate)
-        {
-            if (result.Error is null)
-                _line($"  {env.Method,-6} {path}  →  {result.Status} ({result.DurationMs}ms)  [{label}]");
-            else
-                _err.WriteLine($"  {env.Method,-6} {path}  →  {result.Status}, {result.Error}  [{label}]");
-        }
+        if (result.Error is null)
+            Out($"  {env.Method,-6} {path}  →  {result.Status} ({result.DurationMs}ms)  [{label}]");
+        else
+            Err($"  {env.Method,-6} {path}  →  {result.Status}, {result.Error}  [{label}]");
     }
 
     /// <summary>A workspace session lost one of its queues to a session that took it over; it keeps listening.</summary>
@@ -141,8 +134,7 @@ internal sealed class ListenOutput
             return;
         }
 
-        lock (_gate)
-            _err.WriteLine($"Lost {lost.QueuePublicId}: {lost.Message}");
+        Err($"Lost {lost.QueuePublicId}: {lost.Message}");
     }
 
     public void Refused(string code, string message, string? action, DateTimeOffset? heldSinceUtc)
@@ -155,12 +147,9 @@ internal sealed class ListenOutput
             return;
         }
 
-        lock (_gate)
-        {
-            _err.WriteLine($"Listen refused: {message}");
-            if (!string.IsNullOrWhiteSpace(action))
-                _err.WriteLine($"  → {action}");
-        }
+        Err($"Listen refused: {message}");
+        if (!string.IsNullOrWhiteSpace(action))
+            Err($"  → {action}");
     }
 
     public void Superseded(string message, long forwarded)
@@ -173,8 +162,7 @@ internal sealed class ListenOutput
             return;
         }
 
-        lock (_gate)
-            _err.WriteLine($"Taken over: {message} Forwarded {forwarded} event(s).");
+        Err($"Taken over: {message} Forwarded {forwarded} event(s).");
     }
 
     /// <param name="reason"><c>stopped</c> (Ctrl-C), <c>terminated</c> (SIGTERM) or <c>connection_lost</c> (it will not come back).</param>
@@ -188,21 +176,13 @@ internal sealed class ListenOutput
             return;
         }
 
-        lock (_gate)
-        {
-            if (message is not null)
-                _err.WriteLine(message);
-            _line(string.Empty);
-            _line($"Stopped. Forwarded {forwarded} event(s).");
-        }
+        if (message is not null)
+            Err(message);
+        Out(string.Empty, $"Stopped. Forwarded {forwarded} event(s).");
     }
 
     /// <summary>A note for a person, on stderr: never part of the JSON stream.</summary>
-    public void Note(string text)
-    {
-        lock (_gate)
-            _err.WriteLine(text);
-    }
+    public void Note(string text) => Err(text);
 
     /// <summary>
     /// The headers Queuey's signing set on the forward. A Queuey older than the field doesn't say, and then the
@@ -233,10 +213,22 @@ internal sealed class ListenOutput
         }
     }
 
-    private void Write(object line)
+    private void Write(object line) => Out(JsonSerializer.Serialize(line, Line));
+
+    /// <summary>Stdout lines, in order. Queuing one never waits on the reader, so the lock is held only that long.</summary>
+    private void Out(params string?[] lines)
     {
-        string text = JsonSerializer.Serialize(line, Line);
         lock (_gate)
-            _line(text);
+        {
+            foreach (string? line in lines)
+            {
+                if (line is not null)
+                    _line(line);
+            }
+        }
     }
+
+    // Stderr skrives utenfor låsen (re-review av #50): en stderr som henger, skal ikke holde igjen stdout. Console.Error er
+    // synkronisert fra før.
+    private void Err(string line) => _err.WriteLine(line);
 }

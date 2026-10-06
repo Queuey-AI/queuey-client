@@ -52,18 +52,35 @@ internal sealed class LineWriter
     }
 
     /// <summary>
-    /// Where the lines go in a real run: file descriptor 1 itself, not <see cref="Console.Out"/>, which pretends a write
-    /// to a closed pipe succeeded. On Windows, the console's stream.
+    /// Where the lines go in a real run: file descriptor 1 itself when it is a pipe, a socket or a terminal, not
+    /// <see cref="Console.Out"/>, which pretends a write to a closed pipe succeeded. The console's stream for a regular
+    /// file, and on Windows.
     /// </summary>
     public static TextWriter OpenStdout()
-    {
-        if (CliHost.StreamOut is { } test)
-            return test;
+        => CliHost.StreamOut
+           ?? new StreamWriter(OpenStdoutStream(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)) { AutoFlush = false };
 
-        Stream stream = OperatingSystem.IsWindows()
-            ? Console.OpenStandardOutput()
-            : new FileStream(new SafeFileHandle((IntPtr)1, ownsHandle: false), FileAccess.Write, bufferSize: 0);
-        return new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)) { AutoFlush = false };
+    // En vanlig fil gir aldri EPIPE, og der skriver FileStream med pwrite fra en offset den har lest én gang, så den delte
+    // offseten stderr skriver på, flyttes ikke (re-review av #50, K9): med `> listen.log 2>&1` skrev en notis over
+    // listening-linjen. Konsollens strøm skriver med write() på den delte offseten.
+    private static Stream OpenStdoutStream()
+    {
+        if (OperatingSystem.IsWindows())
+            return Console.OpenStandardOutput();
+
+        try
+        {
+            var raw = new FileStream(new SafeFileHandle((IntPtr)1, ownsHandle: false), FileAccess.Write, bufferSize: 0);
+            if (!raw.CanSeek)
+                return raw;
+            raw.Dispose();
+        }
+        catch (Exception ex) when (ex is IOException or ArgumentException or UnauthorizedAccessException)
+        {
+            // Ingen brukbar fd 1: konsollens strøm gjør det den kan.
+        }
+
+        return Console.OpenStandardOutput();
     }
 
     private async Task PumpAsync()

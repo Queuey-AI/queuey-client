@@ -41,6 +41,14 @@ internal static class ListenCommand
     internal const int TerminatedExitCode = 143;
 
     private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(8);
+
+    // Fire forsøk innen 10 s, fristen Queuey holder kravet til en sesjon som mistet tilkoblingen (re-review av #50): med
+    // standardplanen (0, 2, 10, 30 s) nådde bare de to første fram i tide. Etter det prøver den videre i halvannet minutt.
+    internal static readonly TimeSpan[] ReconnectDelays =
+    {
+        TimeSpan.Zero, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(8),
+        TimeSpan.FromSeconds(16), TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30),
+    };
     private static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(5);
 
     public static async Task<int> RunAsync(string[] args)
@@ -141,7 +149,17 @@ internal static class ListenCommand
                         + "or --forward-exact to post to --forward-to as given.");
         }
 
-        return await ListenAsync(config, target, forwardTo!, preservePath, map.Has("take-over"), output);
+        try
+        {
+            return await ListenAsync(config, target, forwardTo!, preservePath, map.Has("take-over"), output);
+        }
+        catch (Exception ex) when (json)
+        {
+            // Også en feil i CLI-en selv er én linje med --json (re-review av #50): ellers skrev CliEntry et objekt over flere.
+            return Refuse("internal_error", $"{ex.GetType().Name}: {ex.Message}",
+                "This is a bug in the queuey CLI. Run the command again without --json for the stack trace, and report it.",
+                ExitCodes.RuntimeError);
+        }
     }
 
     /// <summary>
@@ -201,7 +219,7 @@ internal static class ListenCommand
                 options.SkipNegotiation = true;
                 options.Transports = HttpTransportType.WebSockets;
             })
-            .WithAutomaticReconnect()
+            .WithAutomaticReconnect(ReconnectDelays)
             .Build();
 
         // The session's own id, kept across reconnects, so a session that reconnects keeps its queue.
