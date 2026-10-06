@@ -137,8 +137,10 @@ public static class FlowDesigner
         // miljøet: en fil med bare profilen dev og uten miljø gjelder et workspace Queuey regner som prod.
         private readonly string _profileName;
 
-        // En fil uten profiler som tar miljøet fra en variabel: leveringstypen tar da også en (review av #60, B1).
-        private readonly bool _environmentFromVariable;
+        // Miljøet kommer fra en variabel som ingen verdi i fila holder fast for denne flyten: en fil uten profiler (review av #60,
+        // B1), eller en profil som ikke setter variabelen selv, når intensjonen ikke oppgir miljøet (runde 6). Leveringstypen tar
+        // da også en variabel, uten profilverdi og uten standardverdi, så den følger miljøet der plan og apply kjører.
+        private readonly bool _kindFromVariable;
 
         public Builder(DesiredFlow flow, FlowFacts facts, Advice? sending, string? profile)
         {
@@ -154,7 +156,11 @@ public static class FlowDesigner
             _portable = _file is null || _file.Profiles.Count > 0;
             // advise --profile velger profilen selv (review av #60): en profil fila har, eller navnet på den første i en ny fil.
             _profileName = profile ?? (_file is { Profiles.Count: > 0 } && FileEnvironments.Choose(_file, _env) is { } chosen ? chosen : _env);
-            _environmentFromVariable = !_portable && _file is not null && FileEnvironments.Variable(_file) is not null;
+            // Re-review av #60, runde 6: med ${QUEUEY_WORKSPACE_ENVIRONMENT:-dev} og en profil main som ikke satte variabelen, ga
+            // standardverdien dev, og profiles.main fikk KIND=localForward. CI kjørte apply --profile main med prod, og køen ble
+            // opprettet i prod med en lytter. Et oppgitt miljø skrives inn i profilen (WorkspaceEnvironment), og da holder den det.
+            _kindFromVariable = _file is not null && FileEnvironments.Variable(_file) is { } environmentVariable
+                                && (!_portable || (FileProfileValue(environmentVariable.Name) is null && !flow.IsStated("environment")));
             _profileFlag = _portable ? $" --profile {_profileName}" : "";
 
             // Miljøet er det FlowAdvisor kom fram til: oppgitt, i fila, i den ene profilen, eller antatt (dev for en ny fil, prod
@@ -201,7 +207,7 @@ public static class FlowDesigner
             if ((Property(_file?.Json, "queues") as JsonObject)?[_queue] is JsonObject queue
                 && Property(Property(queue, "delivery") as JsonObject, "kind") is JsonValue value && value.TryGetValue(out string? kind))
                 return FileEnvironments.ParseVariable(kind)?.Name;
-            return _portable || _environmentFromVariable ? DeploymentTemplate.QueueKindVariable(_queue) : null;
+            return _portable || _kindFromVariable ? DeploymentTemplate.QueueKindVariable(_queue) : null;
         }
 
         /// <summary>
@@ -221,6 +227,22 @@ public static class FlowDesigner
             // selv om flyten nå er for dev.
             if (_devInPractice)
             {
+                // Runde 6: en profil som ikke setter miljøvariabelen, men har kind localForward, sender køen til en lytter også der
+                // CI setter prod. advise skriver ikke lenger kind inn i en slik profil, men en fil kan ha det fra før.
+                if (_portable && _kindFromVariable && forwarding.Where.StartsWith("profiles.", StringComparison.Ordinal))
+                {
+                    string environmentVariable = FileEnvironments.Variable(_file!)!.Value.Name;
+                    string kindVariable = forwarding.Where[(forwarding.Where.LastIndexOf('.') + 1)..];
+                    _conflicts.Add(new FlowConflict("ambiguous", "environment", null, JsonValue.Create("localForward"),
+                        new[] { new FlowEvidence(_file!.File, null, $"{forwarding.Where} is localForward") },
+                        $"{_file.File} forwards queues.{_queue} to a local listener ({forwarding.Where}), but the profile " +
+                        $"{_profileName} does not set {environmentVariable}: where CI sets prod, the queue forwards there too.",
+                        $"Take the kind out of the profile: remove {kindVariable} from profiles.{_profileName}.variables, and set it " +
+                        $"where plan and apply run, localForward where {environmentVariable} is dev and http elsewhere. Or give the " +
+                        $"profile {environmentVariable}=dev. Then run advise --intent again."));
+                    return;
+                }
+
                 if (forwarding.Where != $"queues.{_queue}.delivery.kind" || !FileEnvironments.CanRunOutsideDev(_file!))
                     return;
 
@@ -561,7 +583,23 @@ public static class FlowDesigner
                 ? "A dev workspace: each delivery goes to the queuey listen session on your machine, which forwards it to the " +
                   "receiver. While no session is connected, the events wait."
                 : "Queuey delivers to the URL over HTTP.";
-            if (_portable)
+            if (_kindFromVariable)
+            {
+                // Review av #60, B1: en fil uten profiler som tar miljøet fra en variabel, som ${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}
+                // så CI kan sette prod, fikk kind localForward som fast verdi, og køen ble opprettet i prod med localForward. Nå
+                // tar kind også en variabel, uten standardverdi, som pull --as skriver den: glemmer CI den, stopper apply. Runde 6:
+                // det samme for en profil som ikke setter miljøvariabelen, og da uten profilverdi for kind.
+                string variable = DeploymentTemplate.QueueKindVariable(_queue);
+                string from = _portable
+                    ? $"The profile {_profileName} does not set {FileEnvironments.Variable(_file!)!.Value.Name}, so the workspace's " +
+                      "environment comes from where plan and apply run, and so does where the queue delivers"
+                    : "The file takes the workspace's environment from a variable, so where the queue delivers does too";
+                Put(delivery, "kind", "${" + variable + "}", $"{_prefix}.delivery.kind", "recommendation",
+                    $"{from}: {variable} is localForward in dev and http elsewhere, set where plan and apply run, without a " +
+                    "default, so apply stops rather than guess.",
+                    "environment");
+            }
+            else if (_portable)
             {
                 string variable = DeploymentTemplate.QueueKindVariable(_queue);
                 Put(delivery, "kind", "${" + variable + "}", $"{_prefix}.delivery.kind", "recommendation",
@@ -569,18 +607,6 @@ public static class FlowDesigner
                     "environment");
                 // Leveringstypen følger miljøet som en standard, ikke som noe intensjonen sier: en fil som har en, beholder den.
                 ProfileValue(variable, kind, "default", kindBecause, "environment");
-            }
-            else if (_environmentFromVariable)
-            {
-                // Review av #60, B1: en fil uten profiler som tar miljøet fra en variabel, som ${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}
-                // så CI kan sette prod, fikk kind localForward som fast verdi, og køen ble opprettet i prod med localForward. Nå
-                // tar kind også en variabel, uten standardverdi, som pull --as skriver den: glemmer CI den, stopper apply.
-                string variable = DeploymentTemplate.QueueKindVariable(_queue);
-                Put(delivery, "kind", "${" + variable + "}", $"{_prefix}.delivery.kind", "recommendation",
-                    $"The file takes the workspace's environment from a variable, so where the queue delivers does too: {variable} " +
-                    "is localForward in dev and http elsewhere, set where plan and apply run, without a default, so apply stops " +
-                    "rather than guess.",
-                    "environment");
             }
             else
             {
@@ -1269,7 +1295,10 @@ public static class FlowDesigner
                               ? $" {DeploymentTemplate.BaseUrlVariable} is where the receiver is reachable over HTTP, such as production's URL" +
                                 (_local ? "; while the queue forwards to a listener, Queuey sends nothing there and takes only the path." : ".")
                               : "") +
-                          (_portable ? $" A value that is the same every time can go under profiles.{_profileName}.variables instead." : ""));
+                          (_portable
+                              ? $" A value that is the same every time can go under profiles.{_profileName}.variables instead" +
+                                (kindValues.Length > 0 ? $", but not {kindVariable}, which follows the environment." : ".")
+                              : ""));
             }
 
             if (_portable)

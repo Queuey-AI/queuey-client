@@ -90,8 +90,9 @@ ADVISE
                  profile instead, for profiles that share an environment; the file must have
                  it, unless advise proposes a new file. A queue the file forwards to a
                  listener outside dev is a conflict, and so is an environment apply refuses.
-                 A file without profiles that takes its environment from a variable gets the
-                 delivery kind from one too, without a default.
+                 A file that takes its environment from a variable, without a profile value
+                 or a stated environment that holds it, gets the delivery kind from one too,
+                 without a default.
                  The schema command prints the Desired Flow's schema (see SCHEMA).
                  infrastructure.content is the whole deployment file, to write as it is: with a
                  queuey.deploy.json there, that file with the flow's queue and profile values

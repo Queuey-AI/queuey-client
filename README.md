@@ -1117,10 +1117,13 @@ dev: if it refused the file, the steps say to stop and store no test secret. In 
 `credentials` commands name the file's `--tenant`, since without a profile they go to the configured workspace while
 `apply` uses the file's.
 
-A file without profiles that takes its environment from a variable, such as `${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}` so CI
-can set prod, gets the delivery kind from a variable too, `${QUEUEY_<QUEUE>_DELIVERY_KIND}` without a default, and the
-next steps say to set it to `localForward` in dev and `http` elsewhere. If CI forgets it, `apply` stops rather than
-create the queue in prod with a local listener.
+A file that takes its environment from a variable, such as `${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}` so CI can set prod,
+gets the delivery kind from a variable too, `${QUEUEY_<QUEUE>_DELIVERY_KIND}` without a default, when nothing in the file
+holds the environment for the flow: the file has no profiles, or the profile does not set the variable and the intent
+states no environment. A stated environment is written into the profile instead, and then the profile holds the kind
+too. The kind from a variable has no profile value, and the next steps say to set it to `localForward` in dev and
+`http` elsewhere. If CI forgets it, `apply` stops rather than create the queue in prod with a local listener. A profile
+that does not set the variable but sets the kind to `localForward` is a conflict, also in dev.
 
 **`infrastructure.content` is the whole file, to write as it is.** With a `queuey.deploy.json` already there, it is that
 file with the flow's queue and profile values merged in. The file wins over everything the intent does not state. A

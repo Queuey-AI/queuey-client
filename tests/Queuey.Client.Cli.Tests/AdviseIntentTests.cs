@@ -846,6 +846,78 @@ public sealed class AdviseIntentTests : IDisposable
                                                              "everywhere else (CI, prod), set QUEUEY_STRIPE_DELIVERY_KIND=http.", StringComparison.Ordinal));
     }
 
+    // Re-review av #60, runde 6: med ${QUEUEY_WORKSPACE_ENVIRONMENT:-dev} og en profil main som ikke setter variabelen, ga
+    // standardverdien dev, og profiles.main fikk KIND=localForward. CI kjørte apply --profile main med prod, og køen ble opprettet
+    // i prod med en lytter. Det samme skjedde med --profile main uten oppgitt miljø.
+    private const string MainWithEnvironmentDefault = """
+        {
+          "workspace": { "environment": "${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}" },
+          "queues": {},
+          "profiles": { "main": { "variables": { "ORDERS_HOST": "orders.example.com" } } }
+        }
+        """;
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("main")]
+    public void A_profile_that_gets_dev_only_from_the_default_takes_the_kind_from_a_variable_without_a_profile_value(string? profile)
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", MainWithEnvironmentDefault);
+
+        FlowAdvice advice = Advise(StripeIntent, profile: profile);
+        FlowDesign design = advice.Design!;
+
+        Assert.Equal(("dev", Provenance.Evidence), (advice.Flow.String("environment"), advice.Flow["environment"]!.Provenance));
+        Assert.Equal("${QUEUEY_STRIPE_DELIVERY_KIND}", design.Content["queues"]!["stripe"]!["delivery"]!["kind"]!.GetValue<string>());
+        JsonObject variables = design.Content["profiles"]!["main"]!["variables"]!.AsObject();
+        Assert.False(variables.ContainsKey("QUEUEY_STRIPE_DELIVERY_KIND"));
+        Assert.False(variables.ContainsKey("QUEUEY_WORKSPACE_ENVIRONMENT"));
+        Assert.Contains(design.NextSteps, s => s.StartsWith("Set ", StringComparison.Ordinal)
+                                               && s.Contains("Where QUEUEY_WORKSPACE_ENVIRONMENT is dev, set QUEUEY_STRIPE_DELIVERY_KIND=localForward; " +
+                                                             "everywhere else (CI, prod), set QUEUEY_STRIPE_DELIVERY_KIND=http.", StringComparison.Ordinal)
+                                               && s.Contains("but not QUEUEY_STRIPE_DELIVERY_KIND, which follows the environment.", StringComparison.Ordinal));
+        Assert.Contains(design.NextSteps, s => s.StartsWith("queuey apply --profile main.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_stated_dev_is_written_into_a_profile_that_gives_it_only_from_the_default_and_the_profile_holds_the_kind()
+    {
+        // Profilen setter da variabelen selv, og CI som setter prod med --profile main, får en feil fra apply i stedet for en lytter.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", MainWithEnvironmentDefault);
+
+        FlowDesign design = Advise(StripeIntentFor("dev")).Design!;
+
+        JsonNode variables = design.Content["profiles"]!["main"]!["variables"]!;
+        Assert.Equal("dev", variables["QUEUEY_WORKSPACE_ENVIRONMENT"]!.GetValue<string>());
+        Assert.Equal("localForward", variables["QUEUEY_STRIPE_DELIVERY_KIND"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void A_profile_that_does_not_set_the_environment_but_forwards_to_a_listener_is_a_conflict_also_in_dev()
+    {
+        // En fil fra en eldre advise kan ha KIND=localForward i profilen. Den går til en lytter også der CI setter prod.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """
+            {
+              "workspace": { "environment": "${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}" },
+              "queues": { "stripe": { "delivery": { "url": "/api/stripe", "kind": "${QUEUEY_STRIPE_DELIVERY_KIND}" } } },
+              "profiles": { "main": { "variables": { "QUEUEY_STRIPE_DELIVERY_KIND": "localForward" } } }
+            }
+            """);
+
+        FlowAdvice advice = Advise(StripeIntent);
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("ambiguous", "environment", "\"localForward\""), (conflict.Kind, conflict.Field, conflict.Found!.ToJsonString()));
+        Assert.Contains("(profiles.main.variables.QUEUEY_STRIPE_DELIVERY_KIND), but the profile main does not set " +
+                        "QUEUEY_WORKSPACE_ENVIRONMENT: where CI sets prod, the queue forwards there too.", conflict.Message, StringComparison.Ordinal);
+        Assert.Contains("remove QUEUEY_STRIPE_DELIVERY_KIND from profiles.main.variables", conflict.Question, StringComparison.Ordinal);
+        Assert.Contains("Or give the profile QUEUEY_WORKSPACE_ENVIRONMENT=dev.", conflict.Question, StringComparison.Ordinal);
+        Assert.Null(advice.Design);
+    }
+
     [Fact]
     public void A_fixed_listener_kind_in_a_file_that_can_run_outside_dev_is_a_conflict_also_in_dev()
     {
