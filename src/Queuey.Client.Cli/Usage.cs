@@ -124,8 +124,9 @@ APPLY
                  Queuey marks each queue apply writes, and the workspace's settings when the
                  file declares them, as managed by the file: the repository, the file's path
                  in it and the commit. They come from git (origin's URL without user info, the
-                 path from the repository root, HEAD) unless --repo, --repo-path or --commit
-                 gives them; --no-git leaves git alone. A change to a managed queue's or
+                 path from the repository root, HEAD, left out when the file has uncommitted
+                 changes) unless --repo, --repo-path or --commit gives them; --no-git leaves git
+                 alone. git is the one in PATH, never one in the current directory. A change to a managed queue's or
                  workspace's configuration from anywhere else is refused, or only warned about,
                  with where the file is. A person can detach one, with a reason: apply then
                  skips it, and --check reports it with who detached it, when and why. --adopt

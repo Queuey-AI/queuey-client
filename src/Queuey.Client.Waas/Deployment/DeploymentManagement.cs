@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.RegularExpressions;
 
 namespace Queuey.Client.Waas;
 
@@ -12,6 +13,11 @@ namespace Queuey.Client.Waas;
 //
 // Kilden renses her før den sendes, og på serveren før den lagres: en repo-URL kan bære et token
 // (https://token@github.com/…), og git remote get-url origin gir den som den står i .git/config.
+//
+// Sikkerhetsreviewen 2026-10-06, samme regler som serveren: en URL .NET ikke leser, sendes ikke (https://tok@github.com:abc/o/r
+// ville beholdt tok@), heller ikke et repo som er en sti på en maskin (/Users/kari/…, C:\…, ~/…, file:, vert:/sti), som
+// navngir brukeren. Repo og sti tar bare tegnene en adresse og en sti trenger. Det som ikke kan sendes, utelates: applyen går,
+// uten den verdien.
 
 /// <summary>Where a deployment file lives: its repository, its path from the repository root, and the commit.</summary>
 public sealed class DeploymentFileSource
@@ -40,21 +46,28 @@ public sealed class DeploymentFileSource
     };
 
     /// <summary>
-    /// The repository without anything that could carry a secret: a URL keeps its scheme, host, port and path; the
-    /// scp-style <c>user@host:path</c> loses <c>user@</c>; a trailing <c>.git</c> and <c>/</c> go. Null when nothing is left.
+    /// The repository without anything that could carry a secret: a URL keeps its scheme (https, http, ssh or git), host,
+    /// port and path; the scp-style <c>user@host:path</c> loses <c>user@</c>; a trailing <c>.git</c> and <c>/</c> go. Null
+    /// when nothing is left, for a URL .NET cannot read, for a path on a machine, and for a character an address does not need.
     /// </summary>
     public static string? CleanRepo(string? repo)
     {
         string? trimmed = repo?.Trim();
         if (trimmed is null || trimmed.Length == 0 || trimmed.Any(c => char.IsControl(c) || char.IsWhiteSpace(c)))
             return null;
+        if (LocalPath.IsMatch(trimmed))
+            return null;
 
         string cleaned;
-        if (trimmed.Contains("://") && Uri.TryCreate(trimmed, UriKind.Absolute, out Uri? uri))
+        if (trimmed.Contains("://"))
         {
-            if (string.IsNullOrEmpty(uri!.Host)) return null;
+            // En URL .NET ikke leser, kan ikke renses sikkert, så den sendes ikke.
+            if (!Uri.TryCreate(trimmed, UriKind.Absolute, out Uri? uri) || string.IsNullOrEmpty(uri!.Host))
+                return null;
+            if (!RepoSchemes.Contains(uri.Scheme))
+                return null;
             string port = uri.IsDefaultPort || uri.Port < 0 ? "" : ":" + uri.Port.ToString(CultureInfo.InvariantCulture);
-            cleaned = $"{uri.Scheme.ToLowerInvariant()}://{uri.Host.ToLowerInvariant()}{port}{uri.AbsolutePath}";
+            cleaned = $"{uri.Scheme.ToLowerInvariant()}://{uri.IdnHost.ToLowerInvariant()}{port}{uri.AbsolutePath}";
         }
         else
         {
@@ -64,6 +77,10 @@ public sealed class DeploymentFileSource
             int slash = cleaned.IndexOf('/');
             int at = slash < 0 ? cleaned.LastIndexOf('@') : cleaned.LastIndexOf('@', slash);
             if (at >= 0) cleaned = cleaned.Substring(at + 1);
+            // vert:/sti og vert:~sti (file:/Users/kari, server:/home/kari/app.git) er en sti på en maskin.
+            int colon = cleaned.IndexOf(':');
+            if (colon >= 0 && colon + 1 < cleaned.Length && cleaned[colon + 1] is '/' or '\\' or '~')
+                return null;
         }
 
         cleaned = cleaned.TrimEnd('/');
@@ -71,10 +88,16 @@ public sealed class DeploymentFileSource
             cleaned = cleaned.Substring(0, cleaned.Length - 4);
         cleaned = cleaned.TrimEnd('/');
 
-        return cleaned.Length == 0 || cleaned.EndsWith("://", StringComparison.Ordinal) || cleaned.Length > 512 ? null : cleaned;
+        return cleaned.Length == 0 || cleaned.EndsWith("://", StringComparison.Ordinal) || cleaned.Length > 512
+               || !RepoShape.IsMatch(cleaned)
+            ? null
+            : cleaned;
     }
 
-    /// <summary>The path relative to the repository root with <c>/</c>, or null for an absolute path or one that leaves it.</summary>
+    /// <summary>
+    /// The path relative to the repository root with <c>/</c>, or null for an absolute path, one that leaves it, and one
+    /// with a character a path in a repository does not need.
+    /// </summary>
     public static string? CleanPath(string? path)
     {
         string? trimmed = path?.Trim().Replace('\\', '/');
@@ -85,8 +108,17 @@ public sealed class DeploymentFileSource
         if (trimmed.StartsWith("/", StringComparison.Ordinal) || (trimmed.Length > 2 && trimmed[1] == ':' && trimmed[2] == '/')
             || trimmed.Split('/').Any(segment => segment == ".."))
             return null;
-        return trimmed.Length == 0 ? null : trimmed;
+        return trimmed.Length == 0 || !PathShape.IsMatch(trimmed) ? null : trimmed;
     }
+
+    // /…, \…, .…, ~… og en stasjonsbokstav (C:, C:\…, C:/…): en sti på en maskin.
+    private static readonly Regex LocalPath = new(@"^(?:[/\\.~]|[A-Za-z]:(?:[/\\]|$))", RegexOptions.CultureInvariant);
+
+    private static readonly Regex RepoShape = new("^[A-Za-z0-9._~:/+-]+$", RegexOptions.CultureInvariant);
+
+    private static readonly Regex PathShape = new("^[A-Za-z0-9._+/-]+$", RegexOptions.CultureInvariant);
+
+    private static readonly HashSet<string> RepoSchemes = new(new[] { "https", "http", "ssh", "git" }, StringComparer.OrdinalIgnoreCase);
 
     /// <summary>The commit in lower case when it is 7 to 64 hexadecimal characters, otherwise null.</summary>
     public static string? CleanCommit(string? commit)

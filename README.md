@@ -682,9 +682,12 @@ change goes through and the queue records who made it. Operating a queue (pausin
 verify, recovery, replay) is never refused.
 
 The CLI reads the source from git: `origin`'s URL without user info, the file's path from the
-repository root, and `HEAD`. `--repo`, `--repo-path` and `--commit` give each one instead, and
-`--no-git` leaves git alone. A token in the remote's URL (`https://token@github.com/…`) is never sent,
-and Queuey strips it again before it stores anything.
+repository root, and `HEAD`, which it leaves out when the file has changes git has not committed.
+`--repo`, `--repo-path` and `--commit` give each one instead, and `--no-git` leaves git alone. A token
+in the remote's URL (`https://token@github.com/…`) is never sent, and Queuey strips it again before it
+stores anything. A path on your machine, or a URL the CLI cannot read, is not sent at all. The CLI
+runs the `git` it finds in your `PATH`, never one in the directory it runs in, and passes it none of
+your `QUEUEY_*` variables.
 
 A person can detach a queue or the workspace from the file in the console, with a reason. `apply`
 then skips it, and `apply --check` reports it, with who detached it, when and why, instead of as

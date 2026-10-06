@@ -70,6 +70,7 @@ internal static class PlanCommand
                     error = s.Error is null ? null : new { code = s.Error.ErrorCode, message = s.Error.Message, action = s.Error.SuggestedAction, status = s.Error.StatusCode },
                 }),
                 skipped = plan.Skipped.Select(ApplyCommand.ToJson),
+                applyStarted = plan.ApplyStarted,
             }, CliHost.JsonOut));
             return plan.WouldSucceed ? ExitCodes.Success : ExitCodes.RuntimeError;
         }
@@ -98,6 +99,9 @@ internal static class PlanCommand
 
         // Løsrevet av en person (Queuey F2.4): ingen steg, fordi apply lar det være.
         ApplyCommand.WriteDetached(plan.Skipped, "apply skips it");
+        if (!plan.ApplyStarted)
+            Console.WriteLine("  ! Queuey started no apply for this plan (it predates managed resources): each dry run was asked "
+                              + "as a write from outside a deployment file. What a person detached was skipped all the same.");
 
         int refusals = plan.Steps.Count(s => s.Error is not null);
         Console.WriteLine($"{plan.ChangeCount} change(s), {refusals} refusal(s). Nothing was changed."

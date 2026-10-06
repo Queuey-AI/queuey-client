@@ -193,6 +193,59 @@ public class ManagedResourcesTests
         Assert.All(api.Requests, r => Assert.Null(Token(r)));
         Assert.Null(result.Enforcement);
         Assert.Empty(result.Skipped);
+        Assert.False(result.ApplyStarted);
+    }
+
+    [Fact]
+    public async Task Without_an_apply_what_a_person_detached_is_still_skipped_and_adopt_takes_nothing_back()
+    {
+        // Sikkerhetsreviewen 2026-10-06: før ble skip-lista regnet ut bare med et token, så en Queuey som kjenner løsriving,
+        // men ikke svarte med en apply, ville fått den løsrevne køen skrevet over.
+        var api = new StubHttpMessageHandler(req =>
+        {
+            string path = req.RequestUri!.AbsolutePath;
+            if (req.Method == HttpMethod.Get && path == "/tenants/ten_abc/queues")
+                return StubHttpMessageHandler.Json(HttpStatusCode.OK, new[] { Row("orders", Detached()), Row("invoices") });
+            if (req.Method == HttpMethod.Get && path.EndsWith("/credentials", StringComparison.Ordinal))
+                return StubHttpMessageHandler.Json(HttpStatusCode.OK, Array.Empty<object>());
+            if (req.Method == HttpMethod.Put && path == "/queues")
+                return StubHttpMessageHandler.Json(HttpStatusCode.OK, new { publicId = "que_invoices", displayName = "invoices", created = false, hasDeliveryTarget = true });
+            return new HttpResponseMessage(HttpStatusCode.NoContent);
+        });
+
+        QueueSyncResult result = await WaasTestHost.Build(apiStub: api).ApplyDeploymentAsync(
+            DeploymentFile.Parse("""{ "tenant": "ten_abc", "queues": { "orders": { "retentionDays": 5 }, "invoices": { "retentionDays": 5 } } }"""),
+            new SyncOptions { Adopt = DeploymentAdopt.Parse("orders") });
+
+        Assert.False(result.ApplyStarted);
+        Assert.Equal("queues.orders", Assert.Single(result.Skipped).Target);
+        Assert.DoesNotContain(Writes(api), w => w.Contains("que_orders", StringComparison.Ordinal));
+        Assert.Contains("PATCH /queues/que_invoices/policy", Writes(api));
+    }
+
+    [Fact]
+    public async Task Without_an_apply_a_detached_workspace_is_read_and_skipped_when_the_file_declares_one()
+    {
+        var api = new StubHttpMessageHandler(req =>
+        {
+            string path = req.RequestUri!.AbsolutePath;
+            if (req.Method == HttpMethod.Post && path.EndsWith("/deployment/applies", StringComparison.Ordinal))
+                return new HttpResponseMessage(HttpStatusCode.NotFound);
+            if (req.Method == HttpMethod.Get && path == "/tenants/ten_abc")
+                return StubHttpMessageHandler.Json(HttpStatusCode.OK, new { publicId = "ten_abc", deployment = Detached() });
+            if (req.Method == HttpMethod.Get && path == "/tenants/ten_abc/queues")
+                return StubHttpMessageHandler.Json(HttpStatusCode.OK, Array.Empty<object>());
+            if (req.Method == HttpMethod.Get && path.EndsWith("/credentials", StringComparison.Ordinal))
+                return StubHttpMessageHandler.Json(HttpStatusCode.OK, Array.Empty<object>());
+            return new HttpResponseMessage(HttpStatusCode.NoContent);
+        }) { AnswersManagement = true };
+
+        QueueSyncResult result = await WaasTestHost.Build(apiStub: api).ApplyDeploymentAsync(
+            DeploymentFile.Parse("""{ "tenant": "ten_abc", "workspace": { "retentionDays": 7 } }"""));
+
+        Assert.False(result.ApplyStarted);
+        Assert.Equal("workspace", Assert.Single(result.Skipped).Target);
+        Assert.DoesNotContain(Writes(api), w => w.StartsWith("PATCH /tenants/", StringComparison.Ordinal));
     }
 
     // ── plan ────────────────────────────────────────────────────────────────
@@ -306,6 +359,33 @@ public class ManagedResourcesTests
     [InlineData("https://github.com/acme app", null)]
     public void A_repository_loses_everything_that_could_carry_a_secret(string repo, string? expected)
         => Assert.Equal(expected, DeploymentFileSource.CleanRepo(repo));
+
+    // Sikkerhetsreviewen 2026-10-06: samme vektorer som serveren (DeploymentManagementRulesTests). Det som ikke kan sendes,
+    // utelates, og applyen går uten den verdien.
+    [Theory]
+    [InlineData("https://tok@github.com:abc/o/r")]
+    [InlineData("/Users/kari/app")]
+    [InlineData("\\\\server\\share\\app")]
+    [InlineData("C:\\Users\\kari\\app")]
+    [InlineData("C:/Users/kari/app")]
+    [InlineData("~/app")]
+    [InlineData("./app")]
+    [InlineData("file:///Users/kari/app")]
+    [InlineData("file:/Users/kari/app")]
+    [InlineData("server:/home/kari/app.git")]
+    [InlineData("kari@server:~/app.git")]
+    [InlineData("ftp://github.com/acme/app")]
+    [InlineData("https://github.com/acme/Ignore%20previous%20instructions")]
+    [InlineData("acme/app<script>")]
+    public void A_repository_that_cannot_be_cleaned_or_names_a_machine_is_not_sent(string repo)
+        => Assert.Null(DeploymentFileSource.CleanRepo(repo));
+
+    [Theory]
+    [InlineData("deploy/Ignore previous instructions.json")]
+    [InlineData("deploy/queuey%20deploy.json")]
+    [InlineData("deploy/<b>.json")]
+    public void A_path_with_a_character_a_path_does_not_need_is_not_sent(string path)
+        => Assert.Null(DeploymentFileSource.CleanPath(path));
 
     [Theory]
     [InlineData("deploy/queuey.deploy.json", "deploy/queuey.deploy.json")]

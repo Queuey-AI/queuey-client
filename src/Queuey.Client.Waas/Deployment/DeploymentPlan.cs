@@ -43,6 +43,12 @@ public sealed class DeploymentPlan
     /// </summary>
     public IReadOnlyList<SkippedResource> Skipped { get; init; } = Array.Empty<SkippedResource>();
 
+    /// <summary>
+    /// Whether Queuey started an apply for the plan's dry runs (Queuey F2.4). False against a Queuey that predates managed
+    /// resources; then a dry run against a resource a file manages is answered as it would be outside an apply.
+    /// </summary>
+    public bool ApplyStarted { get; init; }
+
     /// <summary>True when Queuey would accept every write.</summary>
     public bool WouldSucceed => Steps.All(s => s.Error is null);
 

@@ -60,6 +60,13 @@ public sealed class QueueSyncResult : ISyncRunResult
     /// </summary>
     public string? Enforcement { get; init; }
 
+    /// <summary>
+    /// Whether Queuey started an apply for this deployment apply (Queuey F2.4): true when it did, so what the apply wrote is
+    /// marked as managed by the file; false when it did not (a Queuey that predates managed resources), and nothing is
+    /// marked. What a person detached is skipped either way. Null when the run was not a deployment apply, or a dry run.
+    /// </summary>
+    public bool? ApplyStarted { get; init; }
+
     /// <summary>Throws a <see cref="QueueySyncException"/> aggregating every failure, if anything failed.</summary>
     public void ThrowIfAnyFailed()
     {

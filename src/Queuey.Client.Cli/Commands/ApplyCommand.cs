@@ -101,6 +101,14 @@ internal static class ApplyCommand
     /// <summary>The version of <c>apply --json</c>'s and <c>apply --check --json</c>'s shapes, which had none before Queuey F2.4.</summary>
     internal const int ResultJsonSchemaVersion = 1;
 
+    /// <summary>
+    /// What apply and plan say when Queuey started no apply (sikkerhetsreviewen 2026-10-06): the run goes as before F2.4, so
+    /// nothing is marked as managed by the file, and what a person detached is still skipped.
+    /// </summary>
+    internal const string NoApplyStarted =
+        "Queuey started no apply for this run (it predates managed resources): nothing was marked as managed by this file. "
+        + "What a person detached was skipped all the same.";
+
     /// <summary>The targets an adopt names, as a plan writes them: <c>workspace</c> and <c>queues.&lt;name&gt;</c>.</summary>
     internal static HashSet<string> AdoptTargets(IReadOnlyList<string> adopt)
         => new(adopt.Select(DeploymentAdopt.TargetOf), StringComparer.Ordinal);
@@ -329,6 +337,8 @@ internal static class ApplyCommand
 
         // Løsrevet av en person (Queuey F2.4): applyen rørte det ikke.
         WriteDetached(result.Skipped, "skipped");
+        if (result.ApplyStarted == false)
+            Console.WriteLine($"  ! {NoApplyStarted}");
 
         foreach (string warning in result.Warnings)
             Console.WriteLine($"  ! {warning}");
@@ -458,6 +468,7 @@ internal static class ApplyCommand
         // Fila slik Queuey merker det applyen styrer med (F2.4): uten userinfo, query og fragment.
         source = source is null ? null : new { repo = source.Repo, path = source.Path, commit = source.Commit },
         enforcement = result.Enforcement,
+        applyStarted = result.ApplyStarted,
         skipped = result.Skipped.Select(ToJson),
         adopted = adopt,
         adoptPlan = adoptPlan is null ? null : adoptPlan.Steps.Where(s => AdoptTargets(adopt).Contains(s.Target)).Select(s => new

@@ -18,6 +18,7 @@ public sealed class ManagedResourcesCommandTests : IDisposable
 
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "queuey-managed-cli-tests", Guid.NewGuid().ToString("N"));
     private readonly GitSource.GitRunner _realGit = GitSource.Git;
+    private readonly Func<string?> _realPath = GitSource.PathVariable;
 
     public ManagedResourcesCommandTests()
     {
@@ -29,6 +30,7 @@ public sealed class ManagedResourcesCommandTests : IDisposable
     public void Dispose()
     {
         GitSource.Git = _realGit;
+        GitSource.PathVariable = _realPath;
         try { Directory.Delete(_dir, recursive: true); } catch { }
     }
 
@@ -87,7 +89,8 @@ public sealed class ManagedResourcesCommandTests : IDisposable
     private static RecordedRequest Start(RecordingHandler api)
         => Assert.Single(api.Requests, r => r.Path == "/tenants/ten_abc/deployment/applies");
 
-    private static GitSource.GitRunner FakeGit(List<string> calls, string? remote = "https://x-access-token:ghs_secret@github.com/acme/app.git") =>
+    private static GitSource.GitRunner FakeGit(
+        List<string> calls, string? remote = "https://x-access-token:ghs_secret@github.com/acme/app.git", bool dirty = false) =>
         (directory, arguments) =>
         {
             string call = string.Join(" ", arguments);
@@ -98,6 +101,7 @@ public sealed class ManagedResourcesCommandTests : IDisposable
                 "remote get-url origin" => remote is null ? null : remote + "\n",
                 "rev-parse --show-prefix" => "deploy/\n",
                 "rev-parse HEAD" => "0123456789ABCDEF0123456789abcdef01234567\n",
+                "status --porcelain -- queuey.deploy.json" => dirty ? " M queuey.deploy.json\n" : "",
                 _ => throw new InvalidOperationException("git " + call),
             };
         };
@@ -195,6 +199,110 @@ public sealed class ManagedResourcesCommandTests : IDisposable
     }
 
     [Fact]
+    public void A_commit_is_left_out_when_the_file_differs_from_it()
+    {
+        // Sikkerhetsreviewen 2026-10-06: merket skal ikke si at fila kommer fra en commit den ikke er i.
+        var calls = new List<string>();
+        GitSource.Git = FakeGit(calls, dirty: true);
+
+        DeploymentFileSource? source = GitSource.Resolve(Path.Combine(_dir, "deploy", "queuey.deploy.json"), null, null, null, noGit: false);
+
+        Assert.Null(source!.Commit);
+        Assert.Equal("deploy/queuey.deploy.json", source.Path);
+        Assert.Contains("status --porcelain -- queuey.deploy.json", calls);
+        // En commit fra flagget sjekkes ikke: den som ga den, står for den.
+        Assert.Equal("abcdef1", GitSource.Resolve(Path.Combine(_dir, "deploy", "queuey.deploy.json"), null, null, "abcdef1", noGit: false)!.Commit);
+    }
+
+    [Fact]
+    public void Git_is_looked_up_only_in_the_absolute_entries_of_the_path()
+    {
+        string bin = Path.Combine(_dir, "bin");
+        Directory.CreateDirectory(bin);
+        string fake = Path.Combine(bin, OperatingSystem.IsWindows() ? "git.exe" : "git");
+        File.WriteAllText(fake, "");
+
+        Assert.Equal(fake, GitSource.FindExecutable("git", bin));
+        Assert.Equal(fake, GitSource.FindExecutable("git", string.Join(Path.PathSeparator, ".", "", "relative/bin", bin)));
+        Assert.Null(GitSource.FindExecutable("git", string.Join(Path.PathSeparator, ".", "", "bin")));
+        Assert.Null(GitSource.FindExecutable("git", null));
+    }
+
+    [Fact]
+    public void A_git_in_the_working_directory_is_never_run_and_git_gets_no_queuey_secrets()
+    {
+        // .NET slår opp et program uten sti i arbeidskatalogen før PATH; et repo med en kjørbar fil som heter git, ville fått
+        // den kjørt (sikkerhetsreviewen 2026-10-06). Skriptene her er sh, så testen gjelder ikke Windows.
+        if (OperatingSystem.IsWindows()) return;
+
+        string work = Path.Combine(_dir, "work");
+        Directory.CreateDirectory(work);
+        string trap = Path.Combine(work, "trap-ran");
+        Executable(Path.Combine(work, "git"), $"#!/bin/sh\ntouch '{trap}'\necho true\n");
+
+        string bin = Path.Combine(_dir, "bin");
+        Directory.CreateDirectory(bin);
+        string env = Path.Combine(_dir, "git-env");
+        Executable(Path.Combine(bin, "git"), $"#!/bin/sh\nenv > '{env}'\necho true\n");
+
+        string before = Directory.GetCurrentDirectory();
+        string? key = Environment.GetEnvironmentVariable("QUEUEY_API_KEY");
+        GitSource.Git = _realGit;
+        GitSource.PathVariable = () => string.Join(Path.PathSeparator, ".", bin);
+        try
+        {
+            Directory.SetCurrentDirectory(work);
+            Environment.SetEnvironmentVariable("QUEUEY_API_KEY", "qak_kid.do-not-pass-on");
+
+            Assert.Equal("true", GitSource.Git(work, "rev-parse", "--is-inside-work-tree")?.Trim());
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(before);
+            Environment.SetEnvironmentVariable("QUEUEY_API_KEY", key);
+        }
+
+        Assert.False(File.Exists(trap), "the git in the working directory ran");
+        string seen = File.ReadAllText(env);
+        Assert.DoesNotContain("QUEUEY_", seen);
+        Assert.DoesNotContain("do-not-pass-on", seen);
+        Assert.Contains("GIT_TERMINAL_PROMPT=0", seen);
+    }
+
+    [System.Runtime.Versioning.UnsupportedOSPlatform("windows")]
+    private static void Executable(string path, string script)
+    {
+        File.WriteAllText(path, script);
+        File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+    }
+
+    [Fact]
+    public async Task Against_a_queuey_that_starts_no_apply_the_output_says_so()
+    {
+        // Ingen AnswersManagement: starten svarer 404, som en Queuey fra før F2.4.
+        Func<RecordedRequest, HttpResponseMessage> respond = req => req switch
+        {
+            { Method.Method: "GET", Path: "/tenants/ten_abc/queues" } => RecordingHandler.Json(HttpStatusCode.OK, Array.Empty<object>()),
+            { Method.Method: "GET" } when req.Path.EndsWith("/credentials", StringComparison.Ordinal)
+                => RecordingHandler.Json(HttpStatusCode.OK, Array.Empty<object>()),
+            { Method.Method: "PUT", Path: "/queues" } => RecordingHandler.Json(HttpStatusCode.OK,
+                new { publicId = "que_orders", displayName = "orders", created = true, hasDeliveryTarget = true }),
+            _ => RecordingHandler.NoContent(),
+        };
+        string path = DeployFile("""{ "tenant": "ten_abc", "queues": { "orders": { "retentionDays": 5 } } }""");
+
+        CliRun human = await CliHarness.RunAsync(
+            () => CliEntry.RunAsync(CliHarness.With("apply", "--file", path, "--no-git")), new RecordingHandler(respond));
+
+        Assert.Equal(ExitCodes.Success, human.Exit);
+        Assert.Contains("! Queuey started no apply for this run (it predates managed resources)", human.Stdout);
+
+        CliRun json = await CliHarness.RunAsync(
+            () => CliEntry.RunAsync(CliHarness.With("apply", "--file", path, "--no-git", "--json")), new RecordingHandler(respond));
+        Assert.False(JsonDocument.Parse(json.Stdout).RootElement.GetProperty("applyStarted").GetBoolean());
+    }
+
+    [Fact]
     public void Against_a_real_repository_the_remote_loses_its_token_and_the_path_is_from_the_root()
     {
         GitSource.Git = _realGit;
@@ -212,6 +320,13 @@ public sealed class ManagedResourcesCommandTests : IDisposable
         Assert.Equal("https://gitlab.example.com/acme/app", source!.Repo);
         Assert.Equal("infra/queuey/queuey.deploy.json", source.Path);
         Assert.Equal(head, source.Commit);
+
+        // En fil git ikke har committet, er ikke det commit-en sier, så commit-en sendes ikke (sikkerhetsreviewen 2026-10-06).
+        File.WriteAllText(file, "{}");
+        Assert.Null(GitSource.Resolve(file, null, null, null, noGit: false)!.Commit);
+        Git(repo, "add", ".");
+        Git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "file");
+        Assert.Equal(Git(repo, "rev-parse", "HEAD").Trim(), GitSource.Resolve(file, null, null, null, noGit: false)!.Commit);
     }
 
     private static string Git(string directory, params string[] arguments)
