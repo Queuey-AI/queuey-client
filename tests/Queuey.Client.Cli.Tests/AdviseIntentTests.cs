@@ -1150,12 +1150,68 @@ public sealed class AdviseIntentTests : IDisposable
         string set = "queuey credentials set --profile dev --name stripe-whsec --type HmacSigning --key-id stripe-whsec --from-env STRIPE_WHSEC";
         Assert.Equal(set, Assert.Single(design.Credentials).Store);
         string step = Assert.Single(design.NextSteps, s => s.StartsWith("Test mode", StringComparison.Ordinal));
-        Assert.Contains("export STRIPE_WHSEC=\"$(stripe listen --print-secret)\"", step, StringComparison.Ordinal);
-        Assert.Contains("never in the output", step, StringComparison.Ordinal);
-        Assert.Contains(set, step, StringComparison.Ordinal);
+        // Én kommando (K1 i runde 2 av #58): i et agentverktøy er hvert kall et nytt skall.
+        Assert.Contains("In a POSIX shell: STRIPE_WHSEC=\"$(stripe listen --print-secret)\" " + set + ".", step, StringComparison.Ordinal);
+        Assert.Contains("In PowerShell: $env:STRIPE_WHSEC = stripe listen --print-secret; " + set + ".", step, StringComparison.Ordinal);
+        Assert.Contains("so it stays out of the output", step, StringComparison.Ordinal);
         Assert.Contains("A real endpoint's secret is never yours to hold: a person pastes it on the page queuey credentials request " +
                         "stripe-whsec --profile dev opens", step, StringComparison.Ordinal);
         Assert.DoesNotContain(design.NextSteps, s => s.Contains("prints this session's signing secret", StringComparison.Ordinal));
+    }
+
+    // Et umerket workspace er prod, og et antatt miljø skrives bare inn i en ny fil (review av #58, B2). En fil som finnes uten
+    // miljø, får derfor credentials request og et ekte endepunkt, som plan og apply gir, og testmodus bare når dev er oppgitt.
+
+    [Fact]
+    public void An_existing_file_without_an_environment_gets_a_real_endpoint_and_a_request_not_test_mode()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """{ "queues": {} }""");
+
+        FlowDesign design = Advise(StripeIntent).Design!;
+
+        Assert.Equal("queuey credentials request stripe-whsec", Assert.Single(design.Credentials).Store);
+        Assert.DoesNotContain(design.NextSteps, s => s.StartsWith("Test mode", StringComparison.Ordinal)
+                                                   || s.StartsWith("Apply it to a workspace set to dev", StringComparison.Ordinal)
+                                                   || s.Contains("queuey credentials set", StringComparison.Ordinal));
+        Assert.Contains(design.NextSteps, s => s.Contains("queuey credentials request stripe-whsec prints a link where a person pastes it",
+            StringComparison.Ordinal));
+        Assert.Contains(design.NextSteps, s => s.StartsWith("For test mode with stripe listen instead, state the environment dev in the " +
+                                                            "intent", StringComparison.Ordinal));
+        Assert.Contains(design.NextSteps, s => s.StartsWith("queuey listen --queue stripe", StringComparison.Ordinal));   // køen leverer lokalt
+    }
+
+    [Fact]
+    public void An_existing_file_without_an_environment_gets_test_mode_when_the_intent_states_dev()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """{ "queues": {} }""");
+
+        FlowDesign design = Advise("""
+            {
+              "environment": { "value": "dev", "provenance": "stated" },
+              "source": { "kind": { "value": "stripe", "provenance": "stated" } },
+              "destination": { "route": { "value": "/api/stripe", "provenance": "stated" } }
+            }
+            """).Design!;
+
+        Assert.Equal("queuey credentials set --name stripe-whsec --type HmacSigning --key-id stripe-whsec --from-env STRIPE_WHSEC",
+            Assert.Single(design.Credentials).Store);
+        Assert.Contains(design.NextSteps, s => s.StartsWith("Test mode", StringComparison.Ordinal));
+        Assert.DoesNotContain(design.NextSteps, s => s.StartsWith("For test mode", StringComparison.Ordinal));
+        Assert.Equal("dev", design.Content["workspace"]!["environment"]!.GetValue<string>());   // det oppgitte skrives inn
+    }
+
+    [Fact]
+    public void A_file_that_takes_its_environment_from_a_variable_without_profiles_is_not_taken_for_dev()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """{ "workspace": { "environment": "${QUEUEY_WORKSPACE_ENVIRONMENT}" }, "queues": {} }""");
+
+        FlowDesign design = Advise(StripeIntent).Design!;
+
+        Assert.Equal("queuey credentials request stripe-whsec", Assert.Single(design.Credentials).Store);
+        Assert.DoesNotContain(design.NextSteps, s => s.StartsWith("Test mode", StringComparison.Ordinal));
     }
 
     [Fact]

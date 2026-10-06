@@ -565,8 +565,8 @@ development workspace its events go to your machine through a local listener rat
 ```bash
 queuey plan                    # shows the queue's ingress URL before it exists
 queuey apply                   # creates the queue; its ingress refuses every event until stripe-whsec is stored
-export STRIPE_WHSEC="$(stripe listen --print-secret)"   # the Stripe CLI's own test secret, never printed
-queuey credentials set --name stripe-whsec --type HmacSigning --key-id stripe-whsec --from-env STRIPE_WHSEC
+# POSIX sh, one command: the Stripe CLI's own test secret is never printed, and needs no variable from an earlier shell
+STRIPE_WHSEC="$(stripe listen --print-secret)" queuey credentials set --name stripe-whsec --type HmacSigning --key-id stripe-whsec --from-env STRIPE_WHSEC
                                # the ingress verifies with it at once (a Queuey that predates this: run apply again)
 stripe listen --forward-to <ingress URL>        # in the background: Stripe's test events, signed with that secret
 queuey listen --queue stripe --forward-to http://localhost:5000

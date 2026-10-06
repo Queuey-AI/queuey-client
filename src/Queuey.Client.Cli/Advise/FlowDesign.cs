@@ -113,6 +113,12 @@ public static class FlowDesigner
         private readonly string _prefix;
         private readonly ExistingDeployFile? _file;
 
+        // Et umerket workspace er prod, og et antatt miljø skrives bare inn i en ny fil (Kenneths beslutninger, review av #58,
+        // B2). Dev i praksis er derfor et miljø intensjonen oppgir, fila sier, eller advise skriver inn: i en ny fil, eller i
+        // profilen til en fil som tar miljøet fra en variabel. En fil som finnes uten miljø, eller med en variabel uten profiler,
+        // er det ikke: der gir advise credentials request og et ekte Stripe-endepunkt, som plan og apply.
+        private readonly bool _devInPractice;
+
         // Med profiler (F2.7, #53) står verdiene som skiller miljøene, i profilen med miljøets navn, og fila tar dem som
         // ${VAR}: `queuey plan --profile dev` virker da, og prod er en PR som legger til en profil. En fil som finnes uten
         // profiler, holder seg til faste verdier, som resten av den.
@@ -134,7 +140,10 @@ public static class FlowDesigner
             _file = facts.DeployFile;
             _portable = _file is null || _file.Profiles.Count > 0;
             _profileFlag = _portable ? $" --profile {_env}" : "";
-            _storing = new CredentialStoring(_env, _portable ? _env : null);
+            bool assumed = flow["environment"] is not { Provenance: not Provenance.Assumed };
+            bool writesIt = _file is null || (_portable && _file.Environment is { } existing && existing.IndexOf("${", StringComparison.Ordinal) >= 0);
+            _devInPractice = _local && (!assumed || writesIt);
+            _storing = new CredentialStoring(_devInPractice || !assumed ? _env : null, _portable ? _env : null);
         }
 
         public FlowDesign? Build()
@@ -1104,7 +1113,8 @@ public static class FlowDesigner
                           $"profiles.{_env} there, with apiKey, license and tenant, readable only by you (chmod 600). The key is " +
                           "minted in the Queuey console.");
 
-            if (_local)
+            // Bare der fila sier dev: en fil uten miljø senker ingenting, og apply har ingenting å nekte (B2).
+            if (_devInPractice)
                 _next.Add("Apply it to a workspace set to dev. Only a person lowers a workspace's environment, in the Queuey " +
                           "console, and apply refuses this file against a higher one.");
 
@@ -1129,18 +1139,23 @@ public static class FlowDesigner
                     string set = _storing.Set(StripeCredential, CredentialStoring.RequestDefaultType, "STRIPE_WHSEC");
                     string request = _storing.Request(StripeCredential, CredentialStoring.RequestDefaultType);
                     _next.Add($"queuey apply{_profileFlag}. Until {StripeCredential} is stored, the ingress refuses every event.");
-                    if (_local)
+                    if (_devInPractice)
                     {
-                        // Testmodus: Stripe CLI-ens egen hemmelighet er en testhemmelighet agenten kan holde, i variabelen og
-                        // aldri i utdata. Et ekte endepunkts hemmelighet limer en person inn (F2.9, playbooken fra F2.11).
-                        _next.Add("Test mode, with Stripe's own CLI: export STRIPE_WHSEC=\"$(stripe listen --print-secret)\" holds the " +
-                                  "secret it signs with, a test secret you may hold. Keep it in the variable, never in the output, and " +
-                                  $"store it: {set}. Then run queuey apply{_profileFlag} again, which points the ingress at it, and " +
-                                  "stripe listen --forward-to <ingress URL> in the background. A real endpoint's secret is never " +
-                                  $"yours to hold: a person pastes it on the page {request} opens.");
-                        _next.Add(SecretName() is { } secret
-                            ? $"Run the app with {secret} set to that same secret."
-                            : "Run the app with its signing secret set to that same secret.");
+                        // Testmodus: Stripe CLI-ens egen hemmelighet er en testhemmelighet agenten kan holde, aldri i utdata. Et
+                        // ekte endepunkts hemmelighet limer en person inn (F2.9, playbooken fra F2.11). Hentingen og lagringen står
+                        // på én linje (K1 i runde 2 av #58): i et agentverktøy er hvert kall et nytt skall, og en variabel fra et
+                        // kall er borte i det neste.
+                        _next.Add("Test mode, with Stripe's own CLI, whose signing secret is a test secret you may hold. Take it and " +
+                                  "store it in one command, so it stays out of the output and needs no variable from an earlier shell. " +
+                                  $"In a POSIX shell: STRIPE_WHSEC=\"$(stripe listen --print-secret)\" {set}. In PowerShell: " +
+                                  $"$env:STRIPE_WHSEC = stripe listen --print-secret; {set}. Then run queuey apply{_profileFlag} again, " +
+                                  "which points the ingress at it, and stripe listen --forward-to <ingress URL> in the background. A real " +
+                                  $"endpoint's secret is never yours to hold: a person pastes it on the page {request} opens.");
+                        _next.Add((SecretName() is { } secret
+                                      ? $"Run the app with {secret} set to that same secret."
+                                      : "Run the app with its signing secret set to that same secret.") +
+                                  " stripe listen --print-secret prints the same one each time, so take it from there again rather " +
+                                  "than from any output.");
                         _next.Add($"queuey listen{_profileFlag} --queue {_queue} --forward-to http://localhost:{port} --json, in the " +
                                   "background.");
                         _next.Add($"queuey verify {_queue}{_profileFlag} --event-type {type} --ingress-auth stripe --json, and while it " +
@@ -1157,8 +1172,16 @@ public static class FlowDesigner
                         _next.Add("Then point the Stripe webhook endpoint at the queue's ingress URL, in the dashboard or with Stripe's " +
                                   "API. Changing the URL of an endpoint that exists keeps its secret, which the handler has. A new " +
                                   "endpoint has a secret of its own: the person pastes that one, and gives the handler the same.");
+                        // Køen leverer til en lytter når designet antar dev, også der fila ikke sier det (B2).
+                        if (_local)
+                            _next.Add($"queuey listen{_profileFlag} --queue {_queue} --forward-to http://localhost:{port} --json, in " +
+                                      "the background: the queue forwards each delivery to it.");
                         _next.Add($"queuey verify {_queue}{_profileFlag} --event-type {type} --ingress-auth stripe --json, and send that " +
                                   "event from Stripe while it waits.");
+                        if (_local)
+                            _next.Add("For test mode with stripe listen instead, state the environment dev in the intent, or give the " +
+                                      "deployment file workspace.environment dev. Only a person lowers a workspace to dev, in the Queuey " +
+                                      "console.");
                     }
                     break;
 

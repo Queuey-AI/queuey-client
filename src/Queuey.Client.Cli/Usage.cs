@@ -163,9 +163,10 @@ APPLY
                  delivery never reaches it, and localForward is the way to your machine.
                  ingress.signedRequest { template, credentialRef } verifies a provider's
                  signature, such as Stripe's. A credential that is not stored yet is
-                 accepted: the ingress refuses every event until it is stored and apply runs
-                 again, and apply says so with the command that stores it: credentials
-                 request, where a person pastes the value, unless the file's
+                 accepted: the ingress refuses every event until it is stored, and storing it
+                 points the ingress at it at once (a Queuey from before credential requests
+                 needs another apply). apply says so with the command that stores it:
+                 credentials request, where a person pastes the value, unless the file's
                  workspace.environment is dev, where credentials set stores a value you hold.
                  The workspace is the file's ""tenant"" when it names one, else --tenant /
                  QUEUEY_TENANT / queuey.json. When --tenant or QUEUEY_TENANT names another
