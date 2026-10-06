@@ -9,13 +9,14 @@ USAGE
   queuey --version
 
 COMMANDS
-  advise         Read this repository and say how Queuey fits: Client, Edge or plain HTTP. Reads only.
+  advise         Read this repository and say how Queuey fits: Client, Edge or plain HTTP. Or turn a Desired
+                 Flow into a deployment file and a code plan. Reads only.
   sync           Apply every [QueueyModel] stream found in an assembly (PUT /waas/streams).
   queue          Declare queues from [QueueyQueue] types: queue plan | queue sync.
   apply          Converge Queuey from a declarative deployment file (queuey.deploy.json).
   plan           Ask Queuey what apply would change and refuse, as dry runs. Writes nothing.
   verify         Verify a queue's flow with Queuey, step by step from the ingress to the final state.
-  schema         Print the JSON Schema for queuey.deploy.json. Reads nothing, needs no credentials.
+  schema         Print the JSON Schema for queuey.deploy.json, or a Desired Flow's. Reads nothing, needs no credentials.
   pull           Read a workspace back into a deployment file (the inverse of apply).
   credentials    Store delivery secrets a deployment file refers to: credentials set | list.
   keys           Mint an ingress signing key for a queue: keys mint.
@@ -32,6 +33,7 @@ COMMANDS
 
 ADVISE
   queuey advise [<path>] [--queue <name>] [--write-files [--force]] [--apply] [--json]
+  queuey advise [<path>] --intent <flow.json> [--queue <name>] [--json]
                  Reads the repository (default: the current directory) and recommends how to
                  publish from it — and, when it finds an endpoint that takes webhooks, how to
                  receive safely. Every conclusion names the file it came from, so you can
@@ -58,6 +60,32 @@ ADVISE
                  (dotnet add package) — editing your project file is a bigger liberty than this
                  command takes. Anywhere else there is no package: the advice is one HTTP call,
                  and where in the repository to make it.
+                 --intent starts from what you want instead: a Desired Flow, a JSON file with
+                 the source (stripe, supabase or app), the destination's route and what the
+                 receiver needs, each field an object with its value and its provenance. Mark
+                 what you say ""stated"". advise fills in the rest from the repository, marked
+                 ""evidence"" with the file and line (the handler and its route, Stripe's
+                 constructEvent or a secret compared in a header, the raw body, the framework,
+                 the port), or ""assumed"". Then it proposes a deployment file and a code plan,
+                 kept apart, with the reason for each setting and what it rests on: stated,
+                 evidence, default or recommendation. What differs between environments goes
+                 in a profile named after the flow's environment, so plan and apply take it
+                 with that profile; a deployment file that is there without profiles keeps
+                 fixed values. Where the repository contradicts the
+                 intent, points several ways, or the intent asks for what Queuey cannot do, it
+                 lists conflicts, proposes nothing and exits 1: answer them in the intent, and
+                 run it again. Only stated fields are intent, so the flow it returns can go
+                 back in. It writes nothing, so --write-files and --apply do not go with it.
+                 The schema command prints the Desired Flow's schema (see SCHEMA).
+                 --json prints { ""schemaVersion"": 1, ""outcome"": ""proposed"" or ""conflicts"",
+                 ""flow"", ""existing"", ""infrastructure"", ""code"", ""nextSteps"" }; check
+                 schemaVersion first. ""flow"" is the enriched Desired Flow, to keep beside the
+                 code or in the pull request. It explains queuey.deploy.json, and apply never
+                 reads it. ""existing"" is Queuey where the repository has it already. Without
+                 --intent, --json carries the same schemaVersion and lists ""candidates"": the
+                 Stripe and Supabase flows the repository shows, each a Desired Flow with its
+                 evidence. advise reads the names
+                 in a .env file and never a value, and shows no payload from the repository.
 
 SYNC
   queuey sync --assembly <path.dll> [--dry-run] [--only a,b] [--continue-on-error] [--json]
@@ -209,11 +237,13 @@ VERIFY
                  refused (name that one with --deployment).
 
 SCHEMA
-  queuey schema [--json]
+  queuey schema [--flow] [--json]
                  Prints the JSON Schema for queuey.deploy.json — every field, the values it
                  accepts and what it does. Save it, or point ""$schema"" at its ""$id"": the copy
                  published at this version's release tag,
                  https://raw.githubusercontent.com/Queuey-AI/queuey-client/v<version>/schema/queuey.deploy.schema.json
+                 --flow prints the Desired Flow's schema instead: the intent advise reads.
+                 Each release publishes it beside the other, as schema/queuey.flow.schema.json.
 
 PULL
   queuey pull [--file queuey.deploy.json] [--force] [--stdout]

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using Queuey.Client.Cli.Advise;
@@ -26,11 +27,18 @@ namespace Queuey.Client.Cli;
 /// The output is written for two readers at once. A person gets the reasoning
 /// with the file each conclusion came from, so they can disagree with it. An
 /// agent gets --json, and the same fields.
+///
+/// With <c>--intent</c> it starts from what the person wants instead: a Desired
+/// Flow, which it enriches from the repository and turns into a deployment file
+/// and a code plan, or stops at a conflict and asks. That mode only reads.
 /// </summary>
 internal static class AdviseCommand
 {
     internal static readonly CommandOptions Options = new(
-        "advise", flags: new[] { "json", "write-files", "apply", "force" }, values: new[] { "path", "queue" }, positionals: 1);
+        "advise", flags: new[] { "json", "write-files", "apply", "force" }, values: new[] { "path", "queue", "intent" }, positionals: 1);
+
+    /// <summary>The version of advise's --json output. Version 1 added it, with the candidate flows and --intent.</summary>
+    internal const int SchemaVersion = 1;
 
     public static async Task<int> RunAsync(string[] args)
     {
@@ -39,10 +47,24 @@ internal static class AdviseCommand
 
         var root = map.Get("path") ?? map.FirstPositional ?? Directory.GetCurrentDirectory();
 
+        if (map.Get("intent") is { } intentPath)
+        {
+            // F2.10: om --intent skal skrive fila, er en produktbeslutning som venter (rapportert 2026-10-06). Til den er tatt,
+            // leser modusen bare, og et flagg som ville skrevet noe, avvises i stedet for å gjøre noe annet enn det sier.
+            if (map.Has("write-files") || map.Has("apply") || map.Has("force"))
+                return CliErrors.Usage(map, "intent_writes_nothing",
+                    "advise --intent proposes a deployment file and a code plan, and writes nothing: --write-files, --force and " +
+                    "--apply do not go with it.",
+                    "Write infrastructure.content to queuey.deploy.json yourself, then run queuey plan and queuey apply.");
+            return Intent(map, root, intentPath);
+        }
+
         RepoFacts facts;
+        FlowFacts flowFacts;
         try
         {
             facts = RepoScan.Scan(root);
+            flowFacts = FlowScan.Scan(root);
         }
         catch (DirectoryNotFoundException ex)
         {
@@ -52,12 +74,14 @@ internal static class AdviseCommand
         Advice advice = Recommendation.For(facts);
         var queueName = ScaffoldPlan.DefaultQueueName(root, map.Get("queue"));
         IReadOnlyList<PlannedFile> scaffold = ScaffoldPlan.For(root, queueName);
+        IReadOnlyList<FlowCandidate> candidates = FlowAdvisor.Candidates(flowFacts, root);
 
         if (map.Has("json"))
         {
             Console.WriteLine(JsonSerializer.Serialize(
                 new
                 {
+                    schemaVersion = SchemaVersion,
                     path = Path.GetFullPath(root),
                     sends = advice.Sends,
                     receives = advice.Receives,
@@ -71,6 +95,7 @@ internal static class AdviseCommand
                     docs = "https://queuey.ai/llms-full.txt",
                     queue = queueName,
                     files = scaffold.Select(f => new { path = f.Path, action = f.Action, exists = f.Exists }),
+                    candidates = candidates.Select(c => new { summary = c.Summary, flow = c.Flow.ToJson(FlowSchema.Url) }),
                 },
                 CliHost.JsonOut));
 
@@ -78,8 +103,99 @@ internal static class AdviseCommand
             return await DoRequestedWorkAsync(map, root, queueName, scaffold, quiet: true);
         }
 
-        WriteHuman(root, advice, queueName, scaffold, map);
+        WriteHuman(root, advice, queueName, scaffold, map, candidates);
         return await DoRequestedWorkAsync(map, root, queueName, scaffold, quiet: false);
+    }
+
+    /// <summary>
+    /// advise --intent: reads the Desired Flow, enriches it from the repository, and proposes the design, or stops at the
+    /// conflicts with exit 1. Writes nothing.
+    /// </summary>
+    private static int Intent(ArgMap map, string root, string intentPath)
+    {
+        DesiredFlow intent;
+        try
+        {
+            intent = DesiredFlow.Parse(CliFiles.ReadAllText(intentPath));
+        }
+        catch (FlowFormatException ex)
+        {
+            return CliErrors.Usage(map, "invalid_intent", ex.Message,
+                "Write the intent as queuey schema --flow describes: each field an object with value and provenance.");
+        }
+
+        FlowFacts facts;
+        RepoFacts repo;
+        try
+        {
+            facts = FlowScan.Scan(root);
+            repo = RepoScan.Scan(root);
+        }
+        catch (DirectoryNotFoundException ex)
+        {
+            return CliErrors.Usage(map, "missing_directory", ex.Message);
+        }
+
+        string? queue = map.Get("queue") is { } requested ? ScaffoldPlan.DefaultQueueName(root, requested) : null;
+        FlowAdvice advice = FlowAdvisor.Advise(intent, facts, root, queue, Recommendation.For(repo));
+
+        if (map.Has("json"))
+            Console.WriteLine(IntentJson(root, intentPath, advice).ToJsonString(CliHost.JsonOut));
+        else
+            AdviseIntentText.Write(root, advice);
+
+        return advice.Design is null ? ExitCodes.RuntimeError : ExitCodes.Success;
+    }
+
+    internal const string ConflictStep =
+        "Answer each conflict in flow.conflicts: write the answer into the intent, marked stated, and run advise --intent again.";
+
+    private static JsonObject IntentJson(string root, string intentPath, FlowAdvice advice)
+    {
+        FlowDesign? design = advice.Design;
+        return new JsonObject
+        {
+            ["schemaVersion"] = SchemaVersion,
+            ["path"] = Path.GetFullPath(root),
+            ["intent"] = intentPath,
+            ["outcome"] = design is null ? "conflicts" : "proposed",
+            ["flow"] = advice.Flow.ToJson(FlowSchema.Url),
+            ["existing"] = DesiredFlow.EvidenceJson(advice.Existing),
+            ["infrastructure"] = design is null ? null : new JsonObject
+            {
+                ["file"] = design.File,
+                ["exists"] = design.Exists,
+                ["merge"] = design.Merge,
+                ["content"] = design.Content.DeepClone(),
+                ["variables"] = new JsonArray(design.Variables.Select(v => (JsonNode?)JsonValue.Create(v)).ToArray()),
+                ["credentials"] = new JsonArray(design.Credentials.Select(c => (JsonNode?)new JsonObject
+                {
+                    ["name"] = c.Name,
+                    ["type"] = c.Type,
+                    ["holds"] = c.Holds,
+                    ["store"] = c.Store,
+                }).ToArray()),
+                ["settings"] = new JsonArray(design.Settings.Select(s => (JsonNode?)new JsonObject
+                {
+                    ["path"] = s.Path,
+                    ["value"] = s.Value?.DeepClone(),
+                    ["basis"] = s.Basis,
+                    ["because"] = s.Because,
+                    ["from"] = new JsonArray(s.From.Select(f => (JsonNode?)JsonValue.Create(f)).ToArray()),
+                }).ToArray()),
+            },
+            ["code"] = new JsonArray((design?.Code ?? Array.Empty<CodeStep>()).Select(c => (JsonNode?)new JsonObject
+            {
+                ["file"] = c.File,
+                ["line"] = c.Line,
+                ["action"] = c.Action,
+                ["what"] = c.What,
+                ["why"] = c.Why,
+                ["basis"] = c.Basis,
+            }).ToArray()),
+            ["nextSteps"] = new JsonArray((design?.NextSteps ?? new[] { ConflictStep })
+                .Select(s => (JsonNode?)JsonValue.Create(s)).ToArray()),
+        };
     }
 
     /// <summary>
@@ -217,7 +333,8 @@ internal static class AdviseCommand
     }
 
     private static void WriteHuman(
-        string root, Advice advice, string queueName, IReadOnlyList<PlannedFile> scaffold, ArgMap map)
+        string root, Advice advice, string queueName, IReadOnlyList<PlannedFile> scaffold, ArgMap map,
+        IReadOnlyList<FlowCandidate> candidates)
     {
         Console.WriteLine($"Queuey — how this fits  ({Path.GetFullPath(root)})");
         Console.WriteLine();
@@ -227,6 +344,12 @@ internal static class AdviseCommand
         WriteSection("Next", advice.NextSteps, numbered: true);
         WriteSection("Receiving", advice.ReceivingSteps, numbered: true);
         WriteSection("I could not tell from the code", advice.Questions);
+
+        if (candidates.Count > 0)
+        {
+            WriteSection("Flows I can see (describe the one you want in a Desired Flow, and run advise with --intent)",
+                candidates.Select(c => c.Summary).ToArray());
+        }
 
         var willWrite = map.Has("write-files");
         var willApply = map.Has("apply");
@@ -254,7 +377,7 @@ internal static class AdviseCommand
         if (willWrite || willApply) Console.WriteLine();
     }
 
-    private static void WriteSection(string title, IReadOnlyList<string> lines, bool numbered = false)
+    internal static void WriteSection(string title, IReadOnlyList<string> lines, bool numbered = false)
     {
         if (lines.Count == 0) return;
 
@@ -265,7 +388,7 @@ internal static class AdviseCommand
     }
 
     /// <summary>Wraps at a terminal-friendly width, keeping the two-space hang of the bullet.</summary>
-    private static string Wrap(string text, int width = 88)
+    internal static string Wrap(string text, int width = 88)
     {
         var words = text.Split(' ');
         var lines = new List<string>();

@@ -7,6 +7,7 @@ your app, this does from a pipeline or a terminal.
 ```bash
 dotnet tool install -g Queuey.Cli --prerelease
 queuey advise          # reads the repository and says how Queuey belongs in it; changes nothing
+queuey advise --intent flow.json --json   # from what you want to a deployment file and a code plan
 ```
 
 No .NET on the machine? Every release also ships the tool as one self-contained
