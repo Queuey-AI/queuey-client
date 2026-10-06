@@ -1,17 +1,19 @@
 using System;
+using Queuey.Client.Cli.Advise;
 using Queuey.Client.Waas;
 
 namespace Queuey.Client.Cli;
 
 /// <summary>
 /// <c>queuey schema</c> — prints the JSON Schema for <c>queuey.deploy.json</c>: every field, the values
-/// it accepts and what it does. Reads nothing and needs no credentials.
+/// it accepts and what it does. <c>--flow</c> prints the Desired Flow's instead, the intent <c>advise --intent</c>
+/// reads. Reads nothing and needs no credentials.
 /// </summary>
 internal static class SchemaCommand
 {
     // --json er lov, men endrer ingenting: skjemaet er JSON uansett. Et skript som gir --json til hver
     // kommando, skal ikke feile her fordi ukjente valg nå avvises.
-    internal static readonly CommandOptions Options = new("schema", flags: new[] { "json" });
+    internal static readonly CommandOptions Options = new("schema", flags: new[] { "json", "flow" });
 
     public static int Run(string[] args)
     {
@@ -24,7 +26,7 @@ internal static class SchemaCommand
         if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
 
-        Console.Write(DeploymentFile.JsonSchema);
+        Console.Write(map.Has("flow") ? FlowSchema.Json : DeploymentFile.JsonSchema);
         return ExitCodes.Success;
     }
 }

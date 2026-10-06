@@ -1,0 +1,8 @@
+project_id = "lovable-shop"
+
+[api]
+enabled = true
+port = 54321
+
+[functions.stripe-webhook]
+verify_jwt = false

@@ -1033,6 +1033,66 @@ shell history and CI logs.
 **`pull` won't overwrite.** Use `--stdout` and diff it first — replacing a committed declaration is
 how an intentional, not-yet-applied edit disappears.
 
+### From what you want to a deployment file: `queuey advise --intent`
+
+`queuey advise` reads a repository and says how Queuey fits. Give it a **Desired Flow**, what you want as JSON, and
+it designs the queue: it reads the repository for how, proposes `queuey.deploy.json` with the reason for each setting,
+and keeps the code changes apart from it. It writes nothing.
+
+```json
+{
+  "source": { "kind": { "value": "stripe", "provenance": "stated" } },
+  "destination": { "route": { "value": "/api/stripe", "provenance": "stated" } }
+}
+```
+
+```bash
+queuey advise --intent flow.json --json
+```
+
+Each field has its `value` and its `provenance`: `stated` (you said it), `evidence` (advise found it, with the file and
+line) or `assumed` (advise's default, an assumption to check). Only stated fields are intent. advise works the others
+out again on each run, so the flow it returns can go back in, with what you confirm marked `stated`. `queuey schema
+--flow` prints the schema.
+
+What differs between environments goes in a profile named after the flow's environment: the workspace's environment,
+where the queue delivers, and the base URL when the intent gives it. So `queuey plan --profile dev` works on the file as
+proposed, and production is one more profile. A deployment file that is there without profiles keeps fixed values.
+
+**`infrastructure.content` is the whole file, to write as it is.** With a `queuey.deploy.json` already there, it is that
+file with the flow's queue and profile values merged in. The file wins over everything the intent does not state. A
+stated value the file contradicts, such as the same queue with another route, is a conflict rather than an overwrite,
+and so is a file `apply` cannot read. `infrastructure.merge` says what was added and what the file kept. Comments in the
+file are not carried over, and `merge` says so.
+
+**Stripe.** advise finds the handler and its route, `constructEvent`, the raw body, the framework and the port. It
+proposes a queue whose ingress verifies Stripe's signature and whose deliveries Queuey signs again in Stripe's format,
+so the handler keeps `constructEvent` as it is. In dev the queue delivers to `queuey listen` on your machine.
+
+**Supabase.** For a function that receives a Database Webhook, advise finds the table, the operations and the secret
+the handler compares in a header. It proposes a queue the webhook publishes to with a key, and that delivers the header
+the handler checks.
+
+**When the repository contradicts the intent, advise stops.** A route no handler serves, a Stripe intent at a handler
+that does not verify Stripe's signature, or an order key Queuey cannot read: the flow lists `conflicts`, nothing is
+proposed, and the command exits 1. Answer them in the intent and run it again.
+
+`--json` prints `schemaVersion` 1, the `outcome` (`proposed` or `conflicts`), the enriched `flow`, `existing` (Queuey
+where the repository has it already: a package, a registration, a deployment file), `scanLimited`, `infrastructure` (the
+file, each setting with its basis and reason, and the credentials it names), `code` and `nextSteps`. Keep the flow
+beside the code or in the pull request: it explains `queuey.deploy.json`, and `apply` never reads it. Without
+`--intent`, `advise --json` lists the `candidates` the repository shows. advise reads the names in a `.env` file and
+never a value.
+
+**The scan has limits, and says when it reaches one.**
+
+- It never follows a symbolic link, not even one inside the repository.
+- It reads only regular files, at most 512 KiB of each, 6000 files, 20,000 folders and 64 MiB in all, for at most 15 seconds.
+- It skips lines longer than 4 KiB, folders with tests, fixtures and docs, and names with control or direction characters.
+
+`scanLimited` lists what it left out, and is empty when it read everything. A router mounted from another app in a
+monorepo is not followed: mounting counts within the app's own folder.
+
 ### `queuey listen` — receive webhooks on your machine
 
 Opens an **outbound** authenticated push session (no inbound port exposed) and forwards each

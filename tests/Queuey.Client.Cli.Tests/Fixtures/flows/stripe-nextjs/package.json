@@ -1,0 +1,14 @@
+{
+  "name": "storefront",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 3001",
+    "build": "next build"
+  },
+  "dependencies": {
+    "next": "15.0.3",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "stripe": "^16.2.0"
+  }
+}

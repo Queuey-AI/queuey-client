@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
 using Queuey.Client.Cli.Advise;
@@ -26,11 +28,18 @@ namespace Queuey.Client.Cli;
 /// The output is written for two readers at once. A person gets the reasoning
 /// with the file each conclusion came from, so they can disagree with it. An
 /// agent gets --json, and the same fields.
+///
+/// With <c>--intent</c> it starts from what the person wants instead: a Desired
+/// Flow, which it enriches from the repository and turns into a deployment file
+/// and a code plan, or stops at a conflict and asks. That mode only reads.
 /// </summary>
 internal static class AdviseCommand
 {
     internal static readonly CommandOptions Options = new(
-        "advise", flags: new[] { "json", "write-files", "apply", "force" }, values: new[] { "path", "queue" }, positionals: 1);
+        "advise", flags: new[] { "json", "write-files", "apply", "force" }, values: new[] { "path", "queue", "intent" }, positionals: 1);
+
+    /// <summary>The version of advise's --json output. Version 1 added it, with the candidate flows and --intent.</summary>
+    internal const int SchemaVersion = 1;
 
     public static async Task<int> RunAsync(string[] args)
     {
@@ -39,10 +48,24 @@ internal static class AdviseCommand
 
         var root = map.Get("path") ?? map.FirstPositional ?? Directory.GetCurrentDirectory();
 
+        if (map.Get("intent") is { } intentPath)
+        {
+            // F2.10: om --intent skal skrive fila, er en produktbeslutning som venter (rapportert 2026-10-06). Til den er tatt,
+            // leser modusen bare, og et flagg som ville skrevet noe, avvises i stedet for å gjøre noe annet enn det sier.
+            if (map.Has("write-files") || map.Has("apply") || map.Has("force"))
+                return CliErrors.Usage(map, "intent_writes_nothing",
+                    "advise --intent proposes a deployment file and a code plan, and writes nothing: --write-files, --force and " +
+                    "--apply do not go with it.",
+                    "Write infrastructure.content to queuey.deploy.json yourself, then run queuey plan and queuey apply.");
+            return Intent(map, root, intentPath);
+        }
+
         RepoFacts facts;
+        FlowFacts flowFacts;
         try
         {
             facts = RepoScan.Scan(root);
+            flowFacts = FlowScan.Scan(root);
         }
         catch (DirectoryNotFoundException ex)
         {
@@ -52,12 +75,14 @@ internal static class AdviseCommand
         Advice advice = Recommendation.For(facts);
         var queueName = ScaffoldPlan.DefaultQueueName(root, map.Get("queue"));
         IReadOnlyList<PlannedFile> scaffold = ScaffoldPlan.For(root, queueName);
+        IReadOnlyList<FlowCandidate> candidates = FlowAdvisor.Candidates(flowFacts, root);
 
         if (map.Has("json"))
         {
             Console.WriteLine(JsonSerializer.Serialize(
                 new
                 {
+                    schemaVersion = SchemaVersion,
                     path = Path.GetFullPath(root),
                     sends = advice.Sends,
                     receives = advice.Receives,
@@ -71,6 +96,8 @@ internal static class AdviseCommand
                     docs = "https://queuey.ai/llms-full.txt",
                     queue = queueName,
                     files = scaffold.Select(f => new { path = f.Path, action = f.Action, exists = f.Exists }),
+                    candidates = candidates.Select(c => new { summary = c.Summary, flow = c.Flow.ToJson(FlowSchema.Url) }),
+                    scanLimited = RepoWalk.Union(facts.ScanLimits, flowFacts.Limits),
                 },
                 CliHost.JsonOut));
 
@@ -78,8 +105,136 @@ internal static class AdviseCommand
             return await DoRequestedWorkAsync(map, root, queueName, scaffold, quiet: true);
         }
 
-        WriteHuman(root, advice, queueName, scaffold, map);
+        WriteHuman(root, advice, queueName, scaffold, map, candidates, RepoWalk.Union(facts.ScanLimits, flowFacts.Limits));
         return await DoRequestedWorkAsync(map, root, queueName, scaffold, quiet: false);
+    }
+
+    /// <summary>
+    /// advise --intent: reads the Desired Flow, enriches it from the repository, and proposes the design, or stops at the
+    /// conflicts with exit 1. Writes nothing.
+    /// </summary>
+    private static int Intent(ArgMap map, string root, string intentPath)
+    {
+        DesiredFlow intent;
+        try
+        {
+            string? text = ReadIntent(intentPath);
+            if (text is null)
+                return CliErrors.Usage(map, "intent_too_large",
+                    $"The intent is larger than {MaxIntentBytes / 1024} KiB, the most advise reads: a Desired Flow is a few fields.",
+                    "Write the intent as queuey schema --flow describes it, with the stated fields only.");
+            intent = DesiredFlow.Parse(text);
+        }
+        catch (FlowFormatException ex)
+        {
+            return CliErrors.Usage(map, "invalid_intent", ex.Message,
+                "Write the intent as queuey schema --flow describes: each field an object with value and provenance.");
+        }
+
+        FlowFacts facts;
+        RepoFacts repo;
+        try
+        {
+            facts = FlowScan.Scan(root);
+            repo = RepoScan.Scan(root);
+        }
+        catch (DirectoryNotFoundException ex)
+        {
+            return CliErrors.Usage(map, "missing_directory", ex.Message);
+        }
+
+        string? queue = map.Get("queue") is { } requested ? ScaffoldPlan.DefaultQueueName(root, requested) : null;
+        FlowAdvice advice = FlowAdvisor.Advise(intent, facts, root, queue, Recommendation.For(repo));
+
+        IReadOnlyList<string> limits = RepoWalk.Union(facts.Limits, repo.ScanLimits);
+        if (map.Has("json"))
+            Console.WriteLine(IntentJson(root, intentPath, advice, limits).ToJsonString(CliHost.JsonOut));
+        else
+            AdviseIntentText.Write(root, advice, limits);
+
+        return advice.Design is null ? ExitCodes.RuntimeError : ExitCodes.Success;
+    }
+
+    /// <summary>The most of an intent advise reads: a Desired Flow is a few fields, never a file this size.</summary>
+    internal const int MaxIntentBytes = 256 * 1024;
+
+    /// <summary>
+    /// The intent's text, read to <see cref="MaxIntentBytes"/> and no further whatever the file's length says, or null when it
+    /// is larger. A file that cannot be read is a <see cref="CliFileException"/>, as for every file the command line names.
+    /// </summary>
+    private static string? ReadIntent(string path)
+    {
+        try
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            byte[] buffer = new byte[MaxIntentBytes + 1];
+            int read = 0;
+            while (read < buffer.Length)
+            {
+                int n = stream.Read(buffer, read, buffer.Length - read);
+                if (n == 0)
+                    break;
+                read += n;
+            }
+            return read > MaxIntentBytes ? null : new UTF8Encoding(false).GetString(buffer, 0, read).TrimStart('\uFEFF');
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new CliFileException("file_unreadable", ex.Message, "Check that the path names a file this user can read.", ex);
+        }
+    }
+
+    internal const string ConflictStep =
+        "Answer each conflict in flow.conflicts: write the answer into the intent, marked stated, and run advise --intent again.";
+
+    private static JsonObject IntentJson(string root, string intentPath, FlowAdvice advice, IReadOnlyList<string> limits)
+    {
+        FlowDesign? design = advice.Design;
+        return new JsonObject
+        {
+            ["schemaVersion"] = SchemaVersion,
+            ["path"] = Path.GetFullPath(root),
+            ["intent"] = intentPath,
+            ["outcome"] = design is null ? "conflicts" : "proposed",
+            ["flow"] = advice.Flow.ToJson(FlowSchema.Url),
+            ["existing"] = DesiredFlow.EvidenceJson(advice.Existing),
+            ["scanLimited"] = new JsonArray(limits.Select(l => (JsonNode?)JsonValue.Create(l)).ToArray()),
+            ["infrastructure"] = design is null ? null : new JsonObject
+            {
+                ["file"] = design.File,
+                ["exists"] = design.Exists,
+                ["merge"] = design.Merge,
+                ["content"] = design.Content.DeepClone(),
+                ["variables"] = new JsonArray(design.Variables.Select(v => (JsonNode?)JsonValue.Create(v)).ToArray()),
+                ["credentials"] = new JsonArray(design.Credentials.Select(c => (JsonNode?)new JsonObject
+                {
+                    ["name"] = c.Name,
+                    ["type"] = c.Type,
+                    ["holds"] = c.Holds,
+                    ["store"] = c.Store,
+                    ["for"] = c.For,
+                }).ToArray()),
+                ["settings"] = new JsonArray(design.Settings.Select(s => (JsonNode?)new JsonObject
+                {
+                    ["path"] = s.Path,
+                    ["value"] = s.Value?.DeepClone(),
+                    ["basis"] = s.Basis,
+                    ["because"] = s.Because,
+                    ["from"] = new JsonArray(s.From.Select(f => (JsonNode?)JsonValue.Create(f)).ToArray()),
+                }).ToArray()),
+            },
+            ["code"] = new JsonArray((design?.Code ?? Array.Empty<CodeStep>()).Select(c => (JsonNode?)new JsonObject
+            {
+                ["file"] = c.File,
+                ["line"] = c.Line,
+                ["action"] = c.Action,
+                ["what"] = c.What,
+                ["why"] = c.Why,
+                ["basis"] = c.Basis,
+            }).ToArray()),
+            ["nextSteps"] = new JsonArray((design?.NextSteps ?? new[] { ConflictStep })
+                .Select(s => (JsonNode?)JsonValue.Create(s)).ToArray()),
+        };
     }
 
     /// <summary>
@@ -217,7 +372,8 @@ internal static class AdviseCommand
     }
 
     private static void WriteHuman(
-        string root, Advice advice, string queueName, IReadOnlyList<PlannedFile> scaffold, ArgMap map)
+        string root, Advice advice, string queueName, IReadOnlyList<PlannedFile> scaffold, ArgMap map,
+        IReadOnlyList<FlowCandidate> candidates, IReadOnlyList<string> limits)
     {
         Console.WriteLine($"Queuey — how this fits  ({Path.GetFullPath(root)})");
         Console.WriteLine();
@@ -227,6 +383,15 @@ internal static class AdviseCommand
         WriteSection("Next", advice.NextSteps, numbered: true);
         WriteSection("Receiving", advice.ReceivingSteps, numbered: true);
         WriteSection("I could not tell from the code", advice.Questions);
+
+        if (candidates.Count > 0)
+        {
+            // Sammendraget har stier og ruter fra repoet, og går derfor gjennom TerminalText som alt annet fra repoet.
+            WriteSection("Flows I can see (describe the one you want in a Desired Flow, and run advise with --intent)",
+                candidates.Select(c => TerminalText.Line(c.Summary)).ToArray());
+        }
+
+        WriteSection("The scan was limited", limits);
 
         var willWrite = map.Has("write-files");
         var willApply = map.Has("apply");
@@ -254,18 +419,19 @@ internal static class AdviseCommand
         if (willWrite || willApply) Console.WriteLine();
     }
 
-    private static void WriteSection(string title, IReadOnlyList<string> lines, bool numbered = false)
+    internal static void WriteSection(string title, IReadOnlyList<string> lines, bool numbered = false)
     {
         if (lines.Count == 0) return;
 
         Console.WriteLine();
         Console.WriteLine($"{title}:");
+        // Linjene har stier, ruter og navn fra repoet. TerminalText tar bort det som kunne styrt terminalen (F2.10-review).
         foreach (var (line, i) in lines.Select((l, i) => (l, i)))
-            Console.WriteLine($"  {(numbered ? $"{i + 1}." : "-")} {Wrap(line)}");
+            Console.WriteLine($"  {(numbered ? $"{i + 1}." : "-")} {Wrap(TerminalText.Line(line))}");
     }
 
     /// <summary>Wraps at a terminal-friendly width, keeping the two-space hang of the bullet.</summary>
-    private static string Wrap(string text, int width = 88)
+    internal static string Wrap(string text, int width = 88)
     {
         var words = text.Split(' ');
         var lines = new List<string>();

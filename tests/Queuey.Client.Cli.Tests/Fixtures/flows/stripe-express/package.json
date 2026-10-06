@@ -1,0 +1,11 @@
+{
+  "name": "shop-api",
+  "private": true,
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "stripe": "^16.2.0"
+  }
+}

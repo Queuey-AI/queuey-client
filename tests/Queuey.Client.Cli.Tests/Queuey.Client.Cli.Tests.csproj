@@ -22,4 +22,10 @@
     <ProjectReference Include="..\..\src\Queuey.Client.Cli\Queuey.Client.Cli.csproj" />
   </ItemGroup>
 
+  <!-- Repoene advise leses mot (AdviseIntentTests): de bygges aldri, og koden deres hører ikke til testene. -->
+  <ItemGroup>
+    <Compile Remove="Fixtures/**" />
+    <None Remove="Fixtures/**" />
+  </ItemGroup>
+
 </Project>
