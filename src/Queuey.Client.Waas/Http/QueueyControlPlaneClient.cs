@@ -314,6 +314,13 @@ internal sealed class QueueyControlPlaneClient
         => PatchAsync(new QueueModeChangeRequest { Mode = mode }, cancellationToken, "queues", queuePublicId, "mode-change");
 
     /// <summary>
+    /// Sends a queue's events to a connected <c>queuey listen</c> session, or back to its HTTP destination
+    /// (<c>PATCH /queues/{que}/local-forward</c>). Returns 204. Turning it on needs <c>queue.listen</c>.
+    /// </summary>
+    public Task SetQueueLocalForwardAsync(string queuePublicId, bool enabled, CancellationToken cancellationToken)
+        => PatchAsync(new LocalForwardRequest { Enabled = enabled }, cancellationToken, "queues", queuePublicId, "local-forward");
+
+    /// <summary>
     /// The oldest event on a queue that is still failing (<c>GET /events/{que}?status=Failed</c>,
     /// oldest first), or none. What holds the events behind it on an ordered queue.
     /// </summary>

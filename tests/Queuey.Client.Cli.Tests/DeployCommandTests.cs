@@ -64,6 +64,56 @@ public sealed class DeployCommandTests : IDisposable
         Assert.Contains("audit\tmode=(deliver when it has a destination, if new)", run.Stdout);
     }
 
+    // ── Den komplette deploy-fila (Queuey F2.3, 2026-10-06) ──────────────────
+
+    private const string StripeFile = """
+    { "queues": { "stripe": {
+        "ingress": { "authMode": "SignedRequest", "signedRequest": { "template": "stripe", "credentialRef": "stripe-whsec" } },
+        "delivery": { "url": "/api/stripe", "kind": "localForward" } } } }
+    """;
+
+    [Fact]
+    public async Task A_dry_run_shows_the_kind_and_the_signed_request_in_text_and_json()
+    {
+        string path = DeployFile(StripeFile);
+
+        CliRun text = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path, "--dry-run")));
+        CliRun json = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path, "--dry-run", "--json")));
+
+        Assert.Equal(ExitCodes.Success, text.Exit);
+        Assert.Contains("stripe\tmode=(deliver when it has a destination, if new) url=/api/stripe kind=localForward signedRequest=stripe:stripe-whsec", text.Stdout);
+
+        Assert.Equal(ExitCodes.Success, json.Exit);
+        JsonElement queue = JsonDocument.Parse(json.Stdout).RootElement.GetProperty("queues")[0];
+        Assert.Equal("localForward", queue.GetProperty("kind").GetString());
+        JsonElement signed = queue.GetProperty("ingress").GetProperty("signedRequest");
+        Assert.Equal("stripe", signed.GetProperty("template").GetString());
+        Assert.Equal("stripe-whsec", signed.GetProperty("credentialRef").GetString());
+    }
+
+    [Fact]
+    public async Task A_dry_run_refuses_a_delivery_url_on_this_machine_and_points_to_the_local_listener()
+    {
+        string path = DeployFile("""{ "queues": { "stripe": { "delivery": { "url": "http://localhost:3000/api/stripe" } } } }""");
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path, "--dry-run")));
+
+        Assert.Equal(ExitCodes.Configuration, run.Exit);
+        Assert.Contains("queues.stripe.delivery.url: it points at localhost, which is on this machine", run.Stderr);
+        Assert.Contains("localForward", run.Stderr);
+    }
+
+    [Fact]
+    public async Task Against_a_queuey_on_this_machine_the_dry_run_leaves_the_destination_to_the_server()
+    {
+        string path = DeployFile("""{ "queues": { "stripe": { "delivery": { "url": "http://localhost:3000/api/stripe" } } } }""");
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(
+            new[] { "apply", "--file", path, "--dry-run", "--api-base", "http://localhost:5100", "--config", Path.Combine(_dir, "none.json") }));
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+    }
+
     [Fact]
     public async Task A_dry_run_as_json_carries_the_mode_and_the_filter()
     {
@@ -80,7 +130,7 @@ public sealed class DeployCommandTests : IDisposable
         Assert.Equal(JsonValueKind.Null, root.GetProperty("workspace").ValueKind);   // fila har ikke noe workspace
 
         JsonElement plan = Assert.Single(root.GetProperty("queues").EnumerateArray());
-        Assert.Equal(new[] { "name", "mode", "policy", "delivery", "ingress", "notes" }, plan.EnumerateObject().Select(p => p.Name).ToArray());
+        Assert.Equal(new[] { "name", "mode", "policy", "delivery", "kind", "ingress", "notes" }, plan.EnumerateObject().Select(p => p.Name).ToArray());
         Assert.Equal("orders", plan.GetProperty("name").GetString());
         Assert.Equal("logOnly", plan.GetProperty("mode").GetString());
         Assert.Equal("any", plan.GetProperty("policy").GetProperty("filter").GetProperty("match").GetString());
@@ -98,8 +148,8 @@ public sealed class DeployCommandTests : IDisposable
               "rateLimit": { "maxRequests": 10, "perSeconds": 1 } }
             """;
         const string workspaceIngress = """
-            { "authMode": "ApiKey", "eventType": { "from": "body", "name": "type" }, "groupKey": { "from": "query", "name": "customer" },
-              "successStatusCode": 200 }
+            { "authMode": "ApiKeyAndSignedRequest", "eventType": { "from": "body", "name": "type" }, "groupKey": { "from": "query", "name": "customer" },
+              "successStatusCode": 200, "signedRequest": { "template": "stripe", "credentialRef": "stripe-whsec" } }
             """;
         const string queueDelivery = """
             { "url": "/orders", "inherit": false, "authMode": "Bearer", "credentialRef": "orders-token", "authHeaderName": "Authorization",
@@ -107,7 +157,8 @@ public sealed class DeployCommandTests : IDisposable
               "rateLimit": { "maxRequests": 5, "perSeconds": 60 } }
             """;
         const string queueIngress = """
-            { "authMode": "None", "eventType": { "from": "header", "name": "X-Event" }, "groupKey": null, "successStatusCode": null }
+            { "authMode": "None", "eventType": { "from": "header", "name": "X-Event" }, "groupKey": null, "successStatusCode": null,
+              "signedRequest": null }
             """;
         string path = DeployFile($$"""
             { "workspace": { "ingress": {{workspaceIngress}}, "delivery": {{workspaceDelivery}} },

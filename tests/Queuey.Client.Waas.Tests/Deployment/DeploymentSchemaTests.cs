@@ -99,6 +99,16 @@ public class DeploymentSchemaTests
         Assert.Equal(new[] { "None", "Bearer", "ApiKey", "Basic", "OAuth2ClientCredentials" },
             Values(Defs(schema, queue["properties"]!["delivery"]!)["properties"]!["authMode"]!));
 
+        // Leveringstypen er http eller localForward, eller en ${VAR} per miljø (Queuey F2.3, 2026-10-06).
+        JsonNode kind = Defs(schema, queue["properties"]!["delivery"]!)["properties"]!["kind"]!;
+        Assert.Equal(new[] { "http", "localForward" }, Values(kind["anyOf"]![0]!));
+        Assert.Matches(new Regex(kind["anyOf"]![1]!["pattern"]!.GetValue<string>()), "${QUEUEY_ORDERS_DELIVERY_KIND}");
+
+        // En signert forespørsel må ha malen, og navnet passer i en credential (Queuey F2.3).
+        JsonNode signed = Defs(schema, ingress["properties"]!["signedRequest"]!);
+        Assert.Equal(new[] { "template" }, signed["required"]!.AsArray().Select(r => r!.GetValue<string>()).ToArray());
+        Assert.Equal(200, signed["properties"]!["credentialRef"]!["maxLength"]!.GetValue<int>());
+
         // Miljø-merket er en av de fire, eller en ${VAR} som skiller workspacene en fil brukes mot (Queuey F2.2, 2026-10-05).
         JsonNode environment = workspace["properties"]!["environment"]!;
         Assert.Equal(new[] { "dev", "test", "staging", "prod" }, Values(environment["anyOf"]![0]!));
@@ -156,6 +166,15 @@ public class DeploymentSchemaTests
     private static readonly Dictionary<(Type, string), IReadOnlyList<string>> ClosedValuesOrVariable = new()
     {
         [(typeof(DeploymentWorkspace), nameof(DeploymentWorkspace.Environment))] = DeploymentWorkspace.EnvironmentValues,
+        // Leveringstypen hører til miljøet (Queuey F2.3, 2026-10-06): en lokal lytter i dev, HTTP ellers.
+        [(typeof(QueueDelivery), nameof(QueueDelivery.Kind))] = QueueDelivery.KindValues,
+    };
+
+    // Lengdetakene valideringen har (DeploymentSignedRequest.Validate): et felt som ikke kan stå i Queuey, avvises i editoren.
+    private static readonly Dictionary<(Type, string), int> MaxLengths = new()
+    {
+        [(typeof(DeploymentSignedRequest), nameof(DeploymentSignedRequest.Template))] = 64,
+        [(typeof(DeploymentSignedRequest), nameof(DeploymentSignedRequest.CredentialRef))] = 200,
     };
 
     /// <summary>
@@ -168,6 +187,7 @@ public class DeploymentSchemaTests
     private static readonly Dictionary<Type, string[]> RequiredWhenDeclared = new()
     {
         [typeof(DeliveryFilter)] = new[] { "conditions" },
+        [typeof(DeploymentSignedRequest)] = new[] { "template" },
     };
 
     /// <summary>
@@ -225,6 +245,12 @@ public class DeploymentSchemaTests
                         obj["anyOf"] = new JsonArray(
                             new JsonObject { ["enum"] = new JsonArray(orVariable.Select(v => (JsonNode?)JsonValue.Create(v)).ToArray()) },
                             new JsonObject { ["pattern"] = VariablePattern });
+                    }
+
+                    if (MaxLengths.TryGetValue((member.DeclaringType!, member.Name), out int maxLength))
+                    {
+                        obj["minLength"] = 1;
+                        obj["maxLength"] = maxLength;
                     }
                 }
                 else if (context.PropertyInfo is null && context.TypeInfo.Type is { IsClass: true } type

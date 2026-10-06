@@ -112,6 +112,15 @@ internal sealed class QueueModeChangeRequest
     public int Mode { get; set; }
 }
 
+/// <summary>
+/// Wire request for <c>PATCH /queues/{que}/local-forward</c>: whether the queue's events go to a connected local listener
+/// (Queuey F2.3, where a deployment file sets it as <c>delivery.kind</c>).
+/// </summary>
+internal sealed class LocalForwardRequest
+{
+    public bool Enabled { get; set; }
+}
+
 /// <summary>Wire shape of one row from <c>GET /tenants/{ten}/queues</c>.</summary>
 internal sealed class QueueListItemResponse
 {

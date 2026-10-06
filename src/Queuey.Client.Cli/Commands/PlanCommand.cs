@@ -21,9 +21,11 @@ internal static class PlanCommand
     internal static readonly CommandOptions Options = new("plan", flags: new[] { "json" }, values: new[] { "file" });
 
     /// <summary>
-    /// The version of <c>plan --json</c>'s shape: <c>{ schemaVersion, file, tenant, wouldSucceed, changeCount, steps }</c>.
-    /// A script that reads it checks this first, as it does in <c>apply --dry-run --json</c>.
+    /// The version of <c>plan --json</c>'s shape: <c>{ schemaVersion, file, tenant, planId, planHash, wouldSucceed,
+    /// changeCount, queues, steps }</c>. A script that reads it checks this first, as it does in <c>apply --dry-run --json</c>.
     /// </summary>
+    // planId, planHash, queues og hvert stegs state kom til i samme versjon (Queuey F2.3, 2026-10-06): ingen tag har sluppet
+    // versjon 1 ennå, og feltene legger bare til.
     // Samme mønster som apply --dry-run --json, der Kenneth valgte et versjonert objekt (2026-10-05). Formen er ny med
     // queuey plan, så den har en versjon fra første utgave, og ingen leser må gjette når den endres.
     internal const int JsonSchemaVersion = 1;
@@ -49,8 +51,11 @@ internal static class PlanCommand
                 schemaVersion = JsonSchemaVersion,
                 file = path,
                 tenant = plan.Tenant,
+                planId = plan.PlanId,
+                planHash = plan.PlanHash,
                 wouldSucceed = plan.WouldSucceed,
                 changeCount = plan.ChangeCount,
+                queues = plan.Queues.Select(q => new { name = q.Name, ingressUrl = q.IngressUrl, publicId = q.PublicId }),
                 steps = plan.Steps.Select(s => new
                 {
                     target = s.Target,
@@ -58,6 +63,8 @@ internal static class PlanCommand
                     creates = s.Creates,
                     changes = s.Changes.Select(c => new { path = c.Path, from = c.From, to = c.To }),
                     notes = s.Notes,
+                    state = s.State,
+                    desired = s.Desired,
                     error = s.Error is null ? null : new { code = s.Error.ErrorCode, message = s.Error.Message, action = s.Error.SuggestedAction, status = s.Error.StatusCode },
                 }),
             }, CliHost.JsonOut));
@@ -65,6 +72,9 @@ internal static class PlanCommand
         }
 
         Console.WriteLine($"Queuey plan — {path} → {config.ResolvedApiBase()}  (tenant {plan.Tenant})");
+        Console.WriteLine($"  {plan.PlanId}  {plan.PlanHash}");
+        foreach (DeploymentPlanQueue queue in plan.Queues)
+            Console.WriteLine($"  {queue.Name}\tingress {queue.IngressUrl}{(queue.PublicId is null ? "  (would be created)" : "")}");
         foreach (DeploymentPlanStep step in plan.Steps)
         {
             bool quiet = step.Error is null && !step.Creates && step.Changes.Count == 0 && step.Notes.Count == 0;

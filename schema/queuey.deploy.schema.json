@@ -277,6 +277,28 @@
                 "null"
               ],
               "pattern": "^-?(?:0|[1-9]\\d*)$"
+            },
+            "signedRequest": {
+              "description": "The provider signature the ingress verifies: a template, such as stripe, and the credential holding the provider's signing secret. Checked while AuthMode is SignedRequest or ApiKeyAndSignedRequest.",
+              "type": "object",
+              "properties": {
+                "template": {
+                  "description": "The signed-request template from Queuey's catalogue: stripe, or queuey for Queuey's own scheme, which verifies with the sending API client's signing key and takes no credential.",
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                "credentialRef": {
+                  "description": "The name of the credential holding the provider's signing secret (or its cred_… id). Store it with queuey credentials set --name <name> --type HmacSigning --key-id <name> --from-env <VARIABLE>.",
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              },
+              "additionalProperties": false,
+              "required": [
+                "template"
+              ]
             }
           },
           "additionalProperties": false
@@ -413,6 +435,21 @@
             "description": "This queue's destination. Omit it — the usual case — and the queue inherits the workspace. A relative url appends to the workspace base, which is the shape to reach for.",
             "type": "object",
             "properties": {
+              "kind": {
+                "description": "Where the queue's events go: http, to its URL, or localForward, to a connected queuey listen session, for a queue in a development workspace. Omit it to leave the kind as it is. A local listener's address belongs to its session (--forward-to), never to this file, and the queue keeps its URL for when it delivers over HTTP again. A file applied to several workspaces takes it from a variable, such as ${QUEUEY_ORDERS_DELIVERY_KIND}.",
+                "type": "string",
+                "anyOf": [
+                  {
+                    "enum": [
+                      "http",
+                      "localForward"
+                    ]
+                  },
+                  {
+                    "pattern": "^\\$\\{[A-Za-z_][A-Za-z0-9_]*(:-[^}]*)?\\}$"
+                  }
+                ]
+              },
               "url": {
                 "description": "Where this queue delivers. A relative path (/orders) appends to the workspace base — the shape to reach for, since moving hosts is then one workspace edit. An absolute URL overrides the workspace outright.",
                 "type": "string"
@@ -526,6 +563,10 @@
                   "null"
                 ],
                 "pattern": "^-?(?:0|[1-9]\\d*)$"
+              },
+              "signedRequest": {
+                "description": "The provider signature the ingress verifies: a template, such as stripe, and the credential holding the provider's signing secret. Checked while AuthMode is SignedRequest or ApiKeyAndSignedRequest.",
+                "$ref": "#/properties/workspace/properties/ingress/properties/signedRequest"
               }
             },
             "additionalProperties": false

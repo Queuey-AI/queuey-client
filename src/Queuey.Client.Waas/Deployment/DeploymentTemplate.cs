@@ -93,6 +93,9 @@ public static class DeploymentTemplate
                 Ingress = q.Ingress,
                 Delivery = q.Delivery is null ? null : new QueueDelivery
                 {
+                    // Leveringstypen hører til miljøet (Queuey F2.3): en lokal lytter i dev, HTTP ellers. Den blir en variabel
+                    // per kø, som en absolutt URL.
+                    Kind = string.IsNullOrWhiteSpace(q.Delivery.Kind) ? null : Reference(QueueKindVariable(entry.Key, environment)),
                     // A relative path is already portable — leave it. An absolute URL pins a host, so
                     // it becomes a variable named after the queue it belongs to.
                     Url = IsAbsolute(q.Delivery.Url)
@@ -110,6 +113,13 @@ public static class DeploymentTemplate
         }
 
         return template;
+    }
+
+    /// <summary>The variable name a queue's delivery kind is templated to: <c>http</c> or <c>localForward</c> per environment.</summary>
+    public static string QueueKindVariable(string queueName, string? environment = null)
+    {
+        string url = QueueUrlVariable(queueName, environment);
+        return url.Substring(0, url.Length - "_URL".Length) + "_DELIVERY_KIND";
     }
 
     /// <summary>The variable name a queue's absolute URL is templated to.</summary>

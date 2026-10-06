@@ -59,6 +59,17 @@ public sealed class WorkspaceDelivery
 /// <summary>One queue's destination. Null properties are left alone.</summary>
 public sealed class QueueDelivery
 {
+    /// <summary>The values <see cref="Kind"/> accepts, in any casing.</summary>
+    public static readonly IReadOnlyList<string> KindValues = new[] { "http", "localForward" };
+
+    /// <summary>
+    /// Where the queue's events go: <c>http</c>, to its URL, or <c>localForward</c>, to a connected <c>queuey listen</c>
+    /// session, for a queue in a development workspace. Omit it to leave the kind as it is. A local listener's address belongs
+    /// to its session (<c>--forward-to</c>), never to this file, and the queue keeps its URL for when it delivers over HTTP
+    /// again. A file applied to several workspaces takes it from a variable, such as <c>${QUEUEY_ORDERS_DELIVERY_KIND}</c>.
+    /// </summary>
+    public string? Kind { get; set; }
+
     /// <summary>
     /// Where this queue delivers. A <b>relative path</b> (<c>/orders</c>) appends to the workspace
     /// base — the shape to reach for, since moving hosts is then one workspace edit. An absolute URL
@@ -87,6 +98,8 @@ public sealed class QueueDelivery
     /// <summary>Send budget for this queue only.</summary>
     public DeliveryRateLimit? RateLimit { get; set; }
 
+    // Typen settes for seg (PATCH /queues/{que}/local-forward), så den teller ikke her: en levering som bare sier kind,
+    // sender ingen PATCH av levering.
     internal bool IsEmpty =>
         Url is null && !Inherit && AuthMode is null && CredentialRef is null && AuthHeaderName is null
         && TimeoutMs is null && Signing is null && RateLimit is null;
@@ -259,6 +272,8 @@ internal sealed class QueueInheritResponse
 /// <summary>The flat delivery read-back. Secret VALUES are never present — only refs and flags.</summary>
 internal sealed class TenantDeliveryResponse
 {
+    // Den effektive typen, "Http" eller "LocalForward" (Queuey F2.3). Null fra et API som er eldre enn feltet.
+    public string? Kind { get; set; }
     public string? BaseUrl { get; set; }
     public string? AuthMode { get; set; }
     public bool HasCredential { get; set; }

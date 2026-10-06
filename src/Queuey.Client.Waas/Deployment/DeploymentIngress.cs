@@ -48,7 +48,14 @@ public sealed class DeploymentIngress
     /// </summary>
     public int? SuccessStatusCode { get; set; }
 
-    internal bool IsEmpty => AuthMode is null && EventType is null && GroupKey is null && SuccessStatusCode is null;
+    /// <summary>
+    /// The provider signature the ingress verifies: a template, such as <c>stripe</c>, and the credential holding the
+    /// provider's signing secret. Checked while <see cref="AuthMode"/> is <c>SignedRequest</c> or
+    /// <c>ApiKeyAndSignedRequest</c>.
+    /// </summary>
+    public DeploymentSignedRequest? SignedRequest { get; set; }
+
+    internal bool IsEmpty => AuthMode is null && EventType is null && GroupKey is null && SuccessStatusCode is null && SignedRequest is null;
 
     /// <summary>
     /// Refuses what Queuey would refuse, or quietly read another way, before anything is sent.
@@ -62,6 +69,63 @@ public sealed class DeploymentIngress
 
         EventType?.Validate($"{where}.eventType");
         GroupKey?.Validate($"{where}.groupKey");
+
+        if (SignedRequest is not null)
+        {
+            SignedRequest.Validate($"{where}.signedRequest");
+
+            // Fila sier både at signaturen skal verifiseres og at ingen signatur sjekkes: en av dem er en feil.
+            if (AuthMode is { } mode && (mode.Trim().Equals("None", StringComparison.OrdinalIgnoreCase)
+                                        || mode.Trim().Equals("ApiKey", StringComparison.OrdinalIgnoreCase)))
+                throw new QueueyConfigurationException(
+                    $"{where} declares a signedRequest, but authMode {mode.Trim()} checks no signature. Use SignedRequest, or " +
+                    "ApiKeyAndSignedRequest to demand both, or remove the signedRequest.");
+        }
+    }
+}
+
+/// <summary>
+/// The provider signature an ingress verifies. <see cref="CredentialRef"/> names a stored credential, never the secret;
+/// a name no credential has yet is accepted, and the ingress then refuses every event until it is stored and applied
+/// again.
+/// </summary>
+public sealed class DeploymentSignedRequest
+{
+    /// <summary>The longest template a file may name. Queuey's templates are a word each.</summary>
+    internal const int MaxTemplateLength = 64;
+
+    /// <summary>The longest credential reference a file may name: the longest a credential name can be.</summary>
+    internal const int MaxCredentialRefLength = 200;
+
+    /// <summary>
+    /// The signed-request template from Queuey's catalogue: <c>stripe</c>, or <c>queuey</c> for Queuey's own scheme, which
+    /// verifies with the sending API client's signing key and takes no credential.
+    /// </summary>
+    public string? Template { get; set; }
+
+    /// <summary>
+    /// The name of the credential holding the provider's signing secret (or its <c>cred_…</c> id). Store it with
+    /// <c>queuey credentials set --name &lt;name&gt; --type HmacSigning --key-id &lt;name&gt; --from-env &lt;VARIABLE&gt;</c>.
+    /// </summary>
+    public string? CredentialRef { get; set; }
+
+    // Det en pull leser tilbake, for drift-sjekken: id-en til en bundet credential (fila kan navngi den med id), og om
+    // ingressen venter på et navn som er lagret nå, så apply ville bundet det. Ikke en del av fila.
+    internal string? BoundCredentialId { get; set; }
+    internal bool AwaitsStoredCredential { get; set; }
+
+    internal void Validate(string where)
+    {
+        if (string.IsNullOrWhiteSpace(Template))
+            throw new QueueyConfigurationException(
+                $"{where} needs a template: the provider signature to verify, such as stripe.");
+        if (Template!.Trim().Length > MaxTemplateLength)
+            throw new QueueyConfigurationException($"{where}.template is longer than {MaxTemplateLength} characters.");
+        if (CredentialRef is not null && CredentialRef.Trim().Length == 0)
+            throw new QueueyConfigurationException(
+                $"{where}.credentialRef is empty. Name the credential that holds the signing secret, or leave the field out for a template that takes none.");
+        if (CredentialRef is not null && CredentialRef.Trim().Length > MaxCredentialRefLength)
+            throw new QueueyConfigurationException($"{where}.credentialRef is longer than {MaxCredentialRefLength} characters, the longest a credential name can be.");
     }
 }
 
@@ -129,6 +193,23 @@ internal sealed class PatchIngressWireRequest
     public ContextSourceWire? EventType { get; set; }
     public ContextSourceWire? GroupKey { get; set; }
     public int? SuccessStatusCode { get; set; }
+
+    // Navnet sendes som fila skriver det: Queuey slår det opp og venter på en credential som ikke finnes ennå (F2.3).
+    public SignedRequestWire? SignedRequest { get; set; }
+}
+
+internal sealed class SignedRequestWire
+{
+    public string? Template { get; set; }
+    public string? CredentialRef { get; set; }
+}
+
+/// <summary>The signed request an ingress keeps, as Queuey reads it back: a bound <c>cred_…</c> id, or the name it waits for.</summary>
+internal sealed class SignedRequestResponse
+{
+    public string? Template { get; set; }
+    public string? CredentialRef { get; set; }
+    public string? PendingCredential { get; set; }
 }
 
 internal sealed class ContextSourceWire
@@ -158,4 +239,7 @@ internal sealed class IngressResponse
     public ContextSourceWire? EventType { get; set; }
     public ContextSourceWire? GroupKey { get; set; }
     public int SuccessStatusCode { get; set; }
+
+    // Null fra et API som er eldre enn feltet (Queuey F2.3), eller når ingressen ikke har noen signert forespørsel.
+    public SignedRequestResponse? SignedRequest { get; set; }
 }
