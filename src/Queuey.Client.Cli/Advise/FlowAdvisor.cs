@@ -803,88 +803,105 @@ internal sealed class Enrichment
 
     private void ResolveEnvironment()
     {
-        string? existing = _facts.DeployFile?.Environment is { } env && env.IndexOf("${", StringComparison.Ordinal) < 0
-            ? env.Trim().ToLowerInvariant()
-            : null;
+        ExistingDeployFile? file = _facts.DeployFile;
+        string? existing = file is null ? null : FileEnvironments.Fixed(file);
         FlowEvidence[] evidence = existing is null
             ? Array.Empty<FlowEvidence>()
-            : new[] { new FlowEvidence(_facts.DeployFile!.File, null, $"the deployment file's workspace is {existing}") };
+            : new[] { new FlowEvidence(file!.File, null, $"the deployment file's workspace is {existing}") };
 
         if (_flow["environment"] is { } stated)
         {
             if (existing is not null && existing != stated.AsString)
+            {
                 Conflict("contradiction", "environment", stated.Value, JsonValue.Create(existing), evidence,
-                    $"{_facts.DeployFile!.File} sets up a {existing} workspace.",
+                    $"{file!.File} sets up a {existing} workspace.",
                     $"Is this flow for {existing}, as the deployment file is, or for {stated.AsString}, in a deployment file of its own?");
-            else if (existing is not null)
+                return;
+            }
+            if (existing is not null)
                 _flow.Set("environment", stated.WithEvidence(evidence));
-            return;
-        }
-
-        if (existing is not null)
-        {
-            _flow.Set("environment", FlowValue.Of(existing, Provenance.Evidence, evidence));
+            if (file is { Profiles.Count: > 0 })
+                StatedProfile(file, stated.AsString!);
             return;
         }
 
         // Med profiler og et miljø ingen har oppgitt, lager advise aldri en ny profil (re-review av #59, Kenneths prinsipp om å
-        // stoppe ved tvetydighet): med en ny profil og --profile prod ville flyten gått rett til produksjon med brukerens
-        // prod-tilkobling. Den ene profilen fila har, brukes; flere er et spørsmål.
-        if (_facts.DeployFile is { Profiles.Count: > 1 } several)
+        // stoppe ved tvetydighet). Den ene profilen fila har, brukes; flere er et spørsmål, med miljøet hver av dem gir, så
+        // svaret er et miljø environment tar (før tag: spørsmålet ba om et profilnavn, som environment avviser).
+        if (file is { Profiles.Count: > 1 })
         {
-            string names = string.Join(", ", several.Profiles);
-            Conflict("ambiguous", "environment", null, Values(several.Profiles),
-                new[] { new FlowEvidence(several.File, null, $"the deployment file's profiles: {names}") },
-                $"{several.File} has the profiles {names}, and the intent states no environment, so advise cannot tell which one the " +
-                "flow belongs in.",
-                $"Which environment is this flow for? State it in the intent as environment ({names}), and the flow goes into the " +
-                "profile of that name.");
+            Conflict("ambiguous", "environment", null, FileEnvironments.Found(file), ProfileEvidence(file),
+                $"{file.File} has the profiles {FileEnvironments.Describe(file)}, and the intent states no environment, so advise " +
+                "cannot tell which one the flow belongs in.",
+                ProfileQuestion(file));
             return;
         }
 
-        if (_facts.DeployFile is { Profiles.Count: 1 } single && ProfileEnvironment(single) is { } given)
+        if (file is { Profiles.Count: 1 } && FileEnvironments.GivenBy(file, file.Profiles[0]) is { } given)
         {
-            _flow.Set("environment", FlowValue.Of(given.Environment, Provenance.Evidence, new[] { given.Evidence }));
+            _flow.Set("environment", FlowValue.Of(given, Provenance.Evidence,
+                new[] { new FlowEvidence(file.File, null, FileEnvironments.Source(file, file.Profiles[0])) }));
+            return;
+        }
+
+        // Uten profiler gir fila et fast miljø, eller standardverdien i ${VAR:-dev}, som plan og apply bruker når variabelen
+        // ikke er satt.
+        if (file is not null && FileEnvironments.WithoutProfile(file) is { } fromFile)
+        {
+            _flow.Set("environment", FlowValue.Of(fromFile, Provenance.Evidence,
+                new[] { new FlowEvidence(file.File, null, FileEnvironments.Source(file, null)) }));
             return;
         }
 
         // En ny fil er for dev, og advise skriver det inn. En fil som finnes uten miljø, gjelder et umerket workspace, som Queuey
         // regner som prod, og advise skriver ikke et antatt miljø inn i den; det samme gjelder en fil som tar miljøet fra en
-        // variabel ingen profil gir. Før tag (oppfølging av #58, 2026-10-06): advise antok dev også her, og designet ble en
-        // blanding av localForward og et ekte Stripe-endepunkt i et workspace Queuey regner som prod.
-        _flow.Set("environment", FlowValue.Of(_facts.DeployFile is null ? "dev" : "prod", Provenance.Assumed));
+        // variabel ingen profil eller standardverdi gir. Før tag (oppfølging av #58, 2026-10-06): advise antok dev også her, og
+        // designet ble en blanding av localForward og et ekte Stripe-endepunkt i et workspace Queuey regner som prod.
+        _flow.Set("environment", FlowValue.Of(file is null ? "dev" : "prod", Provenance.Assumed));
     }
 
     /// <summary>
-    /// The environment the file's one profile gives the variable its workspace's environment comes from, with where it says
-    /// so; null when the file names no such variable, the profile does not give it, or gives something that is not an
-    /// environment.
+    /// The profile a stated environment goes into: the one profile that gives it, or the file's only profile when that gives
+    /// none, which then gets the stated one. Anything else is a conflict, never a new profile beside the file's own.
     /// </summary>
-    private static (string Environment, FlowEvidence Evidence)? ProfileEnvironment(ExistingDeployFile file)
+    // Før tag (etter #59): med prod oppgitt og profilene local og production laget advise profiles.prod ved siden av production,
+    // med --profile prod. En profil velges etter miljøet den gir, aldri etter navnet.
+    private void StatedProfile(ExistingDeployFile file, string environment)
     {
-        if (file.Environment is not { } environment || environment.IndexOf("${", StringComparison.Ordinal) < 0
-            || DeploymentVariables.Referenced(environment).FirstOrDefault() is not { } variable)
-            return null;
+        string[] giving = file.Profiles.Where(p => FileEnvironments.GivenBy(file, p) == environment).ToArray();
+        if (giving.Length == 1 || (giving.Length == 0 && file.Profiles.Count == 1 && FileEnvironments.GivenBy(file, file.Profiles[0]) is null))
+            return;
 
-        string profile = file.Profiles[0];
-        JsonNode? value = Property(Property(Property(file.Json, "profiles") as JsonObject, profile, exact: true) as JsonObject, "variables")
-            is JsonObject variables ? variables[variable] : null;
-        if (value is not JsonValue text || !text.TryGetValue(out string? given)
-            || !DeploymentWorkspace.EnvironmentValues.Contains(given.Trim().ToLowerInvariant(), StringComparer.Ordinal))
-            return null;
-
-        string chosen = given.Trim().ToLowerInvariant();
-        return (chosen, new FlowEvidence(file.File, null, $"profiles.{profile}.variables.{variable} is {chosen}"));
+        Conflict(giving.Length > 1 ? "ambiguous" : "contradiction", "environment", JsonValue.Create(environment), FileEnvironments.Found(file),
+            ProfileEvidence(file),
+            giving.Length > 1
+                ? $"{file.File} has {giving.Length} profiles that give {environment} ({string.Join(", ", giving)}), so advise cannot tell " +
+                  "which one the flow belongs in."
+                : $"No profile in {file.File} gives {environment}: {FileEnvironments.Describe(file)}. advise adds a flow to a profile " +
+                  "by the environment it gives, never by its name.",
+            ProfileQuestion(file));
     }
 
-    /// <summary>A property of a file's object: matched in any casing, as the deployment file's reader does, or exactly for a name.</summary>
-    private static JsonNode? Property(JsonObject? obj, string name, bool exact = false)
+    private static FlowEvidence[] ProfileEvidence(ExistingDeployFile file)
+        => new[] { new FlowEvidence(file.File, null, $"the deployment file's profiles: {FileEnvironments.Describe(file)}") };
+
+    /// <summary>
+    /// What to do about profiles advise cannot choose between: state the environment one of them gives, or first give each
+    /// profile an environment of its own.
+    /// </summary>
+    private static string ProfileQuestion(ExistingDeployFile file)
     {
-        if (obj is null)
-            return null;
-        if (obj.TryGetPropertyValue(name, out JsonNode? found) || exact)
-            return found;
-        return obj.FirstOrDefault(p => string.Equals(p.Key, name, StringComparison.OrdinalIgnoreCase)).Value;
+        string?[] given = file.Profiles.Select(p => FileEnvironments.GivenBy(file, p)).ToArray();
+        if (given.All(g => g is not null) && given.Distinct().Count() == given.Length)
+            return "Which environment is this flow for? State it in the intent as environment: " +
+                   string.Join(", ", file.Profiles.Select((p, i) => $"{given[i]} for {p}")) +
+                   ". advise adds the flow to the profile that gives it.";
+
+        return FileEnvironments.Variable(file) is { } variable
+            ? $"Give each profile its own environment in {variable.Name}, the variable workspace.environment comes from, then state " +
+              "the one this flow is for in the intent as environment."
+            : $"Take workspace.environment from ${{{DeploymentTemplate.EnvironmentVariable}}} in {file.File}, give each profile its " +
+              $"value for {DeploymentTemplate.EnvironmentVariable}, then state the one this flow is for in the intent as environment.";
     }
 
     private void ResolveQueue(string kind)

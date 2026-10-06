@@ -131,10 +131,10 @@ public static class FlowDesigner
         private readonly SortedDictionary<string, (string Value, DesignSetting Setting)> _profile = new(StringComparer.Ordinal);
         private readonly string _profileFlag;
 
-        // Profilen verdiene går i, og som kommandoene tar med --profile (re-review av #59). Et oppgitt miljø, et fila sier, eller
-        // en ny fil gir profilen med miljøets navn. En fil som finnes med profiler, og et miljø ingen har oppgitt, får aldri en
-        // ny profil: den ene fila har (flere er en konflikt fra FlowAdvisor). Profilens navn er da ikke miljøet: en fil med bare
-        // profilen dev og uten miljø gjelder et workspace Queuey regner som prod.
+        // Profilen verdiene går i, og som kommandoene tar med --profile. En ny fil får profilen med miljøets navn. En fil som
+        // finnes med profiler, får aldri en ny (re-review av #59, og før tag): profilen som gir miljøet, eller den eneste fila har
+        // (FileEnvironments.Choose, som FlowAdvisor velger med; ellers har flyten en konflikt). Profilens navn er da ikke
+        // miljøet: en fil med bare profilen dev og uten miljø gjelder et workspace Queuey regner som prod.
         private readonly string _profileName;
 
         public Builder(DesiredFlow flow, FlowFacts facts, Advice? sending)
@@ -149,8 +149,7 @@ public static class FlowDesigner
             _prefix = $"queues.{_queue}";
             _file = facts.DeployFile;
             _portable = _file is null || _file.Profiles.Count > 0;
-            bool literal = _file?.Environment is { } named && named.IndexOf("${", StringComparison.Ordinal) < 0;
-            _profileName = _file is null || flow.IsStated("environment") || literal || _file.Profiles.Count != 1 ? _env : _file.Profiles[0];
+            _profileName = _file is { Profiles.Count: > 0 } && FileEnvironments.Choose(_file, _env) is { } chosen ? chosen : _env;
             _profileFlag = _portable ? $" --profile {_profileName}" : "";
 
             // Miljøet er det FlowAdvisor kom fram til: oppgitt, i fila, i den ene profilen, eller antatt (dev for en ny fil, prod
@@ -168,41 +167,61 @@ public static class FlowDesigner
                 ? text
                 : null;
 
-        /// <summary>The queue's delivery kind in the file, lower case, read through the profile when it is a ${VAR}; null without one.</summary>
-        private string? FileQueueKind()
+        /// <summary>
+        /// The queue's delivery kind in the file, lower case, and where it is set: the kind itself, the profile's value for its
+        /// ${VAR}, or that variable's ${VAR:-default}, as plan and apply read it. Null when the file gives the queue none.
+        /// </summary>
+        private (string Kind, string Where)? FileQueueKind()
         {
             if ((Property(_file?.Json, "queues") as JsonObject)?[_queue] is not JsonObject queue
                 || Property(Property(queue, "delivery") as JsonObject, "kind") is not JsonValue value
                 || !value.TryGetValue(out string? kind) || string.IsNullOrWhiteSpace(kind))
                 return null;
 
-            if (kind.IndexOf("${", StringComparison.Ordinal) >= 0)
-                kind = _portable && DeploymentVariables.Referenced(kind).FirstOrDefault() is { } variable ? FileProfileValue(variable) : null;
-            return kind?.Trim().ToLowerInvariant();
+            string leaf = $"queues.{_queue}.delivery.kind";
+            if (FileEnvironments.ParseVariable(kind) is not { } variable)
+                return (kind.Trim().ToLowerInvariant(), leaf);
+            if (_portable && FileProfileValue(variable.Name) is { } given)
+                return (given.Trim().ToLowerInvariant(), $"profiles.{_profileName}.variables.{variable.Name}");
+            return variable.Default is { Length: > 0 } fallback ? (fallback.Trim().ToLowerInvariant(), $"the default in {leaf}") : null;
+        }
+
+        /// <summary>The variable the queue's delivery kind comes from: the file's, or the one advise writes; null for a fixed kind.</summary>
+        private string? KindVariable()
+        {
+            if ((Property(_file?.Json, "queues") as JsonObject)?[_queue] is JsonObject queue
+                && Property(Property(queue, "delivery") as JsonObject, "kind") is JsonValue value && value.TryGetValue(out string? kind))
+                return FileEnvironments.ParseVariable(kind)?.Name;
+            return _portable ? DeploymentTemplate.QueueKindVariable(_queue) : null;
         }
 
         /// <summary>
-        /// A queue the file already sends to a local listener, in a workspace advise only assumes is prod: a conflict. The
-        /// design for prod would point a real endpoint at a queue that delivers to a laptop, and nobody starts the listener.
+        /// A queue the file already sends to a local listener, outside dev: a conflict, wherever the environment comes from. The
+        /// design for it would point a real endpoint at a queue that delivers to a laptop, and nobody starts the listener.
         /// </summary>
         // Re-review av #59: en fil skrevet av en eldre advise kan ha kind localForward og ikke noe miljø. Fila vinner over det
-        // advise antar, så designet beholdt localForward, mens stegene var for prod. Det avgjør en person, ikke advise.
-        private void ForwardingInAssumedProd()
+        // advise antar, så designet beholdt localForward, mens stegene var for prod. Før tag gjelder det uansett hvor miljøet
+        // kommer fra: oppgitt, fast i fila eller fra profilen, som en profil prod med KIND=localForward kopiert fra dev.
+        private void ForwardingOutsideDev()
         {
-            if (_devInPractice || !_assumedForUnmarkedFile || FileQueueKind() != "localforward")
+            if (_devInPractice || FileQueueKind() is not { Kind: "localforward" } forwarding)
                 return;
 
-            _conflicts.Add(new FlowConflict("ambiguous", "environment", null, JsonValue.Create("localForward"),
-                new[] { new FlowEvidence(_file!.File, null, $"queues.{_queue}.delivery.kind is localForward") },
-                $"{_file.File} forwards queues.{_queue} to a local listener, but it names no workspace environment, and Queuey counts " +
-                "such a workspace as prod.",
-                $"Is this flow for dev? State the environment dev in the intent. For prod, set queues.{_queue}.delivery.kind to http " +
-                $"in {_file.File}. Then run advise --intent again."));
+            bool stated = _flow.IsStated("environment");
+            string where = _flow["environment"]?.Provenance == Provenance.Assumed
+                ? "but it names no workspace environment, and Queuey counts such a workspace as prod"
+                : stated ? $"and the intent states {_env}" : $"and its workspace is {_env}";
+            _conflicts.Add(new FlowConflict(stated ? "contradiction" : "ambiguous", "environment",
+                stated ? JsonValue.Create(_env) : null, JsonValue.Create("localForward"),
+                new[] { new FlowEvidence(_file!.File, null, $"{forwarding.Where} is localForward") },
+                $"{_file.File} forwards queues.{_queue} to a local listener ({forwarding.Where}), {where}.",
+                $"Is this flow for dev? State the environment dev in the intent. For {_env}, set {forwarding.Where} to http in " +
+                $"{_file.File}. Then run advise --intent again."));
         }
 
         public FlowDesign? Build()
         {
-            ForwardingInAssumedProd();
+            ForwardingOutsideDev();
 
             // 1. Forslaget for flyten: miljøet, køen og profilverdiene, hver innstilling med en grunn.
             var workspace = new JsonObject();
@@ -1166,8 +1185,12 @@ public static class FlowDesigner
 
             if (variables.Count > 0)
             {
+                // Leveringstypen fra en variabel (som pull --as skriver den) får verdien den skal ha her (før tag): uten profil
+                // sier ingenting ellers at den er http i prod.
+                string? kindVariable = KindVariable();
+                string Named(string variable) => variable == kindVariable ? $"{variable}={(_local ? "localForward" : "http")}" : variable;
                 bool baseUrl = variables.Contains(DeploymentTemplate.BaseUrlVariable);
-                _next.Add($"Set {string.Join(", ", variables)} where plan and apply run: the file reads {(variables.Count == 1 ? "it" : "them")} " +
+                _next.Add($"Set {string.Join(", ", variables.Select(Named))} where plan and apply run: the file reads {(variables.Count == 1 ? "it" : "them")} " +
                           "from the environment." +
                           (baseUrl
                               ? $" {DeploymentTemplate.BaseUrlVariable} is where the receiver is reachable over HTTP, such as production's URL" +

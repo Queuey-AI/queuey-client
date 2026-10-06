@@ -1081,15 +1081,17 @@ proposed, and production is one more profile. A deployment file that is there wi
 
 **Without an environment in the intent, advise goes by the file.** A new file is for `dev`, which advise writes into it.
 A file that is there without `workspace.environment` applies to a workspace Queuey counts as `prod`, so advise proposes
-for prod: delivery over HTTP, `credentials request` for a secret, and Stripe's path for a real endpoint. So does a file
-that takes the environment from a variable without profiles, or whose profile already gives that variable another value.
-State `dev` in the intent for the dev path: a local listener, and Stripe's test mode.
+for prod: delivery over HTTP, `credentials request` for a secret, and Stripe's path for a real endpoint. A file that
+takes the environment from a variable gets what its profile gives that variable, or the variable's `${VAR:-default}`, as
+plan and apply read it; without either, it is for prod too. State `dev` in the intent for the dev path: a local listener,
+and Stripe's test mode.
 
-advise stops rather than guess. A file with profiles never gets a new one from an environment advise only assumes: with
-one profile the flow goes into it, and the commands take it with `--profile`; with several, the flow lists an
-`ambiguous` conflict, and the answer is `environment` in the intent. A queue the file already forwards to a listener
-(`"kind": "localForward"`) in a file without an environment is a conflict too: state `dev`, or give the queue
-`"kind": "http"`.
+advise stops rather than guess. A file with profiles never gets a new one: advise picks a profile by the environment it
+gives, never by its name. Without an environment in the intent, one profile takes the flow, and several are an
+`ambiguous` conflict that names what each gives. With one, the profile that gives it takes the flow, and the commands
+take it with `--profile`; when no profile gives it, or several do, the flow has a conflict that says what to change. A
+queue the file already forwards to a listener (`"kind": "localForward"`, directly or through its profile) outside dev is
+a conflict too: state `dev`, or give it `http` where the file sets it.
 
 **`infrastructure.content` is the whole file, to write as it is.** With a `queuey.deploy.json` already there, it is that
 file with the flow's queue and profile values merged in. The file wins over everything the intent does not state. A

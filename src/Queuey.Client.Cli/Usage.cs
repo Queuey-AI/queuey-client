@@ -80,9 +80,10 @@ ADVISE
                  queuey.deploy.json that is there without workspace.environment is for prod,
                  as Queuey counts such a workspace: delivery over HTTP, credentials request,
                  and a real Stripe endpoint. State dev for a local listener and test mode.
-                 A file with profiles gets no new profile from an assumed environment: one
-                 profile takes the flow, and several are a conflict that asks which. So is a
-                 queue the file forwards to a listener in a file without an environment.
+                 A file with profiles gets no new profile: the profile that gives the
+                 environment takes the flow, chosen by that and never by its name. Without
+                 one stated, one profile takes it, and several are a conflict. So is a queue
+                 the file forwards to a listener outside dev.
                  The schema command prints the Desired Flow's schema (see SCHEMA).
                  infrastructure.content is the whole deployment file, to write as it is: with a
                  queuey.deploy.json there, that file with the flow's queue and profile values
