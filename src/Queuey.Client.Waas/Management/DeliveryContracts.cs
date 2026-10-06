@@ -142,6 +142,28 @@ public sealed class CredentialResult
 
     /// <summary>Key id, for types that carry one.</summary>
     public string? KeyId { get; set; }
+
+    /// <summary>
+    /// The version of the secret the credential holds: 1 for the one it was created with, one more each time a secret is
+    /// stored under its name again. Set when it was just stored; null from a list, and from a Queuey that predates
+    /// versions.
+    /// </summary>
+    public int? Version { get; set; }
+
+    /// <summary>
+    /// When it was just stored: true when the name was new in the workspace, false when the secret replaced the one the
+    /// credential under that name held, which keeps its id. Null from a list, and from a Queuey that predates it.
+    /// </summary>
+    public bool? Created { get; set; }
+
+    /// <summary>
+    /// When it was just stored: true when the workspace's ingress waited for a credential by this name and verifies with it
+    /// now. Null from a list, and from a Queuey that predates it, where the next <c>apply</c> points the ingress at it.
+    /// </summary>
+    public bool? BoundWorkspace { get; set; }
+
+    /// <summary>When it was just stored: the queues (<c>que_…</c>) whose ingress waited for it and verifies with it now.</summary>
+    public IReadOnlyList<string>? BoundQueues { get; set; }
 }
 
 // ── wire shapes ───────────────────────────────────────────────────────────────
@@ -198,6 +220,10 @@ internal sealed class CredentialWireResponse
     public string? Name { get; set; }
     public string? Type { get; set; }
     public string? KeyId { get; set; }
+    public int? Version { get; set; }
+    public bool? Created { get; set; }
+    public bool? BoundWorkspace { get; set; }
+    public List<string>? BoundQueues { get; set; }
 }
 
 /// <summary>Wire shape of <c>GET /tenants/{ten}/config</c> — the workspace's delivery + policy.</summary>

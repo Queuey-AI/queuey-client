@@ -567,13 +567,22 @@ queuey plan                    # shows the queue's ingress URL before it exists
 queuey apply                   # creates the queue; its ingress refuses every event until stripe-whsec is stored
 stripe listen --forward-to <ingress URL>        # prints a test signing secret, whsec_…
 STRIPE_WHSEC=whsec_… queuey credentials set --name stripe-whsec --type HmacSigning --key-id stripe-whsec --from-env STRIPE_WHSEC
-queuey apply                   # points the ingress at the stored secret
+                               # the ingress verifies with it at once (a Queuey that predates this: run apply again)
 queuey listen --queue stripe --forward-to http://localhost:5000
 ```
 
+**The one who sets this up never needs to hold the secret.** An agent, or a script, runs
+`queuey credentials request stripe-whsec --type HmacSigning` instead of `credentials set`. Queuey opens a
+one-time request and the command prints the console link for it. A person who can manage the workspace's
+credentials signs in there and pastes the value, which is stored exactly as `credentials set` stores it, and the
+ingress waiting for the name verifies with it at once. The value never passes through the command, the key or
+its logs, and nothing shows it again. The link works once, for a day; asking again for the same name while it
+is open prints the same link.
+
 **A credential that is not stored yet is accepted.** `apply` keeps the name the ingress waits for, and
-the ingress refuses every event until a credential by that name is stored and `apply` runs again, which
-points the ingress at it. The plan, `apply` and Queuey's setup review all say so, with the command that
+the ingress refuses every event until a credential by that name is stored. Storing it, with `credentials set`
+or by a person fulfilling `credentials request`, points the ingress at it at once; with a Queuey that predates
+credential requests, `apply` must run again to do that. The plan, `apply` and Queuey's setup review all say so, with the command that
 stores it, and `apply --check` reports drift once it is stored. `template` is one of Queuey's signed-request
 templates; `queuey` is Queuey's own scheme, which verifies with the sending API client's signing key and
 takes no `credentialRef`. A `signedRequest` is checked while `authMode` is `SignedRequest` or
@@ -918,6 +927,7 @@ carries the per-flag detail this table leaves out.
 | Command | What it does |
 | --- | --- |
 | `credentials set` | Store a delivery secret under a name a deployment file can refer to |
+| `credentials request` | Ask a person to paste a secret in the Queuey console, so you never hold it |
 | `credentials list` | List stored credentials — names and types, never values |
 | `keys mint` | Mint an ingress signing key so a producer can publish with HMAC |
 
@@ -1028,7 +1038,9 @@ purpose: a pipeline key that could hand out credentials would turn repo access i
 Mint once from an admin credential and put the result in your secret store.
 
 **`credentials set` reads the secret from the environment, never an argument.** Arguments land in
-shell history and CI logs.
+shell history and CI logs. Setting a name the workspace has gives that credential the new value as a new version
+of its secret, under the same id, so everything that refers to it uses it. When the value is not yours to hold,
+`credentials request` asks the person who has it to paste it in the console instead.
 
 **`pull` won't overwrite.** Use `--stdout` and diff it first — replacing a committed declaration is
 how an intentional, not-yet-applied edit disappears.
