@@ -34,6 +34,24 @@ public class DeploymentPlanHashTests
             """{"x":[{"a":1},{"a":2,"b":1}]}""",
             "sha256:8a809cb89b4ca5f54646f907227015a8f06c72c7cd2cd4854ed2932ada74682f"
         },
+        // Queuey F2.3-review (2026-10-06): tall utenfor det decimal rommer, skrives med double sin rundtur-form, med eksponent.
+        {
+            """{"m":79228162514264337593543950336,"n":1E+30,"o":-1.5e+40}""",
+            """{"m":7.922816251426434E+28,"n":1E+30,"o":-1.5E+40}""",
+            "sha256:a629233c97e218162ba87bbedabb577a63e12535b8ff315b8b842e1efa4a4628"
+        },
+        // Tall mindre enn decimal sin minste enhet (1E-28) blir 0; 1E-28 skrives ut i sin helhet.
+        {
+            """{"t":1E-30,"u":-1E-30,"v":1E-28,"w":0.00010}""",
+            """{"t":0,"u":0,"v":0.0000000000000000000000000001,"w":0.0001}""",
+            "sha256:2d35ea9bc29330685800a9f0ae447e0a6d03507a30c606a6f20cf5bc390793cc"
+        },
+        // Navn sorteres ordinalt på UTF-16-enheter: et tegn utenfor BMP (et surrogatpar, 0xD83D…) kommer før U+FFFD.
+        {
+            """{"\uFFFD":1,"\uD83D\uDE00":2,"a":3}""",
+            "{\"a\":3,\"\U0001F600\":2,\"\uFFFD\":1}",
+            "sha256:76d5a5feb9c236eda85f03c6db96116dda55470ad65eca7a538fcf544a0de282"
+        },
     };
 
     [Theory]

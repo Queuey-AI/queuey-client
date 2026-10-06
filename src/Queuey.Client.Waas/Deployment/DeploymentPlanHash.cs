@@ -16,9 +16,12 @@ namespace Queuey.Client.Waas;
 
 /// <summary>
 /// The canonical text of a JSON value, version 1, and its SHA-256. The same value gives the same text whatever order its
-/// members or elements came in: objects drop members whose value is null and sort the rest by name (ordinal), every array
-/// sorts its elements by their canonical text, strings escape only <c>"</c>, <c>\</c> and control characters, and numbers
-/// are written without exponent, sign of zero or trailing zeros. Queuey computes state hashes with the same rules.
+/// members or elements came in: objects drop members whose value is null and sort the rest by name, ordinally over UTF-16
+/// code units (a character outside the BMP sorts by its surrogates); every array sorts its elements by their canonical text;
+/// strings escape only <c>"</c>, <c>\</c> and control characters. A number <c>decimal</c> holds is written in plain decimal
+/// form without sign of zero or trailing zeros; one smaller in size than <c>decimal</c>'s smallest unit (1E-28) is
+/// <c>0</c>, and one larger than <c>decimal</c> holds is written in <c>double</c>'s round-trip form as .NET Core writes it,
+/// with an exponent (<c>1E+30</c>). Queuey computes state hashes with the same rules and the same test vectors.
 /// </summary>
 public static class CanonicalJson
 {
