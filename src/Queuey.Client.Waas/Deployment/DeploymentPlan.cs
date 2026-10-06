@@ -262,9 +262,23 @@ internal sealed class DeploymentPlanner
         ListenerEnvironment? listenerEnvironment = null;
         if (planned.Any(p => p.Kind == DeploymentDeliveryKind.LocalForward && !existing.ContainsKey(p.Definition.Name)))
         {
-            listenerEnvironment = !skipsWorkspace && file.Workspace?.EnvironmentToSend is { } declared
-                ? new ListenerEnvironment(declared, FromFile: true)
-                : new ListenerEnvironment((await _controlPlane.GetTenantConfigAsync(tenant, ct).ConfigureAwait(false)).Environment, FromFile: false);
+            if (!skipsWorkspace && file.Workspace?.EnvironmentToSend is { } declared)
+                listenerEnvironment = new ListenerEnvironment(declared, FromFile: true);
+            else
+            {
+                // GET /tenants/{t}/config krever tenant.write (review av #62): en nøkkel med queue.write uten den fikk 403, og
+                // hele planen feilet, mens apply hadde gått gjennom. Da hoppes forsjekken over, og steget sier det, som når
+                // credential-lista ikke kan leses (CredentialResolver). Apply får Queueys avslag selv.
+                try
+                {
+                    listenerEnvironment = new ListenerEnvironment(
+                        (await _controlPlane.GetTenantConfigAsync(tenant, ct).ConfigureAwait(false)).Environment, FromFile: false);
+                }
+                catch (QueueyForbiddenException)
+                {
+                    listenerEnvironment = ListenerEnvironment.Unread;
+                }
+            }
         }
 
         // Apply sender workspacets levering før køene, så en base-URL i fila er et mål for hver kø uten egen absolutt URL,
@@ -451,12 +465,14 @@ internal sealed class DeploymentPlanner
             if (plan.Ingress?.SignedRequest?.CredentialRef is { } awaited && !awaited.StartsWith("cred_", StringComparison.Ordinal)
                 && !deliveries.KnownCredential(awaited))
                 notes.Add(AwaitedCredentialNote(awaited, storing));
+            if (forwards && listenerEnvironment is { IsUnread: true })
+                notes.Add(ListenerEnvironment.UnreadNote);
 
             steps.Add(new DeploymentPlanStep
             {
                 Target = target, Aspect = "queue", Creates = true, Notes = notes,
                 Desired = DesiredForNewQueue(plan, deliveries),
-                Error = forwards && listenerEnvironment is { AllowsLocalForward: false } environment
+                Error = forwards && listenerEnvironment is { IsUnread: false, AllowsLocalForward: false } environment
                     ? LocalForwardNeedsDevWorkspace(name, tenant, environment)
                     : plan.Mode == DeploymentQueueMode.Deliver && !hasDestination ? DeliverWithoutDestination(name) : null,
             });
@@ -552,9 +568,20 @@ internal sealed class DeploymentPlanner
         SuggestedAction = "Give it a delivery.url, or set workspace.delivery.baseUrl.",
     };
 
-    /// <summary>The environment the workspace has after the apply, for a new queue that would forward: the file's, or the stored one.</summary>
-    private sealed record ListenerEnvironment(string? Value, bool FromFile)
+    /// <summary>
+    /// The environment the workspace has after the apply, for a new queue that would forward: the file's, the stored one, or
+    /// <see cref="Unread"/> when the caller may not read it.
+    /// </summary>
+    private sealed record ListenerEnvironment(string? Value, bool FromFile, bool IsUnread = false)
     {
+        /// <summary>The workspace's environment could not be read: reading it needs <c>tenant.write</c>.</summary>
+        public static readonly ListenerEnvironment Unread = new(null, FromFile: false, IsUnread: true);
+
+        /// <summary>What a new queue's step says when the environment could not be read.</summary>
+        public const string UnreadNote =
+            "Plan could not read the workspace's environment (needs tenant.write); apply checks it. Only a workspace marked dev "
+            + "forwards to a local listener.";
+
         /// <summary>Only a workspace marked dev forwards to a listener; one without an environment counts as prod.</summary>
         public bool AllowsLocalForward => string.Equals(Value?.Trim(), "dev", StringComparison.OrdinalIgnoreCase);
     }

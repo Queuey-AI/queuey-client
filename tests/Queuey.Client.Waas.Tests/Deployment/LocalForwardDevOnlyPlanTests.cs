@@ -91,6 +91,31 @@ public class LocalForwardDevOnlyPlanTests
     }
 
     [Fact]
+    public async Task A_key_without_tenant_write_gets_the_plan_with_a_note_instead_of_a_refusal_for_the_whole_plan()
+    {
+        // Review av #62: GET /tenants/{t}/config krever tenant.write. En nøkkel med queue.write uten den fikk 403, og hele planen
+        // feilet, mens apply hadde gått gjennom. Nå hoppes forsjekken over, og steget sier at apply sjekker det.
+        var server = new StubHttpMessageHandler(req => $"{req.Method.Method} {req.RequestUri!.AbsolutePath}" switch
+        {
+            "GET /tenants/ten_abc/queues" => StubHttpMessageHandler.Json(HttpStatusCode.OK, Array.Empty<object>()),
+            "GET /tenants/ten_abc/config" => StubHttpMessageHandler.Json(HttpStatusCode.Forbidden,
+                new { error = new { code = "forbidden", message = "You are not authorized to perform this action." } }),
+            "PATCH /tenants/ten_abc/policy" => StubHttpMessageHandler.Json(HttpStatusCode.OK, new { dryRun = true, target = "workspace ten_abc", changes = Array.Empty<object>(), notes = Array.Empty<string>() }),
+            "PUT /queues" => StubHttpMessageHandler.Json(HttpStatusCode.OK, new { dryRun = true, publicId = (string?)null, displayName = "stripe", created = true, hasDeliveryTarget = false }),
+            string other => throw new InvalidOperationException("unexpected " + other),
+        });
+
+        DeploymentPlan plan = await PlanAsync(server);
+
+        DeploymentPlanStep create = Assert.Single(plan.Steps, s => s.Creates);
+        Assert.Null(create.Error);
+        Assert.Contains(create.Notes, n => n.StartsWith("Plan could not read the workspace's environment (needs tenant.write); apply checks it.",
+            StringComparison.Ordinal));
+        Assert.Contains(create.Notes, n => n.Contains("deliver to a local listener", StringComparison.Ordinal));
+        Assert.True(plan.WouldSucceed);
+    }
+
+    [Fact]
     public async Task A_plan_without_a_new_queue_that_forwards_does_not_read_the_workspace()
     {
         var reads = new List<string>();
