@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -192,6 +193,8 @@ public sealed class ListenCommandTests
         { new[] { "listen", "--json" }, "missing_argument", ExitCodes.Usage },
         { new[] { "listen", "--json", "--forward-to", "http://localhost:5000", "--config", Path.Combine(Path.GetTempPath(), "queuey-cli-tests-no-config.json") }, "config_error", ExitCodes.Configuration },
         { CliHarness.With("listen", "--json", "--forward-to", "http://localhost:5000", "--queue", "orders"), "missing_argument", ExitCodes.Usage },
+        // Re-review av #50, K2: konfigurasjonen leses også inne i økten sin feilhåndtering.
+        { new[] { "listen", "--json", "--forward-to", "http://localhost:5000", "--tenant", "orders" }, "invalid_value", ExitCodes.Usage },
     };
 
     [Theory]
@@ -304,6 +307,87 @@ public sealed class ListenCommandTests
         JsonElement line = Assert.Single(Lines(stdout));
         Assert.Equal("lost", line.GetProperty("type").GetString());
         Assert.Equal("que_orders", line.GetProperty("queue").GetString());
+    }
+
+    private const string ListeningLine = "{\"schemaVersion\":1,\"type\":\"listening\"}";
+    private const string DeliveryLine = "{\"schemaVersion\":1,\"type\":\"delivery\"}";
+
+    [Fact]
+    public async Task A_reader_that_closes_its_end_of_the_pipe_ends_the_session_instead_of_being_written_to_forever()
+    {
+        // Re-review av #50, K3b: Console.Out svelger EPIPE, så `listen --json | head -n 1` ble aldri ferdig. Her leser head én
+        // linje og avslutter, som i et agentskript.
+        if (OperatingSystem.IsWindows())
+            return;
+
+        using var head = Process.Start(new ProcessStartInfo("head", "-n 1")
+        {
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+        })!;
+        var writer = new LineWriter(head.StandardInput);
+
+        writer.WriteLine(ListeningLine);
+        await head.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        for (int i = 0; i < 50 && !writer.Gone.IsCompleted; i++)
+        {
+            writer.WriteLine(DeliveryLine);
+            await Task.Delay(20);
+        }
+
+        string why = await writer.Gone.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Contains("closed", why);
+    }
+
+    [Fact]
+    public async Task A_reader_that_stops_reading_never_holds_up_the_session()
+    {
+        // Re-review av #50, K3b: en full pipe blokkerte handleren, så eventene etter gikk til DLQ.
+        using var stuck = new StuckWriter();
+        var writer = new LineWriter(stuck, capacity: 3);
+
+        var sw = Stopwatch.StartNew();
+        for (int i = 0; i < 10; i++)
+            writer.WriteLine(DeliveryLine);
+        sw.Stop();
+
+        string why = await writer.Gone.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Contains("not being read", why);
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(1), $"writing waited {sw.Elapsed} on a reader that does not read");
+    }
+
+    [Fact]
+    public void Nothing_is_written_after_the_line_that_ends_the_stream()
+    {
+        // Re-review av #50: en handler som fortsatt holder på når økten slutter, skriver ikke en delivery etter siste linje.
+        var (stdout, stderr) = (new StringWriter(), new StringWriter());
+        var output = new ListenOutput(json: true, stdout, stderr);
+
+        output.Closed("stopped", null, forwarded: 1);
+        output.Delivery(Envelope(signatureHeaders: null), Answered);
+        output.Superseded("late", forwarded: 1);
+
+        JsonElement line = Assert.Single(Lines(stdout));
+        Assert.Equal("closed", line.GetProperty("type").GetString());
+    }
+
+    /// <summary>A reader that never takes anything: every write waits until the writer is disposed.</summary>
+    private sealed class StuckWriter : TextWriter
+    {
+        private readonly TaskCompletionSource _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override Encoding Encoding => Encoding.UTF8;
+
+        public override Task WriteLineAsync(string? value) => _released.Task;
+
+        public override Task FlushAsync() => _released.Task;
+
+        protected override void Dispose(bool disposing)
+        {
+            _released.TrySetResult();
+            base.Dispose(disposing);
+        }
     }
 
     private sealed class NeverAnswers : HttpMessageHandler

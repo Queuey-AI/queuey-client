@@ -48,7 +48,19 @@ internal static class ListenCommand
         // Med --json er hver linje på stdout én hendelse, også en feil før økten (review av queuey-client #50, K2): et
         // agentprogram som leser strømmen, får én refused-linje i stedet for et objekt over flere linjer.
         bool json = CliErrors.WantsJson(args);
-        var output = new ListenOutput(json, Console.Out, Console.Error);
+        var output = new ListenOutput(json, new LineWriter(LineWriter.OpenStdout()), Console.Error);
+        try
+        {
+            return await RunAsync(args, json, output);
+        }
+        finally
+        {
+            await output.CompleteAsync();
+        }
+    }
+
+    private static async Task<int> RunAsync(string[] args, bool json, ListenOutput output)
+    {
         int Refuse(string code, string message, string? action, int exitCode)
         {
             if (!json)
@@ -78,16 +90,19 @@ internal static class ListenCommand
         // bridging to a fixed local endpoint (e.g. a local ingress route /events/{tenant}/{queue}).
         bool preservePath = !(map.Has("forward-exact") || map.Has("exact"));
 
-        ResolvedConfig config = CliHost.Resolve(map);
-        if (string.IsNullOrWhiteSpace(config.ApiKey))
-            return Refuse("config_error", "An API key is required (--api-key, QUEUEY_API_KEY, or queuey.json).", null, ExitCodes.Configuration);
-
+        ResolvedConfig config;
         ListenTarget target;
         try
         {
+            // Konfigurasjonen leses inne i try (re-review av #50, K2): en --tenant som ikke er ten_…, en ugyldig --api-base og
+            // en queuey.json som ikke kan leses, ga før et JSON-objekt over flere linjer fra CliEntry.
+            config = CliHost.Resolve(map);
+            if (string.IsNullOrWhiteSpace(config.ApiKey))
+                return Refuse("config_error", "An API key is required (--api-key, QUEUEY_API_KEY, or queuey.json).", null, ExitCodes.Configuration);
+
             target = await ResolveTargetAsync(map, config);
         }
-        // Uten --json skriver CliEntry feilen, som for hver annen kommando.
+        // Uten --json skriver CliEntry feilen, som for hver annen kommando, med de samme kodene som her.
         catch (CliUsageException ex) when (json)
         {
             return Refuse(ex.Code, ex.Message, ex.Action, ExitCodes.Usage);
@@ -103,6 +118,20 @@ internal static class ListenCommand
         catch (HttpRequestException ex) when (json)
         {
             return Refuse("unreachable", $"Could not reach Queuey: {ex.Message}", "Check --api-base (QUEUEY_API_BASE) and the network.", ExitCodes.RuntimeError);
+        }
+        catch (TaskCanceledException) when (json)
+        {
+            return Refuse("timeout", "The request timed out.", null, ExitCodes.RuntimeError);
+        }
+        catch (CliFileException ex) when (json)
+        {
+            return Refuse(ex.Code, ex.Message, ex.Action, ExitCodes.Configuration);
+        }
+        catch (Exception ex) when (json)
+        {
+            return Refuse("internal_error", $"{ex.GetType().Name}: {ex.Message}",
+                "This is a bug in the queuey CLI. Run the command again without --json for the stack trace, and report it.",
+                ExitCodes.RuntimeError);
         }
 
         if (preservePath && forwardUri.AbsolutePath.Trim('/').Length > 0)
@@ -192,15 +221,15 @@ internal static class ListenCommand
             if (string.Equals(env.Mode, "Redirect", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(env.CorrelationId))
                 await AckAsync(connection, env.CorrelationId, result);
 
-            try { output.Delivery(env, result); }
-            catch (IOException) { ended.TrySetResult(new ListenEnd("output_closed")); }
+            output.Delivery(env, result);
         });
 
-        connection.On<ListenLost>("lost", lost =>
-        {
-            try { output.Lost(lost); }
-            catch (IOException) { ended.TrySetResult(new ListenEnd("output_closed")); }
-        });
+        connection.On<ListenLost>("lost", lost => output.Lost(lost));
+
+        // Ingen leser lenger (pipen er lukket, eller den leser ikke): økten stopper og frigjør køen (re-review av #50, K3b).
+        _ = output.Gone.ContinueWith(
+            gone => ended.TrySetResult(new ListenEnd("output_closed", gone.Result)),
+            CancellationToken.None, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
 
         connection.Reconnecting += _ =>
         {

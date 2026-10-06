@@ -270,8 +270,9 @@ LISTEN
                  status, durationMs, signatureHeaders; path and localUrl without the query or a
                  part that may be a secret), lost when a workspace session loses a queue, and
                  one last line: refused (also for an error before the session), superseded, or
-                 closed. Exit 0 after Ctrl-C, 1 when refused, taken over or the connection is
-                 lost for good, 2 on a usage error, 3 on a key error, 143 after SIGTERM.
+                 closed. Output nobody reads any more (a closed pipe) stops the session too.
+                 Exit 0 after Ctrl-C, 1 when refused, taken over, the connection is lost for good
+                 or the output is gone, 2 on a usage error, 3 on a key error, 143 after SIGTERM.
 
 REPLAY
   queuey replay <event-id> --queue <que_...> [--json]

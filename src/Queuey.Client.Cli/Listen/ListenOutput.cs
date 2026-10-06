@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading.Tasks;
 
 namespace Queuey.Client.Cli;
 
@@ -28,19 +29,45 @@ internal sealed class ListenOutput
     };
 
     private readonly bool _json;
-    private readonly TextWriter _out;
+    private readonly Action<string> _line;
+    private readonly LineWriter? _writer;
     private readonly TextWriter _err;
     private readonly object _gate = new();
 
+    // Satt når siste linje er skrevet (review av #50): en handler som fortsatt holder på, skriver ikke en delivery etter den.
+    private bool _ended;
+
+    /// <summary>Writes each line to <paramref name="stdout"/> at once. For tests and for errors before a session.</summary>
     public ListenOutput(bool json, TextWriter stdout, TextWriter stderr)
     {
         _json = json;
-        _out = stdout;
+        _line = line =>
+        {
+            stdout.WriteLine(line);
+            stdout.Flush();
+        };
         _err = stderr;
     }
 
+    /// <summary>Queues each line on <paramref name="stdout"/>, so writing never waits on the reader.</summary>
+    public ListenOutput(bool json, LineWriter stdout, TextWriter stderr)
+    {
+        _json = json;
+        _writer = stdout;
+        _line = stdout.WriteLine;
+        _err = stderr;
+    }
+
+    /// <summary>Completes, with why, when nobody reads the output any more. Never completes for a direct writer.</summary>
+    public Task<string> Gone => _writer?.Gone ?? new TaskCompletionSource<string>().Task;
+
+    /// <summary>Writes what is queued, within a few seconds.</summary>
+    public Task CompleteAsync() => _writer?.CompleteAsync(TimeSpan.FromSeconds(5)) ?? Task.CompletedTask;
+
     public void Listening(ListenTarget target, string scopeKey, string forwardTo, bool tookOver)
     {
+        if (Ended)
+            return;
         if (_json)
         {
             Write(new
@@ -60,16 +87,18 @@ internal sealed class ListenOutput
         lock (_gate)
         {
             if (tookOver)
-                _out.WriteLine("Took the queue over from the session that listened on it.");
+                _line("Took the queue over from the session that listened on it.");
             string what = target.Name is null ? $"{target.Kind} {target.Id}" : $"{target.Kind} {target.Name} ({target.Id})";
-            _out.WriteLine($"Listening on {what} → forwarding to {forwardTo}");
-            _out.WriteLine("Only a queue set to forward to a local listener (Local forward) sends events here. Press Ctrl-C to stop.");
-            _out.WriteLine();
+            _line($"Listening on {what} → forwarding to {forwardTo}");
+            _line("Only a queue set to forward to a local listener (Local forward) sends events here. Press Ctrl-C to stop.");
+            _line(string.Empty);
         }
     }
 
     public void Delivery(ListenEnvelope env, LocalForwardResult result)
     {
+        if (Ended)
+            return;
         string path = UrlRedaction.EndpointPath(env.OriginalUrl, env.PathAndQuery);
         if (_json)
         {
@@ -95,7 +124,7 @@ internal sealed class ListenOutput
         lock (_gate)
         {
             if (result.Error is null)
-                _out.WriteLine($"  {env.Method,-6} {path}  →  {result.Status} ({result.DurationMs}ms)  [{label}]");
+                _line($"  {env.Method,-6} {path}  →  {result.Status} ({result.DurationMs}ms)  [{label}]");
             else
                 _err.WriteLine($"  {env.Method,-6} {path}  →  {result.Status}, {result.Error}  [{label}]");
         }
@@ -104,6 +133,8 @@ internal sealed class ListenOutput
     /// <summary>A workspace session lost one of its queues to a session that took it over; it keeps listening.</summary>
     public void Lost(ListenLost lost)
     {
+        if (Ended)
+            return;
         if (_json)
         {
             Write(new { schemaVersion = JsonSchemaVersion, type = "lost", queue = lost.QueuePublicId, message = lost.Message });
@@ -116,6 +147,8 @@ internal sealed class ListenOutput
 
     public void Refused(string code, string message, string? action, DateTimeOffset? heldSinceUtc)
     {
+        if (!End())
+            return;
         if (_json)
         {
             Write(new { schemaVersion = JsonSchemaVersion, type = "refused", code, message, action, heldSinceUtc });
@@ -132,6 +165,8 @@ internal sealed class ListenOutput
 
     public void Superseded(string message, long forwarded)
     {
+        if (!End())
+            return;
         if (_json)
         {
             Write(new { schemaVersion = JsonSchemaVersion, type = "superseded", message, forwarded });
@@ -145,6 +180,8 @@ internal sealed class ListenOutput
     /// <param name="reason"><c>stopped</c> (Ctrl-C), <c>terminated</c> (SIGTERM) or <c>connection_lost</c> (it will not come back).</param>
     public void Closed(string reason, string? message, long forwarded)
     {
+        if (!End())
+            return;
         if (_json)
         {
             Write(new { schemaVersion = JsonSchemaVersion, type = "closed", reason, message, forwarded });
@@ -155,8 +192,8 @@ internal sealed class ListenOutput
         {
             if (message is not null)
                 _err.WriteLine(message);
-            _out.WriteLine();
-            _out.WriteLine($"Stopped. Forwarded {forwarded} event(s).");
+            _line(string.Empty);
+            _line($"Stopped. Forwarded {forwarded} event(s).");
         }
     }
 
@@ -179,13 +216,27 @@ internal sealed class ListenOutput
                .Distinct(StringComparer.OrdinalIgnoreCase)
                .ToList();
 
+    private bool Ended
+    {
+        get { lock (_gate) return _ended; }
+    }
+
+    /// <summary>Marks the stream as ended; false when it already was, so only one line ends it.</summary>
+    private bool End()
+    {
+        lock (_gate)
+        {
+            if (_ended)
+                return false;
+            _ended = true;
+            return true;
+        }
+    }
+
     private void Write(object line)
     {
         string text = JsonSerializer.Serialize(line, Line);
         lock (_gate)
-        {
-            _out.WriteLine(text);
-            _out.Flush();
-        }
+            _line(text);
     }
 }

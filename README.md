@@ -918,7 +918,8 @@ Build, Full access or ProducerAdmin key).
 workspace session loses one of its queues, and one last line: `refused` (it never listened, an error
 before the session included), `superseded` (another session took the queue over) or `closed`
 (stopped, terminated, or the connection was lost for good). The last line comes after the session
-has stopped, so the queue is free when you read it. `path` and `localUrl` leave out the query and
+has stopped, so the queue is free when you read it. When whatever reads the output closes it (as
+`head -n 5` does) or stops reading, the session stops and frees the queue too, with exit 1. `path` and `localUrl` leave out the query and
 any part of the path that may be a secret; your app still gets the whole URL. Exit codes: 0 after
 Ctrl-C, 1 when refused, taken over or the connection is lost for good, 2 on a usage error, 3 when
 the key is missing or refused, and 143 after SIGTERM.
