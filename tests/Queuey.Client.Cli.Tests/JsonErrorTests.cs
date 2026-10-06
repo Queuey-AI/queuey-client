@@ -165,8 +165,8 @@ public sealed class JsonErrorTests : IDisposable
             "queues.orders.ingress.authMode must be one of None, ApiKey, SignedRequest, ApiKeyAndSignedRequest; got 'Kerberos'." },
         { new[] { "plan" }, """{ "queues": { "orders": { "delivery": { "authMode": "Kerberos" } } } }""",
             "queues.orders.delivery.authMode must be one of " },
-        { new[] { "apply", "--check" }, """{ "queues": { "orders": { "delivery": { "url": "https://x.example/${QUEUEY_TEST_SURELY_UNSET}" } } } }""",
-            "Environment variable 'QUEUEY_TEST_SURELY_UNSET' is referenced by queues.orders.delivery.url" },
+        { new[] { "apply", "--check" }, """{ "queues": { "orders": { "delivery": { "url": "https://x.example/${TEST_SURELY_UNSET_PATH}" } } } }""",
+            "Environment variable 'TEST_SURELY_UNSET_PATH' is referenced by queues.orders.delivery.url" },
     };
 
     [Theory]

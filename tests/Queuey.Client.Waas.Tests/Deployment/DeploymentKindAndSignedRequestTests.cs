@@ -360,11 +360,11 @@ public class DeploymentKindAndSignedRequestTests
         var api = new Api();
         api.Answers["GET /queues/que_stripe/config"] = () => StubHttpMessageHandler.Json(HttpStatusCode.OK,
             QueueConfig(signedRequest: new { template = "stripe", credentialRef = "cred_live", pendingCredential = (string?)null }));
-        Environment.SetEnvironmentVariable("QUEUEY_TEST_STRIPE_SECRET_NAME", "stripe-whsec-live");
+        Environment.SetEnvironmentVariable("TEST_STRIPE_WHSEC_CREDENTIAL", "stripe-whsec-live");
         try
         {
             QueueSyncResult result = await Apply(api, """
-            { "queues": { "stripe": { "ingress": { "signedRequest": { "template": "stripe", "credentialRef": "${QUEUEY_TEST_STRIPE_SECRET_NAME}" } } } } }
+            { "queues": { "stripe": { "ingress": { "signedRequest": { "template": "stripe", "credentialRef": "${TEST_STRIPE_WHSEC_CREDENTIAL}" } } } } }
             """);
 
             Assert.Equal("stripe-whsec-live", api.Body("PATCH /queues/que_stripe/ingress").GetProperty("signedRequest").GetProperty("credentialRef").GetString());
@@ -372,7 +372,7 @@ public class DeploymentKindAndSignedRequestTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("QUEUEY_TEST_STRIPE_SECRET_NAME", null);
+            Environment.SetEnvironmentVariable("TEST_STRIPE_WHSEC_CREDENTIAL", null);
         }
     }
 

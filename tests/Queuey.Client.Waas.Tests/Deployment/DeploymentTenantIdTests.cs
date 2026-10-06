@@ -36,7 +36,7 @@ public class DeploymentTenantIdTests
     [Fact]
     public void A_tenant_from_a_variable_is_checked_once_it_is_expanded()
     {
-        DeploymentFile file = DeploymentFile.Parse("""{ "tenant": "${QUEUEY_TENANT_ID}", "queues": {} }""");
+        DeploymentFile file = DeploymentFile.Parse("""{ "tenant": "${DEPLOY_TENANT_ID}", "queues": {} }""");
 
         file.Resolve();   // som fila står, i en dry run
         file.Expand(_ => "ten_staging").Resolve();

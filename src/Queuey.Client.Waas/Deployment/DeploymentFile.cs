@@ -287,13 +287,22 @@ public sealed class DeploymentFile
     /// <summary>
     /// Expands every <c>${VAR}</c> in the file against the environment, returning the file with the
     /// values a deploy will actually send. An unset variable throws — see
-    /// <see cref="DeploymentVariables"/> for why that is not an empty string.
+    /// <see cref="DeploymentVariables"/> for why that is not an empty string. A file that is already expanded, by this or
+    /// by <see cref="ForProfile"/>, is returned as it is: a value a variable gave is never expanded again.
     /// </summary>
     /// <param name="lookup">Variable resolver; defaults to the process environment.</param>
     public DeploymentFile Expand(Func<string, string?>? lookup = null) => ExpandCore(lookup, notSetHint: null);
 
+    // Herding før tag (review av #53, 2026-10-06): med en profil utvidet CLI-en fila, og biblioteket utvidet den igjen i
+    // ApplyDeploymentAsync, PlanDeploymentAsync og CheckDeploymentAsync. En verdi fra miljøet som selv inneholdt ${X}, ble da
+    // utvidet i andre runde, fra prosessens miljø. En utvidet fil er merket, og går rett gjennom.
+    internal bool IsExpanded { get; private set; }
+
     private DeploymentFile ExpandCore(Func<string, string?>? lookup, string? notSetHint)
     {
+        if (IsExpanded)
+            return this;
+
         string? E(string? value, string context) => DeploymentVariables.Expand(value, lookup, context, notSetHint);
 
         var expanded = new DeploymentFile
@@ -355,6 +364,7 @@ public sealed class DeploymentFile
             };
         }
 
+        expanded.IsExpanded = true;
         return expanded;
     }
 
