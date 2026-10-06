@@ -748,6 +748,7 @@ public sealed class QueueyService : IQueueyService
         var byName = plans.ToDictionary(p => p.Definition.Name, StringComparer.Ordinal);
 
         string tenant = file.Tenant ?? (options.DryRun ? _options.TenantPublicId ?? string.Empty : RequireTenant());
+        CredentialStoring storing = CredentialStoring.For(file);
         var existing = new Dictionary<string, QueueListItem>(StringComparer.Ordinal);
         ResolvedDeliveries? deliveries = null;
         var workspaceWarnings = new List<string>();
@@ -765,7 +766,7 @@ public sealed class QueueyService : IQueueyService
 
             // Every credential name, before the first write: a name that is missing fails the run
             // here, with nothing sent, instead of halfway through it.
-            deliveries = await new CredentialResolver(Management, tenant)
+            deliveries = await new CredentialResolver(Management, tenant, storing)
                 .ResolveAllAsync(file.Workspace?.Delivery, plans, cancellationToken).ConfigureAwait(false);
 
             // Backoff-takene også før første skriving (2026-10-05). Før feilet en ventetid Queuey avviser, først på
@@ -807,7 +808,7 @@ public sealed class QueueyService : IQueueyService
                 if (ingress.SignedRequest is not null)
                 {
                     TenantConfigResponse stored = await _controlPlane.GetTenantConfigAsync(tenant, cancellationToken).ConfigureAwait(false);
-                    if (AwaitedCredentialWarning("The workspace's ingress", "every queue that inherits it refuses every event", stored.Ingress) is { } waiting)
+                    if (AwaitedCredentialWarning("The workspace's ingress", "every queue that inherits it refuses every event", stored.Ingress, storing) is { } waiting)
                         workspaceWarnings.Add(waiting);
                 }
             }
@@ -845,7 +846,7 @@ public sealed class QueueyService : IQueueyService
                     QueueApplyOutcome outcome = await ConvergeModeAsync(definition.Name, queuePublicId, tenant, plan, response,
                         response.Created ? null : row, ct).ConfigureAwait(false);
 
-                    IReadOnlyList<string> readiness = await ReadinessOfDeclarationsAsync(definition.Name, queuePublicId, plan, ct).ConfigureAwait(false);
+                    IReadOnlyList<string> readiness = await ReadinessOfDeclarationsAsync(definition.Name, queuePublicId, plan, storing, ct).ConfigureAwait(false);
                     return readiness.Count == 0 ? outcome : new QueueApplyOutcome(outcome.Warnings.Concat(readiness).ToArray(), outcome.Mode);
                 },
                 CreatedButFailed = definition =>
@@ -937,7 +938,7 @@ public sealed class QueueyService : IQueueyService
     /// makes the ingress refuse every event. Read only when the file declares one of them, so other applies cost nothing.
     /// </summary>
     private async Task<IReadOnlyList<string>> ReadinessOfDeclarationsAsync(
-        string name, string queueId, DeploymentQueuePlan? plan, CancellationToken cancellationToken)
+        string name, string queueId, DeploymentQueuePlan? plan, CredentialStoring storing, CancellationToken cancellationToken)
     {
         var warnings = new List<string>();
         if (plan?.Kind == DeploymentDeliveryKind.LocalForward)
@@ -954,7 +955,7 @@ public sealed class QueueyService : IQueueyService
                          "to a local listener, so it keeps forwarding. Turn the workspace's forwarding off in the Queuey console.");
 
         if (plan.Ingress?.SignedRequest is not null
-            && AwaitedCredentialWarning($"Queue '{name}'", "its ingress refuses every event", config.Ingress) is { } waiting)
+            && AwaitedCredentialWarning($"Queue '{name}'", "its ingress refuses every event", config.Ingress, storing) is { } waiting)
             warnings.Add(waiting);
 
         return warnings;
@@ -964,21 +965,23 @@ public sealed class QueueyService : IQueueyService
     /// The readiness warning for an ingress that waits for a credential: it checks signatures, and the credential it names
     /// is not stored yet. Null otherwise.
     /// </summary>
-    internal static string? AwaitedCredentialWarning(string who, string consequence, IngressResponse? ingress)
+    internal static string? AwaitedCredentialWarning(string who, string consequence, IngressResponse? ingress, CredentialStoring storing)
     {
         if (ingress?.SignedRequest is not { PendingCredential: { Length: > 0 } awaited } signed || !ChecksSignatures(ingress.AuthMode))
             return null;
 
         // Queuey F2.3-review (2026-10-06): navnet er lagret av en med skrivetilgang. Det står i teksten og i kommandoen bare
         // når det har den trygge formen (CredentialNameRules.Showable); ellers står en plassholder. Malen er Queuey sin.
+        // Utenfor dev limer en person inn verdien (CredentialStoring, F2.9); før sto credentials set her også i prod. Med set
+        // må en Queuey fra før credential-forespørsler ha en apply til før ingressen bruker den.
         string template = CredentialNameRules.FitsPendingShape(signed.Template) ? signed.Template! : "provider";
+        string again = storing.AsksAPerson ? "" : " Then run queuey apply again.";
         return CredentialNameRules.Showable(awaited) is { } name
             ? $"{who} verifies {template} signatures with the credential '{name}', which is not stored yet, so {consequence}. " +
-              $"Store it with queuey credentials set --name {name} --type HmacSigning --key-id {name} --from-env <VARIABLE>, " +
-              "then run queuey apply again."
+              storing.HowToStore(name, CredentialStoring.RequestDefaultType) + again
             : $"{who} verifies {template} signatures with a credential that is not stored yet, so {consequence}. Store it " +
-              "under the name ingress.signedRequest.credentialRef gives, with queuey credentials set --name <NAME> --type " +
-              "HmacSigning --key-id <NAME> --from-env <VARIABLE>, then run queuey apply again.";
+              "under the name ingress.signedRequest.credentialRef gives. " +
+              storing.HowToStore("<NAME>", CredentialStoring.RequestDefaultType) + again;
     }
 
     private static bool ChecksSignatures(string? authMode)

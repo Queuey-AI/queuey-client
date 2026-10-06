@@ -1175,9 +1175,9 @@ public sealed class AdviseIntentTests : IDisposable
         string request = "queuey credentials request orders-webhook-secret --type ApiKeyHeader --profile prod";
         Assert.Equal(request, Assert.Single(design.Credentials).Store);
         string step = Assert.Single(design.NextSteps, s => s.StartsWith("Store the secret the handler checks", StringComparison.Ordinal));
-        Assert.Contains(request + " prints the link", step, StringComparison.Ordinal);
-        Assert.Contains("Only a value that is yours to hold goes in with queuey credentials set --profile prod --name orders-webhook-secret " +
-                        "--type ApiKeyHeader --from-env ORDERS_WEBHOOK_SECRET", step, StringComparison.Ordinal);
+        Assert.Contains(request + " prints a link for them", step, StringComparison.Ordinal);
+        Assert.Contains("A value that is yours to hold goes in with queuey credentials set --profile prod --name orders-webhook-secret " +
+                        "--type ApiKeyHeader --from-env ORDERS_WEBHOOK_SECRET instead.", step, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1188,7 +1188,8 @@ public sealed class AdviseIntentTests : IDisposable
         FlowDesign design = Advise("""{ "source": { "kind": { "value": "supabase", "provenance": "stated" } } }""").Design!;
 
         string step = Assert.Single(design.NextSteps, s => s.StartsWith("Store the secret the handler checks", StringComparison.Ordinal));
-        Assert.Contains("--from-env ORDERS_WEBHOOK_SECRET, from a shell where the variable holds it", step, StringComparison.Ordinal);
+        Assert.Contains("Run queuey credentials set --profile dev --name orders-webhook-secret --type ApiKeyHeader --from-env " +
+                        "ORDERS_WEBHOOK_SECRET from a shell where ORDERS_WEBHOOK_SECRET holds the value", step, StringComparison.Ordinal);
         Assert.Contains("a person pastes it instead: queuey credentials request orders-webhook-secret --type ApiKeyHeader --profile dev",
             step, StringComparison.Ordinal);
     }

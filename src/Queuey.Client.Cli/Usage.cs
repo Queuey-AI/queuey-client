@@ -164,7 +164,9 @@ APPLY
                  ingress.signedRequest { template, credentialRef } verifies a provider's
                  signature, such as Stripe's. A credential that is not stored yet is
                  accepted: the ingress refuses every event until it is stored and apply runs
-                 again, and apply says so with the command that stores it.
+                 again, and apply says so with the command that stores it: credentials
+                 request, where a person pastes the value, unless the file's
+                 workspace.environment is dev, where credentials set stores a value you hold.
                  The workspace is the file's ""tenant"" when it names one, else --tenant /
                  QUEUEY_TENANT / queuey.json. When --tenant or QUEUEY_TENANT names another
                  workspace than the file, apply fails and names both. plan and verify use the

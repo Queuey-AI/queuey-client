@@ -37,9 +37,9 @@ internal static class CredentialsCommand
 
     /// <summary>
     /// The type <c>credentials request</c> asks for without <c>--type</c>: a signing secret, which Queuey never sends as it is.
-    /// The same default as Queuey's.
+    /// The same default as Queuey's, and as the commands advise, plan and apply suggest (<see cref="CredentialStoring"/>).
     /// </summary>
-    internal const string RequestDefaultType = "HmacSigning";
+    internal const string RequestDefaultType = CredentialStoring.RequestDefaultType;
 
     /// <summary>The credential types Queuey stores. Mirrors the server's <c>CredentialType</c>.</summary>
     private static readonly string[] CredentialTypes =

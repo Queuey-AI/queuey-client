@@ -92,8 +92,10 @@ public static class FlowDesigner
         private readonly List<CredentialNeed> _credentials = new();
 
         // To måter å lagre en credential på (F2.9, playbookene fra F2.11, 2026-10-06): set leser en verdi den som kjører,
-        // holder, fra miljøet; request skriver ut en lenke der en person limer inn en verdi agenten aldri skal se.
-        private readonly Dictionary<string, (string Set, string Request)> _storeCommands = new(StringComparer.Ordinal);
+        // holder, fra miljøet; request skriver ut en lenke der en person limer inn en verdi agenten aldri skal se. Regelen og
+        // kommandoene er de plan og apply foreslår (CredentialStoring i Waas), så de ikke glir fra hverandre.
+        private readonly CredentialStoring _storing;
+        private readonly Dictionary<string, (string Type, string Variable)> _stored = new(StringComparer.Ordinal);
         private readonly List<CodeStep> _code = new();
         private readonly List<string> _next = new();
         private readonly List<FlowConflict> _conflicts = new();
@@ -132,6 +134,7 @@ public static class FlowDesigner
             _file = facts.DeployFile;
             _portable = _file is null || _file.Profiles.Count > 0;
             _profileFlag = _portable ? $" --profile {_env}" : "";
+            _storing = new CredentialStoring(_env, _portable ? _env : null);
         }
 
         public FlowDesign? Build()
@@ -215,13 +218,10 @@ public static class FlowDesigner
                 "--event-type and the console filter on.",
                 "source.kind");
 
-            _credentials.Add(Credential(StripeCredential, "HmacSigning",
+            _credentials.Add(Credential(StripeCredential, CredentialStoring.RequestDefaultType,
                 "Stripe's webhook signing secret (whsec_…). Testing locally, it is the Stripe CLI's own, which stripe listen " +
                 "--print-secret prints; for an endpoint in Stripe's dashboard, that endpoint's own, which a person pastes.",
-                set: $"queuey credentials set{_profileFlag} --name {StripeCredential} --type HmacSigning --key-id {StripeCredential} --from-env STRIPE_WHSEC",
-                // Uten --type ber en forespørsel om en HmacSigning-hemmelighet, og en ny får navnet som nøkkel-id, som over.
-                request: $"queuey credentials request {StripeCredential}{_profileFlag}",
-                "ingress"));
+                "STRIPE_WHSEC", "ingress"));
         }
 
         private void SupabaseIngress(JsonObject ingress)
@@ -474,21 +474,18 @@ public static class FlowDesigner
             _credentials.Add(Credential(credential, type,
                 $"The secret the handler compares the {check.Header} header with" +
                 (check.SecretName is { } secretName ? $" ({secretName})." + EnvNote(secretName) : "."),
-                set: $"queuey credentials set{_profileFlag} --name {credential} --type {type} --from-env {variable}",
-                // --type må med: uten den ber en forespørsel om en HmacSigning-hemmelighet, som Queuey aldri sender som den er.
-                request: $"queuey credentials request {credential} --type {type}{_profileFlag}",
-                "delivery"));
+                variable, "delivery"));
         }
 
         /// <summary>
-        /// A credential the file names, stored the way its environment calls for: in dev, <paramref name="set"/>, which reads a
-        /// value the caller holds, such as the Stripe CLI's test secret; elsewhere <paramref name="request"/>, which prints a
-        /// link where a person pastes a value the caller never holds (F2.9).
+        /// A credential the file names, stored the way its environment calls for (<see cref="CredentialStoring"/>): in dev with
+        /// credentials set from <paramref name="variable"/>, such as the Stripe CLI's test secret; elsewhere with credentials
+        /// request, where a person pastes a value the caller never holds (F2.9).
         /// </summary>
-        private CredentialNeed Credential(string name, string type, string holds, string set, string request, string @for)
+        private CredentialNeed Credential(string name, string type, string holds, string variable, string @for)
         {
-            _storeCommands[name] = (set, request);
-            return new CredentialNeed(name, type, holds, _local ? set : request, @for);
+            _stored[name] = (type, variable);
+            return new CredentialNeed(name, type, holds, _storing.Store(name, type, variable), @for);
         }
 
         /// <summary>The check behind a shared-secret verification: the header, and where the secret comes from.</summary>
@@ -1114,14 +1111,9 @@ public static class FlowDesigner
             // En leveranse-credential slås opp av plan og apply, som stopper uten den. Stripe sin på ingressen kan vente (F2.3).
             foreach (CredentialNeed credential in _credentials.Where(c => c.For == "delivery"))
             {
-                (string set, string request) = _storeCommands[credential.Name];
-                _next.Add(_local
-                    ? $"Store the secret the handler checks before plan and apply, which look {credential.Name} up: {set}, from a " +
-                      "shell where the variable holds it, and never print it. When the value is not yours to hold, a person " +
-                      $"pastes it instead: {request}."
-                    : $"Store the secret the handler checks before plan and apply, which look {credential.Name} up. A person pastes " +
-                      $"it, so it never passes through you: {request} prints the link, and queuey credentials list{_profileFlag} " +
-                      $"--json lists {credential.Name} once it is stored. Only a value that is yours to hold goes in with {set}.");
+                (string credentialType, string variable) = _stored[credential.Name];
+                _next.Add($"Store the secret the handler checks before plan and apply, which look {credential.Name} up. " +
+                          _storing.HowToStore(credential.Name, credentialType, variable));
             }
 
             _next.Add($"queuey apply --dry-run{_profileFlag} checks the file and sends nothing. queuey plan{_profileFlag} asks Queuey " +
@@ -1134,7 +1126,8 @@ public static class FlowDesigner
             switch (_kind)
             {
                 case "stripe":
-                    (string set, string request) = _storeCommands[StripeCredential];
+                    string set = _storing.Set(StripeCredential, CredentialStoring.RequestDefaultType, "STRIPE_WHSEC");
+                    string request = _storing.Request(StripeCredential, CredentialStoring.RequestDefaultType);
                     _next.Add($"queuey apply{_profileFlag}. Until {StripeCredential} is stored, the ingress refuses every event.");
                     if (_local)
                     {

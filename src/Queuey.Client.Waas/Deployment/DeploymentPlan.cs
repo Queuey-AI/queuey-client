@@ -239,7 +239,8 @@ internal sealed class DeploymentPlanner
                 existing[name] = row;
         }
 
-        ResolvedDeliveries deliveries = await new CredentialResolver(_management, tenant)
+        CredentialStoring storing = CredentialStoring.For(file);
+        ResolvedDeliveries deliveries = await new CredentialResolver(_management, tenant, storing)
             .ResolveAllAsync(file.Workspace?.Delivery, plans, ct).ConfigureAwait(false);
 
         List<PlannedWrite> workspaceWrites = skipsWorkspace ? new List<PlannedWrite>() : WorkspaceWrites(file.Workspace, deliveries, tenant);
@@ -261,7 +262,7 @@ internal sealed class DeploymentPlanner
         bool workspaceBase = !string.IsNullOrWhiteSpace(file.Workspace?.Delivery?.BaseUrl);
 
         foreach (DeploymentQueuePlan plan in planned)
-            steps.AddRange(await PlanQueueAsync(plan, tenant, deliveries, existing, answered, workspaceBase, ct).ConfigureAwait(false));
+            steps.AddRange(await PlanQueueAsync(plan, tenant, deliveries, storing, existing, answered, workspaceBase, ct).ConfigureAwait(false));
 
         List<DeploymentPlanQueue> queues = plans.Select(p => new DeploymentPlanQueue
         {
@@ -280,6 +281,23 @@ internal sealed class DeploymentPlanner
             Steps = steps,
             Skipped = skipped,
         };
+    }
+
+    /// <summary>
+    /// The note for a queue apply would create, whose ingress names a credential that is not stored yet: its ingress would
+    /// refuse every event, and how to store the credential where the file goes.
+    /// </summary>
+    internal static string AwaitedCredentialNote(string awaited, CredentialStoring storing)
+    {
+        // Navnet er sjekket mot formen (DeploymentSignedRequest.Validate); Showable holder det ute av kommandoen like fullt.
+        // Utenfor dev limer en person inn verdien (CredentialStoring, F2.9); før sto credentials set her også i prod. Med set
+        // må en Queuey fra før credential-forespørsler ha en apply til før ingressen bruker den.
+        string note = CredentialNameRules.Showable(awaited) is { } shown
+            ? $"No credential named '{shown}' is stored in this workspace yet, so its ingress would refuse every event until it " +
+              $"is. {storing.HowToStore(shown, CredentialStoring.RequestDefaultType)}"
+            : "The credential its ingress names is not stored in this workspace yet, so its ingress would refuse every event until " +
+              $"it is. {storing.HowToStore("<NAME>", CredentialStoring.RequestDefaultType)}";
+        return storing.AsksAPerson ? note : note + " Then apply again.";
     }
 
     /// <summary>The workspace's writes, in the order apply sends them: environment, ingress, policy, delivery.</summary>
@@ -380,7 +398,7 @@ internal sealed class DeploymentPlanner
         => answered.TryGetValue(write.Key, out DryRunAnswer? known) ? known : await SendAsync(write, ct).ConfigureAwait(false);
 
     private async Task<IEnumerable<DeploymentPlanStep>> PlanQueueAsync(
-        DeploymentQueuePlan plan, string tenant, ResolvedDeliveries deliveries,
+        DeploymentQueuePlan plan, string tenant, ResolvedDeliveries deliveries, CredentialStoring storing,
         Dictionary<string, QueueListItem> existing, Dictionary<string, DryRunAnswer> answered, bool workspaceBase, CancellationToken ct)
     {
         string name = plan.Definition.Name;
@@ -418,14 +436,9 @@ internal sealed class DeploymentPlanner
             };
             if (!plan.Definition.Policy.IsEmpty || plan.Ingress is not null || plan.Delivery is not null || plan.Kind is not null)
                 notes.Add("Its policy, ingress and delivery passed the checks the CLI makes; Queuey checks the rest, such as a signing template, once the queue exists.");
-            // Navnet er sjekket mot formen (DeploymentSignedRequest.Validate); Showable holder det ute av kommandoen like fullt.
             if (plan.Ingress?.SignedRequest?.CredentialRef is { } awaited && !awaited.StartsWith("cred_", StringComparison.Ordinal)
                 && !deliveries.KnownCredential(awaited))
-                notes.Add(CredentialNameRules.Showable(awaited) is { } shown
-                    ? $"No credential named '{shown}' is stored in this workspace yet, so its ingress would refuse every event " +
-                      $"until it is: queuey credentials set --name {shown} --type HmacSigning --key-id {shown} --from-env <VARIABLE>, then apply again."
-                    : "The credential its ingress names is not stored in this workspace yet, so its ingress would refuse every event " +
-                      "until it is: queuey credentials set --name <NAME> --type HmacSigning --key-id <NAME> --from-env <VARIABLE>, then apply again.");
+                notes.Add(AwaitedCredentialNote(awaited, storing));
 
             steps.Add(new DeploymentPlanStep
             {

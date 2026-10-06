@@ -587,7 +587,9 @@ username as they are.
 the ingress refuses every event until a credential by that name is stored. Storing it, with `credentials set`
 or by a person fulfilling `credentials request`, points the ingress at it at once; with a Queuey that predates
 credential requests, `apply` must run again to do that. The plan, `apply` and Queuey's setup review all say so, with the command that
-stores it, and `apply --check` reports drift once it is stored. `template` is one of Queuey's signed-request
+stores it, and `apply --check` reports drift once it is stored. Plan and `apply` suggest `credentials request`, where a person
+pastes the value, unless the file's `workspace.environment` is `dev`: there `credentials set --from-env` stores a value you
+hold. Each names the other way too, and so does a delivery credential plan and `apply` cannot find. `template` is one of Queuey's signed-request
 templates; `queuey` is Queuey's own scheme, which verifies with the sending API client's signing key and
 takes no `credentialRef`. A `signedRequest` is checked while `authMode` is `SignedRequest` or
 `ApiKeyAndSignedRequest`, so a file that declares one with `None` or `ApiKey` beside it is refused.
