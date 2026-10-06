@@ -264,16 +264,20 @@ PUBLISH
                  Queuey's own, or wants a key and a signature together, is refused before
                  anything is sent, saying what it requires: such an event comes from the
                  provider or from the producer that signs it. A key that may only publish
-                 skips that read, and the ingress decides.
-                 --json prints { ""schemaVersion"": 1, ""tenant"", ""queue"", ""queuePublicId"",
-                 ""eventPublicId"", ""receivedAtUtc"", ""mode"", ""replayed"", ""verify"" }, never the
-                 payload or a key. eventPublicId and verify are null when the ingress
-                 answered without a receipt, as a queue whose ingress answers 204 does.
+                 skips that read, and the ingress decides; a queue name that starts like a
+                 secret (qak_, whsec_, sk_, rk_) is then refused before anything is sent.
+                 --json prints { ""schemaVersion"": 1, ""tenant"", ""tenantFrom"", ""queue"",
+                 ""queuePublicId"", ""eventPublicId"", ""receivedAtUtc"", ""mode"", ""replayed"",
+                 ""verify"" }, never the payload or a key. eventPublicId and verify are null
+                 when the ingress answered without a receipt, as a queue whose ingress
+                 answers 204 does; any other answer that is not Queuey's receipt is an error.
                  0.1.0-preview.8 printed the bare receipt, with eventId, and needed --event.
                  <queue> is the queue's name, or its id (que_…) when the key may read the
                  workspace's queues. The workspace follows apply's rule: the deployment
                  file's ""tenant"" (--deployment, default ./queuey.deploy.json) when it names
                  one, else --tenant / QUEUEY_TENANT / queuey.json, so verify finds the queue.
+                 When the deployment file decides it, publish says so before it sends, and
+                 tenantFrom names the file.
 
 EVENTS
   queuey events get <evt_…> --queue <queue> [--content] [--deployment queuey.deploy.json] [--json]

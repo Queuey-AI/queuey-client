@@ -116,6 +116,40 @@ public sealed class EventsCommandTests
         Assert.Equal("  payload: not shown. Revealing it needs event.payload.read, which this key does not have.", lines[^1]);
     }
 
+    [Fact]
+    public async Task Values_the_producer_controls_are_written_without_escape_sequences_or_line_breaks()
+    {
+        // F2.7-review (2026-10-06): source, groupKey, holdReason og errorMessage kommer fra produsenten eller mottakeren.
+        var envelope = new
+        {
+            publicId = "evt_1",
+            status = 4,
+            source = "orders-api\u001b]0;pwned\u0007\u001b[2J",
+            groupKey = "cust-1\nPublished evt_9 to orders",
+            holdReason = "held\u202Edesrever",
+            attempts = new[] { new { attemptNumber = 1, status = 2, responseCode = 500, errorMessage = "boom\u001b[31mred\r\nnext" } },
+            canRevealContent = false,
+            payloadVisibility = "shape",
+        };
+        RecordingHandler api = new(req => req switch
+        {
+            { Method.Method: "GET", Path: "/events/que_orders/evt_1" } => RecordingHandler.Json(HttpStatusCode.OK, envelope),
+            _ => throw new InvalidOperationException(req.Key),
+        });
+
+        CliRun run = await CliHarness.RunAsync(() => Events("get", "evt_1", "--queue", "que_orders"), api);
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        // Ordinalt: med kulturens sammenligning teller et formateringstegn som U+202E som tomt, og finnes overalt.
+        Assert.DoesNotContain("\u001b", run.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("\u0007", run.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("\u202E", run.Stdout, StringComparison.Ordinal);
+        Assert.Contains("  source: orders-api", run.Stdout);
+        Assert.Contains("  group key: cust-1 Published evt_9 to orders", run.Stdout);
+        Assert.Contains("boomred  next", run.Stdout);
+        Assert.DoesNotContain("\nPublished evt_9", run.Stdout);
+    }
+
     [Theory]
     [InlineData(new[] { "get", "evt_1" }, "missing_argument")]
     [InlineData(new[] { "get", "--queue", "orders" }, "missing_argument")]

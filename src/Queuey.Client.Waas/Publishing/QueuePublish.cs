@@ -109,6 +109,19 @@ internal static class QueuePublisher
             }
             : queue);
 
+        // F2.7-review (2026-10-06): et navn nøkkelen ikke kunne slå opp, går rett inn i URL-en (/events/<workspace>/<navn>).
+        // `queuey publish "$QUEUEY_API_KEY"` sendte dermed nøkkelen i stien. Et navn som starter som en hemmelighet, avvises
+        // før noe sendes, uten å gjentas. Bare de kjente prefiksene: anslaget for tilfeldige verdier ville nektet ekte kønavn.
+        if (row is null && StartsLikeASecret(name))
+            throw new QueueyException(
+                "The queue name starts like a secret (an API key or a signing secret), and this key may not read the workspace's " +
+                "queues to check it, so nothing was sent. Its value is not shown.",
+                errorCode: "queue_name_looks_like_a_secret")
+            {
+                SuggestedAction = "Give the queue's name, as its ingress URL has it (/events/<workspace>/<name>). If that is its name, " +
+                                  "publish with a key that may read the workspace's queues (queue.read), which finds the queue first.",
+            };
+
         if (row is { IngressClosed: true })
             throw new QueueyException(
                 "The queue's ingress is closed: it takes no new events while its backlog drains, so nothing was published.",
@@ -123,22 +136,23 @@ internal static class QueuePublisher
         if (ingress is not null && IngressRefusal(ingress, options, name) is { } refusal)
             throw refusal;
 
+        var publishOptions = new PublishOptions
+        {
+            ContentType = string.IsNullOrWhiteSpace(publish.ContentType) ? JsonContentType : publish.ContentType,
+            EventType = publish.EventType,
+            GroupKey = publish.GroupKey,
+            IdempotencyKey = publish.IdempotencyKey,
+            Source = publish.Source,
+        };
+
         PublishResult? receipt;
         try
         {
-            receipt = await client.Ingress.PublishAsync(name, payload, new PublishOptions
-            {
-                ContentType = string.IsNullOrWhiteSpace(publish.ContentType) ? JsonContentType : publish.ContentType,
-                EventType = publish.EventType,
-                GroupKey = publish.GroupKey,
-                IdempotencyKey = publish.IdempotencyKey,
-                Source = publish.Source,
-            }, cancellationToken).ConfigureAwait(false);
-        }
-        catch (JsonException)
-        {
-            // 2xx uten kvittering: en ingress som svarer 204, sender ingen kropp. Eventet er tatt imot, men id-en er ukjent.
-            receipt = null;
+            // Bare et tomt svar (204, eller 2xx uten kropp) er «tatt imot uten kvittering» (F2.7-review). Et 2xx med HTML eller
+            // annen JSON enn kvitteringen er ikke Queuey sitt svar, og gir en feil i stedet for en publisering som så ut til å virke.
+            receipt = client.Ingress is QueueyIngressClient ingressClient
+                ? await ingressClient.PublishForReceiptAsync(name, payload, publishOptions, cancellationToken).ConfigureAwait(false)
+                : await client.Ingress.PublishAsync(name, payload, publishOptions, cancellationToken).ConfigureAwait(false);
         }
         catch (QueueyAuthException ex) when (ex.ErrorCode is { } code && SignatureRefusals.Contains(code))
         {
@@ -224,7 +238,7 @@ internal static class QueuePublisher
         bool hasApiKey = !string.IsNullOrWhiteSpace(options.ApiKey);
         // Klienten signerer bare uten API-nøkkel: med begge satt sender den nøkkelen (QueueyClient.BuildIngressAuthenticator).
         bool signs = !hasApiKey && !string.IsNullOrWhiteSpace(options.SigningKeyId) && !string.IsNullOrWhiteSpace(options.SigningSecret);
-        string? template = Word(ingress.SignedRequest?.Template);
+        string? template = CommandWords.Word(ingress.SignedRequest?.Template);
         bool queueyTemplate = string.Equals(template, "queuey", StringComparison.OrdinalIgnoreCase);
 
         switch (ingress.AuthMode?.Trim().ToLowerInvariant())
@@ -267,31 +281,23 @@ internal static class QueuePublisher
         }
     }
 
+    // Prefiksene til hemmelighetene som oftest limes inn på feil sted: Queuey sine nøkler, en webhook-hemmelighet, og en
+    // providers nøkler (sk_ og rk_, som Stripe sine). Et kønavn med små bokstaver kan starte slik, men da finner en nøkkel som
+    // kan lese køene, det først.
+    private static readonly string[] SecretPrefixes = { "qak_", "whsec_", "sk_", "rk_" };
+
+    /// <summary>True when <paramref name="name"/> starts like a secret: an API key, a webhook signing secret or a provider's key.</summary>
+    internal static bool StartsLikeASecret(string? name)
+        => name is not null && SecretPrefixes.Any(prefix => name.Trim().StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+
     /// <summary>What to do instead, for an ingress that wants a signature this publish does not carry.</summary>
     private static string SignedEventAction(string queue, string? template)
     {
-        string shown = Word(queue) ?? "<queue>";
+        string shown = CommandWords.Word(queue) ?? "<queue>";
         return template is null
             ? $"Publish from the producer, which signs each event, and follow it with `queuey verify {shown} --event <evt_…>`; or wait " +
               $"for its next event with `queuey verify {shown} --event-type <type>`."
             : $"Trigger the event at the provider (for Stripe: stripe trigger <event>), and follow it with " +
               $"`queuey verify {shown} --event-type <type> --ingress-auth {template}`.";
-    }
-
-    // Et ord som er trygt å sette inn i en kommando: et kønavn eller en mal fra katalogen. Noe annet vises ikke.
-    private static string? Word(string? value)
-    {
-        string? trimmed = value?.Trim();
-        if (string.IsNullOrEmpty(trimmed) || trimmed!.Length > 64)
-            return null;
-
-        foreach (char c in trimmed)
-        {
-            bool allowed = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_';
-            if (!allowed)
-                return null;
-        }
-
-        return trimmed;
     }
 }

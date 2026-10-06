@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -50,6 +51,16 @@ internal static class PublishCommand
                 return CliErrors.Usage(map, "missing_value", $"--{option} takes a value.");
         }
 
+        // F2.7-review (2026-10-06): verdiene gjentas ikke. MediaTypeHeaderValue.Parse gjentok en content type den ikke kunne
+        // lese, og en idempotency-nøkkel sendes som header, lagres på eventet og kan gå videre til mottakeren.
+        if (map.Get("content-type") is { } contentType && !MediaTypeHeaderValue.TryParse(contentType, out _))
+            return CliErrors.Usage(map, "invalid_value",
+                "--content-type is not a media type. The value is not shown.", "Give one such as application/json, the default.");
+        if (QueuePublisher.StartsLikeASecret(map.Get("idempotency-key")))
+            return CliErrors.Usage(map, "invalid_value",
+                "--idempotency-key starts like a secret (an API key or a signing secret). The value is not shown.",
+                "Pick a key that names the event, such as order-A-1: it is sent with the event and stored on it.");
+
         byte[]? body = ReadBody(map, out string? bodyCode, out string? bodyError);
         if (bodyError != null)
             return CliErrors.Usage(map, bodyCode!, bodyError);
@@ -57,7 +68,19 @@ internal static class PublishCommand
         // Workspacet etter samme regel som apply og verify: fila sin tenant, ellers den konfigurerte, og feil når --tenant
         // eller QUEUEY_TENANT navngir et annet enn fila. Ellers kunne verify lete etter køen i et annet workspace.
         (string? fileTenant, string filePath) = DeploymentTenant.FromDeploymentOption(map);
-        ResolvedConfig config = CliHost.ResolveForDeployment(map, fileTenant, filePath);
+        ResolvedConfig configured = CliHost.Resolve(map);
+        ResolvedConfig config = DeploymentTenant.Resolve(configured, map, CliHost.Env, fileTenant, filePath);
+
+        // En publisering er en skriving på dataplanet (F2.7-review): bestemmer deploy-fila workspacet, sies det før noe sendes,
+        // og hvilket workspace konfigurasjonen ellers ville gitt. Ellers kunne en testevent havne et annet sted enn ventet.
+        string? tenantFrom = string.IsNullOrWhiteSpace(fileTenant) ? null : filePath;
+        string? passedOver = tenantFrom is not null && configured.TenantPublicId is { } other
+                             && !string.Equals(other, config.TenantPublicId, StringComparison.Ordinal) ? other : null;
+        bool json = map.Has("json");
+        if (tenantFrom is not null && !json)
+            Console.Error.WriteLine(TerminalText.Line(
+                $"Publishing to {config.TenantPublicId}, the workspace {tenantFrom} names" +
+                (passedOver is null ? "." : $", not {passedOver}, which the configuration names.")));
 
         using ServiceProvider provider = CliHost.BuildProvider(config);
         var service = provider.GetRequiredService<IQueueyService>();
@@ -71,22 +94,32 @@ internal static class PublishCommand
             Source = map.Get("source"),
         });
 
-        if (map.Has("json"))
-            Console.WriteLine(JsonSerializer.Serialize(ToJson(result), CliHost.JsonOut));
+        if (json)
+            Console.WriteLine(JsonSerializer.Serialize(ToJson(result, tenantFrom), CliHost.JsonOut));
         else
             WriteHuman(result);
 
         return ExitCodes.Success;
     }
 
-    /// <summary>The command that follows the event, or null when the ingress gave no id.</summary>
+    /// <summary>
+    /// The command that follows the event, or null when the ingress gave no id. Only words safe in a shell go in (F2.7-review):
+    /// the queue's name when it is a plain word, else its id, else a placeholder; and the event's id when it is one.
+    /// </summary>
     internal static string? VerifyCommandFor(QueuePublishResult result)
-        => result.EventPublicId is { } id ? $"queuey verify {result.Queue} --event {id}" : null;
+    {
+        if (CommandWords.Id(result.EventPublicId, "evt_") is not { } eventId)
+            return null;
 
-    private static object ToJson(QueuePublishResult r) => new
+        string queue = CommandWords.Word(result.Queue) ?? CommandWords.Id(result.QueuePublicId, "que_") ?? "<queue>";
+        return $"queuey verify {queue} --event {eventId}";
+    }
+
+    private static object ToJson(QueuePublishResult r, string? tenantFrom) => new
     {
         schemaVersion = JsonSchemaVersion,
         tenant = r.TenantPublicId,
+        tenantFrom = tenantFrom ?? "configuration",
         queue = r.Queue,
         queuePublicId = r.QueuePublicId,
         eventPublicId = r.EventPublicId,
@@ -96,20 +129,25 @@ internal static class PublishCommand
         verify = VerifyCommandFor(r),
     };
 
+    // Navn og id-er kommer fra serveren eller kommandolinjen, så hver linje går gjennom TerminalText.
     private static void WriteHuman(QueuePublishResult r)
     {
         string where = r.QueuePublicId is null ? r.Queue : $"{r.Queue} ({r.QueuePublicId})";
         if (r.EventPublicId is null)
         {
-            Console.WriteLine($"Published to {where} in {r.TenantPublicId}. Its ingress answered without a receipt (it answers 204), so the event's id is unknown.");
-            Console.WriteLine($"  → To follow it, wait for it with `queuey verify {r.Queue} --event-type <type>` and publish again.");
+            string queue = CommandWords.Word(r.Queue) ?? CommandWords.Id(r.QueuePublicId, "que_") ?? "<queue>";
+            Console.WriteLine(TerminalText.Line(
+                $"Published to {where} in {r.TenantPublicId}. Its ingress answered without a receipt (it answers 204), so the event's id is unknown."));
+            Console.WriteLine($"  → To follow it, wait for it with `queuey verify {queue} --event-type <type>` and publish again.");
             return;
         }
 
-        Console.WriteLine($"Published {r.EventPublicId} to {where} in {r.TenantPublicId}{(r.Mode is null ? "" : $", mode {r.Mode}")}.");
+        Console.WriteLine(TerminalText.Line(
+            $"Published {r.EventPublicId} to {where} in {r.TenantPublicId}{(r.Mode is null ? "" : $", mode {r.Mode}")}."));
         if (r.Replayed)
             Console.WriteLine("  The idempotency key matched an earlier event, so this is that event: nothing new was stored.");
-        Console.WriteLine($"  → Follow it: {VerifyCommandFor(r)}");
+        if (VerifyCommandFor(r) is { } verify)
+            Console.WriteLine($"  → Follow it: {verify}");
     }
 
     private static byte[]? ReadBody(ArgMap map, out string? code, out string? error)

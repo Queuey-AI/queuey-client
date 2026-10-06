@@ -660,8 +660,10 @@ queue's ingress URL. A fixed `--idempotency-key` makes the event recognizable: p
 with the same event (`replayed`), and nothing new is stored. When the key may read the queue, publish
 reads what its ingress requires first, and refuses before anything is sent what it cannot give, saying
 what is required: a provider's signature (Stripe's event comes from Stripe), Queuey's own signature, or a
-key and a signature together. `--json` prints `{ "schemaVersion": 1, "tenant", "queue", "queuePublicId",
-"eventPublicId", "receivedAtUtc", "mode", "replayed", "verify" }`, never the payload or a key.
+key and a signature together. `--json` prints `{ "schemaVersion": 1, "tenant", "tenantFrom", "queue",
+"queuePublicId", "eventPublicId", "receivedAtUtc", "mode", "replayed", "verify" }`, never the payload or a
+key. When the deployment file decides the workspace, publish says so before it sends, and `tenantFrom`
+names the file.
 
 `queuey events get <evt_…> --queue <queue>` reads the event as Queuey's REST API serves it: its status,
 times and each attempt with what Queuey decided after it. The payload, header values and the receiver's

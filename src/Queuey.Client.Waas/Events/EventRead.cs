@@ -11,6 +11,11 @@ namespace Queuey.Client.Waas;
 // den som kaller ber om det.
 
 /// <summary>One event as Queuey's REST API serves it: the envelope, and the content only when asked for and allowed.</summary>
+/// <remarks>
+/// <see cref="Envelope"/> and <see cref="Content"/> are Queuey's answers passed through as JSON, not a model of this package:
+/// their shape is Queuey's REST API's, and it changes with Queuey, not with this package's version. Fields may be added.
+/// Read a field by name and treat a missing one as unknown. The typed members here are the ones this package reads itself.
+/// </remarks>
 public sealed class EventRead
 {
     /// <summary>The queue the event is in (<c>que_…</c>).</summary>

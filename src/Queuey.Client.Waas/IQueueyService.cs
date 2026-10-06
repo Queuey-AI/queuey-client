@@ -206,6 +206,11 @@ public interface IQueueyService
     /// <param name="eventPublicId">The event's id (<c>evt_…</c>).</param>
     /// <param name="revealContent">Also read the content. Refused, with nothing read, when the envelope says it may not be revealed.</param>
     /// <param name="cancellationToken">Cancels the call.</param>
+    /// <remarks>
+    /// The envelope and the content are Queuey's REST answers passed through as JSON (<see cref="EventRead.Envelope"/>,
+    /// <see cref="EventRead.Content"/>): their shape follows Queuey's API, not this package's version, and fields may be
+    /// added. Read fields by name and tolerate a missing one.
+    /// </remarks>
     /// <exception cref="QueueyForbiddenException">
     /// With code <c>payload_visibility_shape_only</c> or <c>payload_read_not_allowed</c> when the content may not be revealed.
     /// </exception>

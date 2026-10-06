@@ -98,7 +98,7 @@ internal static class EventsCommand
     private static void WriteHuman(EventRead r)
     {
         JsonElement e = r.Envelope;
-        Console.WriteLine($"{r.EventPublicId} in {r.QueuePublicId}: {r.Status ?? "unknown status"}");
+        Console.WriteLine(TerminalText.Line($"{r.EventPublicId} in {r.QueuePublicId}: {r.Status ?? "unknown status"}"));
 
         Line("received", Text(e, "createdAtUtc"));
         Line("occurred", Text(e, "occurredAtUtc"));
@@ -112,15 +112,15 @@ internal static class EventsCommand
         {
             Console.WriteLine($"  attempts: {attempts.GetArrayLength()}");
             foreach (JsonElement a in attempts.EnumerateArray())
-                Console.WriteLine("    " + Attempt(a));
+                Console.WriteLine("    " + TerminalText.Line(Attempt(a)));
         }
 
-        Console.WriteLine("  " + PayloadLine(r));
+        Console.WriteLine("  " + TerminalText.Line(PayloadLine(r)));
 
         if (r.Content is { } content)
         {
             Console.WriteLine("  content (this look is recorded in the queue's payload access log):");
-            Console.WriteLine(Indent(JsonSerializer.Serialize(content, CliHost.JsonOut), "    "));
+            Console.WriteLine(Indent(TerminalText.Block(JsonSerializer.Serialize(content, CliHost.JsonOut)), "    "));
         }
     }
 
@@ -170,10 +170,11 @@ internal static class EventsCommand
         };
     }
 
+    // Verdiene kommer fra produsenten eller serveren (source, groupKey, holdReason …), så de skrives som én ren linje.
     private static void Line(string label, string? value)
     {
         if (value is not null)
-            Console.WriteLine($"  {label}: {value}");
+            Console.WriteLine($"  {label}: {TerminalText.Line(value)}");
     }
 
     private static string? Text(JsonElement element, string name)

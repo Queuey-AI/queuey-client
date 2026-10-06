@@ -70,8 +70,9 @@ public sealed class PublishCommandTests : IDisposable
         Assert.Equal("order-A-1", headers["Idempotency-Key"]);
 
         JsonElement json = JsonDocument.Parse(run.Stdout).RootElement;
-        Assert.Equal(new[] { "schemaVersion", "tenant", "queue", "queuePublicId", "eventPublicId", "receivedAtUtc", "mode", "replayed", "verify" },
+        Assert.Equal(new[] { "schemaVersion", "tenant", "tenantFrom", "queue", "queuePublicId", "eventPublicId", "receivedAtUtc", "mode", "replayed", "verify" },
             json.EnumerateObject().Select(p => p.Name).ToArray());
+        Assert.Equal("configuration", json.GetProperty("tenantFrom").GetString());
         Assert.Equal(1, json.GetProperty("schemaVersion").GetInt32());
         Assert.Equal("evt_7", json.GetProperty("eventPublicId").GetString());
         Assert.Equal("que_orders", json.GetProperty("queuePublicId").GetString());
@@ -227,7 +228,109 @@ public sealed class PublishCommandTests : IDisposable
 
         Assert.Equal(ExitCodes.Success, run.Exit);
         Assert.Equal(new[] { "GET /tenants/ten_file/queues", "GET /queues/que_orders/config", "POST /events/ten_file/orders" }, Keys(api));
-        Assert.Equal("ten_file", JsonDocument.Parse(run.Stdout).RootElement.GetProperty("tenant").GetString());
+        JsonElement json = JsonDocument.Parse(run.Stdout).RootElement;
+        Assert.Equal("ten_file", json.GetProperty("tenant").GetString());
+        Assert.Equal(file, json.GetProperty("tenantFrom").GetString());
+    }
+
+    [Fact]
+    public async Task When_the_deployment_files_workspace_wins_over_the_configured_one_publish_says_so_before_it_sends()
+    {
+        // F2.7-review (2026-10-06): en publisering er en skriving på dataplanet, så en testevent skal ikke havne i et annet
+        // workspace enn det brukeren tror uten et ord.
+        string file = Path.Combine(_dir, "queuey.deploy.json");
+        File.WriteAllText(file, """{ "tenant": "ten_file", "queues": { "orders": {} } }""");
+        string config = Path.Combine(_dir, "queuey.json");
+        File.WriteAllText(config, """{ "tenant": "ten_json" }""");
+        RecordingHandler api = Server(new { authMode = "None" }, tenant: "ten_file");
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[]
+        {
+            "publish", "orders", "--data", Payload, "--deployment", file,
+            "--api-key", "qak_kid.secret", "--license", "lic_1", "--api-base", "https://api.test", "--ingress-base", "https://ingress.test",
+            "--config", config,
+        }), api);
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.Equal($"Publishing to ten_file, the workspace {file} names, not ten_json, which the configuration names.", run.Stderr.Trim());
+        Assert.StartsWith("Published evt_7 to orders (que_orders) in ten_file", run.Stdout);
+    }
+
+    [Theory]
+    [InlineData("qak_kid.s3cr3tVALUE")]
+    [InlineData("whsec_FAKEs3cr3t")]
+    [InlineData("sk_live_FAKEs3cr3t")]
+    [InlineData("rk_test_FAKEs3cr3t")]
+    public async Task A_queue_name_that_starts_like_a_secret_is_not_sent_when_the_key_cannot_check_it(string pasted)
+    {
+        // `queuey publish "$QUEUEY_API_KEY"` med en nøkkel som bare kan publisere: navnet kunne ikke slås opp, og gikk rett
+        // inn i URL-en (/events/ten_abc/<nøkkelen>). Nå sendes ingenting, og verdien gjentas ikke (F2.7-review).
+        RecordingHandler api = new(req => req switch
+        {
+            { Method.Method: "GET", Path: "/tenants/ten_abc/queues" }
+                => RecordingHandler.Error(HttpStatusCode.Forbidden, "missing_permission", "The key lacks queue.read."),
+            _ => throw new InvalidOperationException(req.Key),
+        });
+
+        CliRun run = await CliHarness.RunAsync(() => Publish(pasted, "--data", Payload, "--tenant", "ten_abc", "--json"), api);
+
+        Assert.Equal(ExitCodes.RuntimeError, run.Exit);
+        Assert.Equal(new[] { "GET /tenants/ten_abc/queues" }, Keys(api));
+        Assert.Equal("queue_name_looks_like_a_secret",
+            JsonDocument.Parse(run.Stdout).RootElement.GetProperty("error").GetProperty("code").GetString());
+        Assert.DoesNotContain(pasted.Substring(4), run.Stdout + run.Stderr);
+    }
+
+    [Theory]
+    [InlineData("text/html", "<html><body>Sign in</body></html>")]
+    [InlineData("application/json", """{ "ok": true }""")]
+    public async Task A_2xx_that_is_not_queueys_receipt_is_an_error_not_a_publish_that_worked(string contentType, string body)
+    {
+        // Bare et tomt svar er «tatt imot uten kvittering» (F2.7-review). HTML fra en proxy eller annen JSON er det ikke.
+        RecordingHandler api = Server(new { authMode = "None" }, () => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(body, System.Text.Encoding.UTF8, contentType),
+        });
+
+        CliRun run = await CliHarness.RunAsync(() => Publish("orders", "--data", Payload, "--tenant", "ten_abc", "--json"), api);
+
+        Assert.Equal(ExitCodes.RuntimeError, run.Exit);
+        JsonElement error = JsonDocument.Parse(run.Stdout).RootElement.GetProperty("error");
+        Assert.Equal("unreadable_response", error.GetProperty("code").GetString());
+        Assert.DoesNotContain("Sign in", run.Stdout);
+    }
+
+    [Fact]
+    public async Task The_verify_command_holds_only_words_safe_in_a_shell()
+    {
+        // Køen ble funnet ved id, og navnet serveren har på den, er ikke et rent ord: forslaget bruker id-en (F2.7-review).
+        RecordingHandler api = new(req => req switch
+        {
+            { Method.Method: "GET", Path: "/tenants/ten_abc/queues" } => RecordingHandler.Json(HttpStatusCode.OK, new[]
+            {
+                new { publicId = "que_orders", displayName = "orders$(id)", mode = "Deliver" },
+            }),
+            { Method.Method: "GET", Path: "/queues/que_orders/config" } => RecordingHandler.Json(HttpStatusCode.OK, new { ingress = new { authMode = "None" } }),
+            { Method.Method: "POST" } => RecordingHandler.Json(HttpStatusCode.Accepted, Receipt()),
+            _ => throw new InvalidOperationException(req.Key),
+        });
+
+        CliRun run = await CliHarness.RunAsync(() => Publish("que_orders", "--data", Payload, "--tenant", "ten_abc", "--json"), api);
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.Equal("queuey verify que_orders --event evt_7", JsonDocument.Parse(run.Stdout).RootElement.GetProperty("verify").GetString());
+    }
+
+    [Theory]
+    [InlineData("--content-type", "not a media type at all", "--content-type is not a media type")]
+    [InlineData("--idempotency-key", "qak_kid.s3cr3tVALUE", "--idempotency-key starts like a secret")]
+    public async Task A_value_publish_cannot_send_is_refused_without_repeating_it(string option, string value, string message)
+    {
+        CliRun run = await CliHarness.RunAsync(() => Publish("orders", "--data", Payload, option, value, "--tenant", "ten_abc", "--json"));
+
+        Assert.Equal(ExitCodes.Usage, run.Exit);
+        Assert.StartsWith(message, JsonDocument.Parse(run.Stdout).RootElement.GetProperty("error").GetProperty("message").GetString());
+        Assert.DoesNotContain(value.Substring(4), run.Stdout + run.Stderr);
     }
 
     [Fact]
