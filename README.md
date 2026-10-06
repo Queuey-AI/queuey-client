@@ -600,14 +600,20 @@ delivery may reach, so the CLI leaves the check to it.
 ### Prove it delivers: `queuey verify`
 
 `apply` exiting 0 says the configuration landed. It does not say events arrive. `verify` asks Queuey to
-verify the queue's flow and reads the verification until Queuey has settled it: each step from the
-ingress to the final state, with its evidence. It verifies one of three things:
+verify the queue's flow with the producer's own events, and reads the verification until Queuey has
+settled it: each step from the ingress to the final state, with its evidence.
 
 ```bash
-queuey verify orders --event evt_…                                  # an event already in the queue
-queuey verify orders --event-type payment_intent.succeeded --ingress-auth stripe   # the next one, from a provider
-queuey verify orders --send --data '{"type":"order.created","test":true}'          # a test event Queuey sends
+queuey verify orders --event evt_…     # an event the producer published: did it arrive?
+queuey verify payments --event-type payment_intent.succeeded --ingress-auth stripe   # waits; trigger it now
 ```
+
+- `--event` follows an event that is already in the queue: publish one the way the producer does, with
+  its key, and pass the event id the ingress answered.
+- `--event-type` waits for the next event the ingress takes with that type, from the moment `verify`
+  says it is waiting: trigger it then, for example with `stripe trigger payment_intent.succeeded`.
+  `--ingress-auth` adds that the ingress verified it with that signed-request template, so a Stripe flow
+  is proven with Stripe's own event and signature.
 
 ```text
 ✓ Passed — orders (que_…) in ten_…, event evt_…
@@ -623,13 +629,22 @@ queuey verify orders --send --data '{"type":"order.created","test":true}'       
   Verification ver_….
 ```
 
-- `--event` follows an event that is already in the queue, such as the one a publish answered with.
-- `--event-type` waits for the next event the ingress takes with that type, from the moment `verify`
-  says it is waiting: trigger it then. `--ingress-auth` adds that the ingress verified it with that
-  signed-request template, so a Stripe flow is proven with Stripe's own event and signature.
-- `--send` sends a test event through the queue's ingress, with `--event-type` as its type. The event is
-  real: the receiver gets it like any other, so send data it treats as harmless. Queuey sends it only for
-  a key with `event.publish`, to a workspace that is not production, and never signs it as a provider.
+`--send` has Queuey send a test event through the queue's ingress instead, with `--event-type` as its
+type. It works only where all three hold, so it is not the check to reach for first:
+
+- the Queuey you talk to has active verification switched on. Production Queuey does not today, and
+  answers `active_verification_disabled`;
+- the key has `event.publish` on the queue, in a workspace tagged `dev`, `test` or `staging`. A
+  workspace tagged `prod`, or with no tag, counts as production and answers `production_workspace`;
+- the queue's ingress takes events without a key or a signature. Queuey never sends your key and cannot
+  make a provider's signature, so a keyed or signed ingress answers `not_tried`.
+
+```bash
+queuey verify orders --send --data '{"type":"order.created","test":true}'   # a dev, test or staging workspace
+```
+
+The test event is real: the receiver gets it like any other, so send data it treats as harmless. It is
+one JSON value of at most 64 KB, and Queuey never signs it as a provider.
 
 `--timeout` (or `--wait`) is how long Queuey follows the event, in seconds: a minute when left out, at
 most 900. `verify` exits 0 only when the verification passed. `failed`, `timed_out` and `not_tried`
@@ -806,7 +821,7 @@ queuey credentials set --name partner-key --from-env PARTNER_KEY
 queuey apply --dry-run            # catch typos with no credentials and no network
 queuey plan                       # what would change, and would Queuey accept it?
 queuey apply
-queuey verify orders --send --data '{"type":"order.created","test":true}'   # did it arrive?
+queuey verify orders --event evt_…   # publish one order as the service does, then: did it arrive?
 ```
 
 **Adopt a workspace someone configured in the console**

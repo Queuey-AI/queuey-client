@@ -158,10 +158,11 @@ public interface IQueueyService
     /// <param name="progress">Told the verification as it stands after the start and after each read.</param>
     /// <param name="cancellationToken">Stops the reading. Queuey goes on following the event until its time is up.</param>
     /// <remarks>
-    /// Needs a key that may read the queue and its events (<c>queue.read</c>, <c>event.read</c>). A test event
-    /// (<see cref="FlowVerificationRequest.Send"/>) also needs <c>event.publish</c> and a workspace that is not production,
-    /// and it reaches the real receiver like any other event. A refusal throws a <see cref="QueueyException"/> with Queuey's
-    /// code and message. Nothing falls back to another way of verifying.
+    /// Needs a key that may read the queue and its events (<c>queue.read</c>, <c>event.read</c>). Verify the producer's own
+    /// events first (<see cref="FlowVerificationRequest.FollowEvent"/>, <see cref="FlowVerificationRequest.WaitForEvent"/>):
+    /// that works everywhere. A test event (<see cref="FlowVerificationRequest.SendTestEvent"/>) is sent only where Queuey
+    /// allows it, as that factory says, and reaches the real receiver like any other event. A refusal throws a
+    /// <see cref="QueueyException"/> with Queuey's code and message. Nothing falls back to another way of verifying.
     /// </remarks>
     /// <exception cref="QueueyException">
     /// With code <c>flow_verification_unavailable</c> when the Queuey it talks to has no flow verification;

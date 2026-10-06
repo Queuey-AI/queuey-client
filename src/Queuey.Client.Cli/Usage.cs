@@ -172,14 +172,23 @@ VERIFY
                  until Queuey has settled it: each step from the ingress to the final state
                  (ingress_reached, ingress_auth, persisted, routed, delivery_attempted,
                  delivery_auth, receiver_response, final_state), with its evidence.
-                 --event follows an event already in the queue. --event-type waits for the
-                 next event the ingress takes with that type, from the start on: trigger it
-                 once verify says it is waiting. --ingress-auth adds that the ingress
-                 verified it with that signed-request template, such as stripe. --send sends
-                 a test event through the queue's ingress, with --event-type as its type. It
-                 is real and reaches the receiver like any other event, so send data it
-                 treats as harmless. Queuey sends it only for a key with event.publish, to a
-                 workspace that is not production, and never signs it as a provider.
+                 Verify the producer's own events; that works everywhere:
+                 --event follows an event already in the queue: publish one the way the
+                 producer does, with its key, and pass the event id the ingress answered.
+                 --event-type waits for the next event the ingress takes with that type,
+                 from the start on: trigger it once verify says it is waiting, such as with
+                 stripe trigger. --ingress-auth adds that the ingress verified it with that
+                 signed-request template, such as stripe.
+                 --send has Queuey send a test event through the queue's ingress instead,
+                 with --event-type as its type. It works only where all three hold: Queuey
+                 has active verification switched on (production Queuey does not today),
+                 the key has event.publish in a workspace tagged dev, test or staging (no
+                 tag counts as production), and the queue's ingress takes events without a
+                 key or a signature. Otherwise Queuey refuses (active_verification_disabled,
+                 production_workspace) or answers not_tried. The test event is real and
+                 reaches the receiver like any other event, so send data it treats as
+                 harmless: one JSON value of at most 64 KB. Queuey never signs it as a
+                 provider.
                  --timeout (or --wait) is how long Queuey follows the event, in seconds: a
                  minute when left out, at most 900.
                  Exits 0 only when the verification passed. failed, timed_out and not_tried

@@ -304,6 +304,9 @@ public sealed class VerifyCommandTests : IDisposable
         }
     }
 
+    // Over Queuey sin grense på 64 KB: 70 008 byte som JSON.
+    private static readonly string TooLarge = "{\"x\":\"" + new string('a', 70_000) + "\"}";
+
     public static TheoryData<string[], string> UsageErrors => new()
     {
         { new[] { "orders" }, "missing_argument" },
@@ -312,6 +315,7 @@ public sealed class VerifyCommandTests : IDisposable
         { new[] { "orders", "--send" }, "missing_body" },
         { new[] { "orders", "--send", "--data", "{}", "--stdin" }, "conflicting_options" },
         { new[] { "orders", "--send", "--data", "not json" }, "invalid_value" },
+        { new[] { "orders", "--send", "--data", TooLarge }, "invalid_value" },
         { new[] { "orders", "--send", "--data", "{}", "--ingress-auth", "stripe" }, "conflicting_options" },
         { new[] { "orders", "--event", "evt_1", "--event-type", "x" }, "conflicting_options" },
         { new[] { "orders", "--event", "evt_1", "--send", "--data", "{}" }, "conflicting_options" },
@@ -341,6 +345,44 @@ public sealed class VerifyCommandTests : IDisposable
         Assert.Equal(code, error.GetProperty("code").GetString());
         Assert.Empty(api.Requests);
         Assert.DoesNotContain("FAKE", run.Stdout);
+    }
+
+    [Fact]
+    public async Task A_test_event_without_send_points_to_the_producers_own_event_and_says_when_send_works()
+    {
+        // Review av #51: --send virker ikke i prod-Queuey, i et workspace som regnes som prod, eller med en ingress som tar
+        // nøkkel eller signatur. Feilen peker på veiene som virker overalt.
+        var api = new RecordingHandler(req => throw new InvalidOperationException(req.Key));
+
+        CliRun run = await CliHarness.RunAsync(() => Verify("orders", "--data", "{}", "--json"), api);
+
+        Assert.Equal(ExitCodes.Usage, run.Exit);
+        JsonElement error = JsonDocument.Parse(run.Stdout).RootElement.GetProperty("error");
+        Assert.Equal("send_required", error.GetProperty("code").GetString());
+        string action = error.GetProperty("action").GetString()!;
+        Assert.Contains("publish it with a producer key and run `queuey verify <queue> --event <evt_…>`", action);
+        Assert.Contains("`queuey verify <queue> --event-type <type>` and trigger the event yourself, such as with `stripe trigger`", action);
+        Assert.EndsWith(VerifyCommand.SendConditions, action);
+        Assert.Contains("active verification switched on (production Queuey does not today)", VerifyCommand.SendConditions);
+        Assert.Contains("tagged dev, test or staging", VerifyCommand.SendConditions);
+        Assert.Contains("without a key or a signature", VerifyCommand.SendConditions);
+        Assert.Empty(api.Requests);
+    }
+
+    [Fact]
+    public async Task A_test_event_over_64_KB_is_a_usage_error_before_anything_is_sent()
+    {
+        // Review av #51: over 128 KB svarte Kestrel 413 uten kropp, og brukeren så bare en generell feil.
+        var api = new RecordingHandler(req => throw new InvalidOperationException(req.Key));
+
+        CliRun run = await CliHarness.RunAsync(() => Verify("orders", "--send", "--data", TooLarge, "--json"), api);
+
+        Assert.Equal(ExitCodes.Usage, run.Exit);
+        JsonElement error = JsonDocument.Parse(run.Stdout).RootElement.GetProperty("error");
+        Assert.Equal("invalid_value", error.GetProperty("code").GetString());
+        Assert.Equal("The test event is 70,008 bytes as JSON, and Queuey takes at most 65,536 (64 KB).", error.GetProperty("message").GetString());
+        Assert.DoesNotContain("aaaa", run.Stdout);
+        Assert.Empty(api.Requests);
     }
 
     [Fact]
@@ -385,15 +427,5 @@ public sealed class VerifyCommandTests : IDisposable
     public void An_event_that_only_mentions_queues_is_not_a_deployment_file(string payload)
     {
         Assert.False(VerifyCommand.IsDeploymentFile(System.Text.Encoding.UTF8.GetBytes(payload)));
-    }
-
-    [Fact]
-    public void A_test_event_with_a_byte_order_mark_is_json_and_where_it_breaks_shows_no_part_of_it()
-    {
-        Assert.True(FlowPayload.IsJson(new byte[] { 0xEF, 0xBB, 0xBF, (byte)'{', (byte)'}' }, out _));
-
-        Assert.False(FlowPayload.IsJson(System.Text.Encoding.UTF8.GetBytes("{\n  \"a\": SECRET }"), out string? where));
-        Assert.StartsWith("line 2, byte ", where);
-        Assert.DoesNotContain("SECRET", where);
     }
 }

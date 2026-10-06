@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -14,39 +15,112 @@ namespace Queuey.Client.Waas;
 // endepunktet gir en feil som sier hva som mangler.
 
 /// <summary>
-/// What <see cref="IQueueyService.VerifyFlowAsync"/> asks Queuey to verify. Set one of three:
-/// <see cref="EventPublicId"/> follows an event that is already in the queue; <see cref="EventType"/>, with
-/// <see cref="IngressAuth"/> when the queue's ingress verifies a provider's signature, waits for the next event the ingress
-/// takes that meets them; <see cref="Send"/> with a <see cref="Payload"/> sends a test event through the queue's ingress.
+/// What <see cref="IQueueyService.VerifyFlowAsync"/> asks Queuey to verify. Made by one of three factories, so a request is
+/// always exactly one of them: <see cref="FollowEvent"/> follows an event the producer published, <see cref="WaitForEvent"/>
+/// waits for the next event of a type the ingress takes, and <see cref="SendTestEvent"/> has Queuey send a test event through
+/// the queue's ingress.
 /// </summary>
+// Fabrikker i stedet for settere (review av queuey-client#51, 2026-10-06): feltene utelukker hverandre, og en kombinasjon
+// Queuey nekter, skal ikke kunne bygges. Strammet inn før første tag, fordi det etter en tag ville brutt kallere.
 public sealed class FlowVerificationRequest
 {
-    /// <summary>The event to follow (<c>evt_…</c>), already in the queue. It takes none of the other fields but <see cref="Timeout"/>.</summary>
-    public string? EventPublicId { get; set; }
+    private FlowVerificationRequest() { }
+
+    /// <summary>The event <see cref="FollowEvent"/> follows (<c>evt_…</c>); null for the other two.</summary>
+    public string? EventPublicId { get; private init; }
 
     /// <summary>
-    /// The event type the next event must have, compared exactly with what the queue records. With <see cref="Send"/>, the
-    /// type the test event is sent with, where the queue's ingress reads it.
+    /// The event type <see cref="WaitForEvent"/> waits for, compared exactly with what the queue records, or the one
+    /// <see cref="SendTestEvent"/> sends the test event with.
     /// </summary>
-    public string? EventType { get; set; }
+    public string? EventType { get; private init; }
 
-    /// <summary>
-    /// With <see cref="EventType"/>: the signed-request template the queue's ingress must have verified the event with, such
-    /// as <c>stripe</c>.
-    /// </summary>
-    public string? IngressAuth { get; set; }
+    /// <summary>The signed-request template the ingress must have verified the event with (<c>stripe</c>, …), for <see cref="WaitForEvent"/>.</summary>
+    public string? IngressAuth { get; private init; }
 
-    /// <summary>
-    /// True to send a test event through the queue's ingress. It reaches the real receiver like any other event. Queuey
-    /// sends it only for a key that may publish (<c>event.publish</c>) to a workspace that is not production.
-    /// </summary>
-    public bool Send { get; set; }
-
-    /// <summary>With <see cref="Send"/>: the test event's body, one JSON value as UTF-8, at most 64 KB.</summary>
-    public byte[]? Payload { get; set; }
+    /// <summary>True for <see cref="SendTestEvent"/>.</summary>
+    public bool Send { get; private init; }
 
     /// <summary>How long Queuey follows the event, in whole seconds, at most fifteen minutes. Queuey's default, a minute, when null.</summary>
-    public TimeSpan? Timeout { get; set; }
+    public TimeSpan? Timeout { get; private init; }
+
+    // Testeventen, lest og sjekket av SendTestEvent, slik den sendes.
+    internal JsonElement? Payload { get; private init; }
+
+    /// <summary>Follows <paramref name="eventPublicId"/>, an event already in the queue, such as one the producer published.</summary>
+    /// <param name="eventPublicId">The event's public id (<c>evt_…</c>), as the ingress answered it.</param>
+    /// <param name="timeout">How long Queuey follows the event: at least a second; Queuey's default when null.</param>
+    /// <exception cref="ArgumentException"><paramref name="eventPublicId"/> is not an event's public id.</exception>
+    public static FlowVerificationRequest FollowEvent(string eventPublicId, TimeSpan? timeout = null)
+    {
+        if (string.IsNullOrWhiteSpace(eventPublicId) || !eventPublicId.StartsWith("evt_", StringComparison.Ordinal))
+            throw new ArgumentException("An event's public id starts with evt_, as the ingress answered it.", nameof(eventPublicId));
+
+        return new FlowVerificationRequest { EventPublicId = eventPublicId, Timeout = Checked(timeout) };
+    }
+
+    /// <summary>
+    /// Waits for the next event the queue's ingress takes with <paramref name="eventType"/> from the start on, and follows it.
+    /// Trigger the event once the verification has started: an event that arrived before does not count.
+    /// </summary>
+    /// <param name="eventType">The event type, compared exactly with what the queue records.</param>
+    /// <param name="ingressAuth">
+    /// The signed-request template the ingress must have verified the event with, such as <c>stripe</c>, so a provider's flow is
+    /// proven with its own event and signature. Null to match on the event type alone.
+    /// </param>
+    /// <param name="timeout">How long Queuey waits and follows: at least a second; Queuey's default when null.</param>
+    public static FlowVerificationRequest WaitForEvent(string eventType, string? ingressAuth = null, TimeSpan? timeout = null)
+    {
+        if (string.IsNullOrWhiteSpace(eventType))
+            throw new ArgumentException("An event type is required: without one, the first event that arrived would count, from anyone.", nameof(eventType));
+        if (ingressAuth is not null && string.IsNullOrWhiteSpace(ingressAuth))
+            throw new ArgumentException("ingressAuth is a signed-request template, such as stripe, or null.", nameof(ingressAuth));
+
+        return new FlowVerificationRequest { EventType = eventType, IngressAuth = ingressAuth, Timeout = Checked(timeout) };
+    }
+
+    /// <summary>
+    /// Has Queuey send <paramref name="payload"/> as a test event through the queue's ingress, and follow it. It reaches the
+    /// real receiver like any other event, so send data it treats as harmless.
+    /// </summary>
+    /// <remarks>
+    /// Queuey sends it only where all three hold: active verification is switched on in that Queuey, the key has
+    /// <c>event.publish</c> on the queue in a workspace tagged dev, test or staging (no tag counts as production), and the
+    /// queue's ingress takes events without a key or a signature. Otherwise Queuey refuses with
+    /// <c>active_verification_disabled</c> or <c>production_workspace</c>, or answers <c>not_tried</c>. Verify the producer's
+    /// own event there instead, with <see cref="FollowEvent"/> or <see cref="WaitForEvent"/>.
+    /// </remarks>
+    /// <param name="payload">The test event's body: one JSON value as UTF-8, at most <see cref="FlowVerifications.MaxTestEventBytes"/> as sent.</param>
+    /// <param name="eventType">The event type to send it with, where the queue's ingress reads it; null to send none.</param>
+    /// <param name="timeout">How long Queuey follows the event: at least a second; Queuey's default when null.</param>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="payload"/> is not JSON, or larger than Queuey takes. The message never shows a part of it.
+    /// </exception>
+    public static FlowVerificationRequest SendTestEvent(byte[] payload, string? eventType = null, TimeSpan? timeout = null)
+    {
+        if (payload is null) throw new ArgumentNullException(nameof(payload));
+        if (eventType is not null && string.IsNullOrWhiteSpace(eventType))
+            throw new ArgumentException("eventType is the event type to send the test event with, or null.", nameof(eventType));
+
+        if (!FlowVerifier.TryReadJson(payload, out JsonElement value, out string? where))
+            throw new ArgumentException(
+                $"The test event is not JSON ({where}). Queuey sends it through the queue's ingress as application/json, so it is one JSON value.");
+
+        // Størrelsen slik Queuey får den: serialisert som forespørselen sender den, uten mellomrom og med escaping. Det er
+        // det Queuey måler (64 KB). Over 128 KB svarer Kestrel 413 uten kropp, så grensen sjekkes her, med en melding.
+        int size = JsonSerializer.SerializeToUtf8Bytes(value, QueueyJson.Options).Length;
+        if (size > FlowVerifications.MaxTestEventBytes)
+            throw new ArgumentException(
+                $"The test event is {size.ToString("N0", CultureInfo.InvariantCulture)} bytes as JSON, and Queuey takes at most " +
+                $"{FlowVerifications.MaxTestEventBytes.ToString("N0", CultureInfo.InvariantCulture)} (64 KB).");
+
+        return new FlowVerificationRequest { Send = true, Payload = value, EventType = eventType, Timeout = Checked(timeout) };
+    }
+
+    private static TimeSpan? Checked(TimeSpan? timeout)
+        => timeout is { } t && t < TimeSpan.FromSeconds(1)
+            ? throw new ArgumentOutOfRangeException(nameof(timeout), "Queuey follows an event for at least a second.")
+            : timeout;
 }
 
 /// <summary>
@@ -56,7 +130,11 @@ public sealed class FlowVerificationRequest
 /// </summary>
 public sealed class FlowVerification
 {
-    /// <summary>The version of this shape. This client reads version <see cref="FlowVerifications.SchemaVersion"/>.</summary>
+    /// <summary>
+    /// The version of this shape. Queuey raises it only for a change that breaks a reader; a new field or a new value comes
+    /// without a new version. This client reads version <see cref="FlowVerifications.SchemaVersion"/>, and refuses another
+    /// rather than read it wrong.
+    /// </summary>
     public int SchemaVersion { get; init; }
 
     /// <summary>The verification's public id (<c>ver_…</c>).</summary>
@@ -328,8 +406,14 @@ public static class FlowStepStatuses
 /// <summary>Constants for flow verifications.</summary>
 public static class FlowVerifications
 {
-    /// <summary>The version of <see cref="FlowVerification"/>'s shape this client reads.</summary>
+    /// <summary>
+    /// The version of <see cref="FlowVerification"/>'s shape this client reads. Queuey's contract: the version goes up only
+    /// for a change that breaks a reader of the shape, so another version is one this client could read wrong.
+    /// </summary>
     public const int SchemaVersion = 1;
+
+    /// <summary>The largest test event Queuey takes: 64 KB of JSON, counted as it is sent.</summary>
+    public const int MaxTestEventBytes = 64 * 1024;
 
     /// <summary>The error code for a Queuey that has no flow verification.</summary>
     public const string UnavailableCode = "flow_verification_unavailable";
@@ -411,27 +495,10 @@ internal static class FlowVerifier
         return verification;
     }
 
-    /// <summary>The request as Queuey takes it. Throws for a payload that is not JSON or a timeout under a second.</summary>
+    /// <summary>The request as Queuey takes it. The factories of <see cref="FlowVerificationRequest"/> have checked it.</summary>
     internal static FlowVerificationWireRequest ToWire(FlowVerificationRequest request)
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
-
-        int? timeoutSeconds = null;
-        if (request.Timeout is { } timeout)
-        {
-            if (timeout < TimeSpan.FromSeconds(1))
-                throw new ArgumentOutOfRangeException(nameof(request), "Timeout is at least one second.");
-            timeoutSeconds = (int)Math.Ceiling(timeout.TotalSeconds);
-        }
-
-        JsonElement? payload = null;
-        if (request.Payload is { } bytes)
-        {
-            if (TryReadJson(bytes, out JsonElement value, out string? where))
-                payload = value;
-            else
-                throw new ArgumentException($"Payload is the test event's body, and it is not JSON ({where}).", nameof(request));
-        }
 
         return new FlowVerificationWireRequest
         {
@@ -439,8 +506,8 @@ internal static class FlowVerifier
             EventType = request.EventType,
             IngressAuth = request.IngressAuth,
             Send = request.Send ? true : null,
-            Payload = payload,
-            TimeoutSeconds = timeoutSeconds,
+            Payload = request.Payload,
+            TimeoutSeconds = request.Timeout is { } timeout ? (int)Math.Ceiling(timeout.TotalSeconds) : null,
         };
     }
 
@@ -561,6 +628,8 @@ internal static class FlowVerifier
             || verification.Steps is null)
             throw NotAVerification(call);
 
+        // Kontrakten er at Queuey øker schemaVersion bare ved brudd (review av queuey-client#51). En annen versjon er en form
+        // denne klienten kan lese feil, så den vises ikke som et utfall.
         if (verification.SchemaVersion != FlowVerifications.SchemaVersion)
             throw new QueueyException(
                 $"Queuey answered verification {verification.VerificationId} in shape {verification.SchemaVersion}, and this client reads " +

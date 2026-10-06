@@ -49,9 +49,8 @@ internal static class VerifyCommand
         if (Timeout(map, out TimeSpan? timeout) is { } badTimeout)
             return badTimeout;
 
-        if (Request(map, out FlowVerificationRequest? request) is { } refused)
+        if (Request(map, timeout, out FlowVerificationRequest? request) is { } refused)
             return refused;
-        request!.Timeout = timeout;
 
         // Workspacet apply skrev til, etter samme regel som apply: fila sin tenant, ellers den konfigurerte, og feil når
         // --tenant eller QUEUEY_TENANT navngir et annet enn fila. Det trengs for å finne køen ved navn.
@@ -62,7 +61,7 @@ internal static class VerifyCommand
         var service = provider.GetRequiredService<IQueueyService>();
 
         bool json = map.Has("json");
-        FlowVerification result = await service.VerifyFlowAsync(queue!, request, json ? null : new StartLine(queue!));
+        FlowVerification result = await service.VerifyFlowAsync(queue!, request!, json ? null : new StartLine(queue!));
 
         // Workspacet er det Queuey sier køen ligger i; det konfigurerte når svaret ikke har det.
         string? tenant = result.Subject.WorkspacePublicId ?? config.TenantPublicId;
@@ -78,7 +77,7 @@ internal static class VerifyCommand
     /// What the command line asks Queuey to verify, or the exit code of the usage error that says why it cannot ask. Nothing
     /// is read from the network, and stdin only for a test event.
     /// </summary>
-    private static int? Request(ArgMap map, out FlowVerificationRequest? request)
+    private static int? Request(ArgMap map, TimeSpan? timeout, out FlowVerificationRequest? request)
     {
         request = null;
         string[] sources = BodySources.Where(map.Has).ToArray();
@@ -97,7 +96,7 @@ internal static class VerifyCommand
                     $"--event follows an event that is already in the queue, so it takes no {string.Join(", ", others.Select(o => "--" + o))}.",
                     "Leave --event out to wait for the next event of a type (--event-type), or to send a test event (--send).");
 
-            request = new FlowVerificationRequest { EventPublicId = eventId };
+            request = FlowVerificationRequest.FollowEvent(eventId, timeout);
             return null;
         }
 
@@ -126,20 +125,29 @@ internal static class VerifyCommand
             if (error is not null)
                 return CliErrors.Usage(map, code!, error, action);
 
-            if (!FlowPayload.IsJson(body!, out string? where))
-                return CliErrors.Usage(map, "invalid_value",
-                    $"The test event is not JSON ({where}). Queuey sends it through the queue's ingress as application/json.",
-                    "Send one JSON value, such as {\"test\":true}.");
+            // JSON og høyst 64 KB slik den sendes, sjekket i SDK-en (review av #51): over 128 KB svarte Kestrel 413 uten kropp,
+            // og brukeren så bare en generell feil. Meldingen viser aldri en del av eventen.
+            try
+            {
+                request = FlowVerificationRequest.SendTestEvent(body!, eventType, timeout);
+            }
+            catch (ArgumentException ex)
+            {
+                return CliErrors.Usage(map, "invalid_value", ex.Message,
+                    "Send one JSON value of at most 64 KB that the receiver treats as harmless, such as {\"test\":true}.");
+            }
 
-            request = new FlowVerificationRequest { Send = true, Payload = body, EventType = eventType };
             return null;
         }
 
+        // Review av #51: --send er ikke hovedveien. Queuey sender en testevent bare der aktiv verifisering er slått på (ikke i
+        // prod-Queuey i dag), workspacet er merket som ikke prod, og ingressen er åpen. Pek på veiene som virker overalt.
         if (sources.Length > 0)
             return CliErrors.Usage(map, "send_required",
                 $"{string.Join(", ", sources.Select(o => "--" + o))} is a test event, and verify sends one only with --send.",
-                "Add --send to send it through the queue's ingress: it reaches the real receiver. Or leave it out, and wait for " +
-                "the producer's own event with --event-type.");
+                "To verify the producer's own event, publish it with a producer key and run `queuey verify <queue> --event <evt_…>` " +
+                "with the id the ingress answered, or start `queuey verify <queue> --event-type <type>` and trigger the event yourself, " +
+                "such as with `stripe trigger`. " + SendConditions);
 
         if (eventType is null)
         {
@@ -149,14 +157,19 @@ internal static class VerifyCommand
                     "would take the first event of any kind.",
                     "Pass the event type you trigger as well, such as --event-type payment_intent.succeeded --ingress-auth stripe.")
                 : CliErrors.Usage(map, "missing_argument",
-                    "Say what to verify: --event <evt_…> follows an event in the queue, --event-type <type> waits for the next " +
-                    "event of that type, and --send with --data, --file or --stdin sends a test event.",
+                    "Say what to verify: --event <evt_…> follows an event the producer published, --event-type <type> waits for " +
+                    "the next event of that type, and --send with --data, --file or --stdin has Queuey send a test event where it may.",
                     "Without one, verify would take the first event that arrived, from anyone.");
         }
 
-        request = new FlowVerificationRequest { EventType = eventType, IngressAuth = ingressAuth };
+        request = FlowVerificationRequest.WaitForEvent(eventType, ingressAuth, timeout);
         return null;
     }
+
+    /// <summary>When Queuey sends a test event, in one sentence, for the errors that point away from <c>--send</c>.</summary>
+    internal const string SendConditions =
+        "--send works only where Queuey has active verification switched on (production Queuey does not today), the key's " +
+        "workspace is tagged dev, test or staging, and the queue's ingress takes events without a key or a signature.";
 
     /// <summary>
     /// How long Queuey follows the event, from <c>--timeout</c> or its other name <c>--wait</c>: null for Queuey's default.
@@ -410,30 +423,6 @@ internal static class VerifyCommand
         }
         catch (JsonException)
         {
-            return false;
-        }
-    }
-}
-
-/// <summary>Whether a test event is JSON, as Queuey takes it: one JSON value, after a UTF-8 byte order mark when there is one.</summary>
-internal static class FlowPayload
-{
-    /// <summary>
-    /// True when <paramref name="bytes"/> are one JSON value. Otherwise <paramref name="where"/> says where it went wrong, by
-    /// line and byte, and never shows a part of the event.
-    /// </summary>
-    public static bool IsJson(byte[] bytes, out string? where)
-    {
-        int start = bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF ? 3 : 0;
-        try
-        {
-            using JsonDocument _ = JsonDocument.Parse(new ReadOnlyMemory<byte>(bytes, start, bytes.Length - start));
-            where = null;
-            return true;
-        }
-        catch (JsonException ex)
-        {
-            where = $"line {(ex.LineNumber ?? 0) + 1}, byte {(ex.BytePositionInLine ?? 0) + 1}";
             return false;
         }
     }
