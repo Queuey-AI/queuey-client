@@ -4,9 +4,26 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.ExceptionServices;
 using System.Text;
+using System.Threading;
 
 namespace Queuey.Client.Cli.Advise;
+
+/// <summary>Why <see cref="RepoWalk.ReadBounded"/> gave no text.</summary>
+internal enum ReadRefusal
+{
+    None,
+
+    /// <summary>The file holds more than the bound.</summary>
+    TooLarge,
+
+    /// <summary>The file is not a regular file: its stream cannot seek, as a pipe's or a socket's cannot.</summary>
+    NotRegular,
+
+    /// <summary>The open did not finish in time, as opening a pipe without a writer never does.</summary>
+    TimedOut,
+}
 
 /// <summary>
 /// How much one scan of a repository may take: files, folders, bytes read, time, and the length of a line it matches. A
@@ -18,7 +35,12 @@ namespace Queuey.Client.Cli.Advise;
 /// <param name="MaxTotalBytes">Bytes it reads in all.</param>
 /// <param name="Deadline">How long it may take.</param>
 /// <param name="MaxLineLength">The longest line it matches; a longer one, such as minified code, is skipped.</param>
-public sealed record ScanBudget(int MaxFiles, int MaxDirectories, int MaxFileBytes, long MaxTotalBytes, TimeSpan Deadline, int MaxLineLength)
+/// <param name="MaxEntriesPerDirectory">
+/// Entries it takes from one folder, at most, in the order the file system lists them. A larger folder is read in part.
+/// </param>
+public sealed record ScanBudget(
+    int MaxFiles, int MaxDirectories, int MaxFileBytes, long MaxTotalBytes, TimeSpan Deadline, int MaxLineLength,
+    int MaxEntriesPerDirectory = 10_000)
 {
     public static ScanBudget Default { get; } = new(
         MaxFiles: 6000,
@@ -26,7 +48,8 @@ public sealed record ScanBudget(int MaxFiles, int MaxDirectories, int MaxFileByt
         MaxFileBytes: 512 * 1024,
         MaxTotalBytes: 64L * 1024 * 1024,
         Deadline: TimeSpan.FromSeconds(15),
-        MaxLineLength: 4096);
+        MaxLineLength: 4096,
+        MaxEntriesPerDirectory: 10_000);
 }
 
 /// <summary>
@@ -55,6 +78,7 @@ internal sealed class RepoWalk
     private int _links;
     private int _unsafeNames;
     private int _large;
+    private int _partFolders;
 
     /// <param name="root">The repository's folder.</param>
     /// <param name="budget">What the walk may take.</param>
@@ -101,20 +125,18 @@ internal sealed class RepoWalk
                 yield break;
             }
 
-            FileSystemInfo[] entries;
-            try
-            {
-                entries = new DirectoryInfo(dir).GetFileSystemInfos();
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
-            {
-                continue;
-            }
+            List<FileSystemInfo> entries = List(dir);
+            if (Expired)
+                yield break;
 
-            Array.Sort(entries, (a, b) => string.CompareOrdinal(a.Name, b.Name));
+            // Ordnet etter navn, så det som leses, kommer i samme rekkefølge hver gang.
+            entries.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
             var folders = new List<string>();
             foreach (FileSystemInfo entry in entries)
             {
+                if (Expired)
+                    yield break;
+
                 if (IsLink(entry))
                 {
                     _links++;
@@ -150,6 +172,38 @@ internal sealed class RepoWalk
             for (int i = folders.Count - 1; i >= 0; i--)
                 stack.Push(folders[i]);
         }
+    }
+
+    /// <summary>
+    /// A folder's entries, streamed rather than loaded whole: at most the budget's entries per folder, with the deadline
+    /// checked while they come. A folder with more is read in part, which <see cref="Limits"/> says.
+    /// </summary>
+    /// <remarks>
+    /// Which entries a folder over the limit gives depends on the order the file system lists them in; those that are read
+    /// are then sorted, so the walk is the same every time for the same folder. The limit is far above any source folder.
+    /// </remarks>
+    private List<FileSystemInfo> List(string dir)
+    {
+        var entries = new List<FileSystemInfo>();
+        try
+        {
+            foreach (FileSystemInfo entry in new DirectoryInfo(dir).EnumerateFileSystemInfos())
+            {
+                if (entries.Count >= _budget.MaxEntriesPerDirectory)
+                {
+                    _partFolders++;
+                    break;
+                }
+                if (entries.Count % 256 == 0 && Expired)
+                    break;
+                entries.Add(entry);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            // En mappe som ikke kan listes, hoppes over; det som kom før feilen, brukes.
+        }
+        return entries;
     }
 
     /// <summary>
@@ -190,6 +244,9 @@ internal sealed class RepoWalk
         {
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, bufferSize: 16 * 1024,
                 FileOptions.SequentialScan);
+            // Ikke en vanlig fil (et rør, en socket): det som ble sjekket, er ikke det som ble åpnet.
+            if (!stream.CanSeek)
+                return string.Empty;
             byte[] buffer = new byte[cap + 1];
             int read = 0;
             while (read < buffer.Length)
@@ -236,9 +293,121 @@ internal sealed class RepoWalk
                 limits.Add($"{Count(_unsafeNames, "path")} with control or direction characters in the name skipped");
             if (_large > 0)
                 limits.Add($"{Count(_large, "file")} larger than {Size(_budget.MaxFileBytes)} skipped");
+            if (_partFolders > 0)
+                limits.Add($"{Count(_partFolders, "folder")} with more than {_budget.MaxEntriesPerDirectory} entries read in part, " +
+                           "the first the file system listed");
             return limits;
         }
     }
+
+    /// <summary>
+    /// The text of one file, outside any budget, for the one file a caller names: opened within <paramref name="openTimeout"/>,
+    /// only when it is a regular file, and read to <paramref name="max"/> bytes and no further whatever its length says. Null
+    /// with <paramref name="refusal"/> saying why otherwise. An I/O or access error goes to the caller.
+    /// </summary>
+    /// <remarks>
+    /// The file was checked before (lstat, by the caller), but what is opened can be another: a file swapped for a link to a
+    /// pipe between the check and the open (review of #57, K-a). Opening a pipe waits for a writer, so the open runs on a
+    /// thread of its own and is given up after the timeout; and a stream that cannot seek is refused before anything is read.
+    /// </remarks>
+    internal static string? ReadBounded(string path, int max, TimeSpan openTimeout, out ReadRefusal refusal)
+    {
+        FileStream? opened = OpenWithin(path, openTimeout);
+        if (opened is null)
+        {
+            refusal = ReadRefusal.TimedOut;
+            return null;
+        }
+
+        using FileStream stream = opened;
+        if (!stream.CanSeek)
+        {
+            refusal = ReadRefusal.NotRegular;
+            return null;
+        }
+
+        byte[] buffer = new byte[max + 1];
+        int read = 0;
+        while (read < buffer.Length)
+        {
+            int n = stream.Read(buffer, read, buffer.Length - read);
+            if (n == 0)
+                break;
+            read += n;
+        }
+
+        if (read > max)
+        {
+            refusal = ReadRefusal.TooLarge;
+            return null;
+        }
+
+        refusal = ReadRefusal.None;
+        return new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetString(buffer, 0, read).TrimStart('\uFEFF');
+    }
+
+    /// <summary>
+    /// Opens a file for reading on a thread of its own, and gives up after <paramref name="timeout"/>: null then. An open that
+    /// finishes after that is closed where it finishes. A thread rather than the thread pool, so a busy pool never makes an
+    /// ordinary open look late.
+    /// </summary>
+    private static FileStream? OpenWithin(string path, TimeSpan timeout)
+    {
+        var state = new OpenState();
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, bufferSize: 16 * 1024,
+                    FileOptions.SequentialScan);
+                lock (state)
+                {
+                    if (state.Abandoned)
+                        stream.Dispose();
+                    else
+                        state.Stream = stream;
+                }
+            }
+            catch (Exception ex)
+            {
+                lock (state)
+                    state.Error = ex;
+            }
+            finally
+            {
+                state.Done.Set();
+            }
+        })
+        {
+            IsBackground = true,   // en åpning som venter for alltid, holder ikke prosessen
+            Name = "queuey-advise-open",
+        };
+        thread.Start();
+
+        state.Done.Wait(timeout);
+        lock (state)
+        {
+            if (state.Error is { } error)
+                ExceptionDispatchInfo.Capture(error).Throw();
+            if (state.Stream is null)
+                state.Abandoned = true;
+            return state.Stream;
+        }
+    }
+
+    private sealed class OpenState
+    {
+        // Aldri Dispose: tråden kan sette den etter at den som ventet, har gitt opp.
+        public readonly ManualResetEventSlim Done = new();
+        public FileStream? Stream;
+        public Exception? Error;
+        public bool Abandoned;
+    }
+
+    /// <summary>A size in the units a person reads: bytes, KiB or MiB.</summary>
+    internal static string SizeText(long bytes) => Size(bytes);
+
+    internal static string DurationText(TimeSpan span) => Seconds(span);
 
     private void Stop(string reason)
     {
@@ -246,12 +415,15 @@ internal sealed class RepoWalk
             _stops.Add(reason);
     }
 
-    /// <summary>Whether an entry is a symbolic link (or another reparse point), checked on the entry itself, never its target.</summary>
+    /// <summary>
+    /// Whether an entry is a link, a symbolic link or a junction, read on the entry itself and never through it. Another
+    /// reparse point, such as a OneDrive placeholder, is the user's file, and is read (review of #56, K-2).
+    /// </summary>
     internal static bool IsLink(FileSystemInfo entry)
     {
         try
         {
-            return (entry.Attributes & FileAttributes.ReparsePoint) != 0 || entry.LinkTarget is not null;
+            return entry.LinkTarget is not null;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

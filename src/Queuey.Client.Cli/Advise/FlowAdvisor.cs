@@ -205,6 +205,14 @@ internal sealed class Enrichment
     /// </summary>
     private void ResolveDeployFile()
     {
+        // En fil advise ikke leste (en lenke, for stor, uleselig), er der likevel: et forslag om en ny fil ville erstattet den.
+        if (_facts.DeployFile is { Unread: { } reason } unread)
+        {
+            Conflict("unsupported", unread.File, null, null, new[] { new FlowEvidence(unread.File, null, "a deployment file advise did not read") },
+                $"{unread.File} {reason}", unread.WayOut ?? $"Fix {unread.File}, then run advise --intent again.");
+            return;
+        }
+
         if (_facts.DeployFile is not { Problem: { } problem } file)
             return;
 

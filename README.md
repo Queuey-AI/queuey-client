@@ -1081,6 +1081,13 @@ stated value the file contradicts, such as the same queue with another route, is
 and so is a file `apply` cannot read. `infrastructure.merge` says what was added and what the file kept. Comments in the
 file are not carried over, and `merge` says so.
 
+advise reads the `queuey.deploy.json` in the repository's root on its own, before the scan and outside its limits. When
+the file is there in a form advise does not read, the result is a conflict that says what to do, never a new file over
+it. That covers a symbolic link (in a monorepo, to `infra/queuey.deploy.json`), a folder, a file larger than 512 KiB,
+one this user cannot read, and anything that is not a regular file, such as a pipe. The file gets 5 seconds to open,
+since a pipe without a writer never does. The conflict names where a link points only when that is a plain path in the
+repository: letters, digits and `. _ / -`.
+
 **Stripe.** advise finds the handler and its route, `constructEvent`, the raw body, the framework and the port. It
 proposes a queue whose ingress verifies Stripe's signature and whose deliveries Queuey signs again in Stripe's format,
 so the handler keeps `constructEvent` as it is. In dev the queue delivers to `queuey listen` on your machine.
@@ -1103,7 +1110,8 @@ never a value.
 **The scan has limits, and says when it reaches one.**
 
 - It never follows a symbolic link, not even one inside the repository.
-- It reads only regular files, at most 512 KiB of each, 6000 files, 20,000 folders and 64 MiB in all, for at most 15 seconds.
+- It reads only regular files: at most 512 KiB of each, 6000 files, 20,000 folders, 10,000 entries of one folder and 64 MiB
+  in all, for at most 15 seconds.
 - It skips lines longer than 4 KiB, folders with tests, fixtures and docs, and names with control or direction characters.
 
 `scanLimited` lists what it left out, and is empty when it read everything. A router mounted from another app in a
