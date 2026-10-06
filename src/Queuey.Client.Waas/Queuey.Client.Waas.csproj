@@ -31,6 +31,8 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Queuey.Client.Waas.Tests" />
+    <!-- The CLI reaches the deployment file's rules (credential names, workspace ids) without making them public API. -->
+    <InternalsVisibleTo Include="Queuey.Client.Cli" />
   </ItemGroup>
 
   <ItemGroup>
