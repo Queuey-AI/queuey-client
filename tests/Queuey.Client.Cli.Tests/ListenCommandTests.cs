@@ -70,25 +70,32 @@ public sealed class ListenCommandTests
     [Fact]
     public void The_stream_starts_with_listening_and_every_way_it_ends_is_one_versioned_line()
     {
-        var (stdout, stderr) = (new StringWriter(), new StringWriter());
-        var output = new ListenOutput(json: true, stdout, stderr);
+        JsonElement[] Run(Action<ListenOutput> end)
+        {
+            var (stdout, stderr) = (new StringWriter(), new StringWriter());
+            var output = new ListenOutput(json: true, stdout, stderr);
+            output.Listening(new ListenTarget("queue", "que_1", Name: "orders"), "listen:queue:que_1", "http://localhost:5000", tookOver: true);
+            end(output);
+            Assert.Equal("", stderr.ToString());
+            return Lines(stdout);
+        }
 
-        output.Listening(new ListenTarget("queue", "que_1", Name: "orders"), "listen:queue:que_1", "http://localhost:5000", tookOver: true);
-        output.Refused("listener_already_connected", "another queuey listen session has listened on it", "Stop it, or --take-over.",
-            new DateTimeOffset(2026, 10, 6, 9, 0, 0, TimeSpan.Zero));
-        output.Superseded("Another queuey listen session took the queue over.", forwarded: 3);
-        output.Closed("connection_lost", "The connection to Queuey was lost and did not come back.", forwarded: 3);
+        JsonElement[] refused = Run(o => o.Refused("listener_already_connected", "another queuey listen session has listened on it",
+            "Stop it, or --take-over.", new DateTimeOffset(2026, 10, 6, 9, 0, 0, TimeSpan.Zero)));
+        JsonElement[] superseded = Run(o => o.Superseded("Another queuey listen session took the queue over.", forwarded: 3));
+        JsonElement[] closed = Run(o => o.Closed("connection_lost", "The connection to Queuey was lost and did not come back.", forwarded: 3));
 
-        JsonElement[] lines = Lines(stdout);
-        Assert.Equal(new[] { "listening", "refused", "superseded", "closed" }, lines.Select(l => l.GetProperty("type").GetString()));
-        Assert.All(lines, l => Assert.Equal(1, l.GetProperty("schemaVersion").GetInt32()));
-        Assert.Equal("que_1", lines[0].GetProperty("id").GetString());
-        Assert.Equal("orders", lines[0].GetProperty("name").GetString());
-        Assert.True(lines[0].GetProperty("tookOver").GetBoolean());
-        Assert.Equal("listener_already_connected", lines[1].GetProperty("code").GetString());
-        Assert.Equal("2026-10-06T09:00:00+00:00", lines[1].GetProperty("heldSinceUtc").GetString());
-        Assert.Equal("connection_lost", lines[3].GetProperty("reason").GetString());
-        Assert.Equal("", stderr.ToString());
+        foreach (var (lines, type) in new[] { (refused, "refused"), (superseded, "superseded"), (closed, "closed") })
+        {
+            Assert.Equal(new[] { "listening", type }, lines.Select(l => l.GetProperty("type").GetString()));
+            Assert.All(lines, l => Assert.Equal(1, l.GetProperty("schemaVersion").GetInt32()));
+        }
+        Assert.Equal("que_1", refused[0].GetProperty("id").GetString());
+        Assert.Equal("orders", refused[0].GetProperty("name").GetString());
+        Assert.True(refused[0].GetProperty("tookOver").GetBoolean());
+        Assert.Equal("listener_already_connected", refused[1].GetProperty("code").GetString());
+        Assert.Equal("2026-10-06T09:00:00+00:00", refused[1].GetProperty("heldSinceUtc").GetString());
+        Assert.Equal("connection_lost", closed[1].GetProperty("reason").GetString());
     }
 
     [Fact]
