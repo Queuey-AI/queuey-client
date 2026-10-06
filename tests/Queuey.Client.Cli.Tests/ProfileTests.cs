@@ -308,6 +308,16 @@ public sealed class UserProfilesTests : IDisposable
     }
 
     [Fact]
+    public void The_libc_fallback_names_the_same_user_as_the_runtime()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        // Reserven når runtimens shim mangler SystemNative_GetEUid (review av #55): geteuid i libc, lastet ved navn.
+        Assert.Equal(UserProfiles.CurrentUser(), UserProfiles.EffectiveUserFromLibc());
+    }
+
+    [Fact]
     public void Json_that_is_not_valid_is_refused_without_showing_it()
     {
         string path = WriteUserConfig(_dir, """{ "profiles": { "dev": { "apiKey": qak_dev.key-for-dev } } }""");

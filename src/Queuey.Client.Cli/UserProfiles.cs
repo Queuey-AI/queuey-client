@@ -227,13 +227,29 @@ internal static class UserProfiles
     /// <summary>The user the process runs as (its effective uid). A seam, as <see cref="Inspect"/>.</summary>
     internal static Func<uint> CurrentUser = Native.CurrentUser;
 
+    /// <summary>
+    /// The effective uid from libc's <c>geteuid</c>, loaded by name, or null when no libc could be loaded: the fallback
+    /// <see cref="CurrentUser"/> takes when the runtime's shim has no <c>SystemNative_GetEUid</c>.
+    /// </summary>
+    internal static uint? EffectiveUserFromLibc() => Native.LibcEffectiveUser();
+
     // .NET har ikke et offentlig API for eieren av en fil; File.GetUnixFileMode gir bare modusen. Runtimens egen shim har det:
     // libSystem.Native, som File.GetUnixFileMode selv kaller, fyller FileStatus med Flags, Mode, Uid og Gid først, og de fire har
     // stått der siden .NET Core 2.0. Bufferen er romslig, så felt runtimen legger til bak dem, får plass. Modusen fra den
     // sammenlignes med File.GetUnixFileMode, så en annen rekkefølge i en senere runtime gir en feil, aldri en eier som er lest
     // feil. Finnes ikke shimen, leses fila ikke: sjekken faller aldri bort i stillhet.
+    //
+    // Orkestreringen (review av #55, 2026-10-06): uid-en til prosessen har en reserve i libc sin geteuid, lastet ved navn med
+    // NativeLibrary (libc.so.6 i glibc, libc.so i musl, libSystem.dylib i macOS). Eieren av en fil har ingen reserve: stat(2)
+    // har ulik struct per plattform, og en eier som er lest feil, er verre enn en fil som ikke leses. release.yml kjører
+    // --profile i den publiserte binærfila for hver RID, så en runtime uten shimen stopper releasen, ikke brukeren.
     private static class Native
     {
+        private static readonly string[] Libc = { "libc.so.6", "libc.so", "libSystem.dylib" };
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate uint GetEUidFunction();
+
         [StructLayout(LayoutKind.Sequential, Size = 512)]
         private struct FileStatus
         {
@@ -280,12 +296,23 @@ internal static class UserProfiles
             }
             catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
             {
-                throw new QueueyConfigurationException(
+                return LibcEffectiveUser() ?? throw new QueueyConfigurationException(
                     "Could not tell which user runs queuey on this .NET runtime, so the connections file was not read.")
                 {
                     SuggestedAction = "Update the queuey CLI, or run without --profile.",
                 };
             }
+        }
+
+        internal static uint? LibcEffectiveUser()
+        {
+            foreach (string name in Libc)
+            {
+                if (NativeLibrary.TryLoad(name, out IntPtr library) && NativeLibrary.TryGetExport(library, "geteuid", out IntPtr geteuid))
+                    return Marshal.GetDelegateForFunctionPointer<GetEUidFunction>(geteuid)();
+            }
+
+            return null;
         }
 
         private static QueueyConfigurationException Unchecked(string path) => new(
