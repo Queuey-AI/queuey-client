@@ -70,25 +70,43 @@ public sealed class DeploymentTenantCommandTests : IDisposable
         return path;
     }
 
-    /// <summary>En server som godtar apply og leverer verify-eventen, i det workspacet den blir spurt om.</summary>
+    /// <summary>En server som godtar apply, i det workspacet den blir spurt om.</summary>
     private static RecordingHandler Server() => new(req => req switch
     {
         { Method.Method: "GET" } when req.Path.StartsWith("/tenants/", StringComparison.Ordinal)
             => RecordingHandler.Json(HttpStatusCode.OK, Array.Empty<object>()),
         { Method.Method: "PUT", Path: "/queues" }
             => RecordingHandler.Json(HttpStatusCode.OK, new { publicId = "que_orders", displayName = "orders", created = true, hasDeliveryTarget = false }),
-        { Method.Method: "POST" } when req.Path.StartsWith("/events/", StringComparison.Ordinal)
-            => RecordingHandler.Json(HttpStatusCode.Accepted, new { queuePublicId = "que_orders", eventId = "evt_1", receivedAtUtc = DateTimeOffset.UnixEpoch, mode = "Deliver", replayed = false }),
-        { Method.Method: "GET", Path: "/events/que_orders/evt_1" }
-            => RecordingHandler.Json(HttpStatusCode.OK, new { publicId = "evt_1", status = 2, attemptCount = 1, attempts = new[] { new { attemptNumber = 1, targetEndpoint = "https://hooks.example.com/orders", responseCode = 200, durationMs = 12 } } }),
         _ => throw new InvalidOperationException(req.Key),
     });
+
+    /// <summary>
+    /// En server der verify finner køen orders i det workspacet den blir spurt om, og en flytverifisering av den som består,
+    /// i det samme workspacet (F2.6).
+    /// </summary>
+    private static RecordingHandler VerifyServer()
+    {
+        string? tenant = null;
+        return new RecordingHandler(req =>
+        {
+            if (req.Method == HttpMethod.Get && req.Path.StartsWith("/tenants/", StringComparison.Ordinal) && req.Path.EndsWith("/queues", StringComparison.Ordinal))
+            {
+                tenant = req.Path.Split('/')[2];
+                return FlowAnswers.Queues();
+            }
+
+            if (req.Key == "POST /queues/que_orders/verifications" && tenant is not null)
+                return RecordingHandler.Json(HttpStatusCode.Created, FlowAnswers.Verification("passed", tenant: tenant));
+
+            throw new InvalidOperationException(req.Key);
+        });
+    }
 
     private static Task<int> Apply(string path, params string[] extra)
         => ApplyCommand.RunAsync(CliHarness.With(new[] { "--file", path }.Concat(extra).ToArray()));
 
     private static Task<int> Verify(string path, params string[] extra)
-        => VerifyCommand.RunAsync(CliHarness.With(new[] { "orders", "--data", "{}", "--deployment", path }.Concat(extra).ToArray()));
+        => VerifyCommand.RunAsync(CliHarness.With(new[] { "orders", "--event", "evt_1", "--deployment", path }.Concat(extra).ToArray()));
 
     public static TheoryData<string[], Dictionary<string, string>, string> Disagreements => new()
     {
@@ -137,13 +155,13 @@ public sealed class DeploymentTenantCommandTests : IDisposable
         Assert.Equal(expected, applied.Requests.Single(r => r.Key == "PUT /queues").Json.GetProperty("tenantPublicId").GetString());
         Assert.Contains($"(tenant {expected})", apply.Stdout);
 
-        RecordingHandler verified = Server();
+        RecordingHandler verified = VerifyServer();
         CliRun verify = await CliHarness.RunAsync(() => Verify(path, tenantArgs), verified);
         Assert.Equal(ExitCodes.Success, verify.Exit);
-        Assert.Contains($"POST /events/{expected}/orders", verified.Requests.Select(r => r.Key));
+        Assert.Contains($"GET /tenants/{expected}/queues", verified.Requests.Select(r => r.Key));
         Assert.Contains($"in {expected}, event evt_1", verify.Stdout);
 
-        CliRun verifyJson = await CliHarness.RunAsync(() => Verify(path, tenantArgs.Append("--json").ToArray()), Server());
+        CliRun verifyJson = await CliHarness.RunAsync(() => Verify(path, tenantArgs.Append("--json").ToArray()), VerifyServer());
         Assert.Equal(expected, JsonDocument.Parse(verifyJson.Stdout).RootElement.GetProperty("tenant").GetString());
     }
 
@@ -155,11 +173,11 @@ public sealed class DeploymentTenantCommandTests : IDisposable
         string path = Path.Combine(_dir, "queuey.deploy.json");
         File.WriteAllText(path, """{ "tenant": "ten_file", "queues": { "orders": { "maxAttempts": 8 } } }""");
 
-        RecordingHandler verified = Server();
+        RecordingHandler verified = VerifyServer();
         CliRun verify = await CliHarness.RunAsync(() => Verify(path), verified);
 
         Assert.Equal(ExitCodes.Success, verify.Exit);
-        Assert.Contains("POST /events/ten_file/orders", verified.Requests.Select(r => r.Key));
+        Assert.Contains("GET /tenants/ten_file/queues", verified.Requests.Select(r => r.Key));
 
         // Apply leser hele fila, og feilen begynner med hvilken fil det er.
         var refused = await Assert.ThrowsAsync<Queuey.Client.QueueyConfigurationException>(() => CliHarness.RunAsync(() => Apply(path), Server()));

@@ -175,11 +175,11 @@ public sealed class SecretEchoTests : IDisposable
     {
         { new[] { "apply", "--file", "{file}", "--tenant", Key }, NoEnvironment, "--tenant" },
         { new[] { "apply", "--file", "{file}", "--dry-run" }, KeyInTheEnvironment, "QUEUEY_TENANT" },
-        { new[] { "verify", "orders", "--data", "{}", "--deployment", "{file}" }, KeyInTheEnvironment, "QUEUEY_TENANT" },
+        { new[] { "verify", "orders", "--event", "evt_1", "--deployment", "{file}" }, KeyInTheEnvironment, "QUEUEY_TENANT" },
         // Re-review 2026-10-05: uten workspace i fila var det ingen konflikt, og nøkkelen ble workspacet i URL-ene.
         { new[] { "apply", "--file", "{bare}" }, KeyInTheEnvironment, "QUEUEY_TENANT" },
         { new[] { "plan", "--file", "{bare}" }, KeyInTheEnvironment, "QUEUEY_TENANT" },
-        { new[] { "verify", "orders", "--data", "{}", "--deployment", "{bare}" }, KeyInTheEnvironment, "QUEUEY_TENANT" },
+        { new[] { "verify", "orders", "--event", "evt_1", "--deployment", "{bare}" }, KeyInTheEnvironment, "QUEUEY_TENANT" },
         { new[] { "credentials", "list", "--tenant", Key }, NoEnvironment, "--tenant" },
         { new[] { "whoami" }, KeyInTheEnvironment, "QUEUEY_TENANT" },
         { new[] { "whoami", "--tenant", Key }, NoEnvironment, "--tenant" },

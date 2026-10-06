@@ -14,7 +14,7 @@ COMMANDS
   queue          Declare queues from [QueueyQueue] types: queue plan | queue sync.
   apply          Converge Queuey from a declarative deployment file (queuey.deploy.json).
   plan           Ask Queuey what apply would change and refuse, as dry runs. Writes nothing.
-  verify         Publish one event to a queue and follow it: delivered, or why not and what to change.
+  verify         Verify a queue's flow with Queuey, step by step from the ingress to the final state.
   schema         Print the JSON Schema for queuey.deploy.json. Reads nothing, needs no credentials.
   pull           Read a workspace back into a deployment file (the inverse of apply).
   credentials    Store delivery secrets a deployment file refers to: credentials set | list.
@@ -164,30 +164,39 @@ PLAN
                  it as apply --adopt would write it.
 
 VERIFY
-  queuey verify <queue> (--data <json> | --file <path> | --stdin)
-                [--timeout <seconds>] [--event-type <t>] [--content-type <ct>]
-                [--deployment queuey.deploy.json] [--json]
-                 Publishes ONE event to <queue> and follows it until it is delivered, logged,
-                 filtered or failed, or --timeout passes (default 30). Exits 0 only when the
-                 receiver got it. Otherwise the verdict — logged_not_delivered, filtered,
-                 failed or timeout — names what to change: the mode, the filter, the
-                 credential the receiver rejected, held delivery, or the earlier event
-                 holding the queue. The advice follows what Queuey decided after the
-                 attempt. When Queuey holds the queue for a person (a rejected credential,
-                 a missing route, a TLS failure, or a timeout on a queue not marked
-                 idempotent), the advice ends with a person resuming it in the Queuey
-                 console. A delivery Queuey holds before sending (the send budget, a
-                 receiver it probes) is not a failure: verify keeps waiting. A failure is
-                 reported on its first attempt, not after every retry.
-                 --json prints an object with ""schemaVersion"": 1, the verdict and the action.
-                 The event is real and reaches the receiver like any other: send data it
-                 treats as harmless. The workspace follows apply's rule: the deployment file's
-                 ""tenant"" (--deployment, default ./queuey.deploy.json) when it names one, else
-                 --tenant / QUEUEY_TENANT / queuey.json; when --tenant or QUEUEY_TENANT names
-                 another workspace than the file, verify fails and names both. The output names
-                 the workspace. Needs a key that may publish and read events (event.read):
-                 verify reads one event first and publishes nothing without it. --file is the
-                 event; a deployment file there is refused (name that one with --deployment).
+  queuey verify <queue> --event <evt_…>
+  queuey verify <queue> --event-type <type> [--ingress-auth <template>]
+  queuey verify <queue> --send (--data <json> | --file <path> | --stdin) [--event-type <type>]
+                [--timeout <seconds>] [--deployment queuey.deploy.json] [--json]
+                 Verifies the queue's flow with Queuey's flow verification, and reads it
+                 until Queuey has settled it: each step from the ingress to the final state
+                 (ingress_reached, ingress_auth, persisted, routed, delivery_attempted,
+                 delivery_auth, receiver_response, final_state), with its evidence.
+                 --event follows an event already in the queue. --event-type waits for the
+                 next event the ingress takes with that type, from the start on: trigger it
+                 once verify says it is waiting. --ingress-auth adds that the ingress
+                 verified it with that signed-request template, such as stripe. --send sends
+                 a test event through the queue's ingress, with --event-type as its type. It
+                 is real and reaches the receiver like any other event, so send data it
+                 treats as harmless. Queuey sends it only for a key with event.publish, to a
+                 workspace that is not production, and never signs it as a provider.
+                 --timeout (or --wait) is how long Queuey follows the event, in seconds: a
+                 minute when left out, at most 900.
+                 Exits 0 only when the verification passed. failed, timed_out and not_tried
+                 exit 1 with Queuey's summary, and a refusal exits 1 with Queuey's message.
+                 --json prints { ""schemaVersion"": 2, ""tenant"", ""queue"", ""queuePublicId"",
+                 ""verification"": { … } }: the verification in Queuey's own shape, with its
+                 own schemaVersion; check schemaVersion first. Neither output shows a payload
+                 value or a secret: the evidence is ids, statuses, times and header names.
+                 <queue> is the queue's name or its id (que_…). A name is looked up in the
+                 workspace by apply's rule: the deployment file's ""tenant"" (--deployment,
+                 default ./queuey.deploy.json) when it names one, else --tenant /
+                 QUEUEY_TENANT / queuey.json; when --tenant or QUEUEY_TENANT names another
+                 workspace than the file, verify fails and names both. Needs a key that may
+                 read the queue and its events (queue.read, event.read). Against a Queuey
+                 without flow verification, verify fails with flow_verification_unavailable
+                 and sends nothing. --file is the test event; a deployment file there is
+                 refused (name that one with --deployment).
 
 SCHEMA
   queuey schema [--json]

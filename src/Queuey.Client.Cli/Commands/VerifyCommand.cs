@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -12,17 +13,29 @@ using Queuey.Client.Waas;
 namespace Queuey.Client.Cli;
 
 /// <summary>
-/// <c>queuey verify</c> — proves a queue delivers: publishes one event and follows it until it is
-/// delivered, logged, filtered or failed. The step after <c>apply</c>, because an apply that exits 0
-/// says the configuration landed, not that events arrive.
+/// <c>queuey verify</c> — proves a queue's flow with Queuey's flow verification: follows an event from the ingress to its
+/// final state, step by step. The event is one already in the queue (<c>--event</c>), the next one of a type
+/// (<c>--event-type</c>), or a test event Queuey sends (<c>--send</c>). The step after <c>apply</c>, because an apply that
+/// exits 0 says the configuration landed, not that events arrive.
 /// </summary>
+// F2.6 (2026-10-06): Queuey verifiserer, og CLI-en starter og leser. Før publiserte verify selv og fulgte eventen med
+// GET /events, og ga sitt eget verdikt. Nå er det samme trinn og samme utfall som MCP-verktøyene og konsollen viser.
 internal static class VerifyCommand
 {
     internal static readonly CommandOptions Options = new(
         "verify",
-        flags: new[] { "stdin", "json" },
-        values: new[] { "data", "file", "timeout", "event-type", "content-type", "deployment", "queue" },
-        positionals: 1);
+        flags: new[] { "send", "stdin", "json" },
+        values: new[] { "event", "event-type", "ingress-auth", "data", "file", "timeout", "wait", "deployment", "queue" },
+        positionals: 1,
+        hints: new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            // Fantes før F2.6, da verify publiserte selv. Queuey sender testeventen som JSON.
+            ["content-type"] = "--content-type is not an option for queuey verify any more: Queuey sends the test event (--send) " +
+                               "through the queue's ingress as application/json.",
+        });
+
+    // Kildene til en testevent. Bare med --send.
+    private static readonly string[] BodySources = { "data", "file", "stdin" };
 
     public static async Task<int> RunAsync(string[] args)
     {
@@ -31,37 +44,152 @@ internal static class VerifyCommand
 
         string? queue = map.FirstPositional ?? map.Get("queue");
         if (string.IsNullOrWhiteSpace(queue))
-            return CliErrors.Usage(map, "missing_argument", "verify requires <queue>: the queue name you publish to.");
+            return CliErrors.Usage(map, "missing_argument", "verify requires <queue>: the queue's name, or its id (que_…).");
 
-        byte[]? body = ReadBody(map, out string? bodyCode, out string? bodyError, out string? bodyAction);
-        if (bodyError != null)
-            return CliErrors.Usage(map, bodyCode!, bodyError, bodyAction);
+        if (Timeout(map, out TimeSpan? timeout) is { } badTimeout)
+            return badTimeout;
 
-        int timeoutSeconds = 30;
-        if (map.Get("timeout") is { } rawTimeout && (!int.TryParse(rawTimeout, out timeoutSeconds) || timeoutSeconds < 1))
-            return CliErrors.Usage(map, "invalid_value", $"--timeout takes whole seconds, at least 1; got '{rawTimeout}'.");
+        if (Request(map, out FlowVerificationRequest? request) is { } refused)
+            return refused;
+        request!.Timeout = timeout;
 
-        // Workspacet apply skrev til, etter samme regel som apply: fila sin tenant, ellers den
-        // konfigurerte, og feil når --tenant eller QUEUEY_TENANT navngir et annet enn fila.
+        // Workspacet apply skrev til, etter samme regel som apply: fila sin tenant, ellers den konfigurerte, og feil når
+        // --tenant eller QUEUEY_TENANT navngir et annet enn fila. Det trengs for å finne køen ved navn.
         (string? fileTenant, string filePath) = DeploymentFileTenant(map);
         ResolvedConfig config = CliHost.ResolveForDeployment(map, fileTenant, filePath);
 
         using ServiceProvider provider = CliHost.BuildProvider(config);
         var service = provider.GetRequiredService<IQueueyService>();
 
-        DeliveryVerification result = await service.VerifyDeliveryAsync(queue!, body!, new VerifyDeliveryOptions
-        {
-            Timeout = TimeSpan.FromSeconds(timeoutSeconds),
-            ContentType = map.Get("content-type") ?? "application/json",
-            EventType = map.Get("event-type"),
-        });
+        bool json = map.Has("json");
+        FlowVerification result = await service.VerifyFlowAsync(queue!, request, json ? null : new StartLine(queue!));
 
-        if (map.Has("json"))
-            Console.WriteLine(JsonSerializer.Serialize(ToJson(result), CliHost.JsonOut));
+        // Workspacet er det Queuey sier køen ligger i; det konfigurerte når svaret ikke har det.
+        string? tenant = result.Subject.WorkspacePublicId ?? config.TenantPublicId;
+        if (json)
+            Console.WriteLine(JsonSerializer.Serialize(ToJson(queue!, tenant, result), CliHost.JsonOut));
         else
-            WriteHuman(result);
+            WriteHuman(queue!, tenant, result);
 
-        return result.Delivered ? ExitCodes.Success : ExitCodes.RuntimeError;
+        return result.Passed ? ExitCodes.Success : ExitCodes.RuntimeError;
+    }
+
+    /// <summary>
+    /// What the command line asks Queuey to verify, or the exit code of the usage error that says why it cannot ask. Nothing
+    /// is read from the network, and stdin only for a test event.
+    /// </summary>
+    private static int? Request(ArgMap map, out FlowVerificationRequest? request)
+    {
+        request = null;
+        string[] sources = BodySources.Where(map.Has).ToArray();
+
+        if (map.Has("event"))
+        {
+            if (Value(map, "event", "the id of the event to follow (evt_…)", out string? eventId) is { } missing)
+                return missing;
+            if (!eventId!.StartsWith("evt_", StringComparison.Ordinal))
+                return CliErrors.Usage(map, "invalid_value",
+                    "--event takes an event's id (evt_…), as publish answered it. The value is not shown, since it is not one.");
+
+            string[] others = new[] { "event-type", "ingress-auth", "send" }.Concat(BodySources).Where(map.Has).ToArray();
+            if (others.Length > 0)
+                return CliErrors.Usage(map, "conflicting_options",
+                    $"--event follows an event that is already in the queue, so it takes no {string.Join(", ", others.Select(o => "--" + o))}.",
+                    "Leave --event out to wait for the next event of a type (--event-type), or to send a test event (--send).");
+
+            request = new FlowVerificationRequest { EventPublicId = eventId };
+            return null;
+        }
+
+        string? eventType = null;
+        if (map.Has("event-type") && Value(map, "event-type", "the event type", out eventType) is { } noType)
+            return noType;
+        string? ingressAuth = null;
+        if (map.Has("ingress-auth") && Value(map, "ingress-auth", "the signed-request template the ingress verifies with, such as stripe", out ingressAuth) is { } noScheme)
+            return noScheme;
+
+        if (map.Has("send"))
+        {
+            if (ingressAuth is not null)
+                return CliErrors.Usage(map, "conflicting_options",
+                    "Queuey never signs a test event as a provider, so --send takes no --ingress-auth.",
+                    "To prove a provider's flow, leave --send out and wait for the provider's own event: --event-type <type> --ingress-auth <template>.");
+
+            if (sources.Length == 0)
+                return CliErrors.Usage(map, "missing_body", "--send needs the test event: --data <json>, --file <path>, or --stdin.",
+                    "It is delivered to the real receiver like any other event, so send data it treats as harmless.");
+            if (sources.Length > 1)
+                return CliErrors.Usage(map, "conflicting_options",
+                    $"Give the test event once: {string.Join(", ", sources.Select(o => "--" + o))} were all given.");
+
+            byte[]? body = ReadBody(map, out string? code, out string? error, out string? action);
+            if (error is not null)
+                return CliErrors.Usage(map, code!, error, action);
+
+            if (!FlowPayload.IsJson(body!, out string? where))
+                return CliErrors.Usage(map, "invalid_value",
+                    $"The test event is not JSON ({where}). Queuey sends it through the queue's ingress as application/json.",
+                    "Send one JSON value, such as {\"test\":true}.");
+
+            request = new FlowVerificationRequest { Send = true, Payload = body, EventType = eventType };
+            return null;
+        }
+
+        if (sources.Length > 0)
+            return CliErrors.Usage(map, "send_required",
+                $"{string.Join(", ", sources.Select(o => "--" + o))} is a test event, and verify sends one only with --send.",
+                "Add --send to send it through the queue's ingress: it reaches the real receiver. Or leave it out, and wait for " +
+                "the producer's own event with --event-type.");
+
+        if (eventType is null)
+        {
+            return ingressAuth is not null
+                ? CliErrors.Usage(map, "missing_argument",
+                    "--ingress-auth goes with --event-type: a provider sends many kinds of events, so waiting on the template alone " +
+                    "would take the first event of any kind.",
+                    "Pass the event type you trigger as well, such as --event-type payment_intent.succeeded --ingress-auth stripe.")
+                : CliErrors.Usage(map, "missing_argument",
+                    "Say what to verify: --event <evt_…> follows an event in the queue, --event-type <type> waits for the next " +
+                    "event of that type, and --send with --data, --file or --stdin sends a test event.",
+                    "Without one, verify would take the first event that arrived, from anyone.");
+        }
+
+        request = new FlowVerificationRequest { EventType = eventType, IngressAuth = ingressAuth };
+        return null;
+    }
+
+    /// <summary>
+    /// How long Queuey follows the event, from <c>--timeout</c> or its other name <c>--wait</c>: null for Queuey's default.
+    /// </summary>
+    private static int? Timeout(ArgMap map, out TimeSpan? timeout)
+    {
+        timeout = null;
+        if (map.Has("timeout") && map.Has("wait"))
+            return CliErrors.Usage(map, "conflicting_options", "--timeout and --wait are the same option: give one.");
+
+        string name = map.Has("wait") ? "wait" : "timeout";
+        if (!map.Has(name))
+            return null;
+
+        string? raw = map.Get(name);
+        if (!int.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out int seconds) || seconds < 1)
+            return CliErrors.Usage(map, "invalid_value",
+                $"--{name} takes whole seconds, at least 1; got '{(raw is null ? "" : CliErrors.Shown(raw))}'.",
+                "Queuey follows an event for at most 15 minutes (900 seconds), and for a minute when --timeout is left out.");
+
+        timeout = TimeSpan.FromSeconds(seconds);
+        return null;
+    }
+
+    /// <summary>The option's value, or the exit code of the usage error for an option given without one.</summary>
+    private static int? Value(ArgMap map, string option, string what, out string? value)
+    {
+        value = map.Get(option);
+        if (!string.IsNullOrWhiteSpace(value))
+            return null;
+
+        value = null;
+        return CliErrors.Usage(map, "missing_value", $"--{option} takes a value: {what}.");
     }
 
     /// <summary>The deployment file's tenant, when there is a file — named by --deployment, or the default one here.</summary>
@@ -79,49 +207,150 @@ internal static class VerifyCommand
         return (DeploymentTenant.ReadFromFile(CliFiles.ReadAllText(path), path), path);
     }
 
-    private static void WriteHuman(DeliveryVerification r)
+    /// <summary>The line verify writes to stderr once Queuey follows an event, so a person knows to trigger it.</summary>
+    private sealed class StartLine : IProgress<FlowVerification>
     {
-        string mark = r.Delivered ? "✓" : "✗";
-        string verdict = r.Verdict switch
-        {
-            DeliveryVerdict.Delivered => "Delivered",
-            DeliveryVerdict.LoggedNotDelivered => "Logged, not delivered",
-            DeliveryVerdict.Filtered => "Filtered, not delivered",
-            DeliveryVerdict.Failed => "Delivery failed",
-            _ => "No outcome yet",
-        };
+        private readonly string _queue;
+        private bool _written;
 
-        Console.WriteLine($"{mark} {verdict} — {r.Queue} ({r.QueuePublicId}) in {r.Tenant ?? "?"}, event {r.EventId}");
-        Console.WriteLine($"  {r.Summary}");
-        if (r.SuggestedAction is { } action)
-            Console.WriteLine($"  → {action}");
+        public StartLine(string queue) => _queue = queue;
+
+        public void Report(FlowVerification value)
+        {
+            if (_written) return;
+            _written = true;
+            if (value.Settled) return;
+
+            long seconds = Math.Max(0, (long)Math.Ceiling((value.ObserveUntil - value.CreatedAt).TotalSeconds));
+            string queue = Where(_queue, value.Subject.QueuePublicId);
+            Console.Error.WriteLine(value.Mode switch
+            {
+                FlowVerificationModes.ObservedSession =>
+                    $"Waiting up to {seconds} s for the next '{value.Expectations.EventType}' event on {queue}" +
+                    (value.Expectations.IngressAuth is { } scheme ? $", verified with {scheme}" : "") +
+                    ". Trigger it now: an event that arrived before this does not count.",
+                FlowVerificationModes.Active =>
+                    $"Sent a test event to {queue}{Event(value)}. Following it for up to {seconds} s.",
+                _ => $"Following{Event(value)} on {queue} for up to {seconds} s.",
+            });
+        }
+
+        private static string Event(FlowVerification value)
+            => value.Subject.EventPublicId is { } id ? " " + id : "";
+    }
+
+    private static string Where(string queue, string? queuePublicId)
+        => queuePublicId is null || queuePublicId == queue ? queue : $"{queue} ({queuePublicId})";
+
+    private static void WriteHuman(string queue, string? tenant, FlowVerification v)
+    {
+        string outcome = v.Settled
+            ? v.Outcome switch
+            {
+                FlowVerificationOutcomes.Passed => "Passed",
+                FlowVerificationOutcomes.Failed => "Failed",
+                FlowVerificationOutcomes.TimedOut => "Timed out",
+                FlowVerificationOutcomes.NotTried => "Not tried",
+                _ => v.Outcome ?? "No outcome",
+            }
+            : "Not settled";
+
+        string @event = v.Subject.EventPublicId is { } id ? $", event {id}" : "";
+        Console.WriteLine($"{(v.Passed ? "✓" : "✗")} {outcome} — {Where(queue, v.Subject.QueuePublicId)} in {tenant ?? "?"}{@event}");
+        if (!string.IsNullOrWhiteSpace(v.Summary))
+            Console.WriteLine($"  {v.Summary}");
+
+        int width = v.Steps.Count == 0 ? 0 : v.Steps.Max(s => (s.Name ?? "").Length);
+        foreach (FlowVerificationStep step in v.Steps)
+        {
+            string details = Details(step.Evidence);
+            Console.WriteLine($"  {Mark(step.Status)} {(step.Name ?? "").PadRight(width)}  {step.Status}{(details.Length == 0 ? "" : "  " + details)}");
+        }
+
+        if (!v.Settled)
+            Console.WriteLine($"  Queuey had not settled the verification when verify stopped reading it ({v.Outcome ?? "no outcome"} so far).");
+        Console.WriteLine($"  Verification {v.VerificationId}.");
+    }
+
+    private static string Mark(string? status) => status switch
+    {
+        FlowStepStatuses.Passed => "✓",
+        FlowStepStatuses.Failed => "✗",
+        FlowStepStatuses.Skipped => "–",
+        FlowStepStatuses.Pending => "…",
+        _ => "?",
+    };
+
+    /// <summary>
+    /// A step's evidence as <c>name=value</c>, in the order Queuey defines it. Only the fields the SDK reads, so a field it does
+    /// not know never shows; and Queuey's evidence has no payload value, secret, header value or response body to begin with.
+    /// </summary>
+    private static string Details(FlowStepEvidence? e)
+    {
+        if (e is null) return "";
+
+        var parts = new List<string>();
+        void Add(string name, object? value)
+        {
+            string? text = value switch
+            {
+                null => null,
+                bool b => b ? "true" : "false",
+                DateTimeOffset at => at.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture),
+                IEnumerable<string> list => string.Join(",", list),
+                IFormattable f => f.ToString(null, CultureInfo.InvariantCulture),
+                _ => value.ToString(),
+            };
+            if (!string.IsNullOrEmpty(text))
+                parts.Add($"{name}={text}");
+        }
+
+        Add("reason", e.Reason);
+        Add("eventId", e.EventId);
+        Add("scheme", e.Scheme);
+        Add("credentialId", e.CredentialId);
+        Add("eventTypeRecorded", e.EventTypeRecorded);
+        Add("groupKeyRecorded", e.GroupKeyRecorded);
+        Add("partitionKeyRecorded", e.PartitionKeyRecorded);
+        Add("attemptId", e.AttemptId);
+        Add("attemptNumber", e.AttemptNumber);
+        Add("attempts", e.Attempts);
+        Add("targetId", e.TargetId);
+        Add("targetHost", e.TargetHost);
+        Add("targetPath", e.TargetPath);
+        Add("sent", e.Sent);
+        Add("probe", e.Probe);
+        Add("auth", e.Auth);
+        Add("signing", e.Signing);
+        Add("resigned", e.Resigned);
+        Add("headers", e.Headers);
+        Add("statusCode", e.StatusCode);
+        Add("durationMs", e.DurationMs);
+        Add("failureClass", e.FailureClass);
+        Add("decision", e.Decision);
+        Add("status", e.Status);
+        Add("nextRetryAt", e.NextRetryAt?.ToUniversalTime());
+        Add("holdReason", e.HoldReason);
+        Add("heldBy", e.HeldBy);
+        Add("targets", e.Targets);
+        return string.Join(" ", parts);
     }
 
     /// <summary>
     /// The version of <c>verify --json</c>'s shape. A script that reads it checks this first, as it does in
     /// <c>apply --dry-run --json</c> and <c>plan --json</c>.
     /// </summary>
-    // Ny kontrakt med verify (review 2026-10-05): versjonert fra første utgave, og «action» som i alle andre utskrifter.
-    internal const int JsonSchemaVersion = 1;
+    // Versjon 2 (F2.6, 2026-10-06): utfallet er Queuey sin flytverifisering, under «verification», i Queuey sin egen form med
+    // sin egen schemaVersion. Versjon 1 var verify sitt eget verdikt (verdict, action), fra da verify publiserte selv.
+    internal const int JsonSchemaVersion = 2;
 
-    private static object ToJson(DeliveryVerification r) => new
+    private static object ToJson(string queue, string? tenant, FlowVerification v) => new
     {
         schemaVersion = JsonSchemaVersion,
-        tenant = r.Tenant,
-        queue = r.Queue,
-        queuePublicId = r.QueuePublicId,
-        eventId = r.EventId,
-        verdict = r.Verdict.ToText(),
-        delivered = r.Delivered,
-        status = r.Status,
-        attempts = r.Attempts,
-        target = r.Target,
-        responseCode = r.ResponseCode,
-        durationMs = r.DurationMs,
-        failureClass = r.FailureClass,
-        error = r.Error,
-        summary = r.Summary,
-        action = r.SuggestedAction,
+        tenant,
+        queue,
+        queuePublicId = v.Subject.QueuePublicId,
+        verification = v,
     };
 
     private static byte[]? ReadBody(ArgMap map, out string? code, out string? error, out string? action)
@@ -132,29 +361,24 @@ internal static class VerifyCommand
             return Encoding.UTF8.GetBytes(Console.In.ReadToEnd());
 
         string? file = map.Get("file");
-        if (!string.IsNullOrWhiteSpace(file))
+        if (map.Has("file"))
         {
+            if (string.IsNullOrWhiteSpace(file)) { code = "missing_value"; error = "--file takes a value: the path of the test event to send."; return null; }
             if (!File.Exists(file)) { code = "missing_file"; error = $"File not found: {file}"; return null; }
             byte[] bytes = CliFiles.ReadAllBytes(file);
             if (IsDeploymentFile(bytes))
             {
                 code = "deployment_file_as_event";
-                error = $"--file is the event to send, and {file} is a deployment file.";
-                action = "Name the deployment file with --deployment, and send the event with --data, --file or --stdin.";
+                error = $"--file is the test event to send, and {file} is a deployment file.";
+                action = "Name the deployment file with --deployment, and send the test event with --data, --file or --stdin.";
                 return null;
             }
             return bytes;
         }
 
         string? data = map.Get("data");
-        if (data != null)
-            return Encoding.UTF8.GetBytes(data);
-
-        // Ingen standard-payload: eventen går til den ekte mottakeren, så hva den får, skal være et valg.
-        code = "missing_body";
-        error = "verify requires the event to send: --data <json>, --file <path>, or --stdin.";
-        action = "It is delivered to the real receiver like any other event, so send data it treats as harmless.";
-        return null;
+        if (data is null) { code = "missing_value"; error = "--data takes a value: the test event to send, as JSON."; return null; }
+        return Encoding.UTF8.GetBytes(data);
     }
 
     /// <summary>
@@ -186,6 +410,30 @@ internal static class VerifyCommand
         }
         catch (JsonException)
         {
+            return false;
+        }
+    }
+}
+
+/// <summary>Whether a test event is JSON, as Queuey takes it: one JSON value, after a UTF-8 byte order mark when there is one.</summary>
+internal static class FlowPayload
+{
+    /// <summary>
+    /// True when <paramref name="bytes"/> are one JSON value. Otherwise <paramref name="where"/> says where it went wrong, by
+    /// line and byte, and never shows a part of the event.
+    /// </summary>
+    public static bool IsJson(byte[] bytes, out string? where)
+    {
+        int start = bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF ? 3 : 0;
+        try
+        {
+            using JsonDocument _ = JsonDocument.Parse(new ReadOnlyMemory<byte>(bytes, start, bytes.Length - start));
+            where = null;
+            return true;
+        }
+        catch (JsonException ex)
+        {
+            where = $"line {(ex.LineNumber ?? 0) + 1}, byte {(ex.BytePositionInLine ?? 0) + 1}";
             return false;
         }
     }

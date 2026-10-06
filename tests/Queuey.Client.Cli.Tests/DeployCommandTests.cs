@@ -417,18 +417,22 @@ public sealed class DeployCommandTests : IDisposable
     }
 
     [Fact]
-    public async Task Verify_needs_a_queue_and_the_data_to_send()
+    public async Task Verify_needs_a_queue_and_what_to_verify()
     {
         CliRun noQueue = await CliHarness.RunAsync(() => VerifyCommand.RunAsync(Array.Empty<string>()));
         Assert.Equal(ExitCodes.Usage, noQueue.Exit);
         Assert.Contains("verify requires <queue>", noQueue.Stderr);
 
-        // Ingen standard-payload: eventen går til den ekte mottakeren.
-        CliRun noData = await CliHarness.RunAsync(() => VerifyCommand.RunAsync(new[] { "orders" }));
+        CliRun nothing = await CliHarness.RunAsync(() => VerifyCommand.RunAsync(new[] { "orders" }));
+        Assert.Equal(ExitCodes.Usage, nothing.Exit);
+        Assert.Contains("Say what to verify: --event <evt_…>", nothing.Stderr);
+
+        // Ingen standard-payload: testeventen går til den ekte mottakeren.
+        CliRun noData = await CliHarness.RunAsync(() => VerifyCommand.RunAsync(new[] { "orders", "--send" }));
         Assert.Equal(ExitCodes.Usage, noData.Exit);
         Assert.Contains("treats as harmless", noData.Stderr);
 
-        CliRun badTimeout = await CliHarness.RunAsync(() => VerifyCommand.RunAsync(new[] { "orders", "--data", "{}", "--timeout", "0" }));
+        CliRun badTimeout = await CliHarness.RunAsync(() => VerifyCommand.RunAsync(new[] { "orders", "--event", "evt_1", "--timeout", "0" }));
         Assert.Equal(ExitCodes.Usage, badTimeout.Exit);
         Assert.Contains("--timeout takes whole seconds", badTimeout.Stderr);
     }

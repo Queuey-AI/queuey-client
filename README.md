@@ -599,45 +599,54 @@ delivery may reach, so the CLI leaves the check to it.
 
 ### Prove it delivers: `queuey verify`
 
-`apply` exiting 0 says the configuration landed. It does not say events arrive. `verify` publishes
-one event and follows it:
+`apply` exiting 0 says the configuration landed. It does not say events arrive. `verify` asks Queuey to
+verify the queue's flow and reads the verification until Queuey has settled it: each step from the
+ingress to the final state, with its evidence. It verifies one of three things:
 
 ```bash
-queuey verify orders --data '{"type":"order.created","test":true}'
+queuey verify orders --event evt_…                                  # an event already in the queue
+queuey verify orders --event-type payment_intent.succeeded --ingress-auth stripe   # the next one, from a provider
+queuey verify orders --send --data '{"type":"order.created","test":true}'          # a test event Queuey sends
 ```
 
 ```text
-✓ Delivered — orders (que_…) in ten_…, event evt_…
-  Delivered to https://hooks.example.com/orders: 200 in 38 ms.
+✓ Passed — orders (que_…) in ten_…, event evt_…
+  Event evt_… went from the ingress to Delivered: the receiver answered 200.
+  ✓ ingress_reached     passed  eventId=evt_…
+  – ingress_auth        skipped  reason=not_recorded
+  ✓ persisted           passed  …
+  ✓ routed              passed  eventTypeRecorded=true groupKeyRecorded=false partitionKeyRecorded=false
+  ✓ delivery_attempted  passed  attemptId=att_… attemptNumber=1 attempts=1 targetHost=hooks.example.com sent=true …
+  ✓ delivery_auth       passed  signing=queuey …
+  ✓ receiver_response   passed  statusCode=200 durationMs=38
+  ✓ final_state         passed  status=Delivered
+  Verification ver_….
 ```
 
-It exits 0 only when the receiver got the event. Otherwise the verdict — `logged_not_delivered`,
-`filtered`, `failed` or `timeout` with `--json` — comes with what to change: the mode, the filter,
-the credential the receiver rejected, held delivery, or the earlier event that holds the queue. The
-advice follows what Queuey decided after the attempt, not a guess from the response code:
+- `--event` follows an event that is already in the queue, such as the one a publish answered with.
+- `--event-type` waits for the next event the ingress takes with that type, from the moment `verify`
+  says it is waiting: trigger it then. `--ingress-auth` adds that the ingress verified it with that
+  signed-request template, so a Stripe flow is proven with Stripe's own event and signature.
+- `--send` sends a test event through the queue's ingress, with `--event-type` as its type. The event is
+  real: the receiver gets it like any other, so send data it treats as harmless. Queuey sends it only for
+  a key with `event.publish`, to a workspace that is not production, and never signs it as a provider.
 
-- A rejected credential, a missing route or a TLS failure parks the receiver, and Queuey holds the
-  whole queue, whatever its ordering, until a person resumes it in the Queuey console (Verify &
-  resume). The advice ends with that step: a verify run before it waits behind the held queue.
-- A timeout does the same while the queue is not marked `idempotent`, since the receiver may have
-  got the event. Declare `"idempotent": true` if it handles the same event twice safely, or raise
-  `delivery.timeoutMs` if it is only slow.
-- With `"dlqEnabled": false`, an event the receiver rejects holds the queue (or just its key on a
-  `bykey` queue) instead of going to the DLQ.
-- A delivery Queuey holds before sending, for the send budget or a receiver it is probing, is not a
-  failure: `verify` keeps waiting, and a timeout says what holds it.
+`--timeout` (or `--wait`) is how long Queuey follows the event, in seconds: a minute when left out, at
+most 900. `verify` exits 0 only when the verification passed. `failed`, `timed_out` and `not_tried`
+exit 1 with Queuey's summary, and a refusal exits 1 with Queuey's message. With `--json`, the result is
+`{ "schemaVersion": 2, "tenant", "queue", "queuePublicId", "verification": { … } }`: the verification in
+Queuey's own shape, with its own `schemaVersion`, the same one Queuey's agent tools answer with. Neither
+output shows a payload value or a secret: the evidence is ids, statuses, times and header names.
 
-A failure is reported on its first attempt rather than after every retry. With `--json`, the result
-is an object with `schemaVersion` (1) first, the `verdict`, and the `action` to take.
-
-The event is real: the receiver gets it like any other, so send data it treats as harmless. `verify`
-and `apply` pick the workspace by the same rule: the deployment file's `tenant` when it names one,
-otherwise `--tenant`, `QUEUEY_TENANT` or `queuey.json`. When `--tenant` or `QUEUEY_TENANT` names
-another workspace than the file, both commands fail and name the two, rather than guessing which
-one you meant. The output names the workspace. `verify` needs a key that may publish and read
-events (`event.read`). It reads one event from the queue first, and publishes nothing when the key
-cannot. `--file` is the event to send: a deployment file there is refused, since `--deployment`
-names that one.
+`<queue>` is the queue's name or its id (`que_…`). `verify` finds a name in the workspace by the same
+rule as `apply`: the deployment file's `tenant` when it names one, otherwise `--tenant`,
+`QUEUEY_TENANT` or `queuey.json`. When `--tenant` or `QUEUEY_TENANT` names another workspace than the
+file, both commands fail and name the two, rather than guessing which one you meant. The output names
+the workspace. `verify` needs a key that may read the queue and its events (`queue.read`,
+`event.read`). Against a Queuey without flow verification it fails with
+`flow_verification_unavailable` and sends nothing, rather than falling back to something else.
+`--file` is the test event to send: a deployment file there is refused, since `--deployment` names
+that one.
 
 ### The schema
 
@@ -748,7 +757,7 @@ carries the per-flag detail this table leaves out.
 | `plan` | Ask Queuey what apply would change and refuse, as dry runs. Writes nothing |
 | `apply --check` | Report drift and exit non-zero. Read-only — the CI gate |
 | `apply --adopt <queue>` | Take a queue (or `workspace`) a person detached back under the file |
-| `verify <queue>` | Publish one event and follow it: delivered, or why not and what to change |
+| `verify <queue>` | Verify the queue's flow with Queuey, step by step from the ingress to the final state |
 | `schema` | Print the deployment file's JSON Schema. No credentials, no network |
 | `pull` | Read a workspace back into a deployment file (the inverse of `apply`) |
 | `queue plan` | Preview the `[QueueyQueue]` declarations in an assembly (network-free) |
@@ -797,7 +806,7 @@ queuey credentials set --name partner-key --from-env PARTNER_KEY
 queuey apply --dry-run            # catch typos with no credentials and no network
 queuey plan                       # what would change, and would Queuey accept it?
 queuey apply
-queuey verify orders --data '{"type":"order.created","test":true}'   # did it arrive?
+queuey verify orders --send --data '{"type":"order.created","test":true}'   # did it arrive?
 ```
 
 **Adopt a workspace someone configured in the console**
