@@ -76,6 +76,13 @@ ADVISE
                  proposes nothing and exits 1: answer them in the intent, and run it again.
                  Only stated fields are intent, so the flow it returns can go back in. It
                  writes nothing, so --write-files and --apply do not go with it.
+                 Without an environment in the intent, a new file is for dev, and a
+                 queuey.deploy.json that is there without workspace.environment is for prod,
+                 as Queuey counts such a workspace: delivery over HTTP, credentials request,
+                 and a real Stripe endpoint. State dev for a local listener and test mode.
+                 A file with profiles gets no new profile from an assumed environment: one
+                 profile takes the flow, and several are a conflict that asks which. So is a
+                 queue the file forwards to a listener in a file without an environment.
                  The schema command prints the Desired Flow's schema (see SCHEMA).
                  infrastructure.content is the whole deployment file, to write as it is: with a
                  queuey.deploy.json there, that file with the flow's queue and profile values

@@ -1079,6 +1079,18 @@ What differs between environments goes in a profile named after the flow's envir
 where the queue delivers, and the base URL when the intent gives it. So `queuey plan --profile dev` works on the file as
 proposed, and production is one more profile. A deployment file that is there without profiles keeps fixed values.
 
+**Without an environment in the intent, advise goes by the file.** A new file is for `dev`, which advise writes into it.
+A file that is there without `workspace.environment` applies to a workspace Queuey counts as `prod`, so advise proposes
+for prod: delivery over HTTP, `credentials request` for a secret, and Stripe's path for a real endpoint. So does a file
+that takes the environment from a variable without profiles, or whose profile already gives that variable another value.
+State `dev` in the intent for the dev path: a local listener, and Stripe's test mode.
+
+advise stops rather than guess. A file with profiles never gets a new one from an environment advise only assumes: with
+one profile the flow goes into it, and the commands take it with `--profile`; with several, the flow lists an
+`ambiguous` conflict, and the answer is `environment` in the intent. A queue the file already forwards to a listener
+(`"kind": "localForward"`) in a file without an environment is a conflict too: state `dev`, or give the queue
+`"kind": "http"`.
+
 **`infrastructure.content` is the whole file, to write as it is.** With a `queuey.deploy.json` already there, it is that
 file with the flow's queue and profile values merged in. The file wins over everything the intent does not state. A
 stated value the file contradicts, such as the same queue with another route, is a conflict rather than an overwrite,

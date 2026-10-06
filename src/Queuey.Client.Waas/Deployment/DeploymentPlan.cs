@@ -296,7 +296,7 @@ internal sealed class DeploymentPlanner
             ? $"No credential named '{shown}' is stored in this workspace yet, so its ingress would refuse every event until it " +
               $"is. {storing.HowToStore(shown, CredentialStoring.RequestDefaultType)}"
             : "The credential its ingress names is not stored in this workspace yet, so its ingress would refuse every event until " +
-              $"it is. {storing.HowToStore("<NAME>", CredentialStoring.RequestDefaultType)}";
+              $"it is. {storing.HowToStore(CredentialStoring.Placeholder, CredentialStoring.RequestDefaultType)}";
         return storing.AsksAPerson ? note : note + " Then apply again.";
     }
 

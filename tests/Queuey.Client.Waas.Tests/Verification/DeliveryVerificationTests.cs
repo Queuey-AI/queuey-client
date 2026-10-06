@@ -325,6 +325,19 @@ public class DeliveryVerificationTests
     }
 
     [Fact]
+    public void Storing_a_new_secret_follows_the_storing_rule()
+    {
+        // Samme regel som plan og apply (review av #58, K2): verify kjenner ikke miljøet, så en person limer inn verdien, og
+        // set nevnes for en verdi den som kjører, holder.
+        DeliveryVerification v = Judge(Event(4, Attempt(401, "AuthenticationFailed", kind: "HoldEvent", reason: "target_requires_action_auth_failed")));
+
+        Assert.Contains("Store a new secret under the same name. A person pastes the value, so it never passes through you: queuey " +
+                        "credentials request <NAME> --type <type> prints a link", v.SuggestedAction);
+        Assert.Contains("queuey credentials set --name <NAME> --type <type> --from-env <VARIABLE>", v.SuggestedAction);
+        Assert.DoesNotContain("--profile", v.SuggestedAction);
+    }
+
+    [Fact]
     public void A_401_from_the_receiver_is_still_the_receiver_rejecting_the_credentials()
     {
         DeliveryVerification v = Judge(Event(4, Attempt(401, "AuthenticationFailed", kind: "HoldEvent", reason: "target_requires_action_auth_failed")));

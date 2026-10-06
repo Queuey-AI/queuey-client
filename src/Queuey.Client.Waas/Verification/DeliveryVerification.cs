@@ -635,7 +635,8 @@ internal static class DeliveryVerifier
         "so verifying again waits.";
 
     // Samme regel som plan og apply (CredentialStoring, review av #58, K2): verify vet ikke workspacets miljø, og et ukjent
-    // miljø regnes som prod, så en person limer inn verdien, og set nevnes for en verdi den som kjører, holder.
+    // miljø regnes som prod, så en person limer inn verdien, og set nevnes for en verdi den som kjører, holder. Ingen profil:
+    // biblioteket vet ikke hvilken den som kalte, brukte, og CLI-ens verify går gjennom flytverifiseringen (re-review av #59).
     private static readonly string StoreAgain =
         "Store a new secret under the same name. " + new CredentialStoring(environment: null, profile: null).HowToStore(CredentialStoring.Placeholder, null);
 

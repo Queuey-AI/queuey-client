@@ -981,7 +981,7 @@ public sealed class QueueyService : IQueueyService
               storing.HowToStore(name, CredentialStoring.RequestDefaultType) + again
             : $"{who} verifies {template} signatures with a credential that is not stored yet, so {consequence}. Store it " +
               "under the name ingress.signedRequest.credentialRef gives. " +
-              storing.HowToStore("<NAME>", CredentialStoring.RequestDefaultType) + again;
+              storing.HowToStore(CredentialStoring.Placeholder, CredentialStoring.RequestDefaultType) + again;
     }
 
     private static bool ChecksSignatures(string? authMode)

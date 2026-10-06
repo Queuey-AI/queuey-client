@@ -821,9 +821,70 @@ internal sealed class Enrichment
             return;
         }
 
-        _flow.Set("environment", existing is not null
-            ? FlowValue.Of(existing, Provenance.Evidence, evidence)
-            : FlowValue.Of("dev", Provenance.Assumed));
+        if (existing is not null)
+        {
+            _flow.Set("environment", FlowValue.Of(existing, Provenance.Evidence, evidence));
+            return;
+        }
+
+        // Med profiler og et miljø ingen har oppgitt, lager advise aldri en ny profil (re-review av #59, Kenneths prinsipp om å
+        // stoppe ved tvetydighet): med en ny profil og --profile prod ville flyten gått rett til produksjon med brukerens
+        // prod-tilkobling. Den ene profilen fila har, brukes; flere er et spørsmål.
+        if (_facts.DeployFile is { Profiles.Count: > 1 } several)
+        {
+            string names = string.Join(", ", several.Profiles);
+            Conflict("ambiguous", "environment", null, Values(several.Profiles),
+                new[] { new FlowEvidence(several.File, null, $"the deployment file's profiles: {names}") },
+                $"{several.File} has the profiles {names}, and the intent states no environment, so advise cannot tell which one the " +
+                "flow belongs in.",
+                $"Which environment is this flow for? State it in the intent as environment ({names}), and the flow goes into the " +
+                "profile of that name.");
+            return;
+        }
+
+        if (_facts.DeployFile is { Profiles.Count: 1 } single && ProfileEnvironment(single) is { } given)
+        {
+            _flow.Set("environment", FlowValue.Of(given.Environment, Provenance.Evidence, new[] { given.Evidence }));
+            return;
+        }
+
+        // En ny fil er for dev, og advise skriver det inn. En fil som finnes uten miljø, gjelder et umerket workspace, som Queuey
+        // regner som prod, og advise skriver ikke et antatt miljø inn i den; det samme gjelder en fil som tar miljøet fra en
+        // variabel ingen profil gir. Før tag (oppfølging av #58, 2026-10-06): advise antok dev også her, og designet ble en
+        // blanding av localForward og et ekte Stripe-endepunkt i et workspace Queuey regner som prod.
+        _flow.Set("environment", FlowValue.Of(_facts.DeployFile is null ? "dev" : "prod", Provenance.Assumed));
+    }
+
+    /// <summary>
+    /// The environment the file's one profile gives the variable its workspace's environment comes from, with where it says
+    /// so; null when the file names no such variable, the profile does not give it, or gives something that is not an
+    /// environment.
+    /// </summary>
+    private static (string Environment, FlowEvidence Evidence)? ProfileEnvironment(ExistingDeployFile file)
+    {
+        if (file.Environment is not { } environment || environment.IndexOf("${", StringComparison.Ordinal) < 0
+            || DeploymentVariables.Referenced(environment).FirstOrDefault() is not { } variable)
+            return null;
+
+        string profile = file.Profiles[0];
+        JsonNode? value = Property(Property(Property(file.Json, "profiles") as JsonObject, profile, exact: true) as JsonObject, "variables")
+            is JsonObject variables ? variables[variable] : null;
+        if (value is not JsonValue text || !text.TryGetValue(out string? given)
+            || !DeploymentWorkspace.EnvironmentValues.Contains(given.Trim().ToLowerInvariant(), StringComparer.Ordinal))
+            return null;
+
+        string chosen = given.Trim().ToLowerInvariant();
+        return (chosen, new FlowEvidence(file.File, null, $"profiles.{profile}.variables.{variable} is {chosen}"));
+    }
+
+    /// <summary>A property of a file's object: matched in any casing, as the deployment file's reader does, or exactly for a name.</summary>
+    private static JsonNode? Property(JsonObject? obj, string name, bool exact = false)
+    {
+        if (obj is null)
+            return null;
+        if (obj.TryGetPropertyValue(name, out JsonNode? found) || exact)
+            return found;
+        return obj.FirstOrDefault(p => string.Equals(p.Key, name, StringComparison.OrdinalIgnoreCase)).Value;
     }
 
     private void ResolveQueue(string kind)

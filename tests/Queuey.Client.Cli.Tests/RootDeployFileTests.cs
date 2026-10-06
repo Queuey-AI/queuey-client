@@ -288,7 +288,11 @@ public sealed class RootDeployFileTests : IDisposable
         Assert.Equal(new[] { "Workspace", "Queues", "Profiles" }, content.Select(p => p.Key).ToArray());
         Assert.Equal(new[] { "orders", "stripe" }, content["Queues"]!.AsObject().Select(q => q.Key).ToArray());
         Assert.Equal("/api/stripe", content["Queues"]!["stripe"]!["delivery"]!["url"]!.GetValue<string>());   // relativ: fila har en base
-        Assert.True(content["Profiles"]!.AsObject().ContainsKey("dev"));
+        // Uten miljø er fila for prod (oppfølging av #58): verdiene går inn i profilen prod, under Variables slik fila skriver det.
+        Assert.False(content["Profiles"]!.AsObject().ContainsKey("dev"));
+        JsonObject prod = content["Profiles"]!["prod"]!.AsObject();
+        Assert.False(prod.ContainsKey("variables"));
+        Assert.Equal("http", prod["Variables"]!["QUEUEY_STRIPE_DELIVERY_KIND"]!.GetValue<string>());
         DeploymentFile.Parse(content.ToJsonString()).Resolve();
     }
 

@@ -100,9 +100,14 @@ internal static class CliErrors
             return exitCode;
         }
 
-        Console.Error.WriteLine(label is null ? message : $"{label}: {message}");
+        // Meldingen og handlingen kan komme fra Queuey (detail, title, errors, eller rå tekst fra et svar), så de går gjennom
+        // TerminalText, som annet serveren styrer (F2.7-regelen, re-review av #58): en ESC- eller OSC-sekvens kunne flyttet
+        // markøren eller endret vinduets tittel, og et linjeskift kunne laget en linje som ser ut som CLI-ens egen. --json er
+        // data, og JSON-koderen escaper kontrolltegn selv.
+        string said = TerminalText.Line(message);
+        Console.Error.WriteLine(label is null ? said : $"{label}: {said}");
         if (!string.IsNullOrWhiteSpace(action))
-            Console.Error.WriteLine($"  → {action}");
+            Console.Error.WriteLine($"  → {TerminalText.Line(action)}");
         return exitCode;
     }
 }
