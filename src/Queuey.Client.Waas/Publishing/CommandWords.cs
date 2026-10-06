@@ -10,13 +10,16 @@ namespace Queuey.Client.Waas;
 internal static class CommandWords
 {
     /// <summary>
-    /// <paramref name="value"/>, trimmed, when it is a plain word: letters, digits, <c>.</c>, <c>-</c> and <c>_</c>, at most
-    /// 64 characters, as a queue name or a template key is. Null otherwise, so the caller writes a placeholder.
+    /// <paramref name="value"/>, trimmed, when it is a plain word: a letter or digit first, then letters, digits, <c>.</c>,
+    /// <c>-</c> and <c>_</c>, at most 64 characters, as a queue name or a template key is. Null otherwise, so the caller
+    /// writes a placeholder.
     /// </summary>
+    // Re-review av #52 (2026-10-06): en kø fra før navneregelen kan hete «--send», og som første ord etter `queuey verify`
+    // ble den et flagg. Første tegn er nå en bokstav eller et siffer, som i CredentialNameRules.
     internal static string? Word(string? value)
     {
         string? trimmed = value?.Trim();
-        if (string.IsNullOrEmpty(trimmed) || trimmed!.Length > 64)
+        if (string.IsNullOrEmpty(trimmed) || trimmed!.Length > 64 || !IsLetterOrDigit(trimmed[0]))
             return null;
 
         foreach (char c in trimmed)
@@ -28,6 +31,8 @@ internal static class CommandWords
 
         return trimmed;
     }
+
+    private static bool IsLetterOrDigit(char c) => (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
 
     /// <summary>
     /// <paramref name="value"/> when it is a public id with <paramref name="prefix"/> (<c>que_</c>, <c>evt_</c> …): the
