@@ -4,6 +4,9 @@ using System.Linq;
 
 namespace Queuey.Client.Cli;
 
+/// <summary>Writes one usage error and returns the exit code the command returns.</summary>
+internal delegate int UsageErrorWriter(string code, string message, string? action, IReadOnlyDictionary<string, object?>? details);
+
 /// <summary>
 /// The options one command accepts, declared by the command itself. An option it does not declare
 /// fails the command with exit 2, the option's name and the options the command does accept — as
@@ -75,10 +78,16 @@ internal sealed class CommandOptions
     /// Parses <paramref name="args"/>, or writes why it cannot — unknown option, a switch given a
     /// value, an argument too many — and returns false with the exit code to return.
     /// </summary>
-    public bool TryParse(IEnumerable<string> args, out ArgMap map, out int exitCode)
+    /// <param name="usageError">
+    /// Writes the usage error and returns the exit code, for a command whose <c>--json</c> output has its own shape
+    /// (<c>queuey listen</c> streams one object per line). Null writes it as every other command does.
+    /// </param>
+    public bool TryParse(IEnumerable<string> args, out ArgMap map, out int exitCode, UsageErrorWriter? usageError = null)
     {
         map = ArgMap.Parse(args, Flags);
         exitCode = ExitCodes.Success;
+        ArgMap parsed = map;
+        usageError ??= (code, message, action, details) => CliErrors.Usage(parsed, code, message, action, details);
 
         if (map.Keys.FirstOrDefault(k => !Flags.Contains(k) && !_values.Contains(k)) is { } unknown)
         {
@@ -90,7 +99,7 @@ internal sealed class CommandOptions
             bool shown = hint is not null || (valueOf is null && CliErrors.LooksLikeAnOptionName(unknown));
             hint ??= valueOf is null ? null : $"A value that starts with '-' is read as an option: give it as --{valueOf}=<value>.";
 
-            exitCode = CliErrors.Usage(map, "unknown_option",
+            exitCode = usageError("unknown_option",
                 shown ? $"Unknown option --{unknown} for queuey {Command}."
                 : valueOf is not null ? $"queuey {Command} was given an unknown option right after --{valueOf}. It is not shown, since it may be the value of --{valueOf}."
                 : $"queuey {Command} was given an unknown option. It is not shown, since it does not look like an option name and may be a secret.",
@@ -102,8 +111,8 @@ internal sealed class CommandOptions
         if (map.BadSwitches.FirstOrDefault() is { } badSwitch)
         {
             // Bare kommandoens egne brytere havner her, så navnet er aldri noe brukeren har limt inn.
-            exitCode = CliErrors.Usage(map, "invalid_option_value",
-                $"--{badSwitch} is a switch for queuey {Command}: give it alone, or as --{badSwitch}=true or --{badSwitch}=false.");
+            exitCode = usageError("invalid_option_value",
+                $"--{badSwitch} is a switch for queuey {Command}: give it alone, or as --{badSwitch}=true or --{badSwitch}=false.", null, null);
             return false;
         }
 
@@ -111,11 +120,12 @@ internal sealed class CommandOptions
         {
             string extra = map.Positionals[Positionals];
             string? hint = Hints.TryGetValue(extra, out string? own) ? own : null;
-            exitCode = CliErrors.Usage(map, "unexpected_argument",
+            exitCode = usageError("unexpected_argument",
                 $"Unexpected argument '{(hint is null ? CliErrors.Shown(extra) : extra)}' for queuey {Command}.",
                 (hint is null ? "" : hint + " ") + (Positionals == 0
                     ? $"queuey {Command} takes options only. {ValidOptionsSentence()}"
-                    : $"queuey {Command} takes {Positionals} argument{(Positionals == 1 ? "" : "s")} besides its options. See `queuey --help`."));
+                    : $"queuey {Command} takes {Positionals} argument{(Positionals == 1 ? "" : "s")} besides its options. See `queuey --help`."),
+                null);
             return false;
         }
 

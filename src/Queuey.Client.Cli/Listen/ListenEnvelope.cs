@@ -43,3 +43,9 @@ internal sealed record ListenReply(
 /// Queuey, or on a connection that has just reconnected and not yet claimed its scope again.
 /// </summary>
 internal sealed record ListenBeat(bool Owner);
+
+/// <summary>
+/// What the hub tells a session listening on a workspace when another session took one of the workspace's queues over
+/// (client method <c>lost</c>). The session keeps the workspace's other queues.
+/// </summary>
+internal sealed record ListenLost(string QueuePublicId, string Message);

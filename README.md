@@ -903,16 +903,25 @@ local Queuey ingress route:
 **One listener per queue.** The first session that listens on a queue owns it. Another one is
 refused with `listener_already_connected`, and told since when the queue has been held, until the
 first one stops. `--take-over` takes the queue over on purpose, and the session it took over from
-stops (exit 1). Only the owner gets the queue's deliveries, and only its answer counts: your local
-response is the delivery's outcome — a 2xx delivers the event, anything else dead-letters it, and
-`queuey replay` sends it again. A listener that goes away before it answers leaves the event waiting
-for the next listener. The API key needs **`queue.listen`** on the queue or workspace (a Build, Full
-access or ProducerAdmin key).
+stops (exit 1). A queue under a workspace another session listens on is that session's too:
+listening on the queue is refused the same way unless you pass `--take-over`, and then the workspace
+session is told it lost that queue and keeps the others. Only the owner gets the queue's
+deliveries, and only its answer counts: your local response is the delivery's outcome — a 2xx
+delivers the event, anything else dead-letters it, and `queuey replay` sends it again. Your app gets
+18 seconds to answer, then the delivery records a 504. A listener that goes away before it answers
+leaves the event waiting for the next listener, so **the same event can arrive more than once**:
+make your handler idempotent. The API key needs **`queue.listen`** on the queue or workspace (a
+Build, Full access or ProducerAdmin key).
 
 **`--json` for agents and scripts:** one JSON object per line on stdout, each with
-`"schemaVersion": 1` and a `type` — `listening` first, a `delivery` per forward, and one last line:
-`refused` (it never listened), `superseded` (another session took the queue over) or `closed`
-(stopped with Ctrl-C, or the connection was lost for good, exit 1).
+`"schemaVersion": 1` and a `type` — `listening` first, a `delivery` per forward, `lost` when a
+workspace session loses one of its queues, and one last line: `refused` (it never listened, an error
+before the session included), `superseded` (another session took the queue over) or `closed`
+(stopped, terminated, or the connection was lost for good). The last line comes after the session
+has stopped, so the queue is free when you read it. `path` and `localUrl` leave out the query and
+any part of the path that may be a secret; your app still gets the whole URL. Exit codes: 0 after
+Ctrl-C, 1 when refused, taken over or the connection is lost for good, 2 on a usage error, 3 when
+the key is missing or refused, and 143 after SIGTERM.
 
 ```json
 {"schemaVersion":1,"type":"delivery","eventId":"evt_…","eventType":"invoice.paid","queue":"que_…","method":"POST","path":"/api/stripe","localUrl":"http://localhost:5000/api/stripe","status":200,"durationMs":12,"signatureHeaders":["Stripe-Signature"],"error":null}

@@ -16,6 +16,13 @@ internal sealed record LocalForwardResult(int Status, long DurationMs, Uri Local
 internal static class ListenForwarder
 {
     /// <summary>
+    /// How long the local app gets to answer: less than the 20 s Queuey waits for the answer, so a slow app is a 504 the
+    /// delivery records, not a forward nobody answered.
+    /// </summary>
+    // Var HttpClient-standarden på 100 s (review av #50, K4): da hadde Queuey gitt opp lenge før appen svarte.
+    public static readonly TimeSpan LocalTimeout = TimeSpan.FromSeconds(18);
+
+    /// <summary>
     /// Where a forward goes on this machine: <paramref name="forwardTo"/> with the path and query of the queue's
     /// endpoint after it, or <paramref name="forwardTo"/> as given when <paramref name="preservePath"/> is false.
     /// </summary>
@@ -58,8 +65,9 @@ internal static class ListenForwarder
     }
 
     /// <summary>
-    /// Sends the forward to this machine. A receiver that cannot be reached answers 502, so the delivery records the
-    /// failure honestly instead of Queuey waiting for an answer that never comes.
+    /// Sends the forward to this machine. A receiver that cannot be reached answers 502, and one that does not answer
+    /// within the client's timeout 504, so the delivery records the failure honestly instead of Queuey waiting for an
+    /// answer that never comes.
     /// </summary>
     public static async Task<LocalForwardResult> ForwardAsync(HttpClient http, ListenEnvelope env, string forwardTo, CancellationToken ct, bool preservePath = true)
     {
@@ -71,6 +79,11 @@ internal static class ListenForwarder
             using HttpRequestMessage req = BuildLocalRequest(env, forwardTo, preservePath);
             using HttpResponseMessage res = await http.SendAsync(req, ct).ConfigureAwait(false);
             return new LocalForwardResult((int)res.StatusCode, sw.ElapsedMilliseconds, localUrl, null);
+        }
+        catch (TaskCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return new LocalForwardResult(504, sw.ElapsedMilliseconds, localUrl,
+                $"The local app did not answer within {http.Timeout.TotalSeconds:0} s.");
         }
         catch (Exception ex)
         {

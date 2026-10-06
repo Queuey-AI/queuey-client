@@ -8,10 +8,11 @@ namespace Queuey.Client.Cli;
 
 /// <summary>
 /// What <c>queuey listen</c> prints. With <c>--json</c>: one JSON object per line on stdout (NDJSON), each with
-/// <c>schemaVersion</c> and a <c>type</c> — <c>listening</c>, then a <c>delivery</c> per forward, and one line that ends
-/// the stream: <c>refused</c> (it never listened), <c>superseded</c> (another session took the queue over) or
-/// <c>closed</c> (stopped, or the connection was lost for good). Notes for a person go to stderr either way.
-/// Without <c>--json</c>: lines for a person.
+/// <c>schemaVersion</c> and a <c>type</c> — <c>listening</c>, then a <c>delivery</c> per forward, a <c>lost</c> when a
+/// workspace session loses one of its queues, and one line that ends the stream: <c>refused</c> (it never listened, an
+/// error before the session included), <c>superseded</c> (another session took the queue over) or <c>closed</c>
+/// (stopped, terminated, or the connection was lost for good). Addresses are redacted as Queuey redacts them for agents.
+/// Notes for a person go to stderr either way. Without <c>--json</c>: lines for a person.
 /// </summary>
 // Én linje per hendelse, så en agent kan lese strømmen mens lytteren går (F2.5, 2026-10-06). Versjonert fra første
 // utgave, som apply --dry-run, plan og verify; JsonOut skriver over flere linjer og kan ikke brukes her.
@@ -69,6 +70,7 @@ internal sealed class ListenOutput
 
     public void Delivery(ListenEnvelope env, LocalForwardResult result)
     {
+        string path = UrlRedaction.EndpointPath(env.OriginalUrl, env.PathAndQuery);
         if (_json)
         {
             Write(new
@@ -79,8 +81,8 @@ internal sealed class ListenOutput
                 eventType = env.EventType,
                 queue = env.QueuePublicId,
                 method = env.Method,
-                path = env.PathAndQuery,
-                localUrl = result.LocalUrl.ToString(),
+                path,
+                localUrl = UrlRedaction.Redact(result.LocalUrl.ToString()),
                 status = result.Status,
                 durationMs = result.DurationMs,
                 signatureHeaders = SignatureHeaders(env),
@@ -93,10 +95,23 @@ internal sealed class ListenOutput
         lock (_gate)
         {
             if (result.Error is null)
-                _out.WriteLine($"  {env.Method,-6} {env.PathAndQuery}  →  {result.Status} ({result.DurationMs}ms)  [{label}]");
+                _out.WriteLine($"  {env.Method,-6} {path}  →  {result.Status} ({result.DurationMs}ms)  [{label}]");
             else
-                _err.WriteLine($"  {env.Method,-6} {env.PathAndQuery}  →  nothing answered at {result.LocalUrl}: {result.Error}  [{label}]");
+                _err.WriteLine($"  {env.Method,-6} {path}  →  {result.Status}, {result.Error}  [{label}]");
         }
+    }
+
+    /// <summary>A workspace session lost one of its queues to a session that took it over; it keeps listening.</summary>
+    public void Lost(ListenLost lost)
+    {
+        if (_json)
+        {
+            Write(new { schemaVersion = JsonSchemaVersion, type = "lost", queue = lost.QueuePublicId, message = lost.Message });
+            return;
+        }
+
+        lock (_gate)
+            _err.WriteLine($"Lost {lost.QueuePublicId}: {lost.Message}");
     }
 
     public void Refused(string code, string message, string? action, DateTimeOffset? heldSinceUtc)
@@ -127,7 +142,7 @@ internal sealed class ListenOutput
             _err.WriteLine($"Taken over: {message} Forwarded {forwarded} event(s).");
     }
 
-    /// <param name="reason"><c>stopped</c> (Ctrl-C) or <c>connection_lost</c> (it will not come back).</param>
+    /// <param name="reason"><c>stopped</c> (Ctrl-C), <c>terminated</c> (SIGTERM) or <c>connection_lost</c> (it will not come back).</param>
     public void Closed(string reason, string? message, long forwarded)
     {
         if (_json)

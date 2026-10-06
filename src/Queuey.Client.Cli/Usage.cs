@@ -258,15 +258,20 @@ LISTEN
                  --forward-to as given instead, for a FIXED local endpoint such as a local
                  ingress route. --queue takes the queue's name (its workspace from --tenant or
                  QUEUEY_TENANT) or its id; without --queue the session listens on the workspace.
-                 Your local response is the delivery's outcome.
+                 Your local response is the delivery's outcome; the app gets 18 s, then it is a
+                 504. The same event can come more than once, as after a listener went away.
                  One session listens on a queue at a time: the first one. Another is refused
                  (listener_already_connected) until it stops, or takes the queue over with
-                 --take-over, and the session it took over from stops. A session that loses its
-                 connection for good stops with exit 1; events wait until a listener is back.
+                 --take-over, and the session it took over from stops. A queue under a workspace
+                 another session listens on is that session's: listening on the queue takes
+                 --take-over too, and the workspace session is told it lost the queue.
                  --json prints one JSON object per line on stdout, each with ""schemaVersion"": 1
                  and a ""type"": listening, then delivery per forward (eventId, path, localUrl,
-                 status, durationMs, signatureHeaders), and one last line: refused, superseded
-                 or closed. Ctrl-C to stop.
+                 status, durationMs, signatureHeaders; path and localUrl without the query or a
+                 part that may be a secret), lost when a workspace session loses a queue, and
+                 one last line: refused (also for an error before the session), superseded, or
+                 closed. Exit 0 after Ctrl-C, 1 when refused, taken over or the connection is
+                 lost for good, 2 on a usage error, 3 on a key error, 143 after SIGTERM.
 
 REPLAY
   queuey replay <event-id> --queue <que_...> [--json]
