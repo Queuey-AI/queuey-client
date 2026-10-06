@@ -106,6 +106,15 @@ APPLY
                  a file that still declares maxAttempts or dlqAfterAttempts is refused
                  before anything is sent. `queuey schema` lists every field and the values
                  it accepts.
+                 A queue's delivery.kind is http, or localForward to send its events to a
+                 connected `queuey listen` session (they wait while none is). The listener's
+                 address belongs to the session, never to the file. A delivery URL on this
+                 machine or a private network is refused before anything is sent: Queuey's
+                 delivery never reaches it, and localForward is the way to your machine.
+                 ingress.signedRequest { template, credentialRef } verifies a provider's
+                 signature, such as Stripe's. A credential that is not stored yet is
+                 accepted: the ingress refuses every event until it is stored and apply runs
+                 again, and apply says so with the command that stores it.
                  The workspace is the file's ""tenant"" when it names one, else --tenant /
                  QUEUEY_TENANT / queuey.json. When --tenant or QUEUEY_TENANT names another
                  workspace than the file, apply fails and names both. plan and verify use the
@@ -125,9 +134,14 @@ PLAN
                  that one call may have changed — nothing, when a declared queue exists.
                  A verb and not an apply flag on purpose: a CLI too old to know it answers
                  ""Unknown command"" instead of running the apply you meant to plan.
-                 --json prints { ""schemaVersion"": 1, ""file"", ""tenant"", ""wouldSucceed"",
-                 ""changeCount"", ""steps"": […] }; check schemaVersion first. A change's from and
-                 to are JSON values, as Queuey's config reads them back.
+                 It shows each queue's ingress URL, also for one that would be created, and
+                 the plan's id and hash: sha256 over what apply would change and the server
+                 state it rests on, so the same file against the same state gives the same
+                 hash, whatever the order of its queues or its formatting.
+                 --json prints { ""schemaVersion"": 1, ""file"", ""tenant"", ""planId"", ""planHash"",
+                 ""wouldSucceed"", ""changeCount"", ""queues"": […], ""steps"": […] }; check
+                 schemaVersion first. A change's from and to are JSON values, as Queuey's
+                 config reads them back.
 
 VERIFY
   queuey verify <queue> (--data <json> | --file <path> | --stdin)
