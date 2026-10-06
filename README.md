@@ -712,6 +712,97 @@ Adopting a workspace that was configured before anyone wrote it down? `queuey pu
 Queues.cs` generates the `[QueueyQueue]` declarations. Behaviour only: destinations stay in the
 deployment file, where they belong.
 
+### Profiles: one flag for an environment
+
+`--profile <name>` (or `QUEUEY_PROFILE`) picks one environment, such as `dev` or `prod`, and takes both
+halves of it. If either half is missing, the command fails and says which one.
+
+**The values, in the deployment file.** Committed with the file, so promoting a change is a pull
+request. They fill the file's `${VAR}` references:
+
+```json
+{
+  "workspace": {
+    "environment": "${QUEUEY_WORKSPACE_ENVIRONMENT}",
+    "delivery": { "baseUrl": "${QUEUEY_BASE_URL}" }
+  },
+  "queues": {
+    "stripe": { "delivery": { "url": "/api/stripe", "kind": "${QUEUEY_STRIPE_DELIVERY_KIND}" } }
+  },
+  "profiles": {
+    "dev": {
+      "variables": {
+        "QUEUEY_WORKSPACE_ENVIRONMENT": "dev",
+        "QUEUEY_BASE_URL": "https://dev.example.com",
+        "QUEUEY_STRIPE_DELIVERY_KIND": "localForward"
+      }
+    },
+    "prod": {
+      "variables": {
+        "QUEUEY_WORKSPACE_ENVIRONMENT": "prod",
+        "QUEUEY_BASE_URL": "https://api.example.com",
+        "QUEUEY_STRIPE_DELIVERY_KIND": "http"
+      }
+    }
+  }
+}
+```
+
+A profile gives values to whatever names the file uses, including the ones `pull --as` writes.
+
+- A value is taken as it is written and never expanded again.
+- A value that looks like a secret is refused: a key prefix, hex, a UUID or base64 outside a Queuey id.
+  Keep secrets in credentials, by name.
+- A variable a profile leaves out comes from the environment, as without a profile.
+- A variable set in both the profile and the environment, to different values, is an error. Neither
+  is picked.
+
+**The connection, with you.** It never goes in the repository. It lives in `~/.queuey/config.json`, or in
+the file `QUEUEY_USER_CONFIG` names:
+
+```json
+{
+  "profiles": {
+    "dev":  { "apiKey": "qak_…", "license": "lic_…", "tenant": "ten_…",
+              "apiBase": "https://api.queuey.ai", "ingressBase": "https://ingress.queuey.ai" },
+    "prod": { "apiKey": "qak_…", "license": "lic_…", "tenant": "ten_…" }
+  }
+}
+```
+
+`apiBase` and `ingressBase` default to Queuey's hosts. A profile may also set `source`.
+
+The file holds keys, so the CLI reads it only when nobody else can. It must not be readable or writable
+by others, and its folder must not be writable by others: `chmod 600 ~/.queuey/config.json`. A file
+others could write could point the CLI at another host and catch the key, and a warning is easy to miss
+in CI. On Windows, your user profile's permissions protect it. `queuey login` will write the file;
+until then, write it by hand. In CI, write it from the pipeline's secrets to a file only the job can
+read, and point `QUEUEY_USER_CONFIG` at it.
+
+```bash
+queuey plan  --profile prod     # CI, in the pull request that promotes a change
+queuey apply --profile prod     # on merge
+queuey apply --profile dev && queuey listen --profile dev --queue stripe --forward-to http://localhost:5000
+```
+
+Which commands use it:
+
+- `apply`, `plan`, `verify`, `publish`, `listen`, `events get` and `credentials` take both halves.
+  `listen` and `credentials` read `./queuey.deploy.json` for theirs.
+- `whoami --profile` shows the connection it resolves.
+- `apply --dry-run` needs only the file's half, since it never connects.
+- A command that takes no profile refuses to run while `QUEUEY_PROFILE` is set, instead of connecting
+  somewhere else.
+
+With a profile, these rules hold:
+
+- A flag still wins for its value.
+- `queuey.json` is not read.
+- A `QUEUEY_` variable for the key, license, workspace or a host must agree with the profile, or the
+  command fails. A value left in your shell from another environment never mixes in.
+- The workspace comes from the connection. A file that names one too, such as
+  `"tenant": "${QUEUEY_TENANT}"` with the id in each profile, must name the same one.
+
 ### Managed by the file
 
 `apply` marks each queue it writes, and the workspace's settings when the file declares them, as
@@ -998,7 +1089,9 @@ queuey replay evt_… --api-key qak_… --queue que_…
 
 Every command resolves settings as **flag → environment variable → `queuey.json` → default**. The
 one exception is the workspace of `apply` and `verify`: a deployment file that names a `tenant`
-decides it, and a `--tenant` or `QUEUEY_TENANT` that names another one fails the command.
+decides it, and a `--tenant` or `QUEUEY_TENANT` that names another one fails the command. With
+`--profile`, the connection is **flag → the profile in `~/.queuey/config.json` → default** instead;
+see [Profiles](#profiles-one-flag-for-an-environment).
 
 | Setting | Flag | Env var |
 | --- | --- | --- |
@@ -1016,7 +1109,8 @@ Two files, and the difference matters:
 | File | Holds | Commit it? |
 | --- | --- | --- |
 | `queuey.json` | `apiBase` / `apiKey` / `tenant` / `license` — so you don't repeat flags | **No.** It holds your key, and it is already in `.gitignore` |
-| `queuey.deploy.json` | What your workspace and queues should look like | **Yes.** It carries no secrets by construction |
+| `queuey.deploy.json` | What your workspace and queues should look like, and each environment's values under `profiles` | **Yes.** It carries no secrets by construction |
+| `~/.queuey/config.json` | Each profile's connection: `apiKey` / `license` / `tenant` / `apiBase` / `ingressBase` | **Never.** It lives in your home folder, readable only by you |
 
 ## License
 

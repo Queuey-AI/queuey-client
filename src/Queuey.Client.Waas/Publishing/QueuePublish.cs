@@ -150,9 +150,8 @@ internal static class QueuePublisher
         {
             // Bare et tomt svar (204, eller 2xx uten kropp) er «tatt imot uten kvittering» (F2.7-review). Et 2xx med HTML eller
             // annen JSON enn kvitteringen er ikke Queuey sitt svar, og gir en feil i stedet for en publisering som så ut til å virke.
-            receipt = client.Ingress is QueueyIngressClient ingressClient
-                ? await ingressClient.PublishForReceiptAsync(name, payload, publishOptions, cancellationToken).ConfigureAwait(false)
-                : await client.Ingress.PublishAsync(name, payload, publishOptions, cancellationToken).ConfigureAwait(false);
+            // Den konkrete klienten, uten en reservevei: den offentlige PublishAsync kaster JsonException på et 204-svar.
+            receipt = await client.IngressClient.PublishForReceiptAsync(name, payload, publishOptions, cancellationToken).ConfigureAwait(false);
         }
         catch (QueueyAuthException ex) when (ex.ErrorCode is { } code && SignatureRefusals.Contains(code))
         {

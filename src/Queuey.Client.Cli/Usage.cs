@@ -77,7 +77,7 @@ QUEUE
 APPLY
   queuey apply [--file queuey.deploy.json] [--dry-run] [--check] [--continue-on-error] [--json]
                [--repo <url|owner/repo>] [--repo-path <path>] [--commit <sha>] [--no-git]
-               [--adopt <queue>|workspace[,…]]
+               [--adopt <queue>|workspace[,…]] [--profile <name>]
                  Converges the workspace's delivery defaults, then each declared queue's
                  behaviour and destination. Idempotent; exits non-zero unless it fully
                  converged. --dry-run validates the file locally and sends nothing. To ask
@@ -139,7 +139,7 @@ APPLY
                  ""file"", ""inSync"", ""drift"": […], ""detached"": […] }.
 
 PLAN
-  queuey plan [--file queuey.deploy.json] [--adopt <queue>|workspace[,…]] [--json]
+  queuey plan [--file queuey.deploy.json] [--adopt <queue>|workspace[,…]] [--profile <name>] [--json]
                  Asks Queuey itself what apply would do: every write apply would send goes as
                  a dry run (?dryRun=true), so it shows each value that would change and each
                  refusal Queuey would give that write — retention caps, queue limits, bad
@@ -168,7 +168,7 @@ VERIFY
   queuey verify <queue> --event <evt_…>
   queuey verify <queue> --event-type <type> [--ingress-auth <template>]
   queuey verify <queue> --send (--data <json> | --file <path> | --stdin) [--event-type <type>]
-                [--timeout <seconds>] [--deployment queuey.deploy.json] [--json]
+                [--timeout <seconds>] [--deployment queuey.deploy.json] [--profile <name>] [--json]
                  Verifies the queue's flow with Queuey's flow verification, and reads it
                  until Queuey has settled it: each step from the ingress to the final state
                  (ingress_reached, ingress_auth, persisted, routed, delivery_attempted,
@@ -241,17 +241,18 @@ KEYS
 
 CREDENTIALS
   queuey credentials set --name <name> --from-env <ENV_VAR> [--type <type>]
-                [--key-id <id>] [--username <u>] [--json]
+                [--key-id <id>] [--username <u>] [--profile <name>] [--json]
                  Stores a delivery secret under the workspace and names it, so a deployment
                  file can refer to it as credentialRef. The value is read from the
                  environment — never an argument, which would land in shell history and CI
                  logs — is encrypted at rest, and is never readable again.
-  queuey credentials list [--json]
+  queuey credentials list [--profile <name>] [--json]
 
 PUBLISH
   queuey publish <queue> (--data <json> | --file <path> | --stdin)
                  [--idempotency-key <k>] [--event <type>] [--key <group-key>]
-                 [--content-type <ct>] [--source <s>] [--deployment queuey.deploy.json] [--json]
+                 [--content-type <ct>] [--source <s>] [--deployment queuey.deploy.json]
+                 [--profile <name>] [--json]
                  Publishes ONE event to the queue the way a producer does: with the
                  configured key, to the queue's ingress URL. A fixed --idempotency-key
                  makes the event recognizable: publishing it again answers with the same
@@ -280,7 +281,8 @@ PUBLISH
                  tenantFrom names the file.
 
 EVENTS
-  queuey events get <evt_…> --queue <queue> [--content] [--deployment queuey.deploy.json] [--json]
+  queuey events get <evt_…> --queue <queue> [--content] [--deployment queuey.deploy.json]
+                 [--profile <name>] [--json]
                  Reads one event as Queuey's REST API serves it (GET /events/{queue}/{event}):
                  its status, its times and each attempt with what Queuey decided after it.
                  --queue is the queue's name or its id (que_…): Queuey reads an event within
@@ -310,7 +312,7 @@ ISSUES
 
 LISTEN
   queuey listen --forward-to <origin> [--queue <name|que_...> | --tenant <ten_...>]
-                [--take-over] [--forward-exact] [--json]
+                [--take-over] [--forward-exact] [--profile <name>] [--json]
                  Receives the deliveries of a queue set to forward to a local listener (Local
                  forward) over an outbound push session (no inbound port exposed) and sends each
                  to --forward-to. Give the origin only, e.g. http://localhost:5000: a delivery
@@ -386,7 +388,36 @@ EDGE
                  --accept-data-loss, the old file is preserved for support either way).
 
 WHOAMI
-  queuey whoami [--json]
+  queuey whoami [--profile <name>] [--json]
+                 The connection the CLI resolves, with the key masked; with a profile, that
+                 profile's and the file it came from.
+
+PROFILES
+  --profile <name> (or QUEUEY_PROFILE) picks one environment, such as dev or prod, and
+  takes both halves of it. Each half has to be there, or the command fails and says
+  which is missing:
+                 1. The connection, which lives with you and never in the repository:
+                    ~/.queuey/config.json (or the file QUEUEY_USER_CONFIG names), as
+                    { ""profiles"": { ""dev"": { ""apiKey"": ""qak_…"", ""license"": ""lic_…"",
+                    ""tenant"": ""ten_…"", ""apiBase"": ""https://…"", ""ingressBase"": ""https://…"" } } }.
+                    It holds keys, so it is read only when nobody else can read or write
+                    it: chmod 600 ~/.queuey/config.json. `queuey login` will write it; until
+                    then, write it by hand.
+                 2. The deployment file's values for that environment, committed with it:
+                    ""profiles"": { ""dev"": { ""variables"": { ""QUEUEY_BASE_URL"": ""https://…"",
+                    ""QUEUEY_STRIPE_DELIVERY_KIND"": ""localForward"" } } }. They fill the file's
+                    ${VAR} references, so promoting a change is a pull request. A value is
+                    taken as written, and one that looks like a secret is refused.
+                 apply, plan, verify, publish, listen, events get and credentials take both
+                 (listen and credentials read ./queuey.deploy.json for it); whoami shows the
+                 connection; apply --dry-run needs only the file's half, as it never connects.
+                 With a profile, a flag still wins for its value, queuey.json is not read, and
+                 a QUEUEY_ variable for the key, license, workspace or a host that disagrees
+                 with the profile is an error, as is a ${VAR} the profile and the environment
+                 set to different values: a value left in the shell from another environment
+                 never mixes in. The workspace is the connection's; a file that names one
+                 too must name the same. A command that takes no profile refuses to run
+                 while QUEUEY_PROFILE is set.
 
 GLOBAL OPTIONS (all commands)
   An option a command does not take fails it (exit 2) and lists the ones it does.
@@ -403,6 +434,8 @@ CONFIG PRECEDENCE
   flag  >  environment (QUEUEY_API_BASE / QUEUEY_INGRESS_BASE /
            QUEUEY_API_KEY / QUEUEY_TENANT / QUEUEY_LICENSE / QUEUEY_SOURCE)  >
            queuey.json  >  default
+  With --profile:  flag  >  the profile in ~/.queuey/config.json  >  default
+           (see PROFILES: queuey.json is not read, and a disagreeing QUEUEY_ variable fails)
 
 EXIT CODES
   0 success   1 runtime failure   2 usage   3 config   4 assembly load

@@ -86,6 +86,12 @@ public class DeploymentCopyTests
             Schema = sample.Text("schema"),
             Tenant = sample.Text("ten"),
             Workspace = (DeploymentWorkspace)sample.Fill(typeof(DeploymentWorkspace)),
+            // Profilene (F2.7) er en ordbok av ordbøker, som utfyllingen under ikke lager selv.
+            Profiles = new Dictionary<string, DeploymentProfile>(StringComparer.Ordinal)
+            {
+                ["dev"] = new() { Variables = new Dictionary<string, string>(StringComparer.Ordinal) { ["QUEUEY_A"] = sample.Text("dev-a"), ["QUEUEY_B"] = sample.Text("dev-b") } },
+                ["prod"] = new() { Variables = new Dictionary<string, string>(StringComparer.Ordinal) { ["QUEUEY_A"] = sample.Text("prod-a") } },
+            },
         };
 
         foreach (string name in new[] { "orders", "invoices" })

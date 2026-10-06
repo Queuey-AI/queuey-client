@@ -586,6 +586,34 @@
         "pattern": "^[a-z0-9][a-z0-9._-]*$",
         "maxLength": 64
       }
+    },
+    "profiles": {
+      "description": "The values this file takes per environment, by profile name (dev, prod …): what its ${VAR} references expand to with --profile <name>, so promoting a change is a pull request against the file. The connection (the key, the license, the hosts) is never here: it lives with the user, in the profile of the same name in ~/.queuey/config.json.",
+      "type": "object",
+      "additionalProperties": {
+        "description": "The values a deployment file takes in one environment: what its ${VAR} references expand to with --profile <name>. Never a secret: the file is committed, and the key that applies it lives with the user.",
+        "type": "object",
+        "properties": {
+          "variables": {
+            "description": "The value of each ${VAR} in this environment, by variable name, such as QUEUEY_TENANT: a workspace id, a base URL, a delivery kind. A value is taken as it is written, never expanded again, and one that looks like a secret is refused. A variable the profile leaves out comes from the environment, as without a profile; one set in both, to different values, is an error.",
+            "type": "object",
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1,
+              "not": {
+                "pattern": "\\$\\{"
+              }
+            },
+            "propertyNames": {
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "propertyNames": {
+        "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+      }
     }
   },
   "additionalProperties": false

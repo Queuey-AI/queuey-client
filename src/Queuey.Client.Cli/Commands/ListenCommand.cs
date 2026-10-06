@@ -29,13 +29,28 @@ internal static class ListenCommand
     internal static readonly CommandOptions Options = new(
         "listen",
         flags: new[] { "json", "take-over", "forward-exact", "exact", "yes", "y" },
-        values: new[] { "forward-to", "local-baseurl", "queue" },
+        values: new[] { "forward-to", "local-baseurl", "queue", "profile" },
         hints: new Dictionary<string, string>(StringComparer.Ordinal)
         {
             // Fjernet 2026-10-06 (F2.5): tee ble aldri bygget i Queuey, og lovet en levering til endepunktet som ikke skjedde.
             ["tee"] = "--tee is gone: listening never delivered to the real endpoint as well. A queue set to forward to a "
                       + "local listener (Local forward) delivers to the listener only, and your local response is the outcome.",
         });
+
+    /// <summary>
+    /// The connection to listen with: as before profiles without one; with one (F2.7), the profile's connection and the
+    /// workspace the deployment file's values for it name, which have to agree, so the listener hears the workspace apply
+    /// wrote to.
+    /// </summary>
+    internal static ResolvedConfig Connection(ArgMap map)
+    {
+        string? profile = CliHost.Profile(map);
+        if (profile is null)
+            return CliHost.Resolve(map);
+
+        (string? fileTenant, string filePath) = DeploymentTenant.FromDeploymentOption(map, profile);
+        return CliHost.ResolveForDeployment(map, fileTenant, filePath);
+    }
 
     /// <summary>The exit code after SIGTERM, as a shell reports a process the signal ended: 128 + 15.</summary>
     internal const int TerminatedExitCode = 143;
@@ -104,7 +119,7 @@ internal static class ListenCommand
         {
             // Konfigurasjonen leses inne i try (re-review av #50, K2): en --tenant som ikke er ten_…, en ugyldig --api-base og
             // en queuey.json som ikke kan leses, ga før et JSON-objekt over flere linjer fra CliEntry.
-            config = CliHost.Resolve(map);
+            config = Connection(map);
             if (string.IsNullOrWhiteSpace(config.ApiKey))
                 return Refuse("config_error", "An API key is required (--api-key, QUEUEY_API_KEY, or queuey.json).", null, ExitCodes.Configuration);
 

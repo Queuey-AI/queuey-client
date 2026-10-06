@@ -16,6 +16,15 @@ internal sealed class ResolvedConfig
     public string? LicensePublicId { get; init; }
     public string? Source { get; init; }
 
+    /// <summary>The profile the connection came from (<c>--profile</c> or <c>QUEUEY_PROFILE</c>), or null without one.</summary>
+    public string? Profile { get; init; }
+
+    /// <summary>The file the profile's connection was read from, for messages.</summary>
+    public string? ProfileFile { get; init; }
+
+    /// <summary>The workspace the profile's connection names itself, before a flag or the deployment file has a say.</summary>
+    public string? ProfileTenant { get; init; }
+
     /// <summary>Applies the resolved values onto a <see cref="QueueyOptions"/>.</summary>
     public void Apply(QueueyOptions options)
     {
@@ -38,6 +47,9 @@ internal sealed class ResolvedConfig
         TenantPublicId = string.IsNullOrWhiteSpace(tenantPublicId) ? TenantPublicId : tenantPublicId,
         LicensePublicId = LicensePublicId,
         Source = Source,
+        Profile = Profile,
+        ProfileFile = ProfileFile,
+        ProfileTenant = ProfileTenant,
     };
 
     public Uri ResolvedApiBase() => ToOptions().ResolveApiBaseAddress();
@@ -71,6 +83,51 @@ internal static class CliConfig
                 (file.Tenant, $"tenant in {args.Get("config") ?? "queuey.json"}")),
             LicensePublicId = First(args.Get("license"), getEnv("QUEUEY_LICENSE"), file.License),
             Source = First(args.Get("source"), getEnv("QUEUEY_SOURCE"), file.Source),
+        };
+    }
+
+    /// <summary>
+    /// The connection of profile <paramref name="profile"/> (F2.7): a flag first, then the profile, never <c>queuey.json</c>.
+    /// A <c>QUEUEY_</c> variable for the key, the license, the workspace or a host that is set to something else than the
+    /// profile gives, is an error, never a silent pick: a profile is one environment's whole connection, and a variable left
+    /// in the shell from another one would mix the two. The source, a trace label, may still come from the environment.
+    /// </summary>
+    public static ResolvedConfig ResolveProfile(ArgMap args, Func<string, string?> getEnv, string profile, ConnectionProfile values, string path)
+    {
+        string? Pick(string flag, string variable, string? fromProfile, string what)
+        {
+            if (args.Get(flag) is { } flagged && !string.IsNullOrWhiteSpace(flagged))
+                return flagged;
+
+            string? fromEnv = getEnv(variable);
+            if (!string.IsNullOrWhiteSpace(fromEnv) && !string.Equals(fromEnv!.Trim(), fromProfile?.Trim(), StringComparison.Ordinal))
+                throw new QueueyConfigurationException(
+                    (string.IsNullOrWhiteSpace(fromProfile)
+                        ? $"{variable} is set, and profile {profile} in {path} gives no {what}."
+                        : $"{variable} is set to another {what} than profile {profile} in {path} gives.")
+                    + " A profile is one environment's whole connection, so neither is picked. No value is shown.")
+                {
+                    SuggestedAction = $"Unset {variable} to use the profile, or run without --profile.",
+                };
+
+            return string.IsNullOrWhiteSpace(fromProfile) ? null : fromProfile!.Trim();
+        }
+
+        string? profileTenant = string.IsNullOrWhiteSpace(values.Tenant) ? null : WorkspaceId(values.Tenant!, $"tenant of profile {profile} in {path}");
+        string? tenant = Pick("tenant", "QUEUEY_TENANT", profileTenant, "workspace");
+
+        return new ResolvedConfig
+        {
+            Environment = QueueyEnvironment.Production,
+            ApiBaseOverride = ParseUri(Pick("api-base", "QUEUEY_API_BASE", values.ApiBase, "API host")),
+            IngressBaseOverride = ParseUri(Pick("ingress-base", "QUEUEY_INGRESS_BASE", values.IngressBase, "ingress host")),
+            ApiKey = Pick("api-key", "QUEUEY_API_KEY", values.ApiKey, "API key"),
+            TenantPublicId = tenant is null ? null : WorkspaceId(tenant, args.Get("tenant") is null ? $"tenant of profile {profile}" : "--tenant"),
+            LicensePublicId = Pick("license", "QUEUEY_LICENSE", values.License, "license"),
+            Source = First(args.Get("source"), values.Source, getEnv("QUEUEY_SOURCE")),
+            Profile = profile,
+            ProfileFile = path,
+            ProfileTenant = profileTenant,
         };
     }
 

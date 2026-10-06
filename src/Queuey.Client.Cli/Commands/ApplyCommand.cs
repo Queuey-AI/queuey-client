@@ -22,7 +22,7 @@ internal static class ApplyCommand
     internal static readonly CommandOptions Options = new(
         "apply",
         flags: new[] { "dry-run", "check", "continue-on-error", "json", "no-git" },
-        values: new[] { "file", "repo", "repo-path", "commit", "adopt" },
+        values: new[] { "file", "repo", "repo-path", "commit", "adopt", "profile" },
         hints: new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["plan"] = "`apply --plan` is now `queuey plan`: it asks Queuey what apply would change, and writes nothing.",
@@ -33,20 +33,24 @@ internal static class ApplyCommand
         if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
 
-        if (!TryReadDeploymentFile(map, out string path, out DeploymentFile file, out failure)) return failure;
+        // Profilen (F2.7) velger begge halvdelene: verdiene i fila, her, og tilkoblingen hos brukeren, når apply kobler til.
+        string? profile = CliHost.Profile(map);
+        if (!TryReadDeploymentFile(map, out string path, out DeploymentFile file, out failure, profile)) return failure;
+        DeploymentFile target = profile is null ? file : ForProfile(file, profile, path);
+        string? fileTenant = profile is null ? file.ResolveTenant() : target.Tenant;
         bool dryRun = map.Has("dry-run");
 
         if (dryRun)
         {
             // Samme regel for tenant som apply, så en dry-run feiler der applyen ville feilet.
-            DeploymentTenant.EnsureNoConflict(map, CliHost.Env, file.ResolveTenant(), path);
+            DeploymentTenant.EnsureNoConflict(map, CliHost.Env, fileTenant, path);
 
             // Network-free: ParseNamed has expanded and resolved the file, so names, policy and an unset ${VAR}
             // already failed there, in the dry run, rather than during the deploy it was meant to protect.
 
             // En leverings-URL på maskinen eller et privat nett avvises som apply avviser den (Queuey F2.3), med de utvidede
             // verdiene: ParseNamed har alt utvidet fila, så variablene finnes.
-            DeploymentDestinations.EnsureReachable(file.Expand(), CliHost.Resolve(map).ResolvedApiBase());
+            DeploymentDestinations.EnsureReachable(profile is null ? file.Expand() : target, DryRunApiBase(map, profile));
 
             // Det som vises, er fila slik den står, med ${VAR} uutvidet. Før skrev --json de utvidede verdiene, også et
             // token i en ?code=, mens teksten viste workspacet uutvidet og køene utvidet (review 2026-10-05).
@@ -61,9 +65,12 @@ internal static class ApplyCommand
 
         // Workspacet fila navngir, ellers det konfigurerte — og feil når --tenant eller QUEUEY_TENANT sier
         // noe annet enn fila. Samme regel som verify, så de treffer samme workspace.
-        ResolvedConfig config = CliHost.ResolveForDeployment(map, file.ResolveTenant(), path);
+        ResolvedConfig config = CliHost.ResolveForDeployment(map, fileTenant, path);
         using ServiceProvider provider = CliHost.BuildProvider(config);
         var service = provider.GetRequiredService<IQueueyService>();
+
+        // Med en profil går fila ut med profilens verdier, utvidet her; uten en utvider biblioteket den fra miljøet, som før.
+        file = target;
 
         if (map.Has("check"))
             return await CheckAsync(service, file, path, map);
@@ -135,7 +142,7 @@ internal static class ApplyCommand
     /// The deployment file named by <c>--file</c>, or <c>queuey.deploy.json</c> here. A missing file is
     /// a usage error, written the way the caller asked for errors.
     /// </summary>
-    internal static bool TryReadDeploymentFile(ArgMap map, out string path, out DeploymentFile file, out int failure)
+    internal static bool TryReadDeploymentFile(ArgMap map, out string path, out DeploymentFile file, out int failure, string? profile = null)
     {
         path = map.Get("file") ?? DeploymentFile.DefaultFileName;
         file = null!;
@@ -143,12 +150,51 @@ internal static class ApplyCommand
 
         if (!File.Exists(path))
         {
-            failure = CliErrors.Usage(map, "missing_file", $"No deployment file at '{path}'.", "Create one, or pass --file <path>.");
+            failure = CliErrors.Usage(map, "missing_file", $"No deployment file at '{path}'.",
+                profile is null
+                    ? "Create one, or pass --file <path>."
+                    : $"Create one, or pass --file <path>. --profile {profile} needs the file's values for {profile} as well as the connection.");
             return false;
         }
 
-        file = ParseNamed(path);
+        file = ParseNamed(path, profile);
         return true;
+    }
+
+    /// <summary>The file expanded for <paramref name="profile"/>, with the path in front of the error when it fails.</summary>
+    internal static DeploymentFile ForProfile(DeploymentFile file, string profile, string path)
+    {
+        try
+        {
+            return file.ForProfile(profile, CliHost.Env);
+        }
+        catch (QueueyConfigurationException ex)
+        {
+            throw new QueueyConfigurationException($"{path}: {ex.Message}") { SuggestedAction = ex.SuggestedAction };
+        }
+    }
+
+    /// <summary>
+    /// The API host a dry run judges a local destination by. With a profile, its connection's when the user's file has it:
+    /// a dry run never connects, so it needs only the file's half of the profile.
+    /// </summary>
+    private static Uri DryRunApiBase(ArgMap map, string? profile)
+    {
+        if (profile is null)
+            return CliHost.Resolve(map).ResolvedApiBase();
+
+        try
+        {
+            return CliHost.Resolve(map, profiles: true).ResolvedApiBase();
+        }
+        catch (QueueyConfigurationException)
+        {
+            // Uten brukerens fil (en CI-jobb uten nøkler, for eksempel): --api-base, ellers standardverten.
+            return new ResolvedConfig
+            {
+                ApiBaseOverride = map.Get("api-base") is { } apiBase && Uri.TryCreate(apiBase, UriKind.Absolute, out Uri? uri) ? uri : null,
+            }.ResolvedApiBase();
+        }
     }
 
     /// <summary>
@@ -157,12 +203,12 @@ internal static class ApplyCommand
     /// checks speak of "the deployment file" or of a field, and a command can read more than one file. The file is
     /// returned as written, with <c>${VAR}</c> unexpanded.
     /// </summary>
-    internal static DeploymentFile ParseNamed(string path)
+    internal static DeploymentFile ParseNamed(string path, string? profile = null)
     {
         try
         {
             DeploymentFile file = DeploymentFile.Parse(CliFiles.ReadAllText(path));
-            _ = file.Expand().Resolve();
+            _ = (profile is null ? file.Expand() : file.ForProfile(profile, CliHost.Env)).Resolve();
             return file;
         }
         catch (QueueyConfigurationException ex)

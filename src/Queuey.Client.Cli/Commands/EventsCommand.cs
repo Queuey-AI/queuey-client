@@ -22,7 +22,7 @@ internal static class EventsCommand
     internal static readonly CommandOptions GetOptions = new(
         "events get",
         flags: new[] { "content", "json" },
-        values: new[] { "queue", "deployment" },
+        values: new[] { "queue", "deployment", "profile" },
         positionals: 1);
 
     /// <summary>The version of <c>events get --json</c>'s shape; a script checks it first, as for the other commands.</summary>
@@ -67,7 +67,7 @@ internal static class EventsCommand
                 "publish and verify print the queue's id beside the event's.");
 
         // Workspacet etter samme regel som apply, verify og publish, når køen er gitt ved navn.
-        (string? fileTenant, string filePath) = DeploymentTenant.FromDeploymentOption(map);
+        (string? fileTenant, string filePath) = DeploymentTenant.FromDeploymentOption(map, CliHost.Profile(map));
         ResolvedConfig config = CliHost.ResolveForDeployment(map, fileTenant, filePath);
 
         using ServiceProvider provider = CliHost.BuildProvider(config);
