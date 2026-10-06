@@ -137,7 +137,7 @@ public class CredentialStoringTests
 
         Assert.StartsWith("No credential with the name the file gives in workspace ten_abc (workspace.delivery.credentialRef). " +
                           "Nothing was changed. Store it first. A person pastes the value, so it never passes through you: queuey " +
-                          "credentials request <NAME> --type ApiKeyHeader prints a link", ex.Message);
+                          "credentials request <NAME> --type ApiKeyHeader --tenant ten_abc prints a link", ex.Message);
         Assert.Contains(CredentialStoring.NotShown, ex.Message);
         Assert.EndsWith("Available: orders-key, and 1 whose name is not shown.", ex.Message);
         foreach (string piece in new[] { "curl", "evil", "|sh", "$(id)" })
@@ -186,9 +186,9 @@ public class CredentialStoringTests
     }
 
     [Theory]
-    [InlineData(null, "A person pastes the value, so it never passes through you: queuey credentials request partner-key --type ApiKeyHeader prints")]
-    [InlineData("prod", "A person pastes the value, so it never passes through you: queuey credentials request partner-key --type ApiKeyHeader prints")]
-    [InlineData("dev", "Run queuey credentials set --name partner-key --type ApiKeyHeader --from-env <VARIABLE> from a shell")]
+    [InlineData(null, "A person pastes the value, so it never passes through you: queuey credentials request partner-key --type ApiKeyHeader --tenant ten_abc prints")]
+    [InlineData("prod", "A person pastes the value, so it never passes through you: queuey credentials request partner-key --type ApiKeyHeader --tenant ten_abc prints")]
+    [InlineData("dev", "Run queuey credentials set --tenant ten_abc --name partner-key --type ApiKeyHeader --from-env <VARIABLE> from a shell")]
     public async Task A_delivery_credential_apply_cannot_find_is_stored_the_way_the_workspaces_environment_calls_for(string? environment, string how)
     {
         string file = MissingDeliveryCredential.Replace("@ENV@", environment is null ? "" : $"\"environment\": \"{environment}\",");
@@ -197,6 +197,39 @@ public class CredentialStoringTests
 
         Assert.Contains("No credential named 'partner-key' in workspace ten_abc (workspace.delivery.credentialRef). Nothing was " +
                         "changed. Store it first. " + how, ex.Message);
+    }
+
+    // Re-review av #60, runde 5: uten profil går credentials til det konfigurerte workspacet, mens apply skriver til filas tenant.
+    // Var det konfigurerte dev og fila prod, limte en person prod-hemmeligheten inn i dev, og prod-ingressen ventet fortsatt.
+    private const string MissingDeliveryCredentialWithoutProfiles = """
+    {
+      "tenant": "ten_abc",
+      "workspace": {
+        "delivery": { "baseUrl": "https://hooks.example.com", "authMode": "ApiKey", "credentialRef": "partner-key", "authHeaderName": "X-Api-Key" }
+      },
+      "queues": { "orders": { "delivery": { "url": "/orders" } } }
+    }
+    """;
+
+    [Fact]
+    public async Task Without_a_profile_the_commands_name_the_workspace_the_file_was_applied_to()
+    {
+        QueueyConfigurationException ex = await ApplyFails(DeploymentFile.Parse(MissingDeliveryCredentialWithoutProfiles));
+
+        Assert.Contains("queuey credentials request partner-key --type ApiKeyHeader --tenant ten_abc prints a link", ex.Message);
+        Assert.Contains("queuey credentials list --tenant ten_abc --json", ex.Message);
+        Assert.Contains("queuey credentials set --tenant ten_abc --name partner-key", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("ten_abc", "queuey credentials request stripe-whsec --tenant ten_abc")]
+    [InlineData("${QUEUEY_TENANT}", "queuey credentials request stripe-whsec")]   // uutvidet: ingen workspace-id å vise
+    [InlineData(null, "queuey credentials request stripe-whsec")]                // ingen tenant: apply og credentials tar samme
+    public void A_file_names_its_workspace_in_the_commands_only_as_a_workspace_id(string? tenant, string request)
+    {
+        var file = new DeploymentFile { Tenant = tenant };
+
+        Assert.Equal(request, CredentialStoring.For(file).Request("stripe-whsec", "HmacSigning"));
     }
 
     [Fact]
@@ -208,6 +241,8 @@ public class CredentialStoringTests
 
         Assert.Contains("queuey credentials request partner-key --type ApiKeyHeader --profile prod prints a link", ex.Message);
         Assert.Contains("queuey credentials list --profile prod --json", ex.Message);
+        // Med en profil leser credentials filas tenant selv (F2.7), så --profile står alene (re-review av #60, runde 5).
+        Assert.DoesNotContain("--tenant", ex.Message);
     }
 
     /// <summary>Apply against a workspace with <paramref name="stored"/> as its credentials: it fails before its first write, with what to do.</summary>

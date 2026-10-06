@@ -79,7 +79,9 @@ ADVISE
                  Without an environment in the intent, a new file is for dev, and a
                  queuey.deploy.json that is there without workspace.environment is for prod,
                  as Queuey counts such a workspace: delivery over HTTP, credentials request,
-                 and a real Stripe endpoint. State dev for a local listener and test mode.
+                 and a real Stripe endpoint. A local listener and test mode need a new file or
+                 one that gives dev: a stated dev against a file or profile that gives none,
+                 or another, is a conflict, and the file is never rewritten to dev.
                  A file with profiles gets no new profile: the profile that gives the
                  environment takes the flow, chosen by that and never by its name. Without
                  one stated, one profile takes it, and several are a conflict. One profile
@@ -182,6 +184,7 @@ APPLY
                  needs another apply). apply says so with the command that stores it:
                  credentials request, where a person pastes the value, unless the file's
                  workspace.environment is dev, where credentials set stores a value you hold.
+                 Without --profile, the command names the file's tenant with --tenant.
                  The workspace is the file's ""tenant"" when it names one, else --tenant /
                  QUEUEY_TENANT / queuey.json. When --tenant or QUEUEY_TENANT names another
                  workspace than the file, apply fails and names both. plan and verify use the

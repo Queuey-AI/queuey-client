@@ -244,8 +244,33 @@ public static class FlowDesigner
                 stated ? JsonValue.Create(_env) : null, JsonValue.Create("localForward"),
                 new[] { new FlowEvidence(_file!.File, null, $"{forwarding.Where} is localForward") },
                 $"{_file.File} forwards queues.{_queue} to a local listener ({forwarding.Where}), {where}.",
-                $"Is this flow for dev? State the environment dev in the intent. For {_env}, set {forwarding.Where} to http in " +
-                $"{_file.File}. Then run advise --intent again."));
+                "Is this flow for dev? " + (WhatTheFileNeedsForDev() is { } needs ? $"If it is, {needs}." : "State the environment dev in the intent.") +
+                $" For {_env}, set {forwarding.Where} to http in {_file.File}. Then run advise --intent again."));
+        }
+
+        /// <summary>
+        /// What the file needs before a flow for dev can go into it, when it does not give dev itself: the profile gives no
+        /// environment, or the file without profiles gives none or another by its variable's default. Null when stating dev in
+        /// the intent is enough, or the file's environment is fixed.
+        /// </summary>
+        // Re-review av #60, runde 4 og 5: et oppgitt dev tar ikke en profil eller fil som ikke gir dev, så «state dev in the
+        // intent» ledet rett inn i en ny konflikt. Veien ut sier i stedet hva fila må få.
+        private string? WhatTheFileNeedsForDev()
+        {
+            if (_file is null)
+                return null;
+
+            string? variable = FileEnvironments.Variable(_file)?.Name;
+            if (_portable)
+                return FileEnvironments.GivenBy(_file, _profileName) is null
+                    ? $"give the profile {_profileName} {variable ?? DeploymentTemplate.EnvironmentVariable}=dev in {_file.File}" +
+                      (variable is null ? $", with workspace.environment ${{{DeploymentTemplate.EnvironmentVariable}}}" : "")
+                    : null;
+
+            if (FileEnvironments.Fixed(_file) is not null || FileEnvironments.WithoutProfile(_file) == "dev")
+                return null;
+            return $"set workspace.environment to dev in {_file.File}" +
+                   (variable is null ? "" : $", or give ${{{variable}}} the default dev: ${{{variable}:-dev}}");
         }
 
         public FlowDesign? Build()
@@ -482,6 +507,8 @@ public static class FlowDesigner
                 return;
             }
 
+            // Hit kommer bare en fil som finnes uten profiler og uten miljø, med et oppgitt miljø. Et oppgitt dev er en konflikt
+            // der (FlowAdvisor, re-review av #60, runde 5), så dev skrives aldri inn i en fil Queuey regner som prod.
             Put(workspace, "environment", _env, "workspace.environment", Basis("environment"), EnvironmentBecause(), "environment");
         }
 
@@ -1316,10 +1343,13 @@ public static class FlowDesigner
                                   "endpoint has a secret of its own: the person pastes that one, and gives the handler the same.");
                         _next.Add($"queuey verify {_queue}{_profileFlag} --event-type {type} --ingress-auth stripe --json, and send that " +
                                   "event from Stripe while it waits.");
+                        // Re-review av #60, runde 5: et oppgitt dev tar ikke lenger en fil som ikke gir noe miljø, så steget sier
+                        // hva fila må få.
                         if (_assumedForUnmarkedFile)
-                            _next.Add("For test mode with stripe listen instead, state the environment dev in the intent, or give the " +
-                                      "deployment file workspace.environment dev. Only a person lowers a workspace to dev, in the Queuey " +
-                                      "console.");
+                            _next.Add("For test mode with stripe listen instead, " +
+                                      (WhatTheFileNeedsForDev() ?? "state the environment dev in the intent") +
+                                      ", if its workspace is dev, and run advise --intent again. Only a person lowers a workspace to " +
+                                      "dev, in the Queuey console.");
                     }
                     break;
 

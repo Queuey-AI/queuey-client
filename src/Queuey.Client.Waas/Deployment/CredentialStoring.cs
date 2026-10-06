@@ -57,8 +57,14 @@ internal sealed class CredentialStoring
     /// <summary>What the commands add to reach the workspace: <c> --profile &lt;name&gt;</c>, <c> --tenant &lt;ten_…&gt;</c>, or nothing.</summary>
     internal string Connection => _profileFlag;
 
-    /// <summary>For a file as plan and apply read it: its workspace's environment, and the profile it was expanded for.</summary>
-    public static CredentialStoring For(DeploymentFile file) => new(file.Workspace?.Environment, file.ProfileName);
+    /// <summary>
+    /// For a file as plan and apply read it: its workspace's environment, the profile it was expanded for, and without one,
+    /// the workspace it names, which apply writes to while credentials goes to the configured one.
+    /// </summary>
+    // Re-review av #60, runde 5: uten profil foreslo plan og apply credentials request uten --tenant. Den gikk da til det
+    // konfigurerte workspacet, som kan være dev, og en person limte prod-hemmeligheten inn der. Profilen vinner i konstruktøren,
+    // og bare en workspace-id blir et flagg, så en uutvidet ${VAR} gir ingenting.
+    public static CredentialStoring For(DeploymentFile file) => new(file.Workspace?.Environment, file.ProfileName, file.Tenant);
 
     /// <summary>Whether a person pastes the value: everywhere but dev.</summary>
     public bool AsksAPerson { get; }

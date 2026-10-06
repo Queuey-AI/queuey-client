@@ -862,8 +862,9 @@ internal sealed class Enrichment
                 _flow.Set("environment", stated.WithEvidence(evidence));
             if (file is { Profiles.Count: > 0 })
                 StatedProfile(file, stated.AsString!);
-            else if (file is not null)
-                RefusedIn(file, null);   // uten profiler brukes standardverdien når variabelen ikke er satt
+            // Uten profiler brukes standardverdien når variabelen ikke er satt. Et oppgitt dev krever at fila gir dev selv.
+            else if (file is not null && !RefusedIn(file, null) && stated.AsString == "dev")
+                DevWithoutProfile(file);
             return;
         }
 
@@ -980,6 +981,38 @@ internal sealed class Enrichment
             $"If {profile} is the dev profile, give it {variable}=dev in {file.File}" +
             (FileEnvironments.Variable(file) is null ? $", with workspace.environment ${{{variable}}}" : "") +
             ". Or name a profile that gives dev with --profile. Then run advise --intent again.");
+    }
+
+    /// <summary>
+    /// A conflict for a stated dev and a file without profiles that does not give dev itself: it names no environment, takes
+    /// it from a variable without a default, or one whose default is another. advise neither designs for dev there nor writes
+    /// dev into it, as for a profile (re-review of #60).
+    /// </summary>
+    // Re-review av #60, runde 5: fila { "tenant": "ten_abc", "queues": {} } gjelder et workspace Queuey regner som prod, og
+    // intensjonen sa dev. advise skrev "environment": "dev" inn i prod-fila, og testmodus ble credentials set --tenant ten_abc,
+    // rett mot prod-tenanten. Hver CI-deploy av fila ble nektet etterpå. ${VAR:-dev} gir dev og går gjennom. ${VAR:-prod} gir
+    // prod, og er en motsigelse som en profil som gir prod.
+    private void DevWithoutProfile(ExistingDeployFile file)
+    {
+        string? given = FileEnvironments.WithoutProfile(file);
+        if (given == "dev")
+            return;
+
+        string? variable = FileEnvironments.Variable(file)?.Name;
+        string evidence = variable is null ? "the deployment file names no environment"
+            : given is null ? $"workspace.environment is ${{{variable}}}, with no default"
+            : $"${{{variable}}} defaults to {given}";
+        string message = variable is null
+            ? $"{file.File} names no workspace environment, so Queuey treats its workspace as prod, and the intent states dev."
+            : given is null
+                ? $"{file.File} takes its workspace environment from ${{{variable}}}, which has no default, so the file does not say " +
+                  "its workspace is dev, and the intent states dev."
+                : $"{file.File} gives {given}: ${{{variable}}} defaults to {given}, and the intent states dev.";
+        Conflict("contradiction", "environment", JsonValue.Create("dev"), given is null ? null : JsonValue.Create(given),
+            new[] { new FlowEvidence(file.File, null, evidence) }, message,
+            $"If {file.File} is for dev, set workspace.environment to dev in it" +
+            (variable is null ? "" : $", or give ${{{variable}}} the default dev: ${{{variable}:-dev}}") +
+            ". Then run advise --intent again.");
     }
 
     /// <summary>A value from the file as a conflict shows it: quoted when it is plain, else in words.</summary>

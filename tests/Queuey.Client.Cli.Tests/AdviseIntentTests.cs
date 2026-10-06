@@ -1050,17 +1050,80 @@ public sealed class AdviseIntentTests : IDisposable
     [Theory]
     [InlineData(null, "queuey credentials request stripe-whsec --tenant ten_abc")]
     [InlineData("dev", "queuey credentials set --tenant ten_abc --name stripe-whsec --type HmacSigning --key-id stripe-whsec --from-env STRIPE_WHSEC")]
-    public void A_file_without_profiles_names_its_tenant_in_the_credentials_commands(string? stated, string store)
+    public void A_file_without_profiles_names_its_tenant_in_the_credentials_commands(string? environment, string store)
     {
-        // Re-review av #60: uten profil går credentials til det konfigurerte workspacet, mens apply bruker filas tenant.
+        // Re-review av #60: uten profil går credentials til det konfigurerte workspacet, mens apply bruker filas tenant. Dev står
+        // i fila: et oppgitt dev tar ikke en fil som ikke gir noe miljø (runde 5).
         Fixture("stripe-aspnet");
-        File_("queuey.deploy.json", """{ "tenant": "ten_abc", "queues": {} }""");
+        File_("queuey.deploy.json", "{ \"tenant\": \"ten_abc\", " +
+            (environment is null ? "" : "\"workspace\": { \"environment\": \"" + environment + "\" }, ") + "\"queues\": {} }");
 
-        FlowDesign design = Advise(stated is null ? StripeIntent : StripeIntentFor(stated)).Design!;
+        FlowDesign design = Advise(StripeIntent).Design!;
 
         Assert.Equal(store, Assert.Single(design.Credentials).Store);
-        if (stated is null)
+        if (environment is null)
             Assert.Contains(design.NextSteps, s => s.Contains("queuey credentials list --tenant ten_abc --json", StringComparison.Ordinal));
+    }
+
+    // Re-review av #60, runde 5: det samme som for profiler gjelder en fil uten profiler. Fila uten miljø gjelder et workspace
+    // Queuey regner som prod. advise skrev "environment": "dev" inn i den, og testmodus ble credentials set --tenant ten_abc, rett
+    // mot prod-tenanten.
+    [Theory]
+    [InlineData(null)]
+    [InlineData("${QUEUEY_WORKSPACE_ENVIRONMENT}")]
+    public void A_stated_dev_does_not_take_a_file_without_profiles_that_gives_no_environment(string? environment)
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", "{ \"tenant\": \"ten_abc\", " +
+            (environment is null ? "" : "\"workspace\": { \"environment\": \"" + environment + "\" }, ") + "\"queues\": {} }");
+
+        FlowAdvice advice = Advise(StripeIntentFor("dev"));
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("contradiction", "environment", "\"dev\""), (conflict.Kind, conflict.Field, conflict.Stated!.ToJsonString()));
+        Assert.Null(conflict.Found);
+        Assert.Contains(environment is null
+                ? "queuey.deploy.json names no workspace environment, so Queuey treats its workspace as prod, and the intent states dev."
+                : "queuey.deploy.json takes its workspace environment from ${QUEUEY_WORKSPACE_ENVIRONMENT}, which has no default",
+            conflict.Message, StringComparison.Ordinal);
+        Assert.StartsWith("If queuey.deploy.json is for dev, set workspace.environment to dev in it", conflict.Question, StringComparison.Ordinal);
+        if (environment is not null)
+            Assert.Contains("or give ${QUEUEY_WORKSPACE_ENVIRONMENT} the default dev: ${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}", conflict.Question,
+                StringComparison.Ordinal);
+        Assert.Null(advice.Design);
+    }
+
+    [Fact]
+    public void A_stated_dev_takes_a_file_without_profiles_whose_variable_defaults_to_dev()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """
+            { "tenant": "ten_abc", "workspace": { "environment": "${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}" }, "queues": {} }
+            """);
+
+        FlowAdvice advice = Advise(StripeIntentFor("dev"));
+
+        Assert.Empty(advice.Flow.Conflicts);
+        Assert.Equal("queuey credentials set --tenant ten_abc --name stripe-whsec --type HmacSigning --key-id stripe-whsec --from-env STRIPE_WHSEC",
+            Assert.Single(advice.Design!.Credentials).Store);
+    }
+
+    [Fact]
+    public void A_stated_dev_does_not_take_a_file_without_profiles_whose_variable_defaults_to_another()
+    {
+        // Som en profil som gir prod: fila gir prod der ingenting setter variabelen, og en apply uten den går til prod.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """{ "workspace": { "environment": "${QUEUEY_WORKSPACE_ENVIRONMENT:-prod}" }, "queues": {} }""");
+
+        FlowAdvice advice = Advise(StripeIntentFor("dev"));
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("contradiction", "environment", "\"prod\""), (conflict.Kind, conflict.Field, conflict.Found!.ToJsonString()));
+        Assert.Contains("queuey.deploy.json gives prod: ${QUEUEY_WORKSPACE_ENVIRONMENT} defaults to prod, and the intent states dev.",
+            conflict.Message, StringComparison.Ordinal);
+        Assert.Contains("or give ${QUEUEY_WORKSPACE_ENVIRONMENT} the default dev: ${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}", conflict.Question,
+            StringComparison.Ordinal);
+        Assert.Null(advice.Design);
     }
 
     [Fact]
@@ -1110,18 +1173,17 @@ public sealed class AdviseIntentTests : IDisposable
         FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
         Assert.Equal(("ambiguous", "environment", "\"localForward\""), (conflict.Kind, conflict.Field, conflict.Found!.ToJsonString()));
         Assert.Contains("forwards queues.stripe to a local listener", conflict.Message, StringComparison.Ordinal);
-        Assert.Contains("State the environment dev in the intent", conflict.Question, StringComparison.Ordinal);
+        // Re-review av #60, runde 5: et oppgitt dev tar ikke en fil uten miljø, så veien ut sier hva fila må få.
+        Assert.Contains("Is this flow for dev? If it is, set workspace.environment to dev in queuey.deploy.json.", conflict.Question,
+            StringComparison.Ordinal);
         Assert.Contains("set queues.stripe.delivery.kind to http", conflict.Question, StringComparison.Ordinal);
         Assert.Null(advice.Design);
 
-        // Med dev oppgitt er lytteren riktig, og designet beholder den.
-        FlowDesign dev = Advise("""
-            {
-              "environment": { "value": "dev", "provenance": "stated" },
-              "source": { "kind": { "value": "stripe", "provenance": "stated" } },
-              "destination": { "route": { "value": "/api/stripe", "provenance": "stated" } }
-            }
-            """).Design!;
+        // Med dev i fila er lytteren riktig, og designet beholder den.
+        File_("queuey.deploy.json", """
+            { "workspace": { "environment": "dev" }, "queues": { "stripe": { "delivery": { "url": "/api/stripe", "kind": "localForward" } } } }
+            """);
+        FlowDesign dev = Advise(StripeIntentFor("dev")).Design!;
         Assert.Equal("localForward", dev.Content["queues"]!["stripe"]!["delivery"]!["kind"]!.GetValue<string>());
         Assert.Contains(dev.NextSteps, s => s.StartsWith("queuey listen --queue stripe", StringComparison.Ordinal));
     }
@@ -1658,7 +1720,8 @@ public sealed class AdviseIntentTests : IDisposable
     }
 
     // Et umerket workspace er prod, og et antatt miljø skrives bare inn i en ny fil (review av #58, B2). En fil som finnes uten
-    // miljø, får derfor credentials request og et ekte endepunkt, som plan og apply gir, og testmodus bare når dev er oppgitt.
+    // miljø, får derfor credentials request og et ekte endepunkt, som plan og apply gir. Testmodus krever at fila gir dev: et
+    // oppgitt dev mot en fil uten miljø er en konflikt (re-review av #60, runde 5).
 
     [Fact]
     public void An_existing_file_without_an_environment_gets_a_real_endpoint_and_a_request_not_test_mode()
@@ -1674,32 +1737,27 @@ public sealed class AdviseIntentTests : IDisposable
                                                    || s.Contains("queuey credentials set", StringComparison.Ordinal));
         Assert.Contains(design.NextSteps, s => s.Contains("queuey credentials request stripe-whsec prints a link where a person pastes it",
             StringComparison.Ordinal));
-        Assert.Contains(design.NextSteps, s => s.StartsWith("For test mode with stripe listen instead, state the environment dev in the " +
-                                                            "intent", StringComparison.Ordinal));
+        Assert.Contains(design.NextSteps, s => s.StartsWith("For test mode with stripe listen instead, set workspace.environment to dev " +
+                                                            "in queuey.deploy.json, if its workspace is dev, and run advise --intent again.",
+                                                            StringComparison.Ordinal));
         // Hele designet er for prod (oppfølging av #58): HTTP, og ingen lytter som et ekte endepunkt ville levert til.
         Assert.DoesNotContain(design.NextSteps, s => s.Contains("queuey listen", StringComparison.Ordinal));
         Assert.Equal("http", design.Content["queues"]!["stripe"]!["delivery"]!["kind"]!.GetValue<string>());
     }
 
     [Fact]
-    public void An_existing_file_without_an_environment_gets_test_mode_when_the_intent_states_dev()
+    public void An_existing_file_without_an_environment_is_not_taken_for_dev_when_the_intent_states_it()
     {
+        // Før re-review av #60, runde 5, fikk fila testmodus, og "dev" ble skrevet inn i en fil Queuey regner som prod.
         Fixture("stripe-aspnet");
         File_("queuey.deploy.json", """{ "queues": {} }""");
 
-        FlowDesign design = Advise("""
-            {
-              "environment": { "value": "dev", "provenance": "stated" },
-              "source": { "kind": { "value": "stripe", "provenance": "stated" } },
-              "destination": { "route": { "value": "/api/stripe", "provenance": "stated" } }
-            }
-            """).Design!;
+        FlowAdvice advice = Advise(StripeIntentFor("dev"));
 
-        Assert.Equal("queuey credentials set --name stripe-whsec --type HmacSigning --key-id stripe-whsec --from-env STRIPE_WHSEC",
-            Assert.Single(design.Credentials).Store);
-        Assert.Contains(design.NextSteps, s => s.StartsWith("Test mode", StringComparison.Ordinal));
-        Assert.DoesNotContain(design.NextSteps, s => s.StartsWith("For test mode", StringComparison.Ordinal));
-        Assert.Equal("dev", design.Content["workspace"]!["environment"]!.GetValue<string>());   // det oppgitte skrives inn
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("contradiction", "environment"), (conflict.Kind, conflict.Field));
+        Assert.Contains("names no workspace environment, so Queuey treats its workspace as prod", conflict.Message, StringComparison.Ordinal);
+        Assert.Null(advice.Design);
     }
 
     [Fact]
@@ -1725,10 +1783,21 @@ public sealed class AdviseIntentTests : IDisposable
     [InlineData("supabase", true)]
     [InlineData("app", false)]
     [InlineData("app", true)]
-    public void An_existing_file_without_an_environment_is_designed_for_prod_and_for_dev_only_when_the_intent_says_so(string kind, bool devStated)
+    public void An_existing_file_without_an_environment_is_designed_for_prod_and_for_dev_only_when_the_file_says_so(string kind, bool devStated)
     {
         (string queue, string intent) = Repository(kind, devStated);
         File_("queuey.deploy.json", """{ "queues": {} }""");
+
+        if (devStated)
+        {
+            // Re-review av #60, runde 5: et oppgitt dev tar ikke en fil uten miljø, som Queuey regner som prod, for noen kilde.
+            // Fila må si dev selv.
+            FlowAdvice refused = Advise(intent);
+            FlowConflict conflict = Assert.Single(refused.Flow.Conflicts);
+            Assert.Equal(("contradiction", "environment"), (conflict.Kind, conflict.Field));
+            Assert.Null(refused.Design);
+            File_("queuey.deploy.json", """{ "workspace": { "environment": "dev" }, "queues": {} }""");
+        }
 
         FlowAdvice advice = Advise(intent);
         FlowDesign design = advice.Design!;
