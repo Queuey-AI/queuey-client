@@ -76,11 +76,11 @@ public static class FlowDesigner
     public const string StripeCredential = "stripe-whsec";
 
     /// <summary>The design, or null when it gives the flow a conflict: the flow then says what stands in the way.</summary>
-    public static FlowDesign? Design(DesiredFlow flow, FlowFacts facts, Advice? sending = null)
+    public static FlowDesign? Design(DesiredFlow flow, FlowFacts facts, Advice? sending = null, string? profile = null)
     {
         if (flow.Conflicts.Count > 0)
             throw new InvalidOperationException("A flow with conflicts gets no design.");
-        return new Builder(flow, facts, sending).Build();
+        return new Builder(flow, facts, sending, profile).Build();
     }
 
     private sealed class Builder
@@ -131,13 +131,18 @@ public static class FlowDesigner
         private readonly SortedDictionary<string, (string Value, DesignSetting Setting)> _profile = new(StringComparer.Ordinal);
         private readonly string _profileFlag;
 
-        // Profilen verdiene går i, og som kommandoene tar med --profile (re-review av #59). Et oppgitt miljø, et fila sier, eller
-        // en ny fil gir profilen med miljøets navn. En fil som finnes med profiler, og et miljø ingen har oppgitt, får aldri en
-        // ny profil: den ene fila har (flere er en konflikt fra FlowAdvisor). Profilens navn er da ikke miljøet: en fil med bare
-        // profilen dev og uten miljø gjelder et workspace Queuey regner som prod.
+        // Profilen verdiene går i, og som kommandoene tar med --profile. En ny fil får profilen med miljøets navn. En fil som
+        // finnes med profiler, får aldri en ny (re-review av #59, og før tag): profilen som gir miljøet, eller den eneste fila har
+        // (FileEnvironments.Choose, som FlowAdvisor velger med; ellers har flyten en konflikt). Profilens navn er da ikke
+        // miljøet: en fil med bare profilen dev og uten miljø gjelder et workspace Queuey regner som prod.
         private readonly string _profileName;
 
-        public Builder(DesiredFlow flow, FlowFacts facts, Advice? sending)
+        // Miljøet kommer fra en variabel som ingen verdi i fila holder fast for denne flyten: en fil uten profiler (review av #60,
+        // B1), eller en profil som ikke setter variabelen selv, når intensjonen ikke oppgir miljøet (runde 6). Leveringstypen tar
+        // da også en variabel, uten profilverdi og uten standardverdi, så den følger miljøet der plan og apply kjører.
+        private readonly bool _kindFromVariable;
+
+        public Builder(DesiredFlow flow, FlowFacts facts, Advice? sending, string? profile)
         {
             _flow = flow;
             _facts = facts;
@@ -149,8 +154,13 @@ public static class FlowDesigner
             _prefix = $"queues.{_queue}";
             _file = facts.DeployFile;
             _portable = _file is null || _file.Profiles.Count > 0;
-            bool literal = _file?.Environment is { } named && named.IndexOf("${", StringComparison.Ordinal) < 0;
-            _profileName = _file is null || flow.IsStated("environment") || literal || _file.Profiles.Count != 1 ? _env : _file.Profiles[0];
+            // advise --profile velger profilen selv (review av #60): en profil fila har, eller navnet på den første i en ny fil.
+            _profileName = profile ?? (_file is { Profiles.Count: > 0 } && FileEnvironments.Choose(_file, _env) is { } chosen ? chosen : _env);
+            // Re-review av #60, runde 6: med ${QUEUEY_WORKSPACE_ENVIRONMENT:-dev} og en profil main som ikke satte variabelen, ga
+            // standardverdien dev, og profiles.main fikk KIND=localForward. CI kjørte apply --profile main med prod, og køen ble
+            // opprettet i prod med en lytter. Et oppgitt miljø skrives inn i profilen (WorkspaceEnvironment), og da holder den det.
+            _kindFromVariable = _file is not null && FileEnvironments.Variable(_file) is { } environmentVariable
+                                && (!_portable || (FileProfileValue(environmentVariable.Name) is null && !flow.IsStated("environment")));
             _profileFlag = _portable ? $" --profile {_profileName}" : "";
 
             // Miljøet er det FlowAdvisor kom fram til: oppgitt, i fila, i den ene profilen, eller antatt (dev for en ny fil, prod
@@ -158,7 +168,11 @@ public static class FlowDesigner
             _devInPractice = _env == "dev";
             _local = _devInPractice;
             _assumedForUnmarkedFile = flow["environment"] is { Provenance: Provenance.Assumed } && _file is not null;
-            _storing = new CredentialStoring(_env, _portable ? _profileName : null);
+            // Uten profil går credentials til det konfigurerte workspacet, ikke deploy-filas (review av #60), mens apply bruker
+            // filas tenant. En fast tenant i fila står derfor i kommandoene.
+            _storing = new CredentialStoring(_env, _portable ? _profileName : null,
+                tenant: _portable ? null : Property(_file?.Json, "tenant") is JsonValue fileTenant && fileTenant.TryGetValue(out string? id)
+                                           && id.IndexOf("${", StringComparison.Ordinal) < 0 ? id : null);
         }
 
         /// <summary>The value the file's profile gives <paramref name="variable"/>, or null when it gives none.</summary>
@@ -168,41 +182,122 @@ public static class FlowDesigner
                 ? text
                 : null;
 
-        /// <summary>The queue's delivery kind in the file, lower case, read through the profile when it is a ${VAR}; null without one.</summary>
-        private string? FileQueueKind()
+        /// <summary>
+        /// The queue's delivery kind in the file, lower case, and where it is set: the kind itself, the profile's value for its
+        /// ${VAR}, or that variable's ${VAR:-default}, as plan and apply read it. Null when the file gives the queue none.
+        /// </summary>
+        private (string Kind, string Where)? FileQueueKind()
         {
             if ((Property(_file?.Json, "queues") as JsonObject)?[_queue] is not JsonObject queue
                 || Property(Property(queue, "delivery") as JsonObject, "kind") is not JsonValue value
                 || !value.TryGetValue(out string? kind) || string.IsNullOrWhiteSpace(kind))
                 return null;
 
-            if (kind.IndexOf("${", StringComparison.Ordinal) >= 0)
-                kind = _portable && DeploymentVariables.Referenced(kind).FirstOrDefault() is { } variable ? FileProfileValue(variable) : null;
-            return kind?.Trim().ToLowerInvariant();
+            string leaf = $"queues.{_queue}.delivery.kind";
+            if (FileEnvironments.ParseVariable(kind) is not { } variable)
+                return (kind.Trim().ToLowerInvariant(), leaf);
+            if (_portable && FileProfileValue(variable.Name) is { } given)
+                return (given.Trim().ToLowerInvariant(), $"profiles.{_profileName}.variables.{variable.Name}");
+            return variable.Default is { Length: > 0 } fallback ? (fallback.Trim().ToLowerInvariant(), $"the default in {leaf}") : null;
+        }
+
+        /// <summary>The variable the queue's delivery kind comes from: the file's, or the one advise writes; null for a fixed kind.</summary>
+        private string? KindVariable()
+        {
+            if ((Property(_file?.Json, "queues") as JsonObject)?[_queue] is JsonObject queue
+                && Property(Property(queue, "delivery") as JsonObject, "kind") is JsonValue value && value.TryGetValue(out string? kind))
+                return FileEnvironments.ParseVariable(kind)?.Name;
+            return _portable || _kindFromVariable ? DeploymentTemplate.QueueKindVariable(_queue) : null;
         }
 
         /// <summary>
-        /// A queue the file already sends to a local listener, in a workspace advise only assumes is prod: a conflict. The
-        /// design for prod would point a real endpoint at a queue that delivers to a laptop, and nobody starts the listener.
+        /// A queue the file already sends to a local listener, outside dev: a conflict, wherever the environment comes from. The
+        /// design for it would point a real endpoint at a queue that delivers to a laptop, and nobody starts the listener.
         /// </summary>
         // Re-review av #59: en fil skrevet av en eldre advise kan ha kind localForward og ikke noe miljø. Fila vinner over det
-        // advise antar, så designet beholdt localForward, mens stegene var for prod. Det avgjør en person, ikke advise.
-        private void ForwardingInAssumedProd()
+        // advise antar, så designet beholdt localForward, mens stegene var for prod. Før tag gjelder det uansett hvor miljøet
+        // kommer fra: oppgitt, fast i fila eller fra profilen, som en profil prod med KIND=localForward kopiert fra dev.
+        private void ForwardingOutsideDev()
         {
-            if (_devInPractice || !_assumedForUnmarkedFile || FileQueueKind() != "localforward")
+            if (FileQueueKind() is not { Kind: "localforward" } forwarding)
                 return;
 
-            _conflicts.Add(new FlowConflict("ambiguous", "environment", null, JsonValue.Create("localForward"),
-                new[] { new FlowEvidence(_file!.File, null, $"queues.{_queue}.delivery.kind is localForward") },
-                $"{_file.File} forwards queues.{_queue} to a local listener, but it names no workspace environment, and Queuey counts " +
-                "such a workspace as prod.",
-                $"Is this flow for dev? State the environment dev in the intent. For prod, set queues.{_queue}.delivery.kind to http " +
-                $"in {_file.File}. Then run advise --intent again."));
+            // Re-review av #60: en fast localForward i en fil som også kan kjøre utenfor dev, fordi miljøet kommer fra en
+            // variabel (CI setter prod) eller en profil gir noe annet enn dev, sender køen til en lytter også der. Det gjelder
+            // selv om flyten nå er for dev.
+            if (_devInPractice)
+            {
+                // Runde 6: en profil som ikke setter miljøvariabelen, men har kind localForward, sender køen til en lytter også der
+                // CI setter prod. advise skriver ikke lenger kind inn i en slik profil, men en fil kan ha det fra før.
+                if (_portable && _kindFromVariable && forwarding.Where.StartsWith("profiles.", StringComparison.Ordinal))
+                {
+                    string environmentVariable = FileEnvironments.Variable(_file!)!.Value.Name;
+                    string kindVariable = forwarding.Where[(forwarding.Where.LastIndexOf('.') + 1)..];
+                    _conflicts.Add(new FlowConflict("ambiguous", "environment", null, JsonValue.Create("localForward"),
+                        new[] { new FlowEvidence(_file!.File, null, $"{forwarding.Where} is localForward") },
+                        $"{_file.File} forwards queues.{_queue} to a local listener ({forwarding.Where}), but the profile " +
+                        $"{_profileName} does not set {environmentVariable}: where CI sets prod, the queue forwards there too.",
+                        $"Take the kind out of the profile: remove {kindVariable} from profiles.{_profileName}.variables, and set it " +
+                        $"where plan and apply run, localForward where {environmentVariable} is dev and http elsewhere. Or give the " +
+                        $"profile {environmentVariable}=dev. Then run advise --intent again."));
+                    return;
+                }
+
+                if (forwarding.Where != $"queues.{_queue}.delivery.kind" || !FileEnvironments.CanRunOutsideDev(_file!))
+                    return;
+
+                string variable = DeploymentTemplate.QueueKindVariable(_queue);
+                _conflicts.Add(new FlowConflict("ambiguous", "environment", null, JsonValue.Create("localForward"),
+                    new[] { new FlowEvidence(_file!.File, null, $"{forwarding.Where} is localForward") },
+                    $"{_file.File} forwards queues.{_queue} to a local listener with a fixed kind, but the file can run outside dev: " +
+                    (FileEnvironments.Variable(_file) is { } environment
+                        ? $"its environment comes from ${{{environment.Name}}}."
+                        : $"its profiles give {FileEnvironments.Describe(_file)}."),
+                    $"Take the kind from a variable, as advise writes it: set {forwarding.Where} to ${{{variable}}}, which is " +
+                    $"localForward in dev and http elsewhere. Then run advise --intent again."));
+                return;
+            }
+
+            bool stated = _flow.IsStated("environment");
+            string where = _flow["environment"]?.Provenance == Provenance.Assumed
+                ? "but it names no workspace environment, and Queuey counts such a workspace as prod"
+                : stated ? $"and the intent states {_env}" : $"and its workspace is {_env}";
+            _conflicts.Add(new FlowConflict(stated ? "contradiction" : "ambiguous", "environment",
+                stated ? JsonValue.Create(_env) : null, JsonValue.Create("localForward"),
+                new[] { new FlowEvidence(_file!.File, null, $"{forwarding.Where} is localForward") },
+                $"{_file.File} forwards queues.{_queue} to a local listener ({forwarding.Where}), {where}.",
+                "Is this flow for dev? " + (WhatTheFileNeedsForDev() is { } needs ? $"If it is, {needs}." : "State the environment dev in the intent.") +
+                $" For {_env}, set {forwarding.Where} to http in {_file.File}. Then run advise --intent again."));
+        }
+
+        /// <summary>
+        /// What the file needs before a flow for dev can go into it, when it does not give dev itself: the profile gives no
+        /// environment, or the file without profiles gives none or another by its variable's default. Null when stating dev in
+        /// the intent is enough, or the file's environment is fixed.
+        /// </summary>
+        // Re-review av #60, runde 4 og 5: et oppgitt dev tar ikke en profil eller fil som ikke gir dev, så «state dev in the
+        // intent» ledet rett inn i en ny konflikt. Veien ut sier i stedet hva fila må få.
+        private string? WhatTheFileNeedsForDev()
+        {
+            if (_file is null)
+                return null;
+
+            string? variable = FileEnvironments.Variable(_file)?.Name;
+            if (_portable)
+                return FileEnvironments.GivenBy(_file, _profileName) is null
+                    ? $"give the profile {_profileName} {variable ?? DeploymentTemplate.EnvironmentVariable}=dev in {_file.File}" +
+                      (variable is null ? $", with workspace.environment ${{{DeploymentTemplate.EnvironmentVariable}}}" : "")
+                    : null;
+
+            if (FileEnvironments.Fixed(_file) is not null || FileEnvironments.WithoutProfile(_file) == "dev")
+                return null;
+            return $"set workspace.environment to dev in {_file.File}" +
+                   (variable is null ? "" : $", or give ${{{variable}}} the default dev: ${{{variable}:-dev}}");
         }
 
         public FlowDesign? Build()
         {
-            ForwardingInAssumedProd();
+            ForwardingOutsideDev();
 
             // 1. Forslaget for flyten: miljøet, køen og profilverdiene, hver innstilling med en grunn.
             var workspace = new JsonObject();
@@ -434,6 +529,8 @@ public static class FlowDesigner
                 return;
             }
 
+            // Hit kommer bare en fil som finnes uten profiler og uten miljø, med et oppgitt miljø. Et oppgitt dev er en konflikt
+            // der (FlowAdvisor, re-review av #60, runde 5), så dev skrives aldri inn i en fil Queuey regner som prod.
             Put(workspace, "environment", _env, "workspace.environment", Basis("environment"), EnvironmentBecause(), "environment");
         }
 
@@ -486,7 +583,23 @@ public static class FlowDesigner
                 ? "A dev workspace: each delivery goes to the queuey listen session on your machine, which forwards it to the " +
                   "receiver. While no session is connected, the events wait."
                 : "Queuey delivers to the URL over HTTP.";
-            if (_portable)
+            if (_kindFromVariable)
+            {
+                // Review av #60, B1: en fil uten profiler som tar miljøet fra en variabel, som ${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}
+                // så CI kan sette prod, fikk kind localForward som fast verdi, og køen ble opprettet i prod med localForward. Nå
+                // tar kind også en variabel, uten standardverdi, som pull --as skriver den: glemmer CI den, stopper apply. Runde 6:
+                // det samme for en profil som ikke setter miljøvariabelen, og da uten profilverdi for kind.
+                string variable = DeploymentTemplate.QueueKindVariable(_queue);
+                string from = _portable
+                    ? $"The profile {_profileName} does not set {FileEnvironments.Variable(_file!)!.Value.Name}, so the workspace's " +
+                      "environment comes from where plan and apply run, and so does where the queue delivers"
+                    : "The file takes the workspace's environment from a variable, so where the queue delivers does too";
+                Put(delivery, "kind", "${" + variable + "}", $"{_prefix}.delivery.kind", "recommendation",
+                    $"{from}: {variable} is localForward in dev and http elsewhere, set where plan and apply run, without a " +
+                    "default, so apply stops rather than guess.",
+                    "environment");
+            }
+            else if (_portable)
             {
                 string variable = DeploymentTemplate.QueueKindVariable(_queue);
                 Put(delivery, "kind", "${" + variable + "}", $"{_prefix}.delivery.kind", "recommendation",
@@ -1166,14 +1279,26 @@ public static class FlowDesigner
 
             if (variables.Count > 0)
             {
+                // Leveringstypen fra en variabel (som pull --as skriver den) får verdien den skal ha her (før tag): uten profil
+                // sier ingenting ellers at den er http i prod.
+                // Re-review av #60: begge verdiene, knyttet til miljøvariabelen, så en agent ikke setter localForward der prod kjører.
+                string? kindVariable = KindVariable();
+                string kindValues = kindVariable is null || !variables.Contains(kindVariable) ? ""
+                    : (_file is not null && FileEnvironments.Variable(_file) is { } environment
+                          ? $" Where {environment.Name} is dev, set {kindVariable}=localForward"
+                          : $" In a dev workspace, set {kindVariable}=localForward") +
+                      $"; everywhere else (CI, prod), set {kindVariable}=http.";
                 bool baseUrl = variables.Contains(DeploymentTemplate.BaseUrlVariable);
                 _next.Add($"Set {string.Join(", ", variables)} where plan and apply run: the file reads {(variables.Count == 1 ? "it" : "them")} " +
-                          "from the environment." +
+                          "from the environment." + kindValues +
                           (baseUrl
                               ? $" {DeploymentTemplate.BaseUrlVariable} is where the receiver is reachable over HTTP, such as production's URL" +
                                 (_local ? "; while the queue forwards to a listener, Queuey sends nothing there and takes only the path." : ".")
                               : "") +
-                          (_portable ? $" A value that is the same every time can go under profiles.{_profileName}.variables instead." : ""));
+                          (_portable
+                              ? $" A value that is the same every time can go under profiles.{_profileName}.variables instead" +
+                                (kindValues.Length > 0 ? $", but not {kindVariable}, which follows the environment." : ".")
+                              : ""));
             }
 
             if (_portable)
@@ -1215,7 +1340,11 @@ public static class FlowDesigner
                         // kall er borte i det neste. --replace står aldri i et forslag, heller ikke i testmodus (besluttet av Kenneth
                         // 2026-10-06, review av #60): et bytte er en persons beslutning. Teksten sier bare at set nekter en annen
                         // testhemmelighet under samme navn.
-                        _next.Add("Test mode, with Stripe's own CLI, whose signing secret is a test secret you may hold. Take it and " +
+                        // Re-review av #60: bare en apply som gikk gjennom, viser at workspacet er dev. Ble fila nektet, er det ikke
+                        // det, og testnøkkelen skal ikke lagres der.
+                        _next.Add("Test mode, with Stripe's own CLI, once that apply has gone through: if it refused the file, the " +
+                                  "workspace is not dev, so stop, and store no test secret. The Stripe CLI's signing secret is a test " +
+                                  "secret you may hold. Take it and " +
                                   "store it in one command, so it stays out of the output and needs no variable from an earlier shell. " +
                                   $"In a POSIX shell: STRIPE_WHSEC=\"$(stripe listen --print-secret)\" {set}. In PowerShell: " +
                                   $"$env:STRIPE_WHSEC = stripe listen --print-secret; {set}; Remove-Item Env:STRIPE_WHSEC, since $env: lasts " +
@@ -1239,7 +1368,7 @@ public static class FlowDesigner
                         // Et ekte endepunkt: hemmeligheten går aldri gjennom agenten (F2.9). Den lagres før endepunktet pekes hit,
                         // ellers avviser ingressen Stripe sine eventer til den er der.
                         _next.Add("A real endpoint's signing secret never passes through you or this conversation: " +
-                                  $"{request} prints a link where a person pastes it, and queuey credentials list{_profileFlag} " +
+                                  $"{request} prints a link where a person pastes it, and queuey credentials list{_storing.Connection} " +
                                   $"--json lists {StripeCredential} once it is stored. credentials set --from-env is only for the " +
                                   "test secret stripe listen --print-secret gives, in dev.");
                         _next.Add("Then point the Stripe webhook endpoint at the queue's ingress URL, in the dashboard or with Stripe's " +
@@ -1247,10 +1376,13 @@ public static class FlowDesigner
                                   "endpoint has a secret of its own: the person pastes that one, and gives the handler the same.");
                         _next.Add($"queuey verify {_queue}{_profileFlag} --event-type {type} --ingress-auth stripe --json, and send that " +
                                   "event from Stripe while it waits.");
+                        // Re-review av #60, runde 5: et oppgitt dev tar ikke lenger en fil som ikke gir noe miljø, så steget sier
+                        // hva fila må få.
                         if (_assumedForUnmarkedFile)
-                            _next.Add("For test mode with stripe listen instead, state the environment dev in the intent, or give the " +
-                                      "deployment file workspace.environment dev. Only a person lowers a workspace to dev, in the Queuey " +
-                                      "console.");
+                            _next.Add("For test mode with stripe listen instead, " +
+                                      (WhatTheFileNeedsForDev() ?? "state the environment dev in the intent") +
+                                      ", if its workspace is dev, and run advise --intent again. Only a person lowers a workspace to " +
+                                      "dev, in the Queuey console.");
                     }
                     break;
 

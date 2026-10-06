@@ -663,10 +663,92 @@ public sealed class AdviseIntentTests : IDisposable
                                                    || s.Contains("--profile dev", StringComparison.Ordinal));
     }
 
+    // ── profilen etter miljøet den gir, aldri etter navnet (før tag, etter #59) ──
+    //
+    // Konflikten for flere profiler ba om miljøet som et profilnavn, men environment tar bare dev, test, staging og prod. Og
+    // med prod oppgitt laget advise profiles.prod ved siden av production, med --profile prod.
+
+    private const string LocalAndProduction = """
+        {
+          "workspace": { "environment": "${QUEUEY_WORKSPACE_ENVIRONMENT}" },
+          "queues": {},
+          "profiles": {
+            "local": { "variables": { "QUEUEY_WORKSPACE_ENVIRONMENT": "dev" } },
+            "production": { "variables": { "QUEUEY_WORKSPACE_ENVIRONMENT": "prod" } }
+          }
+        }
+        """;
+
+    private static string StripeIntentFor(string environment) =>
+        "{ \"environment\": { \"value\": \"" + environment + "\", \"provenance\": \"stated\" }, " +
+        "\"source\": { \"kind\": { \"value\": \"stripe\", \"provenance\": \"stated\" } }, " +
+        "\"destination\": { \"route\": { \"value\": \"/api/stripe\", \"provenance\": \"stated\" } } }";
+
     [Fact]
-    public void A_file_with_several_profiles_and_no_environment_asks_which_one()
+    public void A_file_with_several_profiles_and_no_environment_asks_which_by_the_environment_each_gives()
     {
-        // Re-review av #59: å velge en av dem ville vært å gjette. Svaret er environment i intensjonen.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", LocalAndProduction);
+
+        FlowAdvice advice = Advise(StripeIntent);
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("ambiguous", "environment", "{\"local\":\"dev\",\"production\":\"prod\"}"),
+            (conflict.Kind, conflict.Field, conflict.Found!.ToJsonString()));
+        Assert.Contains("has the profiles local (dev), production (prod)", conflict.Message, StringComparison.Ordinal);
+        Assert.Contains("State it in the intent as environment: dev for local, prod for production.", conflict.Question, StringComparison.Ordinal);
+        Assert.Null(advice.Design);
+    }
+
+    [Fact]
+    public void A_stated_environment_takes_the_profile_that_gives_it_and_never_makes_one_by_its_name()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", LocalAndProduction);
+
+        FlowDesign design = Advise(StripeIntentFor("prod")).Design!;
+
+        Assert.Equal(new[] { "local", "production" }, design.Content["profiles"]!.AsObject().Select(p => p.Key).ToArray());
+        Assert.Equal("http", design.Content["profiles"]!["production"]!["variables"]!["QUEUEY_STRIPE_DELIVERY_KIND"]!.GetValue<string>());
+        Assert.Equal("queuey credentials request stripe-whsec --profile production", Assert.Single(design.Credentials).Store);
+        Assert.Contains(design.NextSteps, s => s.StartsWith("queuey apply --profile production.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_stated_environment_no_profile_gives_is_a_conflict_that_names_what_each_gives()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", LocalAndProduction);
+
+        FlowAdvice advice = Advise(StripeIntentFor("staging"));
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("contradiction", "environment", "\"staging\""), (conflict.Kind, conflict.Field, conflict.Stated!.ToJsonString()));
+        Assert.Contains("No profile in queuey.deploy.json gives staging: local (dev), production (prod).", conflict.Message, StringComparison.Ordinal);
+        Assert.Contains("dev for local, prod for production", conflict.Question, StringComparison.Ordinal);
+        Assert.Null(advice.Design);
+    }
+
+    [Fact]
+    public void Two_profiles_that_give_the_stated_environment_are_a_conflict()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", LocalAndProduction.Replace("\"production\"", "\"laptop\"").Replace("\"prod\"", "\"dev\""));
+
+        FlowAdvice advice = Advise(StripeIntentFor("dev"));
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("ambiguous", "environment"), (conflict.Kind, conflict.Field));
+        Assert.Contains("has 2 profiles that give dev (laptop, local)", conflict.Message, StringComparison.Ordinal);
+        Assert.Contains("Name it with advise --profile (laptop, local).", conflict.Question, StringComparison.Ordinal);
+        Assert.Contains("give each profile its own environment in QUEUEY_WORKSPACE_ENVIRONMENT", conflict.Question, StringComparison.Ordinal);
+        Assert.Null(advice.Design);
+    }
+
+    [Fact]
+    public void Profiles_that_give_no_environment_are_never_chosen_by_their_name()
+    {
+        // Re-review av #59 lot et oppgitt prod velge profilen som het prod. Navnet sier ikke hvilket workspace profilen går til.
         Fixture("stripe-aspnet");
         File_("queuey.deploy.json", """
             {
@@ -678,23 +760,476 @@ public sealed class AdviseIntentTests : IDisposable
             }
             """);
 
+        FlowConflict unstated = Assert.Single(Advise(StripeIntent).Flow.Conflicts);
+        Assert.Equal(("ambiguous", "{\"dev\":null,\"prod\":null}"), (unstated.Kind, unstated.Found!.ToJsonString()));
+        Assert.Contains("Name it with advise --profile (dev, prod).", unstated.Question, StringComparison.Ordinal);
+        Assert.Contains("take workspace.environment from ${QUEUEY_WORKSPACE_ENVIRONMENT}", unstated.Question, StringComparison.Ordinal);
+
+        FlowConflict stated = Assert.Single(Advise(StripeIntentFor("prod")).Flow.Conflicts);
+        Assert.Equal(("contradiction", "environment"), (stated.Kind, stated.Field));
+        Assert.Contains("never by its name", stated.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_profile_that_forwards_the_queue_outside_dev_is_a_conflict_that_points_at_the_profile()
+    {
+        // Før tag: konflikten gjaldt bare et antatt prod. En profil prod med KIND=localForward, kopiert fra dev, ga et ekte
+        // endepunkt mot en kø som leverer til en laptop også med prod oppgitt.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """
+            {
+              "workspace": { "environment": "${QUEUEY_WORKSPACE_ENVIRONMENT}" },
+              "queues": { "stripe": { "delivery": { "url": "${QUEUEY_BASE_URL}/api/stripe", "kind": "${QUEUEY_STRIPE_DELIVERY_KIND}" } } },
+              "profiles": { "prod": { "variables": { "QUEUEY_WORKSPACE_ENVIRONMENT": "prod", "QUEUEY_STRIPE_DELIVERY_KIND": "localForward" } } }
+            }
+            """);
+
+        FlowAdvice advice = Advise(StripeIntentFor("prod"));
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("contradiction", "environment", "\"localForward\""), (conflict.Kind, conflict.Field, conflict.Found!.ToJsonString()));
+        Assert.Contains("and the intent states prod", conflict.Message, StringComparison.Ordinal);
+        Assert.Contains("For prod, set profiles.prod.variables.QUEUEY_STRIPE_DELIVERY_KIND to http", conflict.Question, StringComparison.Ordinal);
+        Assert.Null(advice.Design);
+    }
+
+    [Fact]
+    public void A_kind_from_a_variable_without_profiles_is_named_with_the_value_it_needs()
+    {
+        // Før tag: pull --as skriver kind som ${VAR} uten profiler. Uten verdien sa ingenting at den skal være http i prod.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """{ "queues": { "stripe": { "delivery": { "url": "/api/stripe", "kind": "${QUEUEY_STRIPE_DELIVERY_KIND}" } } } }""");
+
+        FlowDesign design = Advise(StripeIntent).Design!;
+
+        // Begge verdiene, så en agent ikke setter localForward der prod kjører (re-review av #60).
+        string step = Assert.Single(design.NextSteps, s => s.StartsWith("Set QUEUEY_STRIPE_DELIVERY_KIND where plan and apply run", StringComparison.Ordinal));
+        Assert.Contains("In a dev workspace, set QUEUEY_STRIPE_DELIVERY_KIND=localForward; everywhere else (CI, prod), set " +
+                        "QUEUEY_STRIPE_DELIVERY_KIND=http.", step, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_default_in_the_environment_variable_is_the_environment_as_plan_and_apply_read_it()
+    {
+        // Før tag: ${VAR:-dev} uten profiler ble lest som et umerket workspace, mens plan og apply bruker dev.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """{ "workspace": { "environment": "${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}" }, "queues": {} }""");
+
+        FlowAdvice advice = Advise(StripeIntent);
+        FlowDesign design = advice.Design!;
+
+        Assert.Equal(("dev", Provenance.Evidence), (advice.Flow.String("environment"), advice.Flow["environment"]!.Provenance));
+        Assert.Contains(design.NextSteps, s => s.StartsWith("Test mode", StringComparison.Ordinal));
+        Assert.StartsWith("queuey credentials set ", Assert.Single(design.Credentials).Store, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}", false)]
+    [InlineData("${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}", true)]
+    [InlineData("${QUEUEY_WORKSPACE_ENVIRONMENT}", false)]
+    public void A_file_without_profiles_that_takes_its_environment_from_a_variable_takes_the_kind_from_one_too(
+        string environment, bool devStated)
+    {
+        // Review av #60, B1: med ${VAR:-dev} så CI kan sette prod, skrev advise kind localForward som fast verdi, og køen ble
+        // opprettet i prod med localForward. Nå tar kind en variabel uten standardverdi: glemmer CI den, stopper apply.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", "{ \"workspace\": { \"environment\": \"" + environment + "\" }, \"queues\": {} }");
+
+        FlowDesign design = Advise(devStated ? StripeIntentFor("dev") : StripeIntent).Design!;
+
+        Assert.Equal("${QUEUEY_STRIPE_DELIVERY_KIND}", design.Content["queues"]!["stripe"]!["delivery"]!["kind"]!.GetValue<string>());
+        Assert.Null(design.Content["profiles"]);
+        // Begge verdiene, knyttet til miljøvariabelen (re-review av #60): dev-verdien hører bare hjemme der miljøet er dev.
+        Assert.Contains(design.NextSteps, s => s.StartsWith("Set ", StringComparison.Ordinal)
+                                               && s.Contains("where plan and apply run", StringComparison.Ordinal)
+                                               && s.Contains("Where QUEUEY_WORKSPACE_ENVIRONMENT is dev, set QUEUEY_STRIPE_DELIVERY_KIND=localForward; " +
+                                                             "everywhere else (CI, prod), set QUEUEY_STRIPE_DELIVERY_KIND=http.", StringComparison.Ordinal));
+    }
+
+    // Re-review av #60, runde 6: med ${QUEUEY_WORKSPACE_ENVIRONMENT:-dev} og en profil main som ikke setter variabelen, ga
+    // standardverdien dev, og profiles.main fikk KIND=localForward. CI kjørte apply --profile main med prod, og køen ble opprettet
+    // i prod med en lytter. Det samme skjedde med --profile main uten oppgitt miljø.
+    private const string MainWithEnvironmentDefault = """
+        {
+          "workspace": { "environment": "${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}" },
+          "queues": {},
+          "profiles": { "main": { "variables": { "ORDERS_HOST": "orders.example.com" } } }
+        }
+        """;
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("main")]
+    public void A_profile_that_gets_dev_only_from_the_default_takes_the_kind_from_a_variable_without_a_profile_value(string? profile)
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", MainWithEnvironmentDefault);
+
+        FlowAdvice advice = Advise(StripeIntent, profile: profile);
+        FlowDesign design = advice.Design!;
+
+        Assert.Equal(("dev", Provenance.Evidence), (advice.Flow.String("environment"), advice.Flow["environment"]!.Provenance));
+        Assert.Equal("${QUEUEY_STRIPE_DELIVERY_KIND}", design.Content["queues"]!["stripe"]!["delivery"]!["kind"]!.GetValue<string>());
+        JsonObject variables = design.Content["profiles"]!["main"]!["variables"]!.AsObject();
+        Assert.False(variables.ContainsKey("QUEUEY_STRIPE_DELIVERY_KIND"));
+        Assert.False(variables.ContainsKey("QUEUEY_WORKSPACE_ENVIRONMENT"));
+        Assert.Contains(design.NextSteps, s => s.StartsWith("Set ", StringComparison.Ordinal)
+                                               && s.Contains("Where QUEUEY_WORKSPACE_ENVIRONMENT is dev, set QUEUEY_STRIPE_DELIVERY_KIND=localForward; " +
+                                                             "everywhere else (CI, prod), set QUEUEY_STRIPE_DELIVERY_KIND=http.", StringComparison.Ordinal)
+                                               && s.Contains("but not QUEUEY_STRIPE_DELIVERY_KIND, which follows the environment.", StringComparison.Ordinal));
+        Assert.Contains(design.NextSteps, s => s.StartsWith("queuey apply --profile main.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_stated_dev_is_written_into_a_profile_that_gives_it_only_from_the_default_and_the_profile_holds_the_kind()
+    {
+        // Profilen setter da variabelen selv, og CI som setter prod med --profile main, får en feil fra apply i stedet for en lytter.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", MainWithEnvironmentDefault);
+
+        FlowDesign design = Advise(StripeIntentFor("dev")).Design!;
+
+        JsonNode variables = design.Content["profiles"]!["main"]!["variables"]!;
+        Assert.Equal("dev", variables["QUEUEY_WORKSPACE_ENVIRONMENT"]!.GetValue<string>());
+        Assert.Equal("localForward", variables["QUEUEY_STRIPE_DELIVERY_KIND"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void A_profile_that_does_not_set_the_environment_but_forwards_to_a_listener_is_a_conflict_also_in_dev()
+    {
+        // En fil fra en eldre advise kan ha KIND=localForward i profilen. Den går til en lytter også der CI setter prod.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """
+            {
+              "workspace": { "environment": "${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}" },
+              "queues": { "stripe": { "delivery": { "url": "/api/stripe", "kind": "${QUEUEY_STRIPE_DELIVERY_KIND}" } } },
+              "profiles": { "main": { "variables": { "QUEUEY_STRIPE_DELIVERY_KIND": "localForward" } } }
+            }
+            """);
+
         FlowAdvice advice = Advise(StripeIntent);
 
         FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
-        Assert.Equal(("ambiguous", "environment", "[\"dev\",\"prod\"]"), (conflict.Kind, conflict.Field, conflict.Found!.ToJsonString()));
-        Assert.Contains("State it in the intent as environment", conflict.Question, StringComparison.Ordinal);
+        Assert.Equal(("ambiguous", "environment", "\"localForward\""), (conflict.Kind, conflict.Field, conflict.Found!.ToJsonString()));
+        Assert.Contains("(profiles.main.variables.QUEUEY_STRIPE_DELIVERY_KIND), but the profile main does not set " +
+                        "QUEUEY_WORKSPACE_ENVIRONMENT: where CI sets prod, the queue forwards there too.", conflict.Message, StringComparison.Ordinal);
+        Assert.Contains("remove QUEUEY_STRIPE_DELIVERY_KIND from profiles.main.variables", conflict.Question, StringComparison.Ordinal);
+        Assert.Contains("Or give the profile QUEUEY_WORKSPACE_ENVIRONMENT=dev.", conflict.Question, StringComparison.Ordinal);
         Assert.Null(advice.Design);
+    }
 
-        // Med miljøet oppgitt går flyten inn i profilen med det navnet.
-        FlowDesign stated = Advise("""
+    [Fact]
+    public void A_fixed_listener_kind_in_a_file_that_can_run_outside_dev_is_a_conflict_also_in_dev()
+    {
+        // Re-review av #60: miljøet kommer fra en variabel, så CI kan sette prod, og en fast localForward sender køen til en
+        // lytter også der. At flyten nå er for dev, endrer ikke det.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """
             {
-              "environment": { "value": "prod", "provenance": "stated" },
-              "source": { "kind": { "value": "stripe", "provenance": "stated" } },
-              "destination": { "route": { "value": "/api/stripe", "provenance": "stated" } }
+              "workspace": { "environment": "${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}" },
+              "queues": { "stripe": { "delivery": { "url": "/api/stripe", "kind": "localForward" } } }
             }
-            """).Design!;
-        Assert.Equal(new[] { "dev", "prod" }, stated.Content["profiles"]!.AsObject().Select(p => p.Key).ToArray());
-        Assert.Equal("http", stated.Content["profiles"]!["prod"]!["variables"]!["QUEUEY_STRIPE_DELIVERY_KIND"]!.GetValue<string>());
+            """);
+
+        FlowAdvice advice = Advise(StripeIntent);
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("ambiguous", "environment", "\"localForward\""), (conflict.Kind, conflict.Field, conflict.Found!.ToJsonString()));
+        Assert.Contains("with a fixed kind, but the file can run outside dev: its environment comes from ${QUEUEY_WORKSPACE_ENVIRONMENT}.",
+            conflict.Message, StringComparison.Ordinal);
+        Assert.Contains("set queues.stripe.delivery.kind to ${QUEUEY_STRIPE_DELIVERY_KIND}", conflict.Question, StringComparison.Ordinal);
+        Assert.Null(advice.Design);
+    }
+
+    [Fact]
+    public void A_refused_value_in_a_profile_that_is_not_used_does_not_stop_the_flow()
+    {
+        // Re-review av #60: bare profilen som brukes, teller. qa: "qa" stopper ikke --profile dev, og velges aldri etter miljø.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """
+            {
+              "workspace": { "environment": "${QUEUEY_WORKSPACE_ENVIRONMENT}" },
+              "queues": {},
+              "profiles": {
+                "dev": { "variables": { "QUEUEY_WORKSPACE_ENVIRONMENT": "dev" } },
+                "qa": { "variables": { "QUEUEY_WORKSPACE_ENVIRONMENT": "qa" } }
+              }
+            }
+            """);
+
+        Assert.Empty(Advise(StripeIntent, profile: "dev").Flow.Conflicts);
+        Assert.Empty(Advise(StripeIntentFor("dev")).Flow.Conflicts);
+
+        FlowConflict unstated = Assert.Single(Advise(StripeIntent).Flow.Conflicts);
+        Assert.Contains("has the profiles dev (dev), qa (refused value)", unstated.Message, StringComparison.Ordinal);
+
+        FlowConflict chosen = Assert.Single(Advise(StripeIntent, profile: "qa").Flow.Conflicts);
+        Assert.Equal(("unsupported", "environment"), (chosen.Kind, chosen.Field));
+        Assert.Contains("profiles.qa.variables.QUEUEY_WORKSPACE_ENVIRONMENT in queuey.deploy.json is \"qa\", which apply refuses", chosen.Message,
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("${QUEUEY_WORKSPACE_ENVIRONMENT}", "\"local\": { \"variables\": { \"QUEUEY_WORKSPACE_ENVIRONMENT\": \"development\" } }",
+        "profiles.local.variables.QUEUEY_WORKSPACE_ENVIRONMENT in queuey.deploy.json is \"development\", which apply refuses")]
+    [InlineData("${QUEUEY_WORKSPACE_ENVIRONMENT:-development}", null,
+        "the default in workspace.environment (${QUEUEY_WORKSPACE_ENVIRONMENT:-…}) in queuey.deploy.json is \"development\", which apply refuses")]
+    public void An_environment_apply_would_refuse_is_a_conflict_not_a_fallback(string environment, string? profile, string message)
+    {
+        // Review av #60: en ugyldig profilverdi falt tilbake på standardverdien, mens plan og apply bruker profilverdien og nekter.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", "{ \"workspace\": { \"environment\": \"" + environment + "\" }, \"queues\": {}" +
+                                    (profile is null ? "" : ", \"profiles\": { " + profile + " }") + " }");
+
+        FlowAdvice advice = Advise(StripeIntent);
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("unsupported", "environment"), (conflict.Kind, conflict.Field));
+        Assert.Contains(message, conflict.Message, StringComparison.Ordinal);
+        Assert.Contains("Set it to one of dev, test, staging, prod", conflict.Question, StringComparison.Ordinal);
+        Assert.Null(advice.Design);
+    }
+
+    [Theory]
+    [InlineData("${ENV_A}x")]
+    [InlineData("${ENV_A}${ENV_B}")]
+    public void An_environment_that_is_not_one_variable_or_a_fixed_value_is_a_conflict(string environment)
+    {
+        // Review av #60: advise leste den første variabelen og så bort fra resten.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", "{ \"workspace\": { \"environment\": \"" + environment + "\" }, \"queues\": {} }");
+
+        FlowConflict conflict = Assert.Single(Advise(StripeIntent).Flow.Conflicts);
+
+        Assert.Equal(("unsupported", "environment"), (conflict.Kind, conflict.Field));
+        Assert.Contains("reads variables in a form advise cannot follow", conflict.Message, StringComparison.Ordinal);
+    }
+
+    // ── advise --profile (review av #60) ─────────────────────────────────
+    //
+    // Profiler som deler et miljø, som eu og us i prod, kan ikke skilles av et oppgitt miljø, og spørsmålet ba om det.
+
+    private const string EuAndUs = """
+        {
+          "workspace": { "environment": "prod" },
+          "queues": {},
+          "profiles": {
+            "eu": { "variables": { "ORDERS_HOST": "eu.example.com" } },
+            "us": { "variables": { "ORDERS_HOST": "us.example.com" } }
+          }
+        }
+        """;
+
+    [Fact]
+    public void Profiles_that_share_an_environment_ask_for_the_profile_by_name()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", EuAndUs);
+
+        FlowConflict conflict = Assert.Single(Advise(StripeIntent).Flow.Conflicts);
+
+        Assert.Equal(("ambiguous", "environment"), (conflict.Kind, conflict.Field));
+        Assert.Contains("Every profile gives prod, so the environment cannot tell them apart: name the profile with advise --profile (eu, us).",
+            conflict.Question, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Advise_profile_names_the_profile_and_its_environment_decides_the_rest()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", EuAndUs);
+
+        FlowAdvice advice = Advise(StripeIntent, profile: "us");
+        FlowDesign design = advice.Design!;
+
+        Assert.Equal(("prod", Provenance.Evidence), (advice.Flow.String("environment"), advice.Flow["environment"]!.Provenance));
+        Assert.Equal(new[] { "eu", "us" }, design.Content["profiles"]!.AsObject().Select(p => p.Key).ToArray());
+        Assert.Equal("http", design.Content["profiles"]!["us"]!["variables"]!["QUEUEY_STRIPE_DELIVERY_KIND"]!.GetValue<string>());
+        Assert.Equal("queuey credentials request stripe-whsec --profile us", Assert.Single(design.Credentials).Store);
+        Assert.Contains(design.NextSteps, s => s.StartsWith("queuey apply --profile us.", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Advise_profile_must_name_a_profile_the_file_has()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", EuAndUs);
+
+        FlowConflict conflict = Assert.Single(Advise(StripeIntent, profile: "asia").Flow.Conflicts);
+
+        Assert.Equal(("missing", "environment"), (conflict.Kind, conflict.Field));
+        Assert.Contains("--profile asia names a profile queuey.deploy.json does not have: it has eu (prod), us (prod).", conflict.Message,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Advise_profile_names_the_first_profile_of_a_new_file_for_the_environment_the_intent_states()
+    {
+        Fixture("stripe-aspnet");
+
+        FlowDesign design = Advise(StripeIntentFor("dev"), profile: "laptop").Design!;
+
+        Assert.Equal(new[] { "laptop" }, design.Content["profiles"]!.AsObject().Select(p => p.Key).ToArray());
+        Assert.Equal("dev", design.Content["profiles"]!["laptop"]!["variables"]!["QUEUEY_WORKSPACE_ENVIRONMENT"]!.GetValue<string>());
+        Assert.Contains(design.NextSteps, s => s.StartsWith("queuey apply --profile laptop.", StringComparison.Ordinal));
+    }
+
+    // Re-review av #60, B1: et oppgitt dev tar ikke en profil som ikke gir noe miljø. Queuey regner workspacet dens som prod.
+    private const string MainWithoutEnvironment = """
+        { "queues": {}, "profiles": { "main": { "variables": { "ORDERS_HOST": "orders.example.com" } } } }
+        """;
+
+    [Fact]
+    public void A_stated_dev_does_not_take_the_only_profile_when_it_gives_no_environment()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", MainWithoutEnvironment);
+
+        FlowAdvice advice = Advise(StripeIntentFor("dev"));
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("contradiction", "environment", "\"dev\""), (conflict.Kind, conflict.Field, conflict.Stated!.ToJsonString()));
+        Assert.Contains("The profile main in queuey.deploy.json gives no environment, so Queuey treats its workspace as prod",
+            conflict.Message, StringComparison.Ordinal);
+        Assert.Contains("give it QUEUEY_WORKSPACE_ENVIRONMENT=dev in queuey.deploy.json, with workspace.environment " +
+                        "${QUEUEY_WORKSPACE_ENVIRONMENT}", conflict.Question, StringComparison.Ordinal);
+        Assert.Null(advice.Design);
+    }
+
+    [Fact]
+    public void A_stated_dev_does_not_take_a_named_profile_that_gives_no_environment()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", MainWithoutEnvironment);
+
+        FlowConflict conflict = Assert.Single(Advise(StripeIntentFor("dev"), profile: "main").Flow.Conflicts);
+
+        Assert.Contains("The profile main in queuey.deploy.json gives no environment", conflict.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_stated_environment_that_is_not_dev_reuses_a_profile_that_gives_none()
+    {
+        // Den forsiktige veien står: prod på en profil som allerede regnes som prod.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", MainWithoutEnvironment);
+
+        FlowDesign design = Advise(StripeIntentFor("prod")).Design!;
+
+        Assert.Equal("queuey credentials request stripe-whsec --profile main", Assert.Single(design.Credentials).Store);
+    }
+
+    [Theory]
+    [InlineData(null, "queuey credentials request stripe-whsec --tenant ten_abc")]
+    [InlineData("dev", "queuey credentials set --tenant ten_abc --name stripe-whsec --type HmacSigning --key-id stripe-whsec --from-env STRIPE_WHSEC")]
+    public void A_file_without_profiles_names_its_tenant_in_the_credentials_commands(string? environment, string store)
+    {
+        // Re-review av #60: uten profil går credentials til det konfigurerte workspacet, mens apply bruker filas tenant. Dev står
+        // i fila: et oppgitt dev tar ikke en fil som ikke gir noe miljø (runde 5).
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", "{ \"tenant\": \"ten_abc\", " +
+            (environment is null ? "" : "\"workspace\": { \"environment\": \"" + environment + "\" }, ") + "\"queues\": {} }");
+
+        FlowDesign design = Advise(StripeIntent).Design!;
+
+        Assert.Equal(store, Assert.Single(design.Credentials).Store);
+        if (environment is null)
+            Assert.Contains(design.NextSteps, s => s.Contains("queuey credentials list --tenant ten_abc --json", StringComparison.Ordinal));
+    }
+
+    // Re-review av #60, runde 5: det samme som for profiler gjelder en fil uten profiler. Fila uten miljø gjelder et workspace
+    // Queuey regner som prod. advise skrev "environment": "dev" inn i den, og testmodus ble credentials set --tenant ten_abc, rett
+    // mot prod-tenanten.
+    [Theory]
+    [InlineData(null)]
+    [InlineData("${QUEUEY_WORKSPACE_ENVIRONMENT}")]
+    public void A_stated_dev_does_not_take_a_file_without_profiles_that_gives_no_environment(string? environment)
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", "{ \"tenant\": \"ten_abc\", " +
+            (environment is null ? "" : "\"workspace\": { \"environment\": \"" + environment + "\" }, ") + "\"queues\": {} }");
+
+        FlowAdvice advice = Advise(StripeIntentFor("dev"));
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("contradiction", "environment", "\"dev\""), (conflict.Kind, conflict.Field, conflict.Stated!.ToJsonString()));
+        Assert.Null(conflict.Found);
+        Assert.Contains(environment is null
+                ? "queuey.deploy.json names no workspace environment, so Queuey treats its workspace as prod, and the intent states dev."
+                : "queuey.deploy.json takes its workspace environment from ${QUEUEY_WORKSPACE_ENVIRONMENT}, which has no default",
+            conflict.Message, StringComparison.Ordinal);
+        Assert.StartsWith("If queuey.deploy.json is for dev, set workspace.environment to dev in it", conflict.Question, StringComparison.Ordinal);
+        if (environment is not null)
+            Assert.Contains("or give ${QUEUEY_WORKSPACE_ENVIRONMENT} the default dev: ${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}", conflict.Question,
+                StringComparison.Ordinal);
+        Assert.Null(advice.Design);
+    }
+
+    [Fact]
+    public void A_stated_dev_takes_a_file_without_profiles_whose_variable_defaults_to_dev()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """
+            { "tenant": "ten_abc", "workspace": { "environment": "${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}" }, "queues": {} }
+            """);
+
+        FlowAdvice advice = Advise(StripeIntentFor("dev"));
+
+        Assert.Empty(advice.Flow.Conflicts);
+        Assert.Equal("queuey credentials set --tenant ten_abc --name stripe-whsec --type HmacSigning --key-id stripe-whsec --from-env STRIPE_WHSEC",
+            Assert.Single(advice.Design!.Credentials).Store);
+    }
+
+    [Fact]
+    public void A_stated_dev_does_not_take_a_file_without_profiles_whose_variable_defaults_to_another()
+    {
+        // Som en profil som gir prod: fila gir prod der ingenting setter variabelen, og en apply uten den går til prod.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """{ "workspace": { "environment": "${QUEUEY_WORKSPACE_ENVIRONMENT:-prod}" }, "queues": {} }""");
+
+        FlowAdvice advice = Advise(StripeIntentFor("dev"));
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("contradiction", "environment", "\"prod\""), (conflict.Kind, conflict.Field, conflict.Found!.ToJsonString()));
+        Assert.Contains("queuey.deploy.json gives prod: ${QUEUEY_WORKSPACE_ENVIRONMENT} defaults to prod, and the intent states dev.",
+            conflict.Message, StringComparison.Ordinal);
+        Assert.Contains("or give ${QUEUEY_WORKSPACE_ENVIRONMENT} the default dev: ${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}", conflict.Question,
+            StringComparison.Ordinal);
+        Assert.Null(advice.Design);
+    }
+
+    [Fact]
+    public void Advise_profile_on_a_new_file_needs_the_environment_stated()
+    {
+        // Re-review av #60, B1: advise --profile prod i et nytt repo, uten miljø i intensjonen, ga profiles.prod med dev og
+        // localForward, og testmodus med credentials set --profile prod. Det kunne byttet ut prod sin ekte signeringsnøkkel
+        // med Stripe CLI-ens testnøkkel. Navnet sier ikke miljøet.
+        Fixture("stripe-aspnet");
+
+        FlowAdvice advice = Advise(StripeIntent, profile: "prod");
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("missing", "environment"), (conflict.Kind, conflict.Field));
+        Assert.Contains("its name does not say", conflict.Message, StringComparison.Ordinal);
+        Assert.Contains("State the environment profile prod is for in the intent as environment", conflict.Question, StringComparison.Ordinal);
+        Assert.Null(advice.Design);
+    }
+
+    [Fact]
+    public async Task Advise_profile_goes_with_intent_and_takes_a_profile_name()
+    {
+        Fixture("stripe-aspnet");
+        File_("flow.json", StripeIntent);
+
+        CliRun alone = await CliHarness.RunAsync(() => AdviseCommand.RunAsync(new[] { _root, "--profile", "eu", "--json" }));
+        CliRun bad = await CliHarness.RunAsync(() => AdviseCommand.RunAsync(
+            new[] { _root, "--intent", Path.Combine(_root, "flow.json"), "--profile", "qak_kid.secret", "--json" }));
+
+        Assert.Equal(ExitCodes.Usage, alone.Exit);
+        Assert.Equal("profile_needs_intent", JsonDocument.Parse(alone.Stdout).RootElement.GetProperty("error").GetProperty("code").GetString());
+        Assert.Equal(ExitCodes.Usage, bad.Exit);
+        Assert.Equal("invalid_value", JsonDocument.Parse(bad.Stdout).RootElement.GetProperty("error").GetProperty("code").GetString());
+        Assert.DoesNotContain("qak_kid", bad.Stdout, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -710,18 +1245,17 @@ public sealed class AdviseIntentTests : IDisposable
         FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
         Assert.Equal(("ambiguous", "environment", "\"localForward\""), (conflict.Kind, conflict.Field, conflict.Found!.ToJsonString()));
         Assert.Contains("forwards queues.stripe to a local listener", conflict.Message, StringComparison.Ordinal);
-        Assert.Contains("State the environment dev in the intent", conflict.Question, StringComparison.Ordinal);
+        // Re-review av #60, runde 5: et oppgitt dev tar ikke en fil uten miljø, så veien ut sier hva fila må få.
+        Assert.Contains("Is this flow for dev? If it is, set workspace.environment to dev in queuey.deploy.json.", conflict.Question,
+            StringComparison.Ordinal);
         Assert.Contains("set queues.stripe.delivery.kind to http", conflict.Question, StringComparison.Ordinal);
         Assert.Null(advice.Design);
 
-        // Med dev oppgitt er lytteren riktig, og designet beholder den.
-        FlowDesign dev = Advise("""
-            {
-              "environment": { "value": "dev", "provenance": "stated" },
-              "source": { "kind": { "value": "stripe", "provenance": "stated" } },
-              "destination": { "route": { "value": "/api/stripe", "provenance": "stated" } }
-            }
-            """).Design!;
+        // Med dev i fila er lytteren riktig, og designet beholder den.
+        File_("queuey.deploy.json", """
+            { "workspace": { "environment": "dev" }, "queues": { "stripe": { "delivery": { "url": "/api/stripe", "kind": "localForward" } } } }
+            """);
+        FlowDesign dev = Advise(StripeIntentFor("dev")).Design!;
         Assert.Equal("localForward", dev.Content["queues"]!["stripe"]!["delivery"]!["kind"]!.GetValue<string>());
         Assert.Contains(dev.NextSteps, s => s.StartsWith("queuey listen --queue stripe", StringComparison.Ordinal));
     }
@@ -1084,12 +1618,13 @@ public sealed class AdviseIntentTests : IDisposable
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void A_stated_profile_value_the_file_contradicts_is_a_conflict(bool devStated)
+    [InlineData(null)]
+    [InlineData("prod")]
+    public void A_stated_profile_value_the_file_contradicts_is_a_conflict(string? stated)
     {
         // Uten oppgitt miljø brukes den ene profilen fila har (re-review av #59), så verdien går i profilen dev også da, selv om
-        // fila uten miljø gjelder et workspace Queuey regner som prod.
+        // fila uten miljø gjelder et workspace Queuey regner som prod. Et oppgitt miljø som ikke er dev, gjenbruker den også;
+        // et oppgitt dev gjør det ikke, siden profilen ikke gir noe miljø (re-review av #60).
         Fixture("stripe-aspnet");
         File_("queuey.deploy.json", """
             {
@@ -1098,7 +1633,7 @@ public sealed class AdviseIntentTests : IDisposable
             }
             """);
 
-        string environment = devStated ? "\"environment\": { \"value\": \"dev\", \"provenance\": \"stated\" }, " : "";
+        string environment = stated is null ? "" : "\"environment\": { \"value\": \"" + stated + "\", \"provenance\": \"stated\" }, ";
         FlowConflict conflict = Assert.Single(Advise("{ " + environment +
             "\"source\": { \"kind\": { \"value\": \"stripe\", \"provenance\": \"stated\" } }, " +
             "\"destination\": { \"baseUrl\": { \"value\": \"https://staging.example.com\", \"provenance\": \"stated\" } } }").Flow.Conflicts);
@@ -1248,13 +1783,17 @@ public sealed class AdviseIntentTests : IDisposable
         Assert.Contains("In PowerShell: $env:STRIPE_WHSEC = stripe listen --print-secret; " + set + "; Remove-Item Env:STRIPE_WHSEC,",
             step, StringComparison.Ordinal);
         Assert.Contains("so it stays out of the output", step, StringComparison.Ordinal);
+        // Bare en apply som gikk gjennom, viser at workspacet er dev (re-review av #60).
+        Assert.StartsWith("Test mode, with Stripe's own CLI, once that apply has gone through: if it refused the file, the workspace " +
+                          "is not dev, so stop, and store no test secret.", step, StringComparison.Ordinal);
         Assert.Contains("A real endpoint's secret is never yours to hold: a person pastes it on the page queuey credentials request " +
                         "stripe-whsec --profile dev opens", step, StringComparison.Ordinal);
         Assert.DoesNotContain(design.NextSteps, s => s.Contains("prints this session's signing secret", StringComparison.Ordinal));
     }
 
     // Et umerket workspace er prod, og et antatt miljø skrives bare inn i en ny fil (review av #58, B2). En fil som finnes uten
-    // miljø, får derfor credentials request og et ekte endepunkt, som plan og apply gir, og testmodus bare når dev er oppgitt.
+    // miljø, får derfor credentials request og et ekte endepunkt, som plan og apply gir. Testmodus krever at fila gir dev: et
+    // oppgitt dev mot en fil uten miljø er en konflikt (re-review av #60, runde 5).
 
     [Theory]
     [InlineData(false)]
@@ -1290,32 +1829,27 @@ public sealed class AdviseIntentTests : IDisposable
                                                    || s.Contains("queuey credentials set", StringComparison.Ordinal));
         Assert.Contains(design.NextSteps, s => s.Contains("queuey credentials request stripe-whsec prints a link where a person pastes it",
             StringComparison.Ordinal));
-        Assert.Contains(design.NextSteps, s => s.StartsWith("For test mode with stripe listen instead, state the environment dev in the " +
-                                                            "intent", StringComparison.Ordinal));
+        Assert.Contains(design.NextSteps, s => s.StartsWith("For test mode with stripe listen instead, set workspace.environment to dev " +
+                                                            "in queuey.deploy.json, if its workspace is dev, and run advise --intent again.",
+                                                            StringComparison.Ordinal));
         // Hele designet er for prod (oppfølging av #58): HTTP, og ingen lytter som et ekte endepunkt ville levert til.
         Assert.DoesNotContain(design.NextSteps, s => s.Contains("queuey listen", StringComparison.Ordinal));
         Assert.Equal("http", design.Content["queues"]!["stripe"]!["delivery"]!["kind"]!.GetValue<string>());
     }
 
     [Fact]
-    public void An_existing_file_without_an_environment_gets_test_mode_when_the_intent_states_dev()
+    public void An_existing_file_without_an_environment_is_not_taken_for_dev_when_the_intent_states_it()
     {
+        // Før re-review av #60, runde 5, fikk fila testmodus, og "dev" ble skrevet inn i en fil Queuey regner som prod.
         Fixture("stripe-aspnet");
         File_("queuey.deploy.json", """{ "queues": {} }""");
 
-        FlowDesign design = Advise("""
-            {
-              "environment": { "value": "dev", "provenance": "stated" },
-              "source": { "kind": { "value": "stripe", "provenance": "stated" } },
-              "destination": { "route": { "value": "/api/stripe", "provenance": "stated" } }
-            }
-            """).Design!;
+        FlowAdvice advice = Advise(StripeIntentFor("dev"));
 
-        Assert.Equal("queuey credentials set --name stripe-whsec --type HmacSigning --key-id stripe-whsec --from-env STRIPE_WHSEC",
-            Assert.Single(design.Credentials).Store);
-        Assert.Contains(design.NextSteps, s => s.StartsWith("Test mode", StringComparison.Ordinal));
-        Assert.DoesNotContain(design.NextSteps, s => s.StartsWith("For test mode", StringComparison.Ordinal));
-        Assert.Equal("dev", design.Content["workspace"]!["environment"]!.GetValue<string>());   // det oppgitte skrives inn
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("contradiction", "environment"), (conflict.Kind, conflict.Field));
+        Assert.Contains("names no workspace environment, so Queuey treats its workspace as prod", conflict.Message, StringComparison.Ordinal);
+        Assert.Null(advice.Design);
     }
 
     [Fact]
@@ -1341,10 +1875,21 @@ public sealed class AdviseIntentTests : IDisposable
     [InlineData("supabase", true)]
     [InlineData("app", false)]
     [InlineData("app", true)]
-    public void An_existing_file_without_an_environment_is_designed_for_prod_and_for_dev_only_when_the_intent_says_so(string kind, bool devStated)
+    public void An_existing_file_without_an_environment_is_designed_for_prod_and_for_dev_only_when_the_file_says_so(string kind, bool devStated)
     {
         (string queue, string intent) = Repository(kind, devStated);
         File_("queuey.deploy.json", """{ "queues": {} }""");
+
+        if (devStated)
+        {
+            // Re-review av #60, runde 5: et oppgitt dev tar ikke en fil uten miljø, som Queuey regner som prod, for noen kilde.
+            // Fila må si dev selv.
+            FlowAdvice refused = Advise(intent);
+            FlowConflict conflict = Assert.Single(refused.Flow.Conflicts);
+            Assert.Equal(("contradiction", "environment"), (conflict.Kind, conflict.Field));
+            Assert.Null(refused.Design);
+            File_("queuey.deploy.json", """{ "workspace": { "environment": "dev" }, "queues": {} }""");
+        }
 
         FlowAdvice advice = Advise(intent);
         FlowDesign design = advice.Design!;
@@ -1591,7 +2136,8 @@ public sealed class AdviseIntentTests : IDisposable
 
     // ── hjelpere ─────────────────────────────────────────────────────────
 
-    private FlowAdvice Advise(string intent) => FlowAdvisor.Advise(DesiredFlow.Parse(intent), FlowScan.Scan(_root), _root);
+    private FlowAdvice Advise(string intent, string? profile = null)
+        => FlowAdvisor.Advise(DesiredFlow.Parse(intent), FlowScan.Scan(_root), _root, profile: profile);
 
     private void Fixture(string name)
     {

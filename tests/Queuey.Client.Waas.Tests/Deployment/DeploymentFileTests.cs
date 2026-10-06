@@ -268,7 +268,7 @@ public class DeploymentFileTests
             () => service.ApplyDeploymentAsync(DeploymentFile.Parse(Sample)));
 
         Assert.Contains("No credential named 'partner-key'", ex.Message);
-        Assert.Contains("queuey credentials set --name partner-key", ex.Message);
+        Assert.Contains("queuey credentials set --tenant ten_abc --name partner-key", ex.Message);
         Assert.All(api.Requests, r => Assert.Equal(HttpMethod.Get, r.Method));
     }
 
