@@ -367,6 +367,11 @@ public sealed class DeploymentFile
     {
         var plans = new List<DeploymentQueuePlan>();
 
+        // F2.7 (2026-10-06): tenant er en ten_-id, sjekket her for hver kommando som leser fila. Før ble den sjekket bare når
+        // --tenant eller QUEUEY_TENANT navnga et annet workspace, så en API-nøkkel limt inn som tenant gikk ellers ut i
+        // URL-ene (/tenants/<verdi>/…). En ${VAR} sjekkes når den er utvidet, som de andre verdiene.
+        EnsureWorkspaceId(Tenant);
+
         // The workspace's behaviour is checked like a queue's, so a typo there fails here too.
         if (Workspace?.AsPolicy().Validate() is { } workspaceReason)
             throw new QueueyConfigurationException($"The workspace has an invalid policy: {workspaceReason}");
@@ -405,6 +410,24 @@ public sealed class DeploymentFile
         }
 
         return plans;
+    }
+
+    /// <summary>
+    /// Throws <see cref="QueueyConfigurationException"/> when <paramref name="tenant"/>, a deployment file's tenant, names
+    /// something that is not a workspace id, without showing it. Null, blank and an unexpanded <c>${VAR}</c> pass.
+    /// </summary>
+    internal static void EnsureWorkspaceId(string? tenant)
+    {
+        if (string.IsNullOrWhiteSpace(tenant) || tenant!.IndexOf("${", StringComparison.Ordinal) >= 0)
+            return;
+
+        if (!WorkspaceIds.IsOne(tenant.Trim()))
+            throw new QueueyConfigurationException(
+                "The deployment file's tenant is not a workspace id. Its value is not shown, since it may be a secret.")
+            {
+                SuggestedAction = "A workspace id starts with ten_, as the Queuey console shows it. An API key belongs in --api-key " +
+                                  "or QUEUEY_API_KEY, never in the deployment file.",
+            };
     }
 
     // Miljø-merket (Queuey F2.2, 2026-10-05): en av de fire, i hvilken som helst skrift. En ${VAR} sjekkes når den er utvidet:

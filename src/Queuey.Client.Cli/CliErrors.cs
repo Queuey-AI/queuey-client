@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json;
+using Queuey.Client.Waas;
 
 namespace Queuey.Client.Cli;
 
@@ -66,16 +67,8 @@ internal static class CliErrors
     /// workspace id instead of showing it.
     /// </summary>
     // Re-review 2026-10-05: en API-nøkkel i QUEUEY_TENANT, en forveksling i CI, ble skrevet ut ved hver apply og verify.
-    internal static bool LooksLikeAWorkspaceId(string value)
-    {
-        if (value.Length is <= 4 or > 64 || !value.StartsWith("ten_", StringComparison.Ordinal))
-            return false;
-
-        foreach (char c in value)
-            if (c is not (>= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '_' or '-'))
-                return false;
-        return true;
-    }
+    // F2.7: regelen er deploy-filas (WorkspaceIds i Queuey.Client.Waas), så flagget og fila sier det samme.
+    internal static bool LooksLikeAWorkspaceId(string value) => WorkspaceIds.IsOne(value);
 
     /// <summary>A usage error (exit 2): the command line itself is wrong, and nothing was sent.</summary>
     public static int Usage(ArgMap map, string code, string message, string? action = null, IReadOnlyDictionary<string, object?>? details = null)
