@@ -671,6 +671,37 @@ Adopting a workspace that was configured before anyone wrote it down? `queuey pu
 Queues.cs` generates the `[QueueyQueue]` declarations. Behaviour only: destinations stay in the
 deployment file, where they belong.
 
+### Managed by the file
+
+`apply` marks each queue it writes, and the workspace's settings when the file declares them, as
+managed by the file: the repository, the file's path in it and the commit. The Queuey console shows
+the mark with a link to the file, and a change to a managed queue's or workspace's configuration from
+anywhere else (the console, the API, an agent) is refused with `managed_by_deployment` and where the
+file is, so the next deploy cannot quietly undo it. While Queuey only warns about such changes, the
+change goes through and the queue records who made it. Operating a queue (pausing it, its lock,
+verify, recovery, replay) is never refused.
+
+The CLI reads the source from git: `origin`'s URL without user info, the file's path from the
+repository root, and `HEAD`, which it leaves out when the file has changes git has not committed.
+`--repo`, `--repo-path` and `--commit` give each one instead, and `--no-git` leaves git alone. A token
+in the remote's URL (`https://token@github.com/…`) is never sent, and Queuey strips it again before it
+stores anything. A path on your machine, or a URL the CLI cannot read, is not sent at all. The CLI
+runs the `git` it finds in your `PATH`, never one in the directory it runs in, and passes it none of
+your `QUEUEY_*` variables.
+
+A person can detach a queue or the workspace from the file in the console, with a reason. `apply`
+then skips it, and `apply --check` reports it, with who detached it, when and why, instead of as
+drift. To take it back:
+
+```bash
+queuey apply --adopt orders               # or --adopt workspace, or both: --adopt orders,workspace
+```
+
+`--adopt` shows what the file changes on what it takes back, then applies. It needs the key `apply`
+needs; adopting the workspace also needs `tenant.write`. `queuey plan --adopt` shows the same without
+writing. `apply --json` and `apply --check --json` print an object with `schemaVersion` (1) first;
+what apply skipped is under `skipped`, and what the check found detached under `detached`.
+
 ### Publishing with HMAC instead of an API key
 
 ```bash
@@ -716,6 +747,7 @@ carries the per-flag detail this table leaves out.
 | `apply --dry-run` | Validate the file locally. No credentials, no network, nothing sent |
 | `plan` | Ask Queuey what apply would change and refuse, as dry runs. Writes nothing |
 | `apply --check` | Report drift and exit non-zero. Read-only — the CI gate |
+| `apply --adopt <queue>` | Take a queue (or `workspace`) a person detached back under the file |
 | `verify <queue>` | Publish one event and follow it: delivered, or why not and what to change |
 | `schema` | Print the deployment file's JSON Schema. No credentials, no network |
 | `pull` | Read a workspace back into a deployment file (the inverse of `apply`) |

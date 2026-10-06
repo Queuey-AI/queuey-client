@@ -131,4 +131,5 @@ internal sealed class QueueListItemResponse
     public bool IngressClosed { get; set; }
     public bool DeliveryHeld { get; set; }
     public bool Suspended { get; set; }
+    public DeploymentManagementResponse? Deployment { get; set; }
 }

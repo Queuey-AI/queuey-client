@@ -149,4 +149,10 @@ public sealed class QueueListItem
 
     /// <summary>Platform-suspended.</summary>
     public bool Suspended { get; init; }
+
+    /// <summary>
+    /// Whether a deployment file manages the queue, and from where (Queuey F2.4). Null when none ever has, and from a
+    /// Queuey that predates managed resources. A detached queue is skipped by apply until it is adopted.
+    /// </summary>
+    public DeploymentManagementInfo? Deployment { get; init; }
 }

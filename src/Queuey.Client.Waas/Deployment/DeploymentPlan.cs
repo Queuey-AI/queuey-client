@@ -37,6 +37,18 @@ public sealed class DeploymentPlan
     /// <summary>One entry per write apply would send, in the order it would send them.</summary>
     public IReadOnlyList<DeploymentPlanStep> Steps { get; init; } = Array.Empty<DeploymentPlanStep>();
 
+    /// <summary>
+    /// The queues, and the workspace, apply would leave alone because a person detached them (Queuey F2.4). No step is
+    /// planned for them. <c>--adopt</c> plans them again.
+    /// </summary>
+    public IReadOnlyList<SkippedResource> Skipped { get; init; } = Array.Empty<SkippedResource>();
+
+    /// <summary>
+    /// Whether Queuey started an apply for the plan's dry runs (Queuey F2.4). False against a Queuey that predates managed
+    /// resources; then a dry run against a resource a file manages is answered as it would be outside an apply.
+    /// </summary>
+    public bool ApplyStarted { get; init; }
+
     /// <summary>True when Queuey would accept every write.</summary>
     public bool WouldSucceed => Steps.All(s => s.Error is null);
 
@@ -208,8 +220,15 @@ internal sealed class DeploymentPlanner
     }
 
     public async Task<DeploymentPlan> PlanAsync(
-        DeploymentFile file, IReadOnlyList<DeploymentQueuePlan> plans, string tenant, CancellationToken ct)
+        DeploymentFile file, IReadOnlyList<DeploymentQueuePlan> plans, string tenant, CancellationToken ct,
+        IReadOnlyList<SkippedResource>? skipped = null)
     {
+        // Det en person har løsrevet (Queuey F2.4), planlegges ikke: apply hopper over det. Køene står likevel i lista med
+        // ingress-URL-en, så planen sier hva fila nevner.
+        skipped ??= Array.Empty<SkippedResource>();
+        var skippedQueues = new HashSet<string>(skipped.Where(s => s.QueueName is not null).Select(s => s.QueueName!), StringComparer.Ordinal);
+        bool skipsWorkspace = skipped.Any(s => s.QueueName is null);
+
         // Lesingene først, før noe sendes: køene slik de er, og hvert credential-navn fila bruker. Et navn
         // som mangler, feiler planen her, før første skriving, slik det feiler apply (review 2026-09-24).
         // Før ble det et avslag på ett steg, oppdaget midt i planen.
@@ -223,12 +242,13 @@ internal sealed class DeploymentPlanner
         ResolvedDeliveries deliveries = await new CredentialResolver(_management, tenant)
             .ResolveAllAsync(file.Workspace?.Delivery, plans, ct).ConfigureAwait(false);
 
-        List<PlannedWrite> workspaceWrites = WorkspaceWrites(file.Workspace, deliveries, tenant);
+        List<PlannedWrite> workspaceWrites = skipsWorkspace ? new List<PlannedWrite>() : WorkspaceWrites(file.Workspace, deliveries, tenant);
+        IReadOnlyList<DeploymentQueuePlan> planned = plans.Where(p => !skippedQueues.Contains(p.Definition.Name)).ToList();
 
         // Beviset på at serveren planlegger, før noe annet sendes. Svaret gjelder også som svaret på
         // den skrivingen, så den sendes ikke to ganger.
         var answered = new Dictionary<string, DryRunAnswer>(StringComparer.Ordinal);
-        if (ChooseProbe(workspaceWrites, plans, existing, tenant) is { } probe)
+        if (ChooseProbe(workspaceWrites, planned, existing, tenant) is { } probe)
             answered[probe.Key] = await ProbeAsync(probe, ct).ConfigureAwait(false);
 
         var steps = new List<DeploymentPlanStep>();
@@ -240,7 +260,7 @@ internal sealed class DeploymentPlanner
         // fil med deliver_without_destination (review 2026-10-05).
         bool workspaceBase = !string.IsNullOrWhiteSpace(file.Workspace?.Delivery?.BaseUrl);
 
-        foreach (DeploymentQueuePlan plan in plans)
+        foreach (DeploymentQueuePlan plan in planned)
             steps.AddRange(await PlanQueueAsync(plan, tenant, deliveries, existing, answered, workspaceBase, ct).ConfigureAwait(false));
 
         List<DeploymentPlanQueue> queues = plans.Select(p => new DeploymentPlanQueue
@@ -258,6 +278,7 @@ internal sealed class DeploymentPlanner
             PlanHash = hash,
             Queues = queues,
             Steps = steps,
+            Skipped = skipped,
         };
     }
 

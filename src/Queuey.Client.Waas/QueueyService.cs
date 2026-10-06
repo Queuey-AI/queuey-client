@@ -590,6 +590,11 @@ public sealed class QueueyService : IQueueyService
     /// <inheritdoc />
     public async Task<IReadOnlyList<DriftItem>> CheckDeploymentAsync(
         DeploymentFile file, string? tenantPublicId = null, CancellationToken cancellationToken = default)
+        => (await InspectDeploymentAsync(file, tenantPublicId, cancellationToken).ConfigureAwait(false)).Drift;
+
+    /// <inheritdoc />
+    public async Task<DeploymentCheck> InspectDeploymentAsync(
+        DeploymentFile file, string? tenantPublicId = null, CancellationToken cancellationToken = default)
     {
         if (file is null) throw new ArgumentNullException(nameof(file));
 
@@ -604,11 +609,51 @@ public sealed class QueueyService : IQueueyService
         DeploymentFile actual = await new DeploymentPuller(_controlPlane, Management)
             .PullAsync(tenant, cancellationToken, effective: true).ConfigureAwait(false);
 
-        return DeploymentDrift.Compare(declared, actual);
+        IReadOnlyList<DriftItem> drift = DeploymentDrift.Compare(declared, actual);
+
+        // Det en person har løsrevet (Queuey F2.4), hopper apply over: det er ikke drift, men det meldes, med hvem og når.
+        var detached = new List<SkippedResource>();
+        if (declared.Workspace is not null && await WorkspaceManagementAsync(tenant, cancellationToken).ConfigureAwait(false) is { IsDetached: true } workspace)
+            detached.Add(new SkippedResource { Target = "workspace", Management = workspace });
+        if (declared.Queues.Count > 0)
+        {
+            foreach (QueueListItem row in await Management.ListQueuesAsync(tenant, cancellationToken).ConfigureAwait(false))
+            {
+                if (row.DisplayName is { } name && declared.Queues.ContainsKey(name) && row.Deployment is { IsDetached: true } management)
+                    detached.Add(new SkippedResource { Target = "queues." + name, QueueName = name, Management = management });
+            }
+        }
+
+        return new DeploymentCheck
+        {
+            Drift = drift.Where(d => !detached.Any(s => Covers(s, d.Path))).ToList(),
+            Detached = detached,
+        };
+    }
+
+    private static bool Covers(SkippedResource skipped, string path)
+        => path == skipped.Target || path.StartsWith(skipped.Target + ".", StringComparison.Ordinal);
+
+    // Workspacets styring, når kalleren kan lese den. Den er et tillegg i sjekken, så en lesing som ikke går, gjør ikke
+    // sjekken feilet: driften er riktig uansett.
+    private async Task<DeploymentManagementInfo?> WorkspaceManagementAsync(string tenant, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return (await _controlPlane.GetTenantDeploymentAsync(tenant, cancellationToken).ConfigureAwait(false)).Deployment?.ToInfo();
+        }
+        catch (QueueyException)
+        {
+            return null;
+        }
     }
 
     /// <inheritdoc />
-    public async Task<DeploymentPlan> PlanDeploymentAsync(DeploymentFile file, CancellationToken cancellationToken = default)
+    public Task<DeploymentPlan> PlanDeploymentAsync(DeploymentFile file, CancellationToken cancellationToken = default)
+        => PlanDeploymentAsync(file, null, cancellationToken);
+
+    /// <inheritdoc />
+    public async Task<DeploymentPlan> PlanDeploymentAsync(DeploymentFile file, SyncOptions? options, CancellationToken cancellationToken = default)
     {
         if (file is null) throw new ArgumentNullException(nameof(file));
 
@@ -617,8 +662,29 @@ public sealed class QueueyService : IQueueyService
         EnsureReachableDestinations(file);
         string tenant = RequireForSync(file.Tenant);
 
-        return await new DeploymentPlanner(_controlPlane, Management, _options.ResolveIngressBaseAddress())
-            .PlanAsync(file, plans, tenant, cancellationToken).ConfigureAwait(false);
+        // Planen starter en apply som apply gjør (Queuey F2.4): dry runs mot det fila styrer slippes gjennom bare inne i en, og
+        // planen hopper over det samme som applyen ville hoppet over. En dry run merker ingenting.
+        var existing = new Dictionary<string, QueueListItem>(StringComparer.Ordinal);
+        foreach (QueueListItem row in await Management.ListQueuesAsync(tenant, cancellationToken).ConfigureAwait(false))
+            if (row.DisplayName is { } name)
+                existing[name] = row;
+        ManagedApply managed = await StartManagedApplyAsync(
+                tenant, options?.Source, options?.Adopt, existing, plans, file.Workspace is not null, cancellationToken)
+            .ConfigureAwait(false);
+        using IDisposable inApply = QueueyControlPlaneClient.InApply(managed.Token);
+
+        DeploymentPlan plan = await new DeploymentPlanner(_controlPlane, Management, _options.ResolveIngressBaseAddress())
+            .PlanAsync(file, plans, tenant, cancellationToken, managed.Skipped).ConfigureAwait(false);
+        return new DeploymentPlan
+        {
+            Tenant = plan.Tenant,
+            PlanId = plan.PlanId,
+            PlanHash = plan.PlanHash,
+            Queues = plan.Queues,
+            Steps = plan.Steps,
+            Skipped = plan.Skipped,
+            ApplyStarted = managed.Started,
+        };
     }
 
     private void EnsureReachableDestinations(DeploymentFile expanded)
@@ -679,10 +745,20 @@ public sealed class QueueyService : IQueueyService
                 plans.Where(p => options.QueueFilter?.Invoke(p.Definition) ?? true), existing, cancellationToken).ConfigureAwait(false);
         }
 
+        // Applyen starter før første skriving (Queuey F2.4): serveren utsteder tokenet som merker det applyen skriver som
+        // styrt fra fila, og slipper skrivingene gjennom på det fila alt styrer. Et løsrevet workspace og løsrevne køer hoppes
+        // over, med mindre --adopt tar dem tilbake.
+        ManagedApply managed = options.DryRun
+            ? ManagedApply.None
+            : await StartManagedApplyAsync(tenant, options.Source, options.Adopt, existing, plans, file.Workspace is not null, cancellationToken)
+                .ConfigureAwait(false);
+        using IDisposable inApply = QueueyControlPlaneClient.InApply(managed.Token);
+        var skippedQueues = new HashSet<string>(managed.Skipped.Where(s => s.QueueName is not null).Select(s => s.QueueName!), StringComparer.Ordinal);
+
         // Workspace first: queues inherit from it, so converging it first means a queue that means to
         // inherit already has something to inherit. A failure here throws before any queue is
         // touched — the same all-or-nothing contract, one level up.
-        if (!options.DryRun && file.Workspace is { } workspace)
+        if (!options.DryRun && !managed.SkipsWorkspace && file.Workspace is { } workspace)
         {
             // Miljø-merket før alt annet (Queuey F2.2): bare en person senker det, så en nøkkel som ville senket det, nektes
             // med 403, og da er ingenting annet skrevet. Feilen går ut som Queuey sa den, med hva en person gjør.
@@ -715,7 +791,7 @@ public sealed class QueueyService : IQueueyService
         }
 
         QueueSyncResult result = await SyncQueueDefinitionsAsync(
-            plans.Select(p => p.Definition).ToArray(),
+            plans.Select(p => p.Definition).Where(d => !skippedQueues.Contains(d.Name)).ToArray(),
             options,
             tenant,
             new QueueApplyHooks
@@ -761,9 +837,69 @@ public sealed class QueueyService : IQueueyService
                 },
             },
             cancellationToken,
-            workspaceWarnings).ConfigureAwait(false);
+            workspaceWarnings,
+            managed.Skipped,
+            managed.Enforcement,
+            options.DryRun ? null : managed.Started).ConfigureAwait(false);
 
         return result;
+    }
+
+    /// <summary>What an apply learned when it started: its token, what it skips, and what Queuey does outside an apply.</summary>
+    private sealed record ManagedApply(string? Token, IReadOnlyList<SkippedResource> Skipped, string? Enforcement)
+    {
+        public static readonly ManagedApply None = new(null, Array.Empty<SkippedResource>(), null);
+
+        public bool SkipsWorkspace => Skipped.Any(s => s.QueueName is null);
+
+        /// <summary>True when Queuey started an apply, so the writes carry its token and mark what they write.</summary>
+        public bool Started => Token is not null;
+    }
+
+    /// <summary>
+    /// Starts the apply on the server (Queuey F2.4), and works out what it skips: the workspace and the declared queues a
+    /// person detached, unless <paramref name="adopt"/> names them. A Queuey that predates managed resources answers with
+    /// no apply, and then nothing is marked; what a person detached is still skipped, from what the reads say, and adopt
+    /// takes nothing back, since only an apply marks it again.
+    /// </summary>
+    private async Task<ManagedApply> StartManagedApplyAsync(
+        string tenant, DeploymentFileSource? source, IReadOnlyList<string>? adopt,
+        IReadOnlyDictionary<string, QueueListItem> existing, IReadOnlyList<DeploymentQueuePlan> plans, bool declaresWorkspace,
+        CancellationToken cancellationToken)
+    {
+        bool adoptsWorkspace = DeploymentAdopt.AdoptsWorkspace(adopt);
+        IReadOnlyList<string> adoptQueues = DeploymentAdopt.Queues(adopt);
+        DeploymentFileSource? clean = source is null ? null : DeploymentFileSource.Clean(source.Repo, source.Path, source.Commit);
+
+        StartApplyWireResponse? started = await _controlPlane.StartApplyAsync(tenant, new StartApplyWireRequest
+        {
+            Source = clean is { IsEmpty: false } ? new StartApplySourceWire { Repo = clean.Repo, Path = clean.Path, Commit = clean.Commit } : null,
+            Adopt = adoptsWorkspace || adoptQueues.Count > 0
+                ? new StartApplyAdoptWire { Workspace = adoptsWorkspace, Queues = adoptQueues.Count > 0 ? adoptQueues.ToList() : null }
+                : null,
+        }, cancellationToken).ConfigureAwait(false);
+
+        string? token = started?.Token is { Length: > 0 } issued ? issued : null;
+
+        // Det en person har løsrevet, hoppes over også når ingen apply startet (sikkerhetsreviewen 2026-10-06): skrivingene går
+        // da uten token, og ville ellers skrevet over det. Uten en apply tar --adopt ikke noe tilbake, for bare en apply merker
+        // det som styrt igjen. Workspacets styring står i svaret på starten; uten en apply leses den, når fila har et workspace.
+        DeploymentManagementInfo? workspace = started?.Workspace?.ToInfo();
+        if (workspace is null && token is null && declaresWorkspace)
+            workspace = await WorkspaceManagementAsync(tenant, cancellationToken).ConfigureAwait(false);
+
+        var skipped = new List<SkippedResource>();
+        if (workspace is { IsDetached: true } && !(adoptsWorkspace && token is not null))
+            skipped.Add(new SkippedResource { Target = "workspace", Management = workspace });
+        foreach (DeploymentQueuePlan plan in plans)
+        {
+            string name = plan.Definition.Name;
+            if (existing.TryGetValue(name, out QueueListItem? row) && row.Deployment is { IsDetached: true } detached
+                && !(adoptQueues.Contains(name, StringComparer.Ordinal) && token is not null))
+                skipped.Add(new SkippedResource { Target = "queues." + name, QueueName = name, Management = detached });
+        }
+
+        return new ManagedApply(token, skipped, token is null ? null : started!.Enforcement);
     }
 
     /// <summary>
@@ -861,7 +997,10 @@ public sealed class QueueyService : IQueueyService
         string? tenantPublicId,
         QueueApplyHooks? hooks,
         CancellationToken cancellationToken,
-        IReadOnlyList<string>? workspaceWarnings = null)
+        IReadOnlyList<string>? workspaceWarnings = null,
+        IReadOnlyList<SkippedResource>? skipped = null,
+        string? enforcement = null,
+        bool? applyStarted = null)
     {
         options ??= new SyncOptions();
 
@@ -923,7 +1062,13 @@ public sealed class QueueyService : IQueueyService
             }
         }
 
-        var result = new QueueSyncResult(results, notAttempted) { WorkspaceWarnings = workspaceWarnings ?? Array.Empty<string>() };
+        var result = new QueueSyncResult(results, notAttempted)
+        {
+            WorkspaceWarnings = workspaceWarnings ?? Array.Empty<string>(),
+            Skipped = skipped ?? Array.Empty<SkippedResource>(),
+            Enforcement = enforcement,
+            ApplyStarted = applyStarted,
+        };
         result.ThrowIfAnyFailed();
         return result;
     }

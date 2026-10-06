@@ -48,6 +48,25 @@ public sealed class QueueSyncResult : ISyncRunResult
     /// <inheritdoc />
     public IReadOnlyList<string> Warnings => WorkspaceWarnings.Concat(Applied.SelectMany(r => r.Warnings)).ToArray();
 
+    /// <summary>
+    /// The queues, and the workspace, a deployment apply left alone because a person detached them from deployment
+    /// management (Queuey F2.4), with who, when and why. Not a failure: <c>--adopt</c> takes them back.
+    /// </summary>
+    public IReadOnlyList<SkippedResource> Skipped { get; init; } = Array.Empty<SkippedResource>();
+
+    /// <summary>
+    /// What Queuey does with a change to a managed resource from outside an apply, as it said when the apply started:
+    /// <c>Off</c>, <c>Warn</c> or <c>Enforce</c>. Null when Queuey predates managed resources, or the run was not a deployment apply.
+    /// </summary>
+    public string? Enforcement { get; init; }
+
+    /// <summary>
+    /// Whether Queuey started an apply for this deployment apply (Queuey F2.4): true when it did, so what the apply wrote is
+    /// marked as managed by the file; false when it did not (a Queuey that predates managed resources), and nothing is
+    /// marked. What a person detached is skipped either way. Null when the run was not a deployment apply, or a dry run.
+    /// </summary>
+    public bool? ApplyStarted { get; init; }
+
     /// <summary>Throws a <see cref="QueueySyncException"/> aggregating every failure, if anything failed.</summary>
     public void ThrowIfAnyFailed()
     {
