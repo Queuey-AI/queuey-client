@@ -101,7 +101,7 @@ public sealed class ManagedResourcesCommandTests : IDisposable
                 "remote get-url origin" => remote is null ? null : remote + "\n",
                 "rev-parse --show-prefix" => "deploy/\n",
                 "rev-parse HEAD" => "0123456789ABCDEF0123456789abcdef01234567\n",
-                "status --porcelain -- queuey.deploy.json" => dirty ? " M queuey.deploy.json\n" : "",
+                "status --porcelain --ignored -- queuey.deploy.json" => dirty ? " M queuey.deploy.json\n" : "",
                 _ => throw new InvalidOperationException("git " + call),
             };
         };
@@ -209,7 +209,7 @@ public sealed class ManagedResourcesCommandTests : IDisposable
 
         Assert.Null(source!.Commit);
         Assert.Equal("deploy/queuey.deploy.json", source.Path);
-        Assert.Contains("status --porcelain -- queuey.deploy.json", calls);
+        Assert.Contains("status --porcelain --ignored -- queuey.deploy.json", calls);
         // En commit fra flagget sjekkes ikke: den som ga den, står for den.
         Assert.Equal("abcdef1", GitSource.Resolve(Path.Combine(_dir, "deploy", "queuey.deploy.json"), null, null, "abcdef1", noGit: false)!.Commit);
     }
@@ -327,6 +327,14 @@ public sealed class ManagedResourcesCommandTests : IDisposable
         Git(repo, "add", ".");
         Git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "file");
         Assert.Equal(Git(repo, "rev-parse", "HEAD").Trim(), GitSource.Resolve(file, null, null, null, noGit: false)!.Commit);
+
+        // En fil git ignorerer, er ikke i noen commit, og en tom status uten --ignored sa det motsatte (re-reviewen 2026-10-06).
+        string ignored = Path.Combine(deploy, "local.deploy.json");
+        File.WriteAllText(Path.Combine(repo, ".gitignore"), "local.deploy.json\n");
+        File.WriteAllText(ignored, "{}");
+        Git(repo, "add", ".gitignore");
+        Git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "ignore");
+        Assert.Null(GitSource.Resolve(ignored, null, null, null, noGit: false)!.Commit);
     }
 
     private static string Git(string directory, params string[] arguments)

@@ -21,6 +21,7 @@ namespace Queuey.Client.Cli;
 //   oppføringene i PATH, og startes med full sti.
 // - Barneprosessen får ingen QUEUEY_*-variabler: git trenger ikke API-nøkkelen, og en hook eller en hjelper skal ikke se den.
 // - Commit-en sendes bare når fila er som i HEAD (git status --porcelain er tom for den), ellers sier merket noe fila ikke er.
+//   Med --ignored, så en fil git ignorerer, og som derfor ikke er i noen commit, heller ikke får en (re-reviewen 2026-10-06).
 
 /// <summary>Where a deployment file lives, from the command's flags and, unless told not to, from git.</summary>
 internal static class GitSource
@@ -53,7 +54,7 @@ internal static class GitSource
                     ? prefix + fileName
                     : null;
                 if (commit is null && Git(directory, "rev-parse", "HEAD")?.Trim() is { Length: > 0 } head
-                    && Git(directory, "status", "--porcelain", "--", fileName) is { } status && status.Trim().Length == 0)
+                    && Git(directory, "status", "--porcelain", "--ignored", "--", fileName) is { } status && status.Trim().Length == 0)
                     commit = head;
             }
         }

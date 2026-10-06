@@ -125,12 +125,14 @@ APPLY
                  file declares them, as managed by the file: the repository, the file's path
                  in it and the commit. They come from git (origin's URL without user info, the
                  path from the repository root, HEAD, left out when the file has uncommitted
-                 changes) unless --repo, --repo-path or --commit gives them; --no-git leaves git
-                 alone. git is the one in PATH, never one in the current directory. A change to a managed queue's or
-                 workspace's configuration from anywhere else is refused, or only warned about,
-                 with where the file is. A person can detach one, with a reason: apply then
-                 skips it, and --check reports it with who detached it, when and why. --adopt
-                 takes it back: apply shows what the file changes on it, then writes it.
+                 changes or git ignores it) unless --repo, --repo-path or --commit gives them;
+                 --no-git leaves git alone. git is the one in PATH, never one in the current
+                 directory. A change to a managed queue's or workspace's configuration from
+                 anywhere else is refused, or only warned about, with where the file is. A
+                 person can detach one, with a reason: apply then skips it, and --check reports
+                 it with who detached it, when and why. --adopt takes it back: apply shows what
+                 the file changes on it, then writes it. A queue named workspace is taken back
+                 with --adopt queue:workspace.
                  --json prints { ""schemaVersion"": 1, ""file"", ""source"", ""enforcement"",
                  ""skipped"": […], ""queues"": […], … }; --check --json { ""schemaVersion"": 1,
                  ""file"", ""inSync"", ""drift"": […], ""detached"": […] }.
