@@ -907,7 +907,8 @@ internal sealed class Enrichment
 
     /// <summary>
     /// The environment for the profile <c>advise --profile</c> names: the one the profile gives, which a stated environment
-    /// must not contradict, or the stated one when the profile gives none. A profile the file does not have is a conflict.
+    /// must not contradict, or the stated one when the profile gives none, unless that is dev, since Queuey treats the
+    /// workspace of a profile that gives none as prod. A profile the file does not have is a conflict.
     /// </summary>
     private void ChosenProfile(ExistingDeployFile file, string profile, string? existing, FlowEvidence[] evidence)
     {
@@ -989,7 +990,8 @@ internal sealed class Enrichment
 
     /// <summary>
     /// The profile a stated environment goes into: the one profile that gives it, or the file's only profile when that gives
-    /// none, which then gets the stated one. Anything else is a conflict, never a new profile beside the file's own.
+    /// none, which then gets the stated one unless it is dev, since Queuey treats the workspace of a profile that gives none
+    /// as prod. Anything else is a conflict, never a new profile beside the file's own.
     /// </summary>
     // Før tag (etter #59): med prod oppgitt og profilene local og production laget advise profiles.prod ved siden av production,
     // med --profile prod. En profil velges etter miljøet den gir, aldri etter navnet.
