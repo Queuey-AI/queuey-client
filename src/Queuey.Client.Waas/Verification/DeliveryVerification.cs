@@ -55,6 +55,13 @@ public sealed class VerifyDeliveryOptions
 
     /// <summary>The event type to publish with, when the queue reads it from a header.</summary>
     public string? EventType { get; set; }
+
+    /// <summary>
+    /// The profile the caller connected with, which the commands in <see cref="DeliveryVerification.SuggestedAction"/> name
+    /// with <c>--profile</c>, so they reach the same workspace. Null names none, and so does a value that is not a profile
+    /// name.
+    /// </summary>
+    public string? Profile { get; set; }
 }
 
 /// <summary>
@@ -248,7 +255,7 @@ internal static class DeliveryVerifier
             }
 
             if (last is not null && IsSettled(last))
-                return Judge(queueName, published, last, null, options.Timeout, tenant: tenantPublicId);
+                return Judge(queueName, published, last, null, options.Timeout, tenant: tenantPublicId, profile: options.Profile);
 
             if (clock.Elapsed + options.PollInterval > options.Timeout)
                 break;
@@ -303,7 +310,7 @@ internal static class DeliveryVerifier
             }
         }
 
-        return Judge(queueName, published, last, row, options.Timeout, blocker, tenantPublicId);
+        return Judge(queueName, published, last, row, options.Timeout, blocker, tenantPublicId, options.Profile);
     }
 
     /// <summary>
@@ -385,7 +392,7 @@ internal static class DeliveryVerifier
 
     internal static DeliveryVerification Judge(
         string queue, PublishResult published, EventDetailsResponse? e, QueueListItem? queueRow, TimeSpan timeout,
-        EventDetailsResponse? blocker = null, string? tenant = null)
+        EventDetailsResponse? blocker = null, string? tenant = null, string? profile = null)
     {
         EventAttemptResponse? attempt = LastAttempt(e);
         EventAttemptResponse? tried = LastTried(e);
@@ -444,7 +451,7 @@ internal static class DeliveryVerifier
 
             case "Failed":
             case "Dlq":
-                return Result(DeliveryVerdict.Failed, FailureSummary(attempt, status == "Dlq"), FailureAction(attempt, queue));
+                return Result(DeliveryVerdict.Failed, FailureSummary(attempt, status == "Dlq"), FailureAction(attempt, queue, profile));
         }
 
         // Ingen utfall innen fristen.
@@ -478,7 +485,7 @@ internal static class DeliveryVerifier
                 (HoldsTheQueue(blocker)
                     ? " — and Queuey holds the queue's deliveries until that is dealt with."
                     : " — and with fifo ordering the events behind it wait for it."),
-                FailureAction(blocking, queue) + " Once that event is delivered or skipped, the events behind it go out.");
+                FailureAction(blocking, queue, profile) + " Once that event is delivered or skipped, the events behind it go out.");
 
         if (queueRow is { HasDeliveryTarget: false })
             return Result(DeliveryVerdict.Timeout,
@@ -596,7 +603,7 @@ internal static class DeliveryVerifier
     /// What to change, and when the queue waits for a person, the step after the fix. Without that step the next
     /// verify waits behind the held queue and times out, even with the cause fixed.
     /// </summary>
-    private static string FailureAction(EventAttemptResponse? a, string queue)
+    private static string FailureAction(EventAttemptResponse? a, string queue, string? profile)
     {
         // Et tidsavbrudd mot en mottaker som ikke er merket idempotent, parkerer køen med standardvalgene (idempotent false,
         // timeoutBehavior Hold). Rådet før 2026-10-05 var å sjekke URL-en, og at Queuey sendte den igjen.
@@ -605,7 +612,7 @@ internal static class DeliveryVerifier
                    $"\"idempotent\": true on queues.{queue}; if it is only slow, raise delivery.timeoutMs. Run `queuey apply`, " +
                    "then a person resumes the queue in the Queuey console.";
 
-        string fix = WhatToFix(a);
+        string fix = WhatToFix(a, profile);
 
         // Et event Queuey ikke kunne signere som Stripe, eller som er signert med et secret mottakeren har forlatt, feiler
         // likt hver gang det sendes på nytt: det sendes fra Stripe igjen, og den som låser opp, hopper over det.
@@ -635,21 +642,24 @@ internal static class DeliveryVerifier
         "so verifying again waits.";
 
     // Samme regel som plan og apply (CredentialStoring, review av #58, K2): verify vet ikke workspacets miljø, og et ukjent
-    // miljø regnes som prod, så en person limer inn verdien, og set nevnes for en verdi den som kjører, holder.
-    private static readonly string StoreAgain =
-        "Store a new secret under the same name. " + new CredentialStoring(environment: null, profile: null).HowToStore(CredentialStoring.Placeholder, null);
+    // miljø regnes som prod, så en person limer inn verdien, og set nevnes for en verdi den som kjører, holder. Kommandoene tar
+    // profilen den som kalte, koblet til med (re-review av #58), bare når den er et profilnavn.
+    private static string StoreAgain(string? profile) =>
+        "Store a new secret under the same name. " +
+        new CredentialStoring(environment: null, profile: profile is not null && DeploymentProfiles.IsName(profile) ? profile : null)
+            .HowToStore(CredentialStoring.Placeholder, null);
 
-    private static string WhatToFix(EventAttemptResponse? a) => WhatToFixFor(a?.DecisionReason) ?? a?.Class switch
+    private static string WhatToFix(EventAttemptResponse? a, string? profile) => WhatToFixFor(a?.DecisionReason) ?? a?.Class switch
     {
         // Uten svar kom feilen fra Queuey sitt oppsett av autentiseringen (credential eller identitetsleverandør), ikke fra
         // mottakeren (review 2026-10-05).
         "AuthenticationFailed" when a.ResponseCode is null =>
             "Queuey could not set up the credentials for this delivery, so it never contacted the receiver. Check " +
             "delivery.credentialRef and the stored credential, or for OAuth2 the identity provider it asks for a token. " +
-            StoreAgain,
+            StoreAgain(profile),
         "AuthenticationFailed" =>
             "The receiver rejected the credentials. Check delivery.authMode and delivery.credentialRef (or signing) " +
-            "against what the receiver expects. " + StoreAgain,
+            "against what the receiver expects. " + StoreAgain(profile),
         "AuthorizationFailed" =>
             "The receiver refused the request (403). Check its permissions or IP allowlist for Queuey's deliveries.",
         // Uten svar stoppet Queuey sin egen sperre for utgående trafikk adressen (destination_not_allowed).

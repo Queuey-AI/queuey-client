@@ -29,10 +29,12 @@ internal sealed class CredentialStoring
     internal const string Placeholder = "<NAME>";
 
     /// <summary>The sentence after a command that shows <see cref="Placeholder"/> for a name the file gives.</summary>
+    // Re-review av #58: hintet skal ikke friste noen til å legge et passord i navnet. credentialRef navngir, og verdien bor i
+    // credentialen.
     internal const string NotShown =
         "The name is not shown: a command carries only letters, digits and . _ : @ / -, starting with a letter or digit, and " +
-        "nothing that looks like a secret. Rename the credential that way, or name a stored one by its cred_… id; a variable " +
-        "is written ${NAME}.";
+        "nothing that looks like a secret. Rename the credential that way, or name a stored one by its cred_… id. " +
+        "credentialRef names a credential, never its value; a variable that holds the name is written ${NAME}.";
 
     private const string VariablePlaceholder = "<VARIABLE>";
 

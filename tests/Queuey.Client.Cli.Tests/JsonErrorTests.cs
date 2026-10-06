@@ -109,6 +109,23 @@ public sealed class JsonErrorTests : IDisposable
     }
 
     [Fact]
+    public async Task A_server_error_reaches_the_terminal_without_escape_sequences_or_direction_overrides()
+    {
+        // F2.7-regelen for det Queuey sier (re-review av #58): meldingen og handlingen i et feilsvar kom rått til stderr. En OSC
+        // kunne endret vinduets tittel, en CSI flyttet markøren, og et linjeskift laget en linje som så ut som CLI-ens egen.
+        RecordingHandler api = new(_ => RecordingHandler.Error(System.Net.HttpStatusCode.Conflict, "conflict",
+            "Queue que_orders\u001b]0;pwned\u0007 is \u001b[31mbusy\u001b[0m.\nqueuey: all good", "Ask \u001b[2Jsomeone\u202e."));
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("metrics", "que_orders")), api);
+
+        Assert.Equal(ExitCodes.RuntimeError, run.Exit);
+        Assert.Contains("Queue que_orders is busy. queuey: all good", run.Stderr);
+        Assert.Contains("→ Ask someone.", run.Stderr);
+        foreach (char c in new[] { '\u001b', '\u0007', '\u202e' })
+            Assert.DoesNotContain(c, run.Stderr);
+    }
+
+    [Fact]
     public async Task An_error_the_cli_did_not_expect_is_json_too()
     {
         // Review 2026-10-05: med --json skal hver feil være JSON. Testserveren kaster InvalidOperationException, en feil
