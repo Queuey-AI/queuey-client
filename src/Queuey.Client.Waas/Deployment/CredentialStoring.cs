@@ -42,11 +42,20 @@ internal sealed class CredentialStoring
 
     /// <param name="environment">The workspace's environment (dev, test, staging or prod), or null when it is not known.</param>
     /// <param name="profile">The profile the commands take with <c>--profile</c>, or null for none.</param>
-    public CredentialStoring(string? environment, string? profile)
+    /// <param name="tenant">
+    /// The workspace the commands name with <c>--tenant</c> when there is no profile: without one, credentials goes to the
+    /// configured workspace, not the deployment file's (review of #60). Taken only when it is a workspace id.
+    /// </param>
+    public CredentialStoring(string? environment, string? profile, string? tenant = null)
     {
         AsksAPerson = !string.Equals(environment?.Trim(), "dev", StringComparison.OrdinalIgnoreCase);
-        _profileFlag = profile is null ? "" : $" --profile {profile}";
+        _profileFlag = profile is not null ? $" --profile {profile}"
+            : tenant is not null && WorkspaceIds.IsOne(tenant.Trim()) ? $" --tenant {tenant.Trim()}"
+            : "";
     }
+
+    /// <summary>What the commands add to reach the workspace: <c> --profile &lt;name&gt;</c>, <c> --tenant &lt;ten_…&gt;</c>, or nothing.</summary>
+    internal string Connection => _profileFlag;
 
     /// <summary>For a file as plan and apply read it: its workspace's environment, and the profile it was expanded for.</summary>
     public static CredentialStoring For(DeploymentFile file) => new(file.Workspace?.Environment, file.ProfileName);

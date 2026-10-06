@@ -83,7 +83,8 @@ ADVISE
                  A file with profiles gets no new profile: the profile that gives the
                  environment takes the flow, chosen by that and never by its name. Without
                  one stated, one profile takes it, and several are a conflict. One profile
-                 that gives none takes a stated environment. --profile <name> names the
+                 that gives none takes a stated environment, but never dev: Queuey treats its
+                 workspace as prod. --profile <name> names the
                  profile instead, for profiles that share an environment; the file must have
                  it, unless advise proposes a new file. A queue the file forwards to a
                  listener outside dev is a conflict, and so is an environment apply refuses.

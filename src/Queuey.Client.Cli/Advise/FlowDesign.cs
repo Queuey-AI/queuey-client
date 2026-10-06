@@ -162,7 +162,11 @@ public static class FlowDesigner
             _devInPractice = _env == "dev";
             _local = _devInPractice;
             _assumedForUnmarkedFile = flow["environment"] is { Provenance: Provenance.Assumed } && _file is not null;
-            _storing = new CredentialStoring(_env, _portable ? _profileName : null);
+            // Uten profil går credentials til det konfigurerte workspacet, ikke deploy-filas (review av #60), mens apply bruker
+            // filas tenant. En fast tenant i fila står derfor i kommandoene.
+            _storing = new CredentialStoring(_env, _portable ? _profileName : null,
+                tenant: _portable ? null : Property(_file?.Json, "tenant") is JsonValue fileTenant && fileTenant.TryGetValue(out string? id)
+                                           && id.IndexOf("${", StringComparison.Ordinal) < 0 ? id : null);
         }
 
         /// <summary>The value the file's profile gives <paramref name="variable"/>, or null when it gives none.</summary>
@@ -1278,7 +1282,11 @@ public static class FlowDesigner
                         // ekte endepunkts hemmelighet limer en person inn (F2.9, playbooken fra F2.11). Hentingen og lagringen står
                         // på én linje (K1 i runde 2 av #58): i et agentverktøy er hvert kall et nytt skall, og en variabel fra et
                         // kall er borte i det neste.
-                        _next.Add("Test mode, with Stripe's own CLI, whose signing secret is a test secret you may hold. Take it and " +
+                        // Re-review av #60: bare en apply som gikk gjennom, viser at workspacet er dev. Ble fila nektet, er det ikke
+                        // det, og testnøkkelen skal ikke lagres der.
+                        _next.Add("Test mode, with Stripe's own CLI, once that apply has gone through: if it refused the file, the " +
+                                  "workspace is not dev, so stop, and store no test secret. The Stripe CLI's signing secret is a test " +
+                                  "secret you may hold. Take it and " +
                                   "store it in one command, so it stays out of the output and needs no variable from an earlier shell. " +
                                   $"In a POSIX shell: STRIPE_WHSEC=\"$(stripe listen --print-secret)\" {set}. In PowerShell: " +
                                   $"$env:STRIPE_WHSEC = stripe listen --print-secret; {set}; Remove-Item Env:STRIPE_WHSEC, since $env: lasts " +
@@ -1300,7 +1308,7 @@ public static class FlowDesigner
                         // Et ekte endepunkt: hemmeligheten går aldri gjennom agenten (F2.9). Den lagres før endepunktet pekes hit,
                         // ellers avviser ingressen Stripe sine eventer til den er der.
                         _next.Add("A real endpoint's signing secret never passes through you or this conversation: " +
-                                  $"{request} prints a link where a person pastes it, and queuey credentials list{_profileFlag} " +
+                                  $"{request} prints a link where a person pastes it, and queuey credentials list{_storing.Connection} " +
                                   $"--json lists {StripeCredential} once it is stored. credentials set --from-env is only for the " +
                                   "test secret stripe listen --print-secret gives, in dev.");
                         _next.Add("Then point the Stripe webhook endpoint at the queue's ingress URL, in the dashboard or with Stripe's " +

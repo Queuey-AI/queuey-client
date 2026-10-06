@@ -934,6 +934,8 @@ internal sealed class Enrichment
                     new[] { new FlowEvidence(file.File, null, FileEnvironments.Source(file, profile)) },
                     $"The profile {profile} in {file.File} gives {given}, and the intent states {stated.AsString}.",
                     $"Is this flow for {given}, as the profile is? State {given} in the intent, or name another profile with --profile.");
+            else if (given is null && stated.AsString == "dev")
+                NoEnvironmentForDev(file, profile);
             else if (existing is not null)
                 _flow.Set("environment", stated.WithEvidence(evidence));
             return;
@@ -960,6 +962,25 @@ internal sealed class Enrichment
         return true;
     }
 
+    /// <summary>
+    /// A conflict for a stated dev and a profile that gives no environment: Queuey treats its workspace as prod, so advise
+    /// neither takes it for dev nor writes dev into it (re-review of #60).
+    /// </summary>
+    // Re-review av #60, B1: fila hadde én profil, main, uten miljø (prod-tenanten), og intensjonen sa dev. advise gjenbrukte
+    // main, skrev QUEUEY_WORKSPACE_ENVIRONMENT=dev og localForward inn i den, og foreslo testmodus med credentials set
+    // --profile main mot prod-tilkoblingen. Og prod-profilen ble skrevet om til dev, så hver CI-deploy med den ble nektet.
+    // Et miljø som ikke er dev, kan fortsatt gjenbruke profilen: det er den forsiktige veien.
+    private void NoEnvironmentForDev(ExistingDeployFile file, string profile)
+    {
+        string variable = FileEnvironments.Variable(file)?.Name ?? DeploymentTemplate.EnvironmentVariable;
+        Conflict("contradiction", "environment", JsonValue.Create("dev"), null, ProfileEvidence(file),
+            $"The profile {profile} in {file.File} gives no environment, so Queuey treats its workspace as prod, and the intent " +
+            "states dev.",
+            $"If {profile} is the dev profile, give it {variable}=dev in {file.File}" +
+            (FileEnvironments.Variable(file) is null ? $", with workspace.environment ${{{variable}}}" : "") +
+            ". Or name a profile that gives dev with --profile. Then run advise --intent again.");
+    }
+
     /// <summary>A value from the file as a conflict shows it: quoted when it is plain, else in words.</summary>
     private static string Shown(string value)
         => string.IsNullOrWhiteSpace(value) ? "blank"
@@ -979,7 +1000,8 @@ internal sealed class Enrichment
             return;
         if (giving.Length == 0 && file.Profiles.Count == 1 && FileEnvironments.GivenBy(file, file.Profiles[0]) is null)
         {
-            RefusedIn(file, file.Profiles[0]);
+            if (!RefusedIn(file, file.Profiles[0]) && environment == "dev")
+                NoEnvironmentForDev(file, file.Profiles[0]);
             return;
         }
 

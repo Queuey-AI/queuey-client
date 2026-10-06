@@ -1002,6 +1002,67 @@ public sealed class AdviseIntentTests : IDisposable
         Assert.Contains(design.NextSteps, s => s.StartsWith("queuey apply --profile laptop.", StringComparison.Ordinal));
     }
 
+    // Re-review av #60, B1: et oppgitt dev tar ikke en profil som ikke gir noe miljø. Queuey regner workspacet dens som prod.
+    private const string MainWithoutEnvironment = """
+        { "queues": {}, "profiles": { "main": { "variables": { "ORDERS_HOST": "orders.example.com" } } } }
+        """;
+
+    [Fact]
+    public void A_stated_dev_does_not_take_the_only_profile_when_it_gives_no_environment()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", MainWithoutEnvironment);
+
+        FlowAdvice advice = Advise(StripeIntentFor("dev"));
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("contradiction", "environment", "\"dev\""), (conflict.Kind, conflict.Field, conflict.Stated!.ToJsonString()));
+        Assert.Contains("The profile main in queuey.deploy.json gives no environment, so Queuey treats its workspace as prod",
+            conflict.Message, StringComparison.Ordinal);
+        Assert.Contains("give it QUEUEY_WORKSPACE_ENVIRONMENT=dev in queuey.deploy.json, with workspace.environment " +
+                        "${QUEUEY_WORKSPACE_ENVIRONMENT}", conflict.Question, StringComparison.Ordinal);
+        Assert.Null(advice.Design);
+    }
+
+    [Fact]
+    public void A_stated_dev_does_not_take_a_named_profile_that_gives_no_environment()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", MainWithoutEnvironment);
+
+        FlowConflict conflict = Assert.Single(Advise(StripeIntentFor("dev"), profile: "main").Flow.Conflicts);
+
+        Assert.Contains("The profile main in queuey.deploy.json gives no environment", conflict.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_stated_environment_that_is_not_dev_reuses_a_profile_that_gives_none()
+    {
+        // Den forsiktige veien står: prod på en profil som allerede regnes som prod.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", MainWithoutEnvironment);
+
+        FlowDesign design = Advise(StripeIntentFor("prod")).Design!;
+
+        Assert.Equal("queuey credentials request stripe-whsec --profile main", Assert.Single(design.Credentials).Store);
+    }
+
+    [Theory]
+    [InlineData(null, "queuey credentials request stripe-whsec --tenant ten_abc")]
+    [InlineData("dev", "queuey credentials set --tenant ten_abc --name stripe-whsec --type HmacSigning --key-id stripe-whsec --from-env STRIPE_WHSEC")]
+    public void A_file_without_profiles_names_its_tenant_in_the_credentials_commands(string? stated, string store)
+    {
+        // Re-review av #60: uten profil går credentials til det konfigurerte workspacet, mens apply bruker filas tenant.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """{ "tenant": "ten_abc", "queues": {} }""");
+
+        FlowDesign design = Advise(stated is null ? StripeIntent : StripeIntentFor(stated)).Design!;
+
+        Assert.Equal(store, Assert.Single(design.Credentials).Store);
+        if (stated is null)
+            Assert.Contains(design.NextSteps, s => s.Contains("queuey credentials list --tenant ten_abc --json", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void Advise_profile_on_a_new_file_needs_the_environment_stated()
     {
@@ -1423,12 +1484,13 @@ public sealed class AdviseIntentTests : IDisposable
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void A_stated_profile_value_the_file_contradicts_is_a_conflict(bool devStated)
+    [InlineData(null)]
+    [InlineData("prod")]
+    public void A_stated_profile_value_the_file_contradicts_is_a_conflict(string? stated)
     {
         // Uten oppgitt miljø brukes den ene profilen fila har (re-review av #59), så verdien går i profilen dev også da, selv om
-        // fila uten miljø gjelder et workspace Queuey regner som prod.
+        // fila uten miljø gjelder et workspace Queuey regner som prod. Et oppgitt miljø som ikke er dev, gjenbruker den også;
+        // et oppgitt dev gjør det ikke, siden profilen ikke gir noe miljø (re-review av #60).
         Fixture("stripe-aspnet");
         File_("queuey.deploy.json", """
             {
@@ -1437,7 +1499,7 @@ public sealed class AdviseIntentTests : IDisposable
             }
             """);
 
-        string environment = devStated ? "\"environment\": { \"value\": \"dev\", \"provenance\": \"stated\" }, " : "";
+        string environment = stated is null ? "" : "\"environment\": { \"value\": \"" + stated + "\", \"provenance\": \"stated\" }, ";
         FlowConflict conflict = Assert.Single(Advise("{ " + environment +
             "\"source\": { \"kind\": { \"value\": \"stripe\", \"provenance\": \"stated\" } }, " +
             "\"destination\": { \"baseUrl\": { \"value\": \"https://staging.example.com\", \"provenance\": \"stated\" } } }").Flow.Conflicts);
@@ -1587,6 +1649,9 @@ public sealed class AdviseIntentTests : IDisposable
         Assert.Contains("In PowerShell: $env:STRIPE_WHSEC = stripe listen --print-secret; " + set + "; Remove-Item Env:STRIPE_WHSEC,",
             step, StringComparison.Ordinal);
         Assert.Contains("so it stays out of the output", step, StringComparison.Ordinal);
+        // Bare en apply som gikk gjennom, viser at workspacet er dev (re-review av #60).
+        Assert.StartsWith("Test mode, with Stripe's own CLI, once that apply has gone through: if it refused the file, the workspace " +
+                          "is not dev, so stop, and store no test secret.", step, StringComparison.Ordinal);
         Assert.Contains("A real endpoint's secret is never yours to hold: a person pastes it on the page queuey credentials request " +
                         "stripe-whsec --profile dev opens", step, StringComparison.Ordinal);
         Assert.DoesNotContain(design.NextSteps, s => s.Contains("prints this session's signing secret", StringComparison.Ordinal));
