@@ -36,6 +36,9 @@ public class DeploymentCopyTests
         expected["Workspace.Environment"] = "${" + DeploymentTemplate.EnvironmentVariable + "}";
         expected["Workspace.Delivery.BaseUrl"] = "${" + DeploymentTemplate.BaseUrlVariable + "}";
         expected["Queues[invoices].Delivery.Url"] = "${" + DeploymentTemplate.QueueUrlVariable("invoices", "staging") + "}";
+        // Leveringstypen hører til miljøet (Queuey F2.3): en lokal lytter i dev, HTTP ellers.
+        expected["Queues[orders].Delivery.Kind"] = "${" + DeploymentTemplate.QueueKindVariable("orders", "staging") + "}";
+        expected["Queues[invoices].Delivery.Kind"] = "${" + DeploymentTemplate.QueueKindVariable("invoices", "staging") + "}";
 
         AssertSameValues(expected, DeploymentTemplate.ToTemplate(file, "staging"));
     }

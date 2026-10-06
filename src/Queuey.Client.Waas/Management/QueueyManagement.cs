@@ -186,6 +186,9 @@ internal sealed class QueueyManagement : IQueueyManagement
         EventType = ToWire(ingress.EventType),
         GroupKey = ToWire(ingress.GroupKey),
         SuccessStatusCode = ingress.SuccessStatusCode,
+        SignedRequest = ingress.SignedRequest is { } signed
+            ? new SignedRequestWire { Template = signed.Template?.Trim(), CredentialRef = signed.CredentialRef?.Trim() }
+            : null,
     };
 
     // Et tomt navn fjerner kilden, og da leser backenden ikke from. Feltet står likevel i ContextSourceRequest(From, Name),

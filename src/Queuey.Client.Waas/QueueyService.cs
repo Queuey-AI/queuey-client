@@ -547,7 +547,8 @@ public sealed class QueueyService : IQueueyService
     private async Task<bool> HasDestinationAsync(
         string queueId, string tenantPublicId, DeploymentQueuePlan? plan, QueueApplyResponse response, CancellationToken cancellationToken)
     {
-        if (IsAbsoluteUrl(plan?.Delivery?.Url))
+        // En lokal lytter er et sted å levere (Queuey F2.3): eventene venter på den, de logges ikke bort.
+        if (IsAbsoluteUrl(plan?.Delivery?.Url) || plan?.Kind == DeploymentDeliveryKind.LocalForward)
             return true;
 
         if (plan?.Delivery is null || response.Created)
@@ -613,11 +614,15 @@ public sealed class QueueyService : IQueueyService
 
         file = file.Expand();
         IReadOnlyList<DeploymentQueuePlan> plans = file.Resolve();   // lokal validering først, som apply
+        EnsureReachableDestinations(file);
         string tenant = RequireForSync(file.Tenant);
 
-        return await new DeploymentPlanner(_controlPlane, Management)
+        return await new DeploymentPlanner(_controlPlane, Management, _options.ResolveIngressBaseAddress())
             .PlanAsync(file, plans, tenant, cancellationToken).ConfigureAwait(false);
     }
+
+    private void EnsureReachableDestinations(DeploymentFile expanded)
+        => DeploymentDestinations.EnsureReachable(expanded, _options.ResolveApiBaseAddress());
 
     /// <inheritdoc />
     public Task<DeliveryVerification> VerifyDeliveryAsync(
@@ -642,11 +647,15 @@ public sealed class QueueyService : IQueueyService
         file = file.Expand();
 
         IReadOnlyList<DeploymentQueuePlan> plans = file.Resolve();   // validates names + policy locally
+        // Også i en dry run (Queuey F2.3-review, 2026-10-06): den skal feile der applyen ville feilet, for en som kaller
+        // biblioteket som for CLI-en.
+        EnsureReachableDestinations(file);
         var byName = plans.ToDictionary(p => p.Definition.Name, StringComparer.Ordinal);
 
         string tenant = file.Tenant ?? (options.DryRun ? _options.TenantPublicId ?? string.Empty : RequireTenant());
         var existing = new Dictionary<string, QueueListItem>(StringComparer.Ordinal);
         ResolvedDeliveries? deliveries = null;
+        var workspaceWarnings = new List<string>();
 
         // The queues as they are before this run touches anything: an existing queue's mode and flow
         // decide what the mode step may change and what it has to say. One read for the whole file,
@@ -685,7 +694,18 @@ public sealed class QueueyService : IQueueyService
             // source already exists, so a policy patch that arrives before the ingress one fails
             // validation on a file that is perfectly correct.
             if (workspace.Ingress is { } ingress && !ingress.IsEmpty)
+            {
                 await Management.SetIngressAsync(tenant, isQueue: false, ingress, cancellationToken).ConfigureAwait(false);
+
+                // En credential som ikke er lagret ennå, godtas (Queuey F2.3), og da avviser ingressen alt. Det sies her, én
+                // gang for workspacet, og ikke for hver kø som arver det.
+                if (ingress.SignedRequest is not null)
+                {
+                    TenantConfigResponse stored = await _controlPlane.GetTenantConfigAsync(tenant, cancellationToken).ConfigureAwait(false);
+                    if (AwaitedCredentialWarning("The workspace's ingress", "every queue that inherits it refuses every event", stored.Ingress) is { } waiting)
+                        workspaceWarnings.Add(waiting);
+                }
+            }
 
             if (workspace.HasPolicy)
                 await Management.SetWorkspacePolicyAsync(tenant, workspace, cancellationToken).ConfigureAwait(false);
@@ -711,9 +731,17 @@ public sealed class QueueyService : IQueueyService
                     if (deliveries is not null && deliveries.Queues.TryGetValue(definition.Name, out QueueDelivery? resolved))
                         await Management.SetQueueDeliveryAsync(queuePublicId, resolved, ct).ConfigureAwait(false);
 
+                    // Leveringstypen etter målet og før modusen (Queuey F2.3): modusen spør om køen har et sted å levere, og en
+                    // lokal lytter er et.
+                    if (plan?.Kind is { } kind)
+                        await _controlPlane.SetQueueLocalForwardAsync(queuePublicId, kind == DeploymentDeliveryKind.LocalForward, ct).ConfigureAwait(false);
+
                     existing.TryGetValue(definition.Name, out QueueListItem? row);
-                    return await ConvergeModeAsync(definition.Name, queuePublicId, tenant, plan, response,
+                    QueueApplyOutcome outcome = await ConvergeModeAsync(definition.Name, queuePublicId, tenant, plan, response,
                         response.Created ? null : row, ct).ConfigureAwait(false);
+
+                    IReadOnlyList<string> readiness = await ReadinessOfDeclarationsAsync(definition.Name, queuePublicId, plan, ct).ConfigureAwait(false);
+                    return readiness.Count == 0 ? outcome : new QueueApplyOutcome(outcome.Warnings.Concat(readiness).ToArray(), outcome.Mode);
                 },
                 CreatedButFailed = definition =>
                 {
@@ -732,10 +760,66 @@ public sealed class QueueyService : IQueueyService
                     };
                 },
             },
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            workspaceWarnings).ConfigureAwait(false);
 
         return result;
     }
+
+    /// <summary>
+    /// What a queue's declared kind and ingress leave it waiting for, read back once its apply landed: a local listener,
+    /// a workspace that keeps forwarding a queue the file sends over HTTP, or a credential that is not stored yet, which
+    /// makes the ingress refuse every event. Read only when the file declares one of them, so other applies cost nothing.
+    /// </summary>
+    private async Task<IReadOnlyList<string>> ReadinessOfDeclarationsAsync(
+        string name, string queueId, DeploymentQueuePlan? plan, CancellationToken cancellationToken)
+    {
+        var warnings = new List<string>();
+        if (plan?.Kind == DeploymentDeliveryKind.LocalForward)
+            warnings.Add($"Queue '{name}' delivers to a local listener: its events wait until queuey listen --queue {name} connects, " +
+                         "and none go to its URL meanwhile.");
+
+        if (plan?.Kind != DeploymentDeliveryKind.Http && plan?.Ingress?.SignedRequest is null)
+            return warnings;
+
+        QueueConfigResponse config = await _controlPlane.GetQueueConfigAsync(queueId, cancellationToken).ConfigureAwait(false);
+
+        if (plan.Kind == DeploymentDeliveryKind.Http && DeploymentDeliveryKinds.FromBackend(config.Delivery?.Kind) == DeploymentDeliveryKind.LocalForward)
+            warnings.Add($"Queue '{name}' declares \"kind\": \"http\", but its workspace forwards every queue that inherits its delivery " +
+                         "to a local listener, so it keeps forwarding. Turn the workspace's forwarding off in the Queuey console.");
+
+        if (plan.Ingress?.SignedRequest is not null
+            && AwaitedCredentialWarning($"Queue '{name}'", "its ingress refuses every event", config.Ingress) is { } waiting)
+            warnings.Add(waiting);
+
+        return warnings;
+    }
+
+    /// <summary>
+    /// The readiness warning for an ingress that waits for a credential: it checks signatures, and the credential it names
+    /// is not stored yet. Null otherwise.
+    /// </summary>
+    internal static string? AwaitedCredentialWarning(string who, string consequence, IngressResponse? ingress)
+    {
+        if (ingress?.SignedRequest is not { PendingCredential: { Length: > 0 } awaited } signed || !ChecksSignatures(ingress.AuthMode))
+            return null;
+
+        // Queuey F2.3-review (2026-10-06): navnet er lagret av en med skrivetilgang. Det står i teksten og i kommandoen bare
+        // når det har den trygge formen (CredentialNameRules.Showable); ellers står en plassholder. Malen er Queuey sin.
+        string template = CredentialNameRules.FitsPendingShape(signed.Template) ? signed.Template! : "provider";
+        return CredentialNameRules.Showable(awaited) is { } name
+            ? $"{who} verifies {template} signatures with the credential '{name}', which is not stored yet, so {consequence}. " +
+              $"Store it with queuey credentials set --name {name} --type HmacSigning --key-id {name} --from-env <VARIABLE>, " +
+              "then run queuey apply again."
+            : $"{who} verifies {template} signatures with a credential that is not stored yet, so {consequence}. Store it " +
+              "under the name ingress.signedRequest.credentialRef gives, with queuey credentials set --name <NAME> --type " +
+              "HmacSigning --key-id <NAME> --from-env <VARIABLE>, then run queuey apply again.";
+    }
+
+    private static bool ChecksSignatures(string? authMode)
+        => authMode is not null
+           && (authMode.Equals("SignedRequest", StringComparison.OrdinalIgnoreCase)
+               || authMode.Equals("ApiKeyAndSignedRequest", StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// Readiness observations — never failures. The declared state landed; these say the workspace is
@@ -776,7 +860,8 @@ public sealed class QueueyService : IQueueyService
         SyncOptions? options,
         string? tenantPublicId,
         QueueApplyHooks? hooks,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlyList<string>? workspaceWarnings = null)
     {
         options ??= new SyncOptions();
 
@@ -838,7 +923,7 @@ public sealed class QueueyService : IQueueyService
             }
         }
 
-        var result = new QueueSyncResult(results, notAttempted);
+        var result = new QueueSyncResult(results, notAttempted) { WorkspaceWarnings = workspaceWarnings ?? Array.Empty<string>() };
         result.ThrowIfAnyFailed();
         return result;
     }

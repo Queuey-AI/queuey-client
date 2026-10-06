@@ -11,7 +11,8 @@ namespace Queuey.Client.Waas.Tests;
 /// <summary>
 /// Sperrehake (review 2026-09-24): en plan skal aldri sende en skriving uten <c>?dryRun=true</c>. Fila
 /// bruker hvert aspekt en plan kan skrive — workspacets miljø-merke, policy, delivery og ingress, og kø policy,
-/// delivery, ingress, modus og filter — mot en server som nekter enhver skriving som ikke er dry-run.
+/// delivery, leveringstype, ingress med signert forespørsel, modus og filter — mot en server som nekter enhver skriving som
+/// ikke er dry-run.
 /// Kommer det et nytt slags kall, feiler testen til det står i lista over det planen sender.
 /// </summary>
 public class DeploymentPlanDryRunRatchetTests
@@ -33,8 +34,8 @@ public class DeploymentPlanDryRunRatchetTests
           "mode": "deliver",
           "backoff": { "maxDelayMs": 30000 },
           "filter": { "match": "any", "conditions": [ { "field": "type", "op": "eq", "value": "order.created" } ] },
-          "ingress": { "successStatusCode": 200 },
-          "delivery": { "url": "/orders", "credentialRef": "orders-key" }
+          "ingress": { "successStatusCode": 200, "signedRequest": { "template": "stripe", "credentialRef": "stripe-whsec" } },
+          "delivery": { "url": "/orders", "credentialRef": "orders-key", "kind": "localForward" }
         }
       }
     }
@@ -50,6 +51,7 @@ public class DeploymentPlanDryRunRatchetTests
         "PATCH /queues/que_orders/ingress",
         "PATCH /queues/que_orders/policy",
         "PATCH /queues/que_orders/delivery",
+        "PATCH /queues/que_orders/local-forward",
         "PATCH /queues/que_orders/mode-change",
     };
 

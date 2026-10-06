@@ -62,7 +62,7 @@ internal sealed class DeploymentPuller
             RetentionDays = config.Policy?.RetentionDays,
             Idempotent = config.Policy?.Idempotent,
             Backoff = config.Policy?.Backoff?.ToModel(),
-            Ingress = ToIngress(config.Ingress, effective),
+            Ingress = ToIngress(config.Ingress, nameByRef, effective),
         };
 
         if (config.Delivery is { } wd && !string.IsNullOrWhiteSpace(wd.BaseUrl))
@@ -134,7 +134,15 @@ internal sealed class DeploymentPuller
             queue.Filter = p.Filter?.ToModel();
         }
 
-        queue.Ingress = ToIngress(qc.Ingress, effective: true);
+        queue.Ingress = ToIngress(qc.Ingress, nameByRef, effective: true);
+
+        // Typen som køen leverer med, alltid: drift-sjekken sammenligner en deklarert http også (Queuey F2.3).
+        if (DeploymentDeliveryKinds.FromBackend(qc.Delivery?.Kind) is { } kind)
+        {
+            queue.Delivery ??= new QueueDelivery();
+            queue.Delivery.Kind = kind.ToFileText();
+        }
+
         return queue;
     }
 
@@ -184,10 +192,18 @@ internal sealed class DeploymentPuller
             };
         }
 
-        DeploymentIngress? queueIngress = ToIngress(qc.Ingress);
-        DeploymentIngress? baselineIngress = ToIngress(qc.TenantBaseline?.Ingress);
+        DeploymentIngress? queueIngress = ToIngress(qc.Ingress, nameByRef);
+        DeploymentIngress? baselineIngress = ToIngress(qc.TenantBaseline?.Ingress, nameByRef);
         if (queueIngress is not null && !SameIngress(queueIngress, baselineIngress))
             declared.Ingress = queueIngress;
+
+        // En kø som videresender til en lokal lytter, skrives med kind, også når workspacet videresender alle: fila kan ikke
+        // si det om workspacet, og uten kind ville en apply av fila et annet sted levere over HTTP (Queuey F2.3).
+        if (DeploymentDeliveryKinds.FromBackend(qc.Delivery?.Kind) == DeploymentDeliveryKind.LocalForward)
+        {
+            declared.Delivery ??= new QueueDelivery();
+            declared.Delivery.Kind = DeploymentDeliveryKind.LocalForward.ToFileText();
+        }
 
         return declared;
     }
@@ -202,7 +218,9 @@ internal sealed class DeploymentPuller
         && string.Equals(a.AuthMode, b.AuthMode, StringComparison.Ordinal)
         && a.SuccessStatusCode == b.SuccessStatusCode
         && SameSource(a.EventType, b.EventType)
-        && SameSource(a.GroupKey, b.GroupKey);
+        && SameSource(a.GroupKey, b.GroupKey)
+        && string.Equals(a.SignedRequest?.Template, b.SignedRequest?.Template, StringComparison.Ordinal)
+        && string.Equals(a.SignedRequest?.CredentialRef, b.SignedRequest?.CredentialRef, StringComparison.Ordinal);
 
     private static bool SameBackoff(RetryBackoffWire a, RetryBackoffWire? b)
         => b is not null && a.BaseDelayMs == b.BaseDelayMs && a.MaxDelayMs == b.MaxDelayMs
@@ -265,7 +283,7 @@ internal sealed class DeploymentPuller
     /// The success status was not read before 2026-09-23, so a file declaring 200 drifted forever.
     /// A pulled file writes it only when it is not the default 202; the effective read always does.
     /// </remarks>
-    private static DeploymentIngress? ToIngress(IngressResponse? r, bool effective = false)
+    private static DeploymentIngress? ToIngress(IngressResponse? r, Dictionary<string, string> nameByRef, bool effective = false)
     {
         if (r is null) return null;
 
@@ -277,9 +295,34 @@ internal sealed class DeploymentPuller
             SuccessStatusCode = r.SuccessStatusCode == 0 || (!effective && r.SuccessStatusCode == DefaultSuccessStatusCode)
                 ? null
                 : r.SuccessStatusCode,
+            SignedRequest = ToSignedRequest(r.SignedRequest, nameByRef),
         };
 
         return ingress.IsEmpty ? null : ingress;
+    }
+
+    /// <summary>
+    /// The signed request as the file writes it (Queuey F2.3): the bound credential by name when it can be read, else its
+    /// id, or the name the ingress waits for. A pending name that is stored now is marked, since apply would bind it.
+    /// </summary>
+    private static DeploymentSignedRequest? ToSignedRequest(SignedRequestResponse? r, Dictionary<string, string> nameByRef)
+    {
+        if (r is null || string.IsNullOrWhiteSpace(r.Template))
+            return null;
+
+        string? pending = string.IsNullOrWhiteSpace(r.PendingCredential) ? null : r.PendingCredential;
+
+        // Fila må tåle sin egen sjekk (Queuey F2.3-review): en bundet credential med et navn utenfor formen skrives med id-en.
+        string? bound = NameFor(nameByRef, r.CredentialRef);
+        if (bound is not null && !CredentialNameRules.FitsPendingShape(bound))
+            bound = r.CredentialRef;
+        return new DeploymentSignedRequest
+        {
+            Template = r.Template,
+            CredentialRef = bound ?? pending,
+            BoundCredentialId = string.IsNullOrWhiteSpace(r.CredentialRef) ? null : r.CredentialRef,
+            AwaitsStoredCredential = pending is not null && nameByRef.ContainsValue(pending),
+        };
     }
 
     private const int DefaultSuccessStatusCode = 202;

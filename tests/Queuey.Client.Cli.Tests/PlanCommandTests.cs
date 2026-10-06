@@ -65,16 +65,24 @@ public sealed class PlanCommandTests : IDisposable
 
         Assert.Equal(ExitCodes.Success, run.Exit);
         JsonElement root = JsonDocument.Parse(run.Stdout).RootElement;
-        Assert.Equal(new[] { "schemaVersion", "file", "tenant", "wouldSucceed", "changeCount", "steps" },
+        // planId, planHash og queues kom til i versjon 1 med Queuey F2.3 (2026-10-06), før noen tag hadde sluppet den.
+        Assert.Equal(new[] { "schemaVersion", "file", "tenant", "planId", "planHash", "wouldSucceed", "changeCount", "queues", "steps" },
             root.EnumerateObject().Select(p => p.Name).ToArray());
         Assert.Equal(1, root.GetProperty("schemaVersion").GetInt32());
         Assert.Equal("ten_abc", root.GetProperty("tenant").GetString());
         Assert.True(root.GetProperty("wouldSucceed").GetBoolean());
         Assert.Equal(3, root.GetProperty("changeCount").GetInt32());
+        Assert.Matches("^sha256:[0-9a-f]{64}$", root.GetProperty("planHash").GetString());
+        Assert.Equal("plan_" + root.GetProperty("planHash").GetString()!.Substring(7, 24), root.GetProperty("planId").GetString());
+
+        JsonElement queue = Assert.Single(root.GetProperty("queues").EnumerateArray());
+        Assert.Equal("orders", queue.GetProperty("name").GetString());
+        Assert.Equal("que_orders", queue.GetProperty("publicId").GetString());
+        Assert.EndsWith("/events/ten_abc/orders", queue.GetProperty("ingressUrl").GetString());
 
         // Køen finnes, så den eneste skrivingen som endrer noe, er policyen.
         JsonElement step = Assert.Single(root.GetProperty("steps").EnumerateArray());
-        Assert.Equal(new[] { "target", "aspect", "creates", "changes", "notes", "error" },
+        Assert.Equal(new[] { "target", "aspect", "creates", "changes", "notes", "state", "desired", "error" },
             step.EnumerateObject().Select(p => p.Name).ToArray());
         Assert.Equal("queues.orders", step.GetProperty("target").GetString());
         Assert.Equal("policy", step.GetProperty("aspect").GetString());
@@ -90,8 +98,10 @@ public sealed class PlanCommandTests : IDisposable
         Assert.Equal(JsonValueKind.Null, changes[2].GetProperty("from").ValueKind);
         Assert.Equal(1000, changes[2].GetProperty("to").GetProperty("baseDelayMs").GetInt32());
 
-        // Uten --json står de som en linje hver.
+        // Uten --json står de som en linje hver, med planens id og hash og køens ingress-URL først.
         CliRun human = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("plan", "--file", DeployFile())), PlansEverything());
+        Assert.Contains(root.GetProperty("planId").GetString() + "  " + root.GetProperty("planHash").GetString(), human.Stdout);
+        Assert.Contains("orders\tingress " + queue.GetProperty("ingressUrl").GetString(), human.Stdout);
         Assert.Contains("~ policy.retentionDays: 7 → 5", human.Stdout);
         Assert.Contains("~ policy.dlqEnabled: true → false", human.Stdout);
         Assert.Contains("~ policy.backoff: (none) → {\"baseDelayMs\":1000,\"jitter\":\"full\"}", human.Stdout);

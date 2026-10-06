@@ -64,9 +64,25 @@ internal sealed class CredentialResolver
                 queues[plan.Definition.Name] = await ResolveAsync(delivery, cancellationToken).ConfigureAwait(false);
         }
 
+        // Ingressens credential-navn slås ikke opp her: Queuey gjør det, og godtar et navn som ikke finnes ennå (F2.3). Planen
+        // vil bare kunne si om navnet finnes, så lista lastes for det, og en nøkkel som ikke får lese den, gir «vet ikke».
+        IReadOnlyCollection<string>? known = null;
+        if (plans.Any(p => p.Ingress?.SignedRequest?.CredentialRef is not null))
+        {
+            try
+            {
+                known = (await LoadAsync(cancellationToken).ConfigureAwait(false)).Keys.ToList();
+            }
+            catch (QueueyForbiddenException)
+            {
+                known = null;
+            }
+        }
+
         return new ResolvedDeliveries(
             workspace is null ? null : await ResolveAsync(workspace, cancellationToken).ConfigureAwait(false),
-            queues);
+            queues,
+            known);
 
         void Collect(string? reference, string where)
         {
@@ -178,11 +194,22 @@ internal sealed class CredentialResolver
 /// <summary>The deliveries of a deployment with every credential name turned into the id the API stores.</summary>
 internal sealed class ResolvedDeliveries
 {
-    public ResolvedDeliveries(WorkspaceDelivery? workspace, IReadOnlyDictionary<string, QueueDelivery> queues)
+    private readonly IReadOnlyCollection<string>? _knownCredentialNames;
+
+    public ResolvedDeliveries(WorkspaceDelivery? workspace, IReadOnlyDictionary<string, QueueDelivery> queues,
+        IReadOnlyCollection<string>? knownCredentialNames = null)
     {
         Workspace = workspace;
         Queues = queues;
+        _knownCredentialNames = knownCredentialNames;
     }
+
+    /// <summary>
+    /// Whether the workspace has a credential by <paramref name="name"/>: false only when the list was read and has none,
+    /// so a caller that could not read it says nothing.
+    /// </summary>
+    public bool KnownCredential(string name)
+        => _knownCredentialNames is null || _knownCredentialNames.Contains(name.Trim(), StringComparer.Ordinal);
 
     /// <summary>The workspace's delivery patch, or null when the file declares none.</summary>
     public WorkspaceDelivery? Workspace { get; }

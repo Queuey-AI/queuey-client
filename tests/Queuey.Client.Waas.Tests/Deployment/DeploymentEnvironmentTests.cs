@@ -35,15 +35,16 @@ public class DeploymentEnvironmentTests
     }
 
     [Theory]
-    [InlineData("production")]
-    [InlineData("qa")]
-    [InlineData("")]
-    public void Another_environment_is_refused_before_anything_is_sent(string environment)
+    [InlineData("production", "pro…")]
+    [InlineData("qa", "qa")]
+    [InlineData("", "")]
+    public void Another_environment_is_refused_before_anything_is_sent_showing_at_most_three_characters(string environment, string shown)
     {
+        // Verdien kan komme fra en ${VAR} (Queuey F2.3-review, 2026-10-06), så feilen viser den som CLI-en viser et ukjent ord.
         var refusal = Assert.Throws<QueueyConfigurationException>(
             () => DeploymentFile.Parse($$"""{ "workspace": { "environment": "{{environment}}" } }""").Resolve());
 
-        Assert.Equal($"workspace.environment must be one of dev, test, staging, prod; got '{environment}'.", refusal.Message);
+        Assert.Equal($"workspace.environment must be one of dev, test, staging, prod; got '{shown}'.", refusal.Message);
     }
 
     [Fact]

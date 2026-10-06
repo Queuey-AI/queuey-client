@@ -270,7 +270,7 @@ public sealed class DeploymentFile
                 RetentionDays = Workspace.RetentionDays,
                 Idempotent = Workspace.Idempotent,
                 Backoff = Workspace.Backoff,
-                Ingress = Workspace.Ingress,
+                Ingress = ExpandIngress(Workspace.Ingress, lookup, "workspace.ingress"),
                 Delivery = Workspace.Delivery is null ? null : new WorkspaceDelivery
                 {
                     BaseUrl = DeploymentVariables.Expand(Workspace.Delivery.BaseUrl, lookup, "workspace.delivery.baseUrl"),
@@ -299,9 +299,10 @@ public sealed class DeploymentFile
                 Filter = q.Filter,
                 // Ingress på kø-nivå ble ikke kopiert her før (2026-09-23), så apply, check og
                 // dry-run droppet den stille: alle tre ekspanderer fila først.
-                Ingress = q.Ingress,
+                Ingress = ExpandIngress(q.Ingress, lookup, $"queues.{entry.Key}.ingress"),
                 Delivery = q.Delivery is null ? null : new QueueDelivery
                 {
+                    Kind = DeploymentVariables.Expand(q.Delivery.Kind, lookup, $"queues.{entry.Key}.delivery.kind"),
                     Url = DeploymentVariables.Expand(q.Delivery.Url, lookup, $"queues.{entry.Key}.delivery.url"),
                     Inherit = q.Delivery.Inherit,
                     AuthMode = q.Delivery.AuthMode,
@@ -317,6 +318,22 @@ public sealed class DeploymentFile
         return expanded;
     }
 
+    // Kilden til en signert forespørsel er en credential per workspace, så navnet kan komme fra en variabel, som for levering.
+    // Resten av ingressen reiser uendret mellom miljøene.
+    private static DeploymentIngress? ExpandIngress(DeploymentIngress? ingress, Func<string, string?>? lookup, string where)
+        => ingress?.SignedRequest is not { } signed ? ingress : new DeploymentIngress
+        {
+            AuthMode = ingress.AuthMode,
+            EventType = ingress.EventType,
+            GroupKey = ingress.GroupKey,
+            SuccessStatusCode = ingress.SuccessStatusCode,
+            SignedRequest = new DeploymentSignedRequest
+            {
+                Template = signed.Template,
+                CredentialRef = DeploymentVariables.Expand(signed.CredentialRef, lookup, $"{where}.signedRequest.credentialRef"),
+            },
+        };
+
     /// <summary>Every environment variable this file references, for a dry run's report.</summary>
     public IReadOnlyList<string> ReferencedVariables()
     {
@@ -325,11 +342,14 @@ public sealed class DeploymentFile
         names.AddRange(DeploymentVariables.Referenced(Workspace?.Environment));
         names.AddRange(DeploymentVariables.Referenced(Workspace?.Delivery?.BaseUrl));
         names.AddRange(DeploymentVariables.Referenced(Workspace?.Delivery?.CredentialRef));
+        names.AddRange(DeploymentVariables.Referenced(Workspace?.Ingress?.SignedRequest?.CredentialRef));
 
         foreach (DeploymentQueue q in Queues.Values)
         {
+            names.AddRange(DeploymentVariables.Referenced(q?.Delivery?.Kind));
             names.AddRange(DeploymentVariables.Referenced(q?.Delivery?.Url));
             names.AddRange(DeploymentVariables.Referenced(q?.Delivery?.CredentialRef));
+            names.AddRange(DeploymentVariables.Referenced(q?.Ingress?.SignedRequest?.CredentialRef));
         }
 
         var seen = new List<string>();
@@ -365,6 +385,7 @@ public sealed class DeploymentFile
             QueueyName.EnsureValid(entry.Key, "queue name");
             declared.Ingress?.Validate($"queues.{entry.Key}.ingress");
             ValidateDelivery($"queues.{entry.Key}.delivery", declared.Delivery?.AuthMode, method: null);
+            DeploymentDeliveryKind? kind = DeploymentDeliveryKinds.Parse(declared.Delivery?.Kind, $"queues.{entry.Key}.delivery.kind");
 
             var definition = QueueDefinitionFactory.FromName(entry.Key, new QueueOptions
             {
@@ -380,7 +401,7 @@ public sealed class DeploymentFile
             });
 
             plans.Add(new DeploymentQueuePlan(definition, declared.Delivery, declared.Ingress,
-                DeploymentQueueModes.Parse(declared.Mode, $"queues.{entry.Key}.mode")));
+                DeploymentQueueModes.Parse(declared.Mode, $"queues.{entry.Key}.mode"), kind));
         }
 
         return plans;
@@ -395,7 +416,7 @@ public sealed class DeploymentFile
 
         if (!DeploymentWorkspace.EnvironmentValues.Contains(environment.Trim(), StringComparer.OrdinalIgnoreCase))
             throw new QueueyConfigurationException(
-                $"workspace.environment must be one of {string.Join(", ", DeploymentWorkspace.EnvironmentValues)}; got '{environment}'.");
+                $"workspace.environment must be one of {string.Join(", ", DeploymentWorkspace.EnvironmentValues)}; got '{ShownValue.Of(environment)}'.");
     }
 
     private static void ValidateDelivery(string where, string? authMode, string? method)
@@ -434,6 +455,27 @@ public sealed class DeploymentFile
                 if (DeliveryFilter.ConditionProblem(conditions[i]) is { } problem)
                     problems.Add(FormattableString.Invariant($"queues.{entry.Key}.filter.conditions[{i}] ({DeliveryFilter.Describe(conditions[i])}): {problem}"));
             }
+        }
+
+        return problems;
+    }
+
+    /// <summary>
+    /// Every delivery destination in the file that Queuey's delivery never reaches, with where it is:
+    /// <c>queues.orders.delivery.url: it points at localhost, …</c>. A URL on this machine or at a private address is one,
+    /// and the way to a service on the developer's machine is <c>"kind": "localForward"</c> with <c>queuey listen</c>. Empty
+    /// when there is none. Read the expanded file: a <c>${VAR}</c> is checked once it has a value.
+    /// </summary>
+    public IReadOnlyList<string> LocalDestinationProblems()
+    {
+        var problems = new List<string>();
+        if (DeploymentDestinations.LocalTargetRefusal(Workspace?.Delivery?.BaseUrl) is { } workspace)
+            problems.Add($"workspace.delivery.baseUrl: {workspace}");
+
+        foreach (KeyValuePair<string, DeploymentQueue> entry in Queues)
+        {
+            if (DeploymentDestinations.LocalTargetRefusal(entry.Value?.Delivery?.Url) is { } queue)
+                problems.Add($"queues.{entry.Key}.delivery.url: {queue}");
         }
 
         return problems;
@@ -579,16 +621,23 @@ public sealed class DeploymentWorkspace
 public sealed class DeploymentQueuePlan
 {
     internal DeploymentQueuePlan(QueueDefinition definition, QueueDelivery? delivery, DeploymentIngress? ingress = null,
-        DeploymentQueueMode? mode = null)
+        DeploymentQueueMode? mode = null, DeploymentDeliveryKind? kind = null)
     {
         Definition = definition;
         Delivery = delivery is null || delivery.IsEmpty ? null : delivery;
         Ingress = ingress is null || ingress.IsEmpty ? null : ingress;
         Mode = mode;
+        Kind = kind;
     }
 
     /// <summary>The mode the file declares, or <c>null</c> to leave it (see <see cref="DeploymentQueue.Mode"/>).</summary>
     public DeploymentQueueMode? Mode { get; }
+
+    /// <summary>
+    /// Where the file sends the queue's events, or <c>null</c> to leave it (see <see cref="QueueDelivery.Kind"/>). Set
+    /// apart from <see cref="Delivery"/>, which is the destination patch: a kind alone sends none.
+    /// </summary>
+    public DeploymentDeliveryKind? Kind { get; }
 
     /// <summary>The queue to converge (name + behaviour).</summary>
     public QueueDefinition Definition { get; }
@@ -656,5 +705,53 @@ public static class DeploymentQueueModes
                 throw new QueueyConfigurationException(
                     $"{where} must be one of {string.Join(", ", Values)}; got '{text}'.");
         }
+    }
+}
+
+/// <summary>Where a queue's events go: to its HTTP destination, or to a connected local listener.</summary>
+public enum DeploymentDeliveryKind
+{
+    /// <summary>Events are delivered over HTTP to the queue's destination.</summary>
+    Http,
+
+    /// <summary>
+    /// Events go to a connected <c>queuey listen</c> session, which forwards them to the address it was started with. While
+    /// no session is connected, they wait.
+    /// </summary>
+    LocalForward,
+}
+
+/// <summary>The text and wire forms of <see cref="DeploymentDeliveryKind"/>.</summary>
+public static class DeploymentDeliveryKinds
+{
+    /// <summary>The file's text form: <c>http</c> or <c>localForward</c>.</summary>
+    public static string ToFileText(this DeploymentDeliveryKind kind) => kind == DeploymentDeliveryKind.LocalForward ? "localForward" : "http";
+
+    /// <summary>The kind Queuey reports in a config read-back (<c>Http</c> or <c>LocalForward</c>), or null for another value.</summary>
+    internal static DeploymentDeliveryKind? FromBackend(string? text) => text?.Trim().ToLowerInvariant() switch
+    {
+        "http" or "0" => DeploymentDeliveryKind.Http,
+        "localforward" or "1" => DeploymentDeliveryKind.LocalForward,
+        _ => null,
+    };
+
+    /// <summary>
+    /// Parses a file's <c>delivery.kind</c>. Null stays null (leave the kind alone), and so does a <c>${VAR}</c> that has not
+    /// been expanded, since a dry run reads the file as written; it is checked once expanded. Anything else is a
+    /// configuration error that names the values.
+    /// </summary>
+    internal static DeploymentDeliveryKind? Parse(string? text, string where)
+    {
+        if (text is null || text.IndexOf("${", StringComparison.Ordinal) >= 0)
+            return null;
+
+        return text.Trim().ToLowerInvariant() switch
+        {
+            "http" => DeploymentDeliveryKind.Http,
+            "localforward" => DeploymentDeliveryKind.LocalForward,
+            // Verdien kan komme fra en ${VAR}, så feilen viser høyst tre tegn av den (ShownValue).
+            _ => throw new QueueyConfigurationException(
+                $"{where} must be one of {string.Join(", ", QueueDelivery.KindValues)}; got '{ShownValue.Of(text)}'."),
+        };
     }
 }

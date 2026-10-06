@@ -39,8 +39,14 @@ public sealed class QueueSyncResult : ISyncRunResult
     /// <summary>Queues this run created, as opposed to found already there.</summary>
     public int Created => Applied.Count(r => r.Created);
 
+    /// <summary>
+    /// What the run saw about the workspace rather than one queue, such as an ingress every inheriting queue shares that
+    /// waits for its credential. Also in <see cref="Warnings"/>, first.
+    /// </summary>
+    public IReadOnlyList<string> WorkspaceWarnings { get; init; } = Array.Empty<string>();
+
     /// <inheritdoc />
-    public IReadOnlyList<string> Warnings => Applied.SelectMany(r => r.Warnings).ToArray();
+    public IReadOnlyList<string> Warnings => WorkspaceWarnings.Concat(Applied.SelectMany(r => r.Warnings)).ToArray();
 
     /// <summary>Throws a <see cref="QueueySyncException"/> aggregating every failure, if anything failed.</summary>
     public void ThrowIfAnyFailed()

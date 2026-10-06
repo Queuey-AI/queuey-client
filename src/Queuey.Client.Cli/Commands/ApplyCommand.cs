@@ -43,6 +43,10 @@ internal static class ApplyCommand
             // Network-free: ParseNamed has expanded and resolved the file, so names, policy and an unset ${VAR}
             // already failed there, in the dry run, rather than during the deploy it was meant to protect.
 
+            // En leverings-URL på maskinen eller et privat nett avvises som apply avviser den (Queuey F2.3), med de utvidede
+            // verdiene: ParseNamed har alt utvidet fila, så variablene finnes.
+            DeploymentDestinations.EnsureReachable(file.Expand(), CliHost.Resolve(map).ResolvedApiBase());
+
             // Det som vises, er fila slik den står, med ${VAR} uutvidet. Før skrev --json de utvidede verdiene, også et
             // token i en ?code=, mens teksten viste workspacet uutvidet og køene utvidet (review 2026-10-05).
             IReadOnlyList<DeploymentQueuePlan> plans = file.Resolve();
@@ -171,6 +175,7 @@ internal static class ApplyCommand
             if (w.Ingress?.AuthMode is { } auth) parts.Add($"ingressAuth={auth}");
             if (w.Ingress?.EventType is { } et) parts.Add($"eventType={et.From}:{et.Name}");
             if (w.Ingress?.GroupKey is { } gk) parts.Add($"groupKey={gk.From}:{gk.Name}");
+            if (w.Ingress?.SignedRequest is { } sr) parts.Add(SignedRequestText(sr));
             if (w.Delivery?.BaseUrl is { } url) parts.Add($"baseUrl={url}");
 
             if (parts.Count > 0)
@@ -191,10 +196,12 @@ internal static class ApplyCommand
                 p.Mode is { } mode ? $"mode={mode.ToFileText()}" : "mode=(deliver when it has a destination, if new)",
                 dest,
             };
+            if (p.Kind is { } kind) parts.Add($"kind={kind.ToFileText()}");
             QueuePolicy policy = p.Definition.Policy;
             if (policy.Ordering is not null) parts.Add($"ordering={policy.Ordering}");
             parts.AddRange(Backoff(policy.Backoff));
             if (policy.Filter is { } filter) parts.Add($"filter=({filter})");
+            if (p.Ingress?.SignedRequest is { } sr) parts.Add(SignedRequestText(sr));
 
             Console.WriteLine($"  • {p.Definition.Name}\t{string.Join(" ", parts)}");
             foreach (string note in CeilingNotes(policy.Backoff))
@@ -217,6 +224,10 @@ internal static class ApplyCommand
             yield return FormattableString.Invariant(
                 $"backoff.maxDelayMs={maxMs} is above the {RetryBackoff.MaxDelayCeilingMs} (24 hours) the longest wait may be: apply refuses it unless that wait is already in place.");
     }
+
+    // Malen og credential-navnet, aldri en hemmelighet: fila har ingen.
+    private static string SignedRequestText(DeploymentSignedRequest signed)
+        => signed.CredentialRef is { } credential ? $"signedRequest={signed.Template}:{credential}" : $"signedRequest={signed.Template}";
 
     private static IEnumerable<string> Backoff(RetryBackoff? backoff)
     {
@@ -322,6 +333,8 @@ internal static class ApplyCommand
                 : null,
         },
         delivery = ToJson(p.Delivery),
+        // Typen står for seg, fordi den ikke er en del av leveringens PATCH: en fil som bare sier kind, har delivery null her.
+        kind = p.Kind?.ToFileText(),
         ingress = ToJson(p.Ingress),
         notes = CeilingNotes(p.Definition.Policy.Backoff).ToArray(),
     };
@@ -364,6 +377,7 @@ internal static class ApplyCommand
         eventType = ToJson(i.EventType),
         groupKey = ToJson(i.GroupKey),
         i.SuccessStatusCode,
+        signedRequest = i.SignedRequest is { } sr ? new { sr.Template, sr.CredentialRef } : null,
     };
 
     private static object? ToJson(ContextSource? s) => s is null ? null : new { s.From, s.Name };

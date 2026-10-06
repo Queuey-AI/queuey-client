@@ -327,9 +327,18 @@ its own rather than an `apply` flag, so a CLI too old to know it answers "Unknow
 running the apply you meant to plan. For the same reason every command rejects an option it does not
 take — a typo like `--paln` fails with exit 2 and the options that command accepts. `queuey plan --json`
 prints the plan as an object a script can read: `schemaVersion` (1, so check it first), `file`, `tenant`,
-`wouldSucceed`, `changeCount`, and `steps`, each with its `target`, `aspect`, `creates`, `changes`, `notes`
-and `error`. A change's `from` and `to` are the values as Queuey's config reads them back, so a number,
-a boolean or an object stays JSON. With `--json`, before or after the command, every error is JSON too.
+`planId`, `planHash`, `wouldSucceed`, `changeCount`, `queues`, and `steps`, each with its `target`, `aspect`,
+`creates`, `changes`, `notes`, `state`, `desired` and `error`. A change's `from` and `to` are the values as
+Queuey's config reads them back, so a number, a boolean or an object stays JSON. With `--json`, before or
+after the command, every error is JSON too.
+
+Each entry in `queues` has the queue's `name`, its `publicId` (null for one apply would create) and its
+`ingressUrl`, where producers publish to it, so a provider can be pointed at a queue in the same change that
+creates it. `planHash` is `sha256:` over what apply would change and the server state it rests on: each
+step's `state` is the hash Queuey gave the config its dry run started from, and `desired` is what apply
+would send to a queue it creates. The order of the queues, the file's formatting and the plan's notes do
+not count, so the same file against the same state gives the same hash, and `planId` is `plan_` and the
+start of it. When the state moves, or the file changes what apply does, the hash changes.
 
 `queuey apply --dry-run --json` prints what the file declares, checked locally, for a script or an
 agent to read:
@@ -338,7 +347,7 @@ agent to read:
 {
   "schemaVersion": 2,
   "workspace": { "environment": "staging", "policy": { … }, "delivery": { … }, "ingress": null, "notes": [] },
-  "queues": [ { "name": "orders", "mode": "deliver", "policy": { … }, "delivery": null, "ingress": null, "notes": [] } ]
+  "queues": [ { "name": "orders", "mode": "deliver", "policy": { … }, "delivery": null, "kind": null, "ingress": null, "notes": [] } ]
 }
 ```
 
@@ -346,7 +355,8 @@ agent to read:
 asking Queuey, such as a wait above its ceiling. Each declaration carries every field the file can set
 on the workspace or the queue, in the file's words, grouped as Queuey's config reads them back: the
 workspace's `environment`, behaviour under `policy`, then `delivery` and `ingress` (where `eventType` is
-`{ "from", "name" }`). A
+`{ "from", "name" }` and `signedRequest` is `{ "template", "credentialRef" }`), and a queue's delivery `kind`
+on its own. A
 field the file leaves out is null, and a `${VAR}` is shown as written, not expanded. Check
 `schemaVersion` first: version 1, a bare array of queues, is what 0.1.0-preview.8 printed.
 
@@ -523,6 +533,69 @@ is a plain number like `1.5`: no comma decimals, thousands separators, currency 
 `exists` takes no value, and a field is looked up exactly as written, so whitespace around it is
 refused rather than trimmed. A condition Queuey stored before it checked these is pulled as it is,
 with a warning, and `apply` refuses the file until it is fixed.
+
+### A provider's webhook, end to end
+
+A provider such as Stripe signs every webhook. The queue's ingress verifies that signature, and in a
+development workspace its events go to your machine through a local listener rather than to a URL:
+
+```jsonc
+{
+  "workspace": {
+    "environment": "dev",
+    "delivery": { "baseUrl": "https://api.example.com" }   // where queues deliver over HTTP; a path appends to it
+  },
+  "queues": {
+    "stripe": {
+      "ingress": {
+        "authMode": "SignedRequest",
+        // Verify Stripe's signature with the secret stored as stripe-whsec. A name, never the secret.
+        "signedRequest": { "template": "stripe", "credentialRef": "stripe-whsec" }
+      },
+      "delivery": {
+        "url": "/api/stripe",          // the path, which the listener forwards to on your machine
+        "kind": "localForward",        // to a connected `queuey listen` session, not over HTTP
+        "signing": { "enabled": true, "templateKey": "stripe" }   // keep Stripe's signature valid for constructEvent
+      }
+    }
+  }
+}
+```
+
+```bash
+queuey plan                    # shows the queue's ingress URL before it exists
+queuey apply                   # creates the queue; its ingress refuses every event until stripe-whsec is stored
+stripe listen --forward-to <ingress URL>        # prints a test signing secret, whsec_…
+STRIPE_WHSEC=whsec_… queuey credentials set --name stripe-whsec --type HmacSigning --key-id stripe-whsec --from-env STRIPE_WHSEC
+queuey apply                   # points the ingress at the stored secret
+queuey listen --queue stripe --forward-to http://localhost:5000
+```
+
+**A credential that is not stored yet is accepted.** `apply` keeps the name the ingress waits for, and
+the ingress refuses every event until a credential by that name is stored and `apply` runs again, which
+points the ingress at it. The plan, `apply` and Queuey's setup review all say so, with the command that
+stores it, and `apply --check` reports drift once it is stored. `template` is one of Queuey's signed-request
+templates; `queuey` is Queuey's own scheme, which verifies with the sending API client's signing key and
+takes no `credentialRef`. A `signedRequest` is checked while `authMode` is `SignedRequest` or
+`ApiKeyAndSignedRequest`, so a file that declares one with `None` or `ApiKey` beside it is refused.
+Since the name shows up in the commands Queuey suggests, `credentialRef` uses only letters, digits and
+`. _ : @ / -`, starting with a letter or digit; a stored credential whose name has other characters is
+named by its `cred_…` id. A value that looks like a secret (a known prefix such as `whsec_`, hex, a UUID,
+base64) is refused, and never repeated.
+
+**`kind` is where a queue's events go:** `http`, to its URL, or `localForward`, to a connected
+`queuey listen` session. While no session is connected, the events wait. The address a listener forwards to
+belongs to its session (`--forward-to`) and never to the file, and the queue keeps its URL for when it
+delivers over HTTP again. Omit `kind` to leave it as it is. A file applied to several workspaces takes it
+from a variable, such as `"kind": "${QUEUEY_STRIPE_DELIVERY_KIND}"`, set to `localForward` in development
+and `http` elsewhere; `pull --as` writes that variable for you. Routing a queue to a listener needs
+`queue.listen` on it.
+
+**A delivery URL on your machine is refused.** Queuey's delivery never reaches `localhost`, `*.localhost`,
+a loopback address or a private one, so `plan`, `apply` and `apply --dry-run` refuse such a `url` or
+`baseUrl` before anything is sent, and point to `"kind": "localForward"` instead. Queuey refuses the write
+too. Against a Queuey that itself runs on your machine or a private network, only the server knows what its
+delivery may reach, so the CLI leaves the check to it.
 
 ### Prove it delivers: `queuey verify`
 

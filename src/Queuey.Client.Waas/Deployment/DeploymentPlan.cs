@@ -18,6 +18,22 @@ public sealed class DeploymentPlan
     /// <summary>The workspace the plan was made against.</summary>
     public string Tenant { get; init; } = default!;
 
+    /// <summary>
+    /// The plan's id: <c>plan_</c> and the start of <see cref="PlanHash"/>, so the same file against the same state gives
+    /// the same id. Opaque: compare it, never parse it.
+    /// </summary>
+    public string PlanId { get; init; } = default!;
+
+    /// <summary>
+    /// <c>sha256:…</c> over what apply would change and the server state it rests on, normalized so that the order of the
+    /// queues and the file's formatting do not count (<see cref="DeploymentPlanHash"/>). A plan made again after the state
+    /// moved, or after the file changed what apply does, has another hash.
+    /// </summary>
+    public string PlanHash { get; init; } = default!;
+
+    /// <summary>One entry per queue the file declares: its ingress URL, and whether it exists yet.</summary>
+    public IReadOnlyList<DeploymentPlanQueue> Queues { get; init; } = Array.Empty<DeploymentPlanQueue>();
+
     /// <summary>One entry per write apply would send, in the order it would send them.</summary>
     public IReadOnlyList<DeploymentPlanStep> Steps { get; init; } = Array.Empty<DeploymentPlanStep>();
 
@@ -26,6 +42,22 @@ public sealed class DeploymentPlan
 
     /// <summary>How many values would change, counting a queue that would be created as one.</summary>
     public int ChangeCount => Steps.Sum(s => s.Changes.Count + (s.Creates ? 1 : 0));
+}
+
+/// <summary>A queue the file declares, as the plan sees it.</summary>
+public sealed class DeploymentPlanQueue
+{
+    /// <summary>The queue's name.</summary>
+    public string Name { get; init; } = default!;
+
+    /// <summary>
+    /// Where producers publish to it: <c>{ingress}/events/{tenant}/{name}</c>. Known before the queue exists, since it is
+    /// built from the name, so a provider can be pointed at it in the same change.
+    /// </summary>
+    public string IngressUrl { get; init; } = default!;
+
+    /// <summary>The queue's id, or null when apply would create it.</summary>
+    public string? PublicId { get; init; }
 }
 
 /// <summary>One write in a <see cref="DeploymentPlan"/>.</summary>
@@ -50,6 +82,16 @@ public sealed class DeploymentPlanStep
 
     /// <summary>The refusal the write would get — code, message and what to do — or null.</summary>
     public QueueyException? Error { get; init; }
+
+    /// <summary>
+    /// What the step rests on, as the plan's hash covers it: the server's <c>stateHash</c> of the config its dry run
+    /// started from, or the mode a queue has when its declared mode needs no write. Null for a refused step and a queue
+    /// apply would create.
+    /// </summary>
+    public string? State { get; init; }
+
+    /// <summary>For a queue apply would create: what it would send once the queue exists, which no dry run can answer for.</summary>
+    public JsonElement? Desired { get; init; }
 }
 
 /// <summary>One value that would change: a path into the config read-back, and the JSON on each side.</summary>
@@ -121,6 +163,9 @@ internal sealed class ConfigPlanResponse : DryRunAnswer
     public string? Target { get; set; }
     public List<ConfigChangeResponse>? Changes { get; set; }
     public List<string>? Notes { get; set; }
+
+    // sha256 over den kanoniske lesingen skrivingen startet fra (Queuey F2.3). Null fra et API som er eldre enn feltet.
+    public string? StateHash { get; set; }
 }
 
 internal sealed class ConfigChangeResponse
@@ -147,11 +192,13 @@ internal sealed class DeploymentPlanner
 
     private readonly QueueyControlPlaneClient _controlPlane;
     private readonly IQueueyManagement _management;
+    private readonly Uri _ingressBase;
 
-    public DeploymentPlanner(QueueyControlPlaneClient controlPlane, IQueueyManagement management)
+    public DeploymentPlanner(QueueyControlPlaneClient controlPlane, IQueueyManagement management, Uri ingressBase)
     {
         _controlPlane = controlPlane;
         _management = management;
+        _ingressBase = ingressBase;
     }
 
     /// <summary>One write the plan sends: where it goes, what it carries, and whether it changes anything as a real write.</summary>
@@ -196,7 +243,22 @@ internal sealed class DeploymentPlanner
         foreach (DeploymentQueuePlan plan in plans)
             steps.AddRange(await PlanQueueAsync(plan, tenant, deliveries, existing, answered, workspaceBase, ct).ConfigureAwait(false));
 
-        return new DeploymentPlan { Tenant = tenant, Steps = steps };
+        List<DeploymentPlanQueue> queues = plans.Select(p => new DeploymentPlanQueue
+        {
+            Name = p.Definition.Name,
+            IngressUrl = QueueyUri.Build(_ingressBase, null, "events", tenant, p.Definition.Name).ToString(),
+            PublicId = existing.TryGetValue(p.Definition.Name, out QueueListItem? row) ? row.PublicId : null,
+        }).ToList();
+
+        string hash = DeploymentPlanHash.Of(tenant, queues, steps);
+        return new DeploymentPlan
+        {
+            Tenant = tenant,
+            PlanId = DeploymentPlanHash.IdOf(hash),
+            PlanHash = hash,
+            Queues = queues,
+            Steps = steps,
+        };
     }
 
     /// <summary>The workspace's writes, in the order apply sends them: environment, ingress, policy, delivery.</summary>
@@ -315,7 +377,9 @@ internal sealed class DeploymentPlanner
             return steps;
         }
 
-        bool hasDestination = IsAbsoluteUrl(plan.Delivery?.Url) || applied.HasDeliveryTarget || workspaceBase;
+        // En lokal lytter er et sted å levere (Queuey F2.3): eventene venter på økten.
+        bool forwards = plan.Kind == DeploymentDeliveryKind.LocalForward;
+        bool hasDestination = forwards || IsAbsoluteUrl(plan.Delivery?.Url) || applied.HasDeliveryTarget || workspaceBase;
 
         if (applied.Created || applied.PublicId is not { } queueId)
         {
@@ -325,21 +389,29 @@ internal sealed class DeploymentPlanner
             {
                 plan.Mode == DeploymentQueueMode.LogOnly
                     ? "It would log events without delivering them (logOnly)."
-                    : hasDestination
-                        ? "It would deliver: it has a destination."
-                        : "It would log events until it has a destination: give it a delivery.url, or set workspace.delivery.baseUrl.",
+                    : forwards
+                        ? "It would deliver to a local listener: its events wait until queuey listen connects."
+                        : hasDestination
+                            ? "It would deliver: it has a destination."
+                            : "It would log events until it has a destination: give it a delivery.url, or set workspace.delivery.baseUrl.",
             };
-            if (!plan.Definition.Policy.IsEmpty || plan.Ingress is not null || plan.Delivery is not null)
+            if (!plan.Definition.Policy.IsEmpty || plan.Ingress is not null || plan.Delivery is not null || plan.Kind is not null)
                 notes.Add("Its policy, ingress and delivery passed the checks the CLI makes; Queuey checks the rest, such as a signing template, once the queue exists.");
+            // Navnet er sjekket mot formen (DeploymentSignedRequest.Validate); Showable holder det ute av kommandoen like fullt.
+            if (plan.Ingress?.SignedRequest?.CredentialRef is { } awaited && !awaited.StartsWith("cred_", StringComparison.Ordinal)
+                && !deliveries.KnownCredential(awaited))
+                notes.Add(CredentialNameRules.Showable(awaited) is { } shown
+                    ? $"No credential named '{shown}' is stored in this workspace yet, so its ingress would refuse every event " +
+                      $"until it is: queuey credentials set --name {shown} --type HmacSigning --key-id {shown} --from-env <VARIABLE>, then apply again."
+                    : "The credential its ingress names is not stored in this workspace yet, so its ingress would refuse every event " +
+                      "until it is: queuey credentials set --name <NAME> --type HmacSigning --key-id <NAME> --from-env <VARIABLE>, then apply again.");
 
-            DeploymentPlanStep create = new() { Target = target, Aspect = "queue", Creates = true, Notes = notes };
-            if (plan.Mode == DeploymentQueueMode.Deliver && !hasDestination)
-                create = new DeploymentPlanStep
-                {
-                    Target = target, Aspect = "queue", Creates = true, Notes = notes,
-                    Error = DeliverWithoutDestination(name),
-                };
-            steps.Add(create);
+            steps.Add(new DeploymentPlanStep
+            {
+                Target = target, Aspect = "queue", Creates = true, Notes = notes,
+                Desired = DesiredForNewQueue(plan, deliveries),
+                Error = plan.Mode == DeploymentQueueMode.Deliver && !hasDestination ? DeliverWithoutDestination(name) : null,
+            });
             return steps;
         }
 
@@ -352,6 +424,11 @@ internal sealed class DeploymentPlanner
         if (deliveries.Queues.TryGetValue(name, out QueueDelivery? delivery))
             steps.Add(await StepAsync(new PlannedWrite(target, "delivery", Patch, QueueyManagement.WireOf(delivery), new[] { "queues", queueId, "delivery" }), answered, ct).ConfigureAwait(false));
 
+        // Leveringstypen som apply setter den (Queuey F2.3), alltid som dry run: den har ingen kolonne i lista over køer.
+        if (plan.Kind is { } kind)
+            steps.Add(await StepAsync(new PlannedWrite(target, "kind", Patch, new LocalForwardRequest { Enabled = kind == DeploymentDeliveryKind.LocalForward },
+                new[] { "queues", queueId, "local-forward" }), answered, ct).ConfigureAwait(false));
+
         // Modus som apply ville satt den: bare en deklarert modus endres på en kø som finnes, og
         // den gamle Paused-modusen røres aldri.
         existing.TryGetValue(name, out QueueListItem? row);
@@ -361,16 +438,42 @@ internal sealed class DeploymentPlanner
             if (string.Equals(row?.Mode, "Paused", StringComparison.OrdinalIgnoreCase))
                 steps.Add(new DeploymentPlanStep
                 {
-                    Target = target, Aspect = "mode",
+                    Target = target, Aspect = "mode", State = "mode:Paused",
                     Notes = new[] { "It has the old Paused mode, which a deploy does not change: resume it in the Queuey console first." },
                 });
-            else if (declared == DeploymentQueueMode.Deliver && !(IsAbsoluteUrl(plan.Delivery?.Url) || (row?.HasDeliveryTarget ?? false) || workspaceBase))
+            else if (declared == DeploymentQueueMode.Deliver && !(forwards || IsAbsoluteUrl(plan.Delivery?.Url) || (row?.HasDeliveryTarget ?? false) || workspaceBase))
                 steps.Add(new DeploymentPlanStep { Target = target, Aspect = "mode", Error = DeliverWithoutDestination(name) });
             else if (declared != current)
                 steps.Add(await StepAsync(new PlannedWrite(target, "mode", Patch, new QueueModeChangeRequest { Mode = declared.ToWire() }, new[] { "queues", queueId, "mode-change" }), answered, ct).ConfigureAwait(false));
+            else
+                // Ingen skriving trengs, men planen hviler på modusen køen har: endres den før apply, setter apply den tilbake.
+                steps.Add(new DeploymentPlanStep { Target = target, Aspect = "mode", State = "mode:" + row?.Mode });
         }
 
         return steps;
+    }
+
+    /// <summary>
+    /// What apply sends to a queue it creates, once it exists: the ingress, policy, delivery (with credential names
+    /// resolved to ids), kind and mode the file declares. No dry run can answer for a queue that does not exist, so the
+    /// plan's hash covers this instead.
+    /// </summary>
+    private static JsonElement? DesiredForNewQueue(DeploymentQueuePlan plan, ResolvedDeliveries deliveries)
+    {
+        var desired = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["ingress"] = plan.Ingress is { } ingress ? QueueyManagement.WireOf(ingress) : null,
+            ["policy"] = plan.Definition.Policy.IsEmpty ? null : QueueyService.ToPatch(plan.Definition.Policy),
+            ["delivery"] = deliveries.Queues.TryGetValue(plan.Definition.Name, out QueueDelivery? delivery) ? QueueyManagement.WireOf(delivery) : null,
+            ["kind"] = plan.Kind?.ToFileText(),
+            ["mode"] = plan.Mode?.ToFileText(),
+        };
+
+        if (desired.Values.All(v => v is null))
+            return null;
+
+        using JsonDocument doc = JsonDocument.Parse(JsonSerializer.Serialize(desired, QueueyJson.Options));
+        return doc.RootElement.Clone();
     }
 
     private async Task<DeploymentPlanStep> StepAsync(PlannedWrite write, Dictionary<string, DryRunAnswer> answered, CancellationToken ct)
@@ -386,6 +489,7 @@ internal sealed class DeploymentPlanner
                     .Select(c => new PlannedChange { Path = c.Path ?? string.Empty, From = PlannedChange.Raw(c.From), To = PlannedChange.Raw(c.To) })
                     .ToList(),
                 Notes = plan.Notes ?? new List<string>(),
+                State = plan.StateHash,
             };
         }
         catch (QueueyException ex) when (ex is not DryRunIgnoredException)
