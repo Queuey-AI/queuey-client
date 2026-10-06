@@ -30,7 +30,12 @@ public sealed class FlowAdvice
 /// </summary>
 public static class FlowAdvisor
 {
-    public static FlowAdvice Advise(DesiredFlow intent, FlowFacts facts, string root, string? queue = null, Advice? sending = null)
+    /// <param name="profile">
+    /// The deployment file's profile the flow goes into, as <c>advise --profile</c> names it: one the file has, or the name of
+    /// the first in a new file. Null lets advise choose by the environment each profile gives.
+    /// </param>
+    public static FlowAdvice Advise(DesiredFlow intent, FlowFacts facts, string root, string? queue = null, Advice? sending = null,
+        string? profile = null)
     {
         if (intent is null) throw new ArgumentNullException(nameof(intent));
         if (facts is null) throw new ArgumentNullException(nameof(facts));
@@ -39,12 +44,12 @@ public static class FlowAdvisor
         if (queue is not null)
             flow.Set("queue", FlowValue.Of(queue, Provenance.Stated));
 
-        new Enrichment(flow, facts, root, seed: null).Run();
+        new Enrichment(flow, facts, root, seed: null, profile).Run();
         return new FlowAdvice
         {
             Flow = flow,
             Existing = facts.Queuey.Select(f => f.ToEvidence()).ToArray(),
-            Design = flow.Conflicts.Count == 0 ? FlowDesigner.Design(flow, facts, sending) : null,
+            Design = flow.Conflicts.Count == 0 ? FlowDesigner.Design(flow, facts, sending, profile) : null,
         };
     }
 
@@ -156,15 +161,17 @@ internal sealed class Enrichment
     private readonly FlowFacts _facts;
     private readonly string _root;
     private readonly Handler? _seed;
+    private readonly string? _profile;
     private readonly List<string> _handlerFiles = new();
     private RouteFinding? _route;
 
-    public Enrichment(DesiredFlow flow, FlowFacts facts, string root, Handler? seed)
+    public Enrichment(DesiredFlow flow, FlowFacts facts, string root, Handler? seed, string? profile = null)
     {
         _flow = flow;
         _facts = facts;
         _root = root;
         _seed = seed;
+        _profile = profile;
     }
 
     public void Run()
@@ -803,88 +810,274 @@ internal sealed class Enrichment
 
     private void ResolveEnvironment()
     {
-        string? existing = _facts.DeployFile?.Environment is { } env && env.IndexOf("${", StringComparison.Ordinal) < 0
-            ? env.Trim().ToLowerInvariant()
-            : null;
+        ExistingDeployFile? file = _facts.DeployFile;
+        string? existing = file is null ? null : FileEnvironments.Fixed(file);
         FlowEvidence[] evidence = existing is null
             ? Array.Empty<FlowEvidence>()
-            : new[] { new FlowEvidence(_facts.DeployFile!.File, null, $"the deployment file's workspace is {existing}") };
+            : new[] { new FlowEvidence(file!.File, null, $"the deployment file's workspace is {existing}") };
+
+        // Et miljø fila gir på en måte advise ikke kan følge, eller som apply nekter, er en konflikt før noe annet (review av
+        // #60): ${A}x og ${A}${B} er ingen enkelt variabel, og en ugyldig profilverdi faller ikke tilbake på standardverdien.
+        if (file is not null && FileEnvironments.Unreadable(file))
+        {
+            Conflict("unsupported", "environment", null, null,
+                new[] { new FlowEvidence(file.File, null, "the deployment file's workspace.environment") },
+                $"workspace.environment in {file.File} reads variables in a form advise cannot follow: it reads a fixed environment " +
+                "or exactly one ${VAR}, so it cannot tell which environment the workspace is.",
+                $"Make workspace.environment one variable, such as ${{{DeploymentTemplate.EnvironmentVariable}}}, or a fixed " +
+                "environment, then run advise --intent again.");
+            return;
+        }
+        // advise --profile velger profilen selv (review av #60): for profiler som deler et miljø, som eu og us i prod, kan
+        // ikke et oppgitt miljø skille dem. Profilen må finnes i fila; bare en ny fil får den laget.
+        if (_profile is not null && file is not null)
+        {
+            ChosenProfile(file, _profile, existing, evidence);
+            return;
+        }
+
+        // Re-review av #60: --profile i en ny fil ga et dev-design mot profilens tilkobling. Med --profile prod ble testmodus
+        // credentials set --profile prod, som kunne byttet ut prod sin ekte signeringsnøkkel med Stripe CLI-ens testnøkkel.
+        // Navnet sier ikke miljøet, så profilen i en ny fil krever et oppgitt miljø, aldri et antatt dev.
+        if (_profile is not null && _flow["environment"] is null)
+        {
+            Conflict("missing", "environment", null, null, Array.Empty<FlowEvidence>(),
+                $"--profile {_profile} names the profile a new deployment file gets, and the intent states no environment, so advise " +
+                "cannot tell which environment the profile is for: its name does not say.",
+                $"State the environment profile {_profile} is for in the intent as environment ({string.Join(", ", DeploymentWorkspace.EnvironmentValues)}), " +
+                "then run advise --intent again.");
+            return;
+        }
 
         if (_flow["environment"] is { } stated)
         {
             if (existing is not null && existing != stated.AsString)
+            {
                 Conflict("contradiction", "environment", stated.Value, JsonValue.Create(existing), evidence,
-                    $"{_facts.DeployFile!.File} sets up a {existing} workspace.",
+                    $"{file!.File} sets up a {existing} workspace.",
                     $"Is this flow for {existing}, as the deployment file is, or for {stated.AsString}, in a deployment file of its own?");
-            else if (existing is not null)
+                return;
+            }
+            if (existing is not null)
                 _flow.Set("environment", stated.WithEvidence(evidence));
-            return;
-        }
-
-        if (existing is not null)
-        {
-            _flow.Set("environment", FlowValue.Of(existing, Provenance.Evidence, evidence));
+            if (file is { Profiles.Count: > 0 })
+                StatedProfile(file, stated.AsString!);
+            // Uten profiler brukes standardverdien når variabelen ikke er satt. Et oppgitt dev krever at fila gir dev selv.
+            else if (file is not null && !RefusedIn(file, null) && stated.AsString == "dev")
+                DevWithoutProfile(file);
             return;
         }
 
         // Med profiler og et miljø ingen har oppgitt, lager advise aldri en ny profil (re-review av #59, Kenneths prinsipp om å
-        // stoppe ved tvetydighet): med en ny profil og --profile prod ville flyten gått rett til produksjon med brukerens
-        // prod-tilkobling. Den ene profilen fila har, brukes; flere er et spørsmål.
-        if (_facts.DeployFile is { Profiles.Count: > 1 } several)
+        // stoppe ved tvetydighet). Den ene profilen fila har, brukes; flere er et spørsmål, med miljøet hver av dem gir, så
+        // svaret er et miljø environment tar (før tag: spørsmålet ba om et profilnavn, som environment avviser).
+        if (file is { Profiles.Count: > 1 })
         {
-            string names = string.Join(", ", several.Profiles);
-            Conflict("ambiguous", "environment", null, Values(several.Profiles),
-                new[] { new FlowEvidence(several.File, null, $"the deployment file's profiles: {names}") },
-                $"{several.File} has the profiles {names}, and the intent states no environment, so advise cannot tell which one the " +
-                "flow belongs in.",
-                $"Which environment is this flow for? State it in the intent as environment ({names}), and the flow goes into the " +
-                "profile of that name.");
+            Conflict("ambiguous", "environment", null, FileEnvironments.Found(file), ProfileEvidence(file),
+                $"{file.File} has the profiles {FileEnvironments.Describe(file)}, and the intent states no environment, so advise " +
+                "cannot tell which one the flow belongs in.",
+                ProfileQuestion(file));
             return;
         }
 
-        if (_facts.DeployFile is { Profiles.Count: 1 } single && ProfileEnvironment(single) is { } given)
+        if (file is not null && RefusedIn(file, file.Profiles.Count == 1 ? file.Profiles[0] : null))
+            return;
+
+        if (file is { Profiles.Count: 1 } && FileEnvironments.GivenBy(file, file.Profiles[0]) is { } given)
         {
-            _flow.Set("environment", FlowValue.Of(given.Environment, Provenance.Evidence, new[] { given.Evidence }));
+            _flow.Set("environment", FlowValue.Of(given, Provenance.Evidence,
+                new[] { new FlowEvidence(file.File, null, FileEnvironments.Source(file, file.Profiles[0])) }));
+            return;
+        }
+
+        // Uten profiler gir fila et fast miljø, eller standardverdien i ${VAR:-dev}, som plan og apply bruker når variabelen
+        // ikke er satt.
+        if (file is not null && FileEnvironments.WithoutProfile(file) is { } fromFile)
+        {
+            _flow.Set("environment", FlowValue.Of(fromFile, Provenance.Evidence,
+                new[] { new FlowEvidence(file.File, null, FileEnvironments.Source(file, null)) }));
             return;
         }
 
         // En ny fil er for dev, og advise skriver det inn. En fil som finnes uten miljø, gjelder et umerket workspace, som Queuey
         // regner som prod, og advise skriver ikke et antatt miljø inn i den; det samme gjelder en fil som tar miljøet fra en
-        // variabel ingen profil gir. Før tag (oppfølging av #58, 2026-10-06): advise antok dev også her, og designet ble en
-        // blanding av localForward og et ekte Stripe-endepunkt i et workspace Queuey regner som prod.
-        _flow.Set("environment", FlowValue.Of(_facts.DeployFile is null ? "dev" : "prod", Provenance.Assumed));
+        // variabel ingen profil eller standardverdi gir. Før tag (oppfølging av #58, 2026-10-06): advise antok dev også her, og
+        // designet ble en blanding av localForward og et ekte Stripe-endepunkt i et workspace Queuey regner som prod.
+        _flow.Set("environment", FlowValue.Of(file is null ? "dev" : "prod", Provenance.Assumed));
     }
 
     /// <summary>
-    /// The environment the file's one profile gives the variable its workspace's environment comes from, with where it says
-    /// so; null when the file names no such variable, the profile does not give it, or gives something that is not an
-    /// environment.
+    /// The environment for the profile <c>advise --profile</c> names: the one the profile gives, which a stated environment
+    /// must not contradict, or the stated one when the profile gives none, unless that is dev, since Queuey treats the
+    /// workspace of a profile that gives none as prod. A profile the file does not have is a conflict.
     /// </summary>
-    private static (string Environment, FlowEvidence Evidence)? ProfileEnvironment(ExistingDeployFile file)
+    private void ChosenProfile(ExistingDeployFile file, string profile, string? existing, FlowEvidence[] evidence)
     {
-        if (file.Environment is not { } environment || environment.IndexOf("${", StringComparison.Ordinal) < 0
-            || DeploymentVariables.Referenced(environment).FirstOrDefault() is not { } variable)
-            return null;
+        if (!file.Profiles.Contains(profile, StringComparer.Ordinal))
+        {
+            Conflict("missing", "environment", null, FileEnvironments.Found(file), ProfileEvidence(file),
+                file.Profiles.Count == 0
+                    ? $"--profile {profile} names a profile, and {file.File} has none. advise adds no profile beside a file's own."
+                    : $"--profile {profile} names a profile {file.File} does not have: it has {FileEnvironments.Describe(file)}.",
+                file.Profiles.Count == 0
+                    ? "Leave --profile out: advise designs with the file's fixed values."
+                    : $"Name one of its profiles with --profile ({string.Join(", ", file.Profiles)}), or leave --profile out.");
+            return;
+        }
 
-        string profile = file.Profiles[0];
-        JsonNode? value = Property(Property(Property(file.Json, "profiles") as JsonObject, profile, exact: true) as JsonObject, "variables")
-            is JsonObject variables ? variables[variable] : null;
-        if (value is not JsonValue text || !text.TryGetValue(out string? given)
-            || !DeploymentWorkspace.EnvironmentValues.Contains(given.Trim().ToLowerInvariant(), StringComparer.Ordinal))
-            return null;
+        if (RefusedIn(file, profile))
+            return;
 
-        string chosen = given.Trim().ToLowerInvariant();
-        return (chosen, new FlowEvidence(file.File, null, $"profiles.{profile}.variables.{variable} is {chosen}"));
+        string? given = FileEnvironments.GivenBy(file, profile);
+        if (_flow["environment"] is { } stated)
+        {
+            if (given is not null && given != stated.AsString)
+                Conflict("contradiction", "environment", stated.Value, JsonValue.Create(given),
+                    new[] { new FlowEvidence(file.File, null, FileEnvironments.Source(file, profile)) },
+                    $"The profile {profile} in {file.File} gives {given}, and the intent states {stated.AsString}.",
+                    $"Is this flow for {given}, as the profile is? State {given} in the intent, or name another profile with --profile.");
+            else if (given is null && stated.AsString == "dev")
+                NoEnvironmentForDev(file, profile);
+            else if (existing is not null)
+                _flow.Set("environment", stated.WithEvidence(evidence));
+            return;
+        }
+
+        _flow.Set("environment", given is not null
+            ? FlowValue.Of(given, Provenance.Evidence, new[] { new FlowEvidence(file.File, null, FileEnvironments.Source(file, profile)) })
+            : FlowValue.Of("prod", Provenance.Assumed));
     }
 
-    /// <summary>A property of a file's object: matched in any casing, as the deployment file's reader does, or exactly for a name.</summary>
-    private static JsonNode? Property(JsonObject? obj, string name, bool exact = false)
+    /// <summary>
+    /// A conflict, and true, when the value the file gives the environment with <paramref name="profile"/>, or without a
+    /// profile, is one apply refuses (review of #60): never a fallback to the default. Only the value in use counts.
+    /// </summary>
+    private bool RefusedIn(ExistingDeployFile file, string? profile)
     {
-        if (obj is null)
-            return null;
-        if (obj.TryGetPropertyValue(name, out JsonNode? found) || exact)
-            return found;
-        return obj.FirstOrDefault(p => string.Equals(p.Key, name, StringComparison.OrdinalIgnoreCase)).Value;
+        if (FileEnvironments.Refused(file, profile) is not { } refused)
+            return false;
+
+        Conflict("unsupported", "environment", null, null, new[] { new FlowEvidence(file.File, null, refused.Where) },
+            $"{refused.Where} in {file.File} is {Shown(refused.Value)}, which apply refuses: workspace.environment must be one of " +
+            $"{string.Join(", ", DeploymentWorkspace.EnvironmentValues)}.",
+            $"Set it to one of {string.Join(", ", DeploymentWorkspace.EnvironmentValues)} in {file.File}, then run advise --intent again.");
+        return true;
+    }
+
+    /// <summary>
+    /// A conflict for a stated dev and a profile that gives no environment: Queuey treats its workspace as prod, so advise
+    /// neither takes it for dev nor writes dev into it (re-review of #60).
+    /// </summary>
+    // Re-review av #60, B1: fila hadde én profil, main, uten miljø (prod-tenanten), og intensjonen sa dev. advise gjenbrukte
+    // main, skrev QUEUEY_WORKSPACE_ENVIRONMENT=dev og localForward inn i den, og foreslo testmodus med credentials set
+    // --profile main mot prod-tilkoblingen. Og prod-profilen ble skrevet om til dev, så hver CI-deploy med den ble nektet.
+    // Et miljø som ikke er dev, kan fortsatt gjenbruke profilen: det er den forsiktige veien.
+    private void NoEnvironmentForDev(ExistingDeployFile file, string profile)
+    {
+        string variable = FileEnvironments.Variable(file)?.Name ?? DeploymentTemplate.EnvironmentVariable;
+        Conflict("contradiction", "environment", JsonValue.Create("dev"), null, ProfileEvidence(file),
+            $"The profile {profile} in {file.File} gives no environment, so Queuey treats its workspace as prod, and the intent " +
+            "states dev.",
+            $"If {profile} is the dev profile, give it {variable}=dev in {file.File}" +
+            (FileEnvironments.Variable(file) is null ? $", with workspace.environment ${{{variable}}}" : "") +
+            ". Or name a profile that gives dev with --profile. Then run advise --intent again.");
+    }
+
+    /// <summary>
+    /// A conflict for a stated dev and a file without profiles that does not give dev itself: it names no environment, takes
+    /// it from a variable without a default, or one whose default is another. advise neither designs for dev there nor writes
+    /// dev into it, as for a profile (re-review of #60).
+    /// </summary>
+    // Re-review av #60, runde 5: fila { "tenant": "ten_abc", "queues": {} } gjelder et workspace Queuey regner som prod, og
+    // intensjonen sa dev. advise skrev "environment": "dev" inn i prod-fila, og testmodus ble credentials set --tenant ten_abc,
+    // rett mot prod-tenanten. Hver CI-deploy av fila ble nektet etterpå. ${VAR:-dev} gir dev og går gjennom. ${VAR:-prod} gir
+    // prod, og er en motsigelse som en profil som gir prod.
+    private void DevWithoutProfile(ExistingDeployFile file)
+    {
+        string? given = FileEnvironments.WithoutProfile(file);
+        if (given == "dev")
+            return;
+
+        string? variable = FileEnvironments.Variable(file)?.Name;
+        string evidence = variable is null ? "the deployment file names no environment"
+            : given is null ? $"workspace.environment is ${{{variable}}}, with no default"
+            : $"${{{variable}}} defaults to {given}";
+        string message = variable is null
+            ? $"{file.File} names no workspace environment, so Queuey treats its workspace as prod, and the intent states dev."
+            : given is null
+                ? $"{file.File} takes its workspace environment from ${{{variable}}}, which has no default, so the file does not say " +
+                  "its workspace is dev, and the intent states dev."
+                : $"{file.File} gives {given}: ${{{variable}}} defaults to {given}, and the intent states dev.";
+        Conflict("contradiction", "environment", JsonValue.Create("dev"), given is null ? null : JsonValue.Create(given),
+            new[] { new FlowEvidence(file.File, null, evidence) }, message,
+            $"If {file.File} is for dev, set workspace.environment to dev in it" +
+            (variable is null ? "" : $", or give ${{{variable}}} the default dev: ${{{variable}:-dev}}") +
+            ". Then run advise --intent again.");
+    }
+
+    /// <summary>A value from the file as a conflict shows it: quoted when it is plain, else in words.</summary>
+    private static string Shown(string value)
+        => string.IsNullOrWhiteSpace(value) ? "blank"
+           : value.Length <= 32 && value.All(c => char.IsLetterOrDigit(c) || c is '.' or '_' or '-') ? $"\"{value}\""
+           : "a value that is not shown";
+
+    /// <summary>
+    /// The profile a stated environment goes into: the one profile that gives it, or the file's only profile when that gives
+    /// none, which then gets the stated one unless it is dev, since Queuey treats the workspace of a profile that gives none
+    /// as prod. Anything else is a conflict, never a new profile beside the file's own.
+    /// </summary>
+    // Før tag (etter #59): med prod oppgitt og profilene local og production laget advise profiles.prod ved siden av production,
+    // med --profile prod. En profil velges etter miljøet den gir, aldri etter navnet.
+    private void StatedProfile(ExistingDeployFile file, string environment)
+    {
+        string[] giving = file.Profiles.Where(p => FileEnvironments.GivenBy(file, p) == environment).ToArray();
+        if (giving.Length == 1)
+            return;
+        if (giving.Length == 0 && file.Profiles.Count == 1 && FileEnvironments.GivenBy(file, file.Profiles[0]) is null)
+        {
+            if (!RefusedIn(file, file.Profiles[0]) && environment == "dev")
+                NoEnvironmentForDev(file, file.Profiles[0]);
+            return;
+        }
+
+        Conflict(giving.Length > 1 ? "ambiguous" : "contradiction", "environment", JsonValue.Create(environment), FileEnvironments.Found(file),
+            ProfileEvidence(file),
+            giving.Length > 1
+                ? $"{file.File} has {giving.Length} profiles that give {environment} ({string.Join(", ", giving)}), so advise cannot tell " +
+                  "which one the flow belongs in."
+                : $"No profile in {file.File} gives {environment}: {FileEnvironments.Describe(file)}. advise adds a flow to a profile " +
+                  "by the environment it gives, never by its name.",
+            ProfileQuestion(file));
+    }
+
+    private static FlowEvidence[] ProfileEvidence(ExistingDeployFile file)
+        => new[] { new FlowEvidence(file.File, null, $"the deployment file's profiles: {FileEnvironments.Describe(file)}") };
+
+    /// <summary>
+    /// What to do about profiles advise cannot choose between: state the environment one of them gives, or first give each
+    /// profile an environment of its own.
+    /// </summary>
+    private static string ProfileQuestion(ExistingDeployFile file)
+    {
+        string names = string.Join(", ", file.Profiles);
+        string?[] given = file.Profiles.Select(p => FileEnvironments.GivenBy(file, p)).ToArray();
+        if (given.All(g => g is not null) && given.Distinct().Count() == given.Length)
+            return "Which environment is this flow for? State it in the intent as environment: " +
+                   string.Join(", ", file.Profiles.Select((p, i) => $"{given[i]} for {p}")) +
+                   $". advise adds the flow to the profile that gives it. Or name the profile with advise --profile ({names}).";
+
+        // Profiler som deler et miljø (review av #60), som eu og us i prod, skilles ikke av et oppgitt miljø: da er --profile svaret.
+        if (FileEnvironments.Fixed(file) is { } fixedEnvironment)
+            return $"Which profile is this flow for? Every profile gives {fixedEnvironment}, so the environment cannot tell them apart: " +
+                   $"name the profile with advise --profile ({names}).";
+
+        return FileEnvironments.Variable(file) is { } variable
+            ? $"Which profile is this flow for? Name it with advise --profile ({names}). To choose by environment instead, give each " +
+              $"profile its own environment in {variable.Name}, the variable workspace.environment comes from, and state the one this " +
+              "flow is for in the intent as environment."
+            : $"Which profile is this flow for? Name it with advise --profile ({names}). To choose by environment instead, take " +
+              $"workspace.environment from ${{{DeploymentTemplate.EnvironmentVariable}}} in {file.File}, give each profile its value " +
+              $"for {DeploymentTemplate.EnvironmentVariable}, and state the one this flow is for in the intent as environment.";
     }
 
     private void ResolveQueue(string kind)

@@ -590,7 +590,9 @@ or by a person fulfilling `credentials request`, points the ingress at it at onc
 credential requests, `apply` must run again to do that. The plan, `apply` and Queuey's setup review all say so, with the command that
 stores it, and `apply --check` reports drift once it is stored. Plan and `apply` suggest `credentials request`, where a person
 pastes the value, unless the file's `workspace.environment` is `dev`: there `credentials set --from-env` stores a value you
-hold. Each names the other way too, and so does a delivery credential plan and `apply` cannot find. `template` is one of Queuey's signed-request
+hold. Each names the other way too, and so does a delivery credential plan and `apply` cannot find. Without `--profile`, the
+commands name the file's `tenant` with `--tenant`: `credentials` otherwise goes to the configured workspace, while plan
+and `apply` go to the file's. `template` is one of Queuey's signed-request
 templates; `queuey` is Queuey's own scheme, which verifies with the sending API client's signing key and
 takes no `credentialRef`. A `signedRequest` is checked while `authMode` is `SignedRequest` or
 `ApiKeyAndSignedRequest`, so a file that declares one with `None` or `ApiKey` beside it is refused.
@@ -1092,15 +1094,40 @@ proposed, and production is one more profile. A deployment file that is there wi
 
 **Without an environment in the intent, advise goes by the file.** A new file is for `dev`, which advise writes into it.
 A file that is there without `workspace.environment` applies to a workspace Queuey counts as `prod`, so advise proposes
-for prod: delivery over HTTP, `credentials request` for a secret, and Stripe's path for a real endpoint. So does a file
-that takes the environment from a variable without profiles, or whose profile already gives that variable another value.
-State `dev` in the intent for the dev path: a local listener, and Stripe's test mode.
+for prod: delivery over HTTP, `credentials request` for a secret, and Stripe's path for a real endpoint. A file that
+takes the environment from a variable gets what its profile gives that variable, or the variable's `${VAR:-default}`, as
+plan and apply read it; without either, it is for prod too. The dev path, a local listener and Stripe's test mode, needs a
+new file or one that gives dev: a stated `dev` against a file or profile that gives no environment, or another one, is a
+conflict, never a file rewritten to dev. If the file is for dev, give it dev first: `workspace.environment` set to `dev`,
+`${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}` where CI sets prod, or the profile's value.
 
-advise stops rather than guess. A file with profiles never gets a new one from an environment advise only assumes: with
-one profile the flow goes into it, and the commands take it with `--profile`; with several, the flow lists an
-`ambiguous` conflict, and the answer is `environment` in the intent. A queue the file already forwards to a listener
-(`"kind": "localForward"`) in a file without an environment is a conflict too: state `dev`, or give the queue
-`"kind": "http"`.
+advise stops rather than guess. A file with profiles never gets a new one: advise picks a profile by the environment it
+gives, never by its name. Without an environment in the intent, one profile takes the flow, and several are an
+`ambiguous` conflict that names what each gives. With one, the profile that gives it takes the flow, and the commands
+take it with `--profile`; the file's only profile also takes it when that profile gives no environment, and gets it
+written in, except for `dev`: a profile that gives no environment points at a workspace Queuey treats as prod, so a
+stated `dev` there is a conflict, and the profile is never rewritten to dev. When no profile gives it, or several do, the
+flow has a conflict that says what to change. Profiles that
+share an environment, such as `eu` and `us` in prod, are told apart with `advise --intent … --profile <name>`, which
+names a profile the file has, or the first one in a new file, where the intent must state the environment it is for: a
+profile's name does not say. Its environment still decides the rest. A queue the
+file already forwards to a listener (`"kind": "localForward"`, directly or through its profile) outside dev is a
+conflict too: make the flow dev, or give it `http` where the file sets it; so is a fixed `localForward` in a file that can run
+outside dev, because its environment comes from a variable or a profile gives another. So is an environment apply would refuse, such as
+`"development"` in a profile, and a `workspace.environment` that is not one fixed value or exactly one `${VAR}`.
+
+Stripe's test mode in the next steps comes after `apply`, and only an `apply` that went through shows the workspace is
+dev: if it refused the file, the steps say to stop and store no test secret. In a file without profiles, the
+`credentials` commands name the file's `--tenant`, since without a profile they go to the configured workspace while
+`apply` uses the file's.
+
+A file that takes its environment from a variable, such as `${QUEUEY_WORKSPACE_ENVIRONMENT:-dev}` so CI can set prod,
+gets the delivery kind from a variable too, `${QUEUEY_<QUEUE>_DELIVERY_KIND}` without a default, when nothing in the file
+holds the environment for the flow: the file has no profiles, or the profile does not set the variable and the intent
+states no environment. A stated environment is written into the profile instead, and then the profile holds the kind
+too. The kind from a variable has no profile value, and the next steps say to set it to `localForward` in dev and
+`http` elsewhere. If CI forgets it, `apply` stops rather than create the queue in prod with a local listener. A profile
+that does not set the variable but sets the kind to `localForward` is a conflict, also in dev.
 
 **`infrastructure.content` is the whole file, to write as it is.** With a `queuey.deploy.json` already there, it is that
 file with the flow's queue and profile values merged in. The file wins over everything the intent does not state. A
