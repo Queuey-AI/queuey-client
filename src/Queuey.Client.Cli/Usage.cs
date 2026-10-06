@@ -257,19 +257,23 @@ CREDENTIALS
                  same id, and an ingress that waits for the name verifies with it at once.
   queuey credentials request <name> [--type <type>] [--key-id <id>] [--username <u>]
                 [--profile <name>] [--json]
-                 Asks for a secret you don't hold, and never will: Queuey opens a one-time
-                 request and prints the console link where a person who can manage the
-                 workspace's credentials signs in and pastes the value. It is stored as
-                 `credentials set` would store it, and nothing here takes or shows it, so an
-                 agent can set up a flow without the secret passing through it. The link
-                 works once, for a day. Asking again for the same name while a request is
-                 open prints the same link. A new HmacSigning credential gets the name as
-                 its key id unless --key-id is given; a new BasicPassword needs --username.
-                 OAuth2Certificate is refused: its passphrase is the key id, which you would
-                 see. --json prints { ""schemaVersion"": 1, ""requestId"", ""workspaceId"",
-                 ""name"", ""type"", ""keyId"", ""username"", ""status"", ""url"", ""expiresAt"",
-                 ""replacesCredentialId"" }; replacesCredentialId names the credential whose
-                 secret the value replaces, when the name has one.
+                 Asks a person for a secret, so it never passes through this terminal or a
+                 conversation: Queuey opens a one-time request and prints the console link
+                 where a person who can manage the workspace's credentials signs in and
+                 pastes the value. No API returns it, and Queuey uses it only where the
+                 workspace's configuration does. Without --type it asks for an HmacSigning
+                 secret, which Queuey never sends as it is; a key or token Queuey sends to
+                 a receiver is asked for with its --type. The link works once, for a day,
+                 and asking again for the same name while it is open prints the same link.
+                 A new HmacSigning credential gets the name as its key id unless --key-id
+                 is given, and a new BasicPassword needs --username. For a name the
+                 workspace has, only the secret is replaced: another key id or username is
+                 refused, and credentials set changes them. OAuth2Certificate is refused: a
+                 certificate is uploaded in the Queuey console. --json prints
+                 { ""schemaVersion"": 1, ""requestId"", ""workspaceId"", ""workspaceName"",
+                 ""organizationName"", ""name"", ""type"", ""keyId"", ""username"", ""status"",
+                 ""url"", ""expiresAt"", ""replacesCredentialId"" }; replacesCredentialId names
+                 the credential whose secret the value replaces, when the name has one.
   queuey credentials list [--profile <name>] [--json]
 
 PUBLISH

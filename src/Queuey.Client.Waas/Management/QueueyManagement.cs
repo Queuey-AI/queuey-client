@@ -144,6 +144,8 @@ internal sealed class QueueyManagement : IQueueyManagement
         {
             RequestId = r.RequestId,
             WorkspaceId = r.WorkspaceId,
+            WorkspaceName = r.WorkspaceName,
+            OrganizationName = r.OrganizationName,
             Name = r.Name,
             Type = r.Type,
             KeyId = r.KeyId,

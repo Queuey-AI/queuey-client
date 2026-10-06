@@ -4,8 +4,8 @@ namespace Queuey.Client.Waas;
 
 /// <summary>
 /// A request for the secret of a credential, which a signed-in person fulfils in the Queuey console
-/// (<see cref="IQueueyManagement.RequestCredentialAsync"/>). Whoever asks never sees the value: a request
-/// never carries one, and nothing returns it.
+/// (<see cref="IQueueyManagement.RequestCredentialAsync"/>). A request never carries the value, no API returns it, and Queuey
+/// uses it only where the workspace's configuration does.
 /// </summary>
 public sealed class CredentialRequestResult
 {
@@ -14,6 +14,12 @@ public sealed class CredentialRequestResult
 
     /// <summary>The workspace the credential is stored in (<c>ten_…</c>).</summary>
     public string? WorkspaceId { get; init; }
+
+    /// <summary>The workspace's name. Null from a Queuey that predates it.</summary>
+    public string? WorkspaceName { get; init; }
+
+    /// <summary>The organization the workspace belongs to. Null from a Queuey that predates it.</summary>
+    public string? OrganizationName { get; init; }
 
     /// <summary>The name the credential is stored under: the one a deployment file's <c>credentialRef</c> names.</summary>
     public string? Name { get; init; }
@@ -82,6 +88,8 @@ internal sealed class CredentialRequestWireResponse
 {
     public string? RequestId { get; set; }
     public string? WorkspaceId { get; set; }
+    public string? WorkspaceName { get; set; }
+    public string? OrganizationName { get; set; }
     public string? Name { get; set; }
     public string? Type { get; set; }
     public string? KeyId { get; set; }

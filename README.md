@@ -572,12 +572,15 @@ queuey listen --queue stripe --forward-to http://localhost:5000
 ```
 
 **The one who sets this up never needs to hold the secret.** An agent, or a script, runs
-`queuey credentials request stripe-whsec --type HmacSigning` instead of `credentials set`. Queuey opens a
-one-time request and the command prints the console link for it. A person who can manage the workspace's
-credentials signs in there and pastes the value, which is stored exactly as `credentials set` stores it, and the
-ingress waiting for the name verifies with it at once. The value never passes through the command, the key or
-its logs, and nothing shows it again. The link works once, for a day; asking again for the same name while it
-is open prints the same link.
+`queuey credentials request stripe-whsec` instead of `credentials set`. Queuey opens a one-time request and the
+command prints the console link for it. A person who can manage the workspace's credentials signs in there and
+pastes the value, which is stored exactly as `credentials set` stores it, and the ingress waiting for the name
+verifies with it at once. The value never passes through the command, its logs or a conversation with an agent,
+no API returns it, and Queuey uses it only where the workspace's configuration does. Without `--type` the request
+is for an `HmacSigning` secret, which Queuey never sends as it is; a key or token Queuey sends to a receiver is
+asked for with its `--type`. The link works once, for a day; asking again for the same name while it is open
+prints the same link. For a name the workspace has, only the secret is replaced, with the credential's key id and
+username as they are.
 
 **A credential that is not stored yet is accepted.** `apply` keeps the name the ingress waits for, and
 the ingress refuses every event until a credential by that name is stored. Storing it, with `credentials set`
@@ -927,7 +930,7 @@ carries the per-flag detail this table leaves out.
 | Command | What it does |
 | --- | --- |
 | `credentials set` | Store a delivery secret under a name a deployment file can refer to |
-| `credentials request` | Ask a person to paste a secret in the Queuey console, so you never hold it |
+| `credentials request` | Ask a person to paste a secret in the Queuey console, so it never passes through you |
 | `credentials list` | List stored credentials — names and types, never values |
 | `keys mint` | Mint an ingress signing key so a producer can publish with HMAC |
 

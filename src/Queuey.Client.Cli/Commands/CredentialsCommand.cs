@@ -35,6 +35,12 @@ internal static class CredentialsCommand
     /// <summary>The JSON <c>credentials request --json</c> prints. Raised only for a change a reader must know about.</summary>
     internal const int RequestJsonSchemaVersion = 1;
 
+    /// <summary>
+    /// The type <c>credentials request</c> asks for without <c>--type</c>: a signing secret, which Queuey never sends as it is.
+    /// The same default as Queuey's.
+    /// </summary>
+    internal const string RequestDefaultType = "HmacSigning";
+
     /// <summary>The credential types Queuey stores. Mirrors the server's <c>CredentialType</c>.</summary>
     private static readonly string[] CredentialTypes =
     {
@@ -182,9 +188,10 @@ internal static class CredentialsCommand
                 "Choose a name of that shape, such as stripe-whsec. A deployment file refers to the credential by it "
                 + "(ingress.signedRequest.credentialRef).");
 
-        // Typen vises bare når den er et typenavn med feil store og små bokstaver, som for `set`. Et sertifikat har passfrasen
-        // i key id, som den som spør, ville gitt og sett: Queuey tar det ikke gjennom en forespørsel.
-        string type = map.Get("type") ?? "ApiKeyHeader";
+        // Typen vises bare når den er et typenavn med feil store og små bokstaver, som for `set`. Uten --type ber kommandoen
+        // om en signeringshemmelighet (Queuey F2.9-review, M5): den sendes aldri som den er, så en nøkkel som spør, kan ikke
+        // peke en køs auth mot en mottaker den selv har. En hemmelighet Queuey sender som den er, bes om med --type.
+        string type = map.Get("type") ?? RequestDefaultType;
         if (Array.IndexOf(CredentialTypes, type) < 0)
         {
             string? spelled = CredentialTypes.FirstOrDefault(t => string.Equals(t, type, StringComparison.OrdinalIgnoreCase));
@@ -194,11 +201,13 @@ internal static class CredentialsCommand
                     : "--type is not a credential type. Its value is not shown, since it may be a secret.",
                 $"Expected one of: {string.Join(", ", CredentialTypes.Where(t => t != "OAuth2Certificate"))}.");
         }
+        // Et sertifikat er en fil og passfrasen dens, som konsollet lagrer sammen ved opplasting; siden for en forespørsel tar én
+        // innlimt verdi (Queuey F2.9-review, L6).
         if (type == "OAuth2Certificate")
             return CliErrors.Usage(map, "invalid_value",
-                "An OAuth2Certificate credential keeps its passphrase with the key id, which whoever asks would give and see, so a "
-                + "request doesn't store one.",
-                "Store the certificate with queuey credentials set, or ask for another type.");
+                "An OAuth2Certificate credential is a certificate file and its passphrase, which the Queuey console stores from an "
+                + "upload, and a request's page takes one pasted value.",
+                "Upload the certificate where the queue's delivery auth is set in the Queuey console, or ask for another type.");
 
         ResolvedConfig config = ListenCommand.Connection(map);
         string? tenant = config.TenantPublicId;
@@ -230,6 +239,8 @@ internal static class CredentialsCommand
                 schemaVersion = RequestJsonSchemaVersion,
                 request.RequestId,
                 request.WorkspaceId,
+                request.WorkspaceName,
+                request.OrganizationName,
                 request.Name,
                 request.Type,
                 request.KeyId,
@@ -242,7 +253,8 @@ internal static class CredentialsCommand
             return ExitCodes.Success;
         }
 
-        Console.WriteLine($"Asked for the secret of '{request.Name}' ({request.Type}) in workspace {request.WorkspaceId ?? tenant}.");
+        string workspace = request.WorkspaceName is { Length: > 0 } wsName ? $"{wsName} ({request.WorkspaceId ?? tenant})" : request.WorkspaceId ?? tenant!;
+        Console.WriteLine($"Asked for the secret of '{request.Name}' ({request.Type}) in workspace {workspace}.");
         string until = request.ExpiresAt is { } expires ? $", until {expires.UtcDateTime:yyyy-MM-dd HH:mm} UTC" : "";
         if (request.Url is { Length: > 0 } url)
         {
@@ -260,8 +272,11 @@ internal static class CredentialsCommand
 
         if (request.ReplacesCredentialId is { Length: > 0 } replaces)
             Console.WriteLine($"A credential is stored under this name ({replaces}): the value replaces its secret as a new version, "
-                              + "under the same id.");
-        Console.WriteLine("The value is stored encrypted, and is never shown to you, to this key or to anyone again.");
+                              + "under the same id and with the key id and username it has.");
+        // Queuey F2.9-review, M5: det som holder. En nøkkel med queue.write kunne peke en køs auth mot en mottaker den har, så
+        // teksten lover ikke at den som spurte, aldri kan få verdien.
+        Console.WriteLine("The value is stored encrypted. No API returns it, it never passes through this terminal or a conversation, "
+                          + "and Queuey uses it only where the workspace's configuration does.");
         return ExitCodes.Success;
     }
 

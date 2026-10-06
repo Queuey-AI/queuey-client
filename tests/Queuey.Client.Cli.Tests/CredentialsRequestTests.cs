@@ -22,6 +22,8 @@ public sealed class CredentialsRequestTests
     {
         requestId = "creq_7Hk2pQ",
         workspaceId = "ten_abc",
+        workspaceName = "Payments",
+        organizationName = "Acme AS",
         name = "stripe-whsec",
         type = "HmacSigning",
         keyId,
@@ -62,7 +64,11 @@ public sealed class CredentialsRequestTests
 
         JsonElement json = JsonDocument.Parse(run.Stdout).RootElement;
         Assert.Equal(
-            new[] { "schemaVersion", "requestId", "workspaceId", "name", "type", "keyId", "username", "status", "url", "expiresAt", "replacesCredentialId" },
+            new[]
+            {
+                "schemaVersion", "requestId", "workspaceId", "workspaceName", "organizationName", "name", "type", "keyId", "username",
+                "status", "url", "expiresAt", "replacesCredentialId",
+            },
             json.EnumerateObject().Select(p => p.Name).ToArray());
         Assert.Equal(CredentialsCommand.RequestJsonSchemaVersion, json.GetProperty("schemaVersion").GetInt32());
         Assert.Equal("creq_7Hk2pQ", json.GetProperty("requestId").GetString());
@@ -76,10 +82,12 @@ public sealed class CredentialsRequestTests
         CliRun run = await Request(Server(Answer()), "stripe-whsec", "--type", "HmacSigning");
 
         Assert.Equal(ExitCodes.Success, run.Exit);
-        Assert.Contains("Asked for the secret of 'stripe-whsec' (HmacSigning) in workspace ten_abc.", run.Stdout);
+        Assert.Contains("Asked for the secret of 'stripe-whsec' (HmacSigning) in workspace Payments (ten_abc).", run.Stdout);
         Assert.Contains($"  {Url}", run.Stdout);
         Assert.Contains("once, until 2026-10-07 12:00 UTC", run.Stdout);
-        Assert.Contains("never shown to you, to this key or to anyone again", run.Stdout);
+        // Queuey F2.9-review, M5: det som holder, ikke at den som spurte, aldri kan få verdien.
+        Assert.Contains("No API returns it, it never passes through this terminal or a conversation, and Queuey uses it only where "
+                        + "the workspace's configuration does.", run.Stdout);
         Assert.DoesNotContain("replaces", run.Stdout);
     }
 
@@ -99,6 +107,19 @@ public sealed class CredentialsRequestTests
 
         Assert.Equal(ExitCodes.Success, run.Exit);
         Assert.Contains("opens request creq_7Hk2pQ in the Queuey console", run.Stdout);
+    }
+
+    [Fact]
+    public async Task Without_a_type_the_request_is_for_a_signing_secret_that_Queuey_never_sends_as_it_is()
+    {
+        // Queuey F2.9-review, M5: en nøkkel som ba om en hemmelighet Queuey sender som den er, kunne pekt en køs auth mot en
+        // mottaker den selv har. Standarden er derfor den samme som Queueys: HmacSigning.
+        RecordingHandler api = Server(Answer());
+
+        CliRun run = await Request(api, "stripe-whsec", "--json");
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.Equal("HmacSigning", Assert.Single(api.Requests).Json.GetProperty("type").GetString());
     }
 
     [Fact]
@@ -156,8 +177,8 @@ public sealed class CredentialsRequestTests
         CliRun run = await Request(null, "partner-cert", "--type", "OAuth2Certificate", "--json");
 
         Assert.Equal(ExitCodes.Usage, run.Exit);
-        Assert.Contains("passphrase", Error(run).GetProperty("message").GetString());
-        Assert.Contains("queuey credentials set", Error(run).GetProperty("action").GetString());
+        Assert.Contains("a certificate file and its passphrase", Error(run).GetProperty("message").GetString());
+        Assert.Contains("Queuey console", Error(run).GetProperty("action").GetString());
     }
 
     [Fact]
