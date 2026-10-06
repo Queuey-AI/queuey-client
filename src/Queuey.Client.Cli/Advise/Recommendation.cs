@@ -306,7 +306,7 @@ public static class Recommendation
         }
 
         yield return "Be idempotent on the event id (X-Queuey-Event-Id). A redelivery after a timeout carries the same id.";
-        yield return "While developing, run: queuey listen --forward-to http://localhost:<port>/<path> — real deliveries, no inbound port open.";
+        yield return "While developing, run: queuey listen --queue <name> --forward-to http://localhost:<port> — real deliveries at the path of the queue's endpoint, no inbound port open.";
     }
 
     private static string Join(IReadOnlyList<Evidence> evidence) =>

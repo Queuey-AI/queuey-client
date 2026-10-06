@@ -31,7 +31,7 @@ queuey publish orders --data '{"orderId":"A-1"}' --idempotency-key order-A-1   #
 queuey verify orders --event evt_…                  # did the event you published arrive?
 
 # 2. Receive real webhooks on your laptop, without exposing a port
-queuey listen --forward-to http://localhost:5000/hooks
+queuey listen --queue <name> --forward-to http://localhost:5000
 
 # 3. Publish, inspect, operate
 queuey publish order-events --event order.created --data '{"orderId":"A-1"}'
