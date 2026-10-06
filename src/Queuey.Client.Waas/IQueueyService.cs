@@ -143,8 +143,33 @@ public interface IQueueyService
     /// The event is a real one: the receiver gets it like any other, so send data it treats as
     /// harmless. Needs a key that may publish to the queue and read its events (<c>event.read</c>):
     /// it reads one event from the queue first, and publishes nothing when the key cannot.
+    /// <see cref="VerifyFlowAsync"/> asks Queuey to verify instead, with each step from the ingress to the
+    /// final state; <c>queuey verify</c> uses that one.
     /// </remarks>
     Task<DeliveryVerification> VerifyDeliveryAsync(string queueName, byte[] payload, VerifyDeliveryOptions? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Verifies a queue's flow with Queuey's flow verification (<c>POST /queues/{que}/verifications</c>) and reads it until
+    /// Queuey has settled it: the steps from the ingress to the final state, each with its evidence, and the outcome.
+    /// <see cref="FlowVerification.Passed"/> is true only when the event was delivered by its flow.
+    /// </summary>
+    /// <param name="queue">The queue's id (<c>que_…</c>), or its name in the configured workspace.</param>
+    /// <param name="request">What to verify: an event in the queue, the next event of a type, or a test event to send.</param>
+    /// <param name="progress">Told the verification as it stands after the start and after each read.</param>
+    /// <param name="cancellationToken">Stops the reading. Queuey goes on following the event until its time is up.</param>
+    /// <remarks>
+    /// Needs a key that may read the queue and its events (<c>queue.read</c>, <c>event.read</c>). Verify the producer's own
+    /// events first (<see cref="FlowVerificationRequest.FollowEvent"/>, <see cref="FlowVerificationRequest.WaitForEvent"/>):
+    /// that works everywhere. A test event (<see cref="FlowVerificationRequest.SendTestEvent"/>) is sent only where Queuey
+    /// allows it, as that factory says, and reaches the real receiver like any other event. A refusal throws a
+    /// <see cref="QueueyException"/> with Queuey's code and message. Nothing falls back to another way of verifying.
+    /// </remarks>
+    /// <exception cref="QueueyException">
+    /// With code <c>flow_verification_unavailable</c> when the Queuey it talks to has no flow verification;
+    /// <c>verification_schema_unsupported</c> when Queuey answers in a shape this client does not read.
+    /// </exception>
+    Task<FlowVerification> VerifyFlowAsync(
+        string queue, FlowVerificationRequest request, IProgress<FlowVerification>? progress = null, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Applies queues, then streams. Queues go first because a stream is published on top of one, so a

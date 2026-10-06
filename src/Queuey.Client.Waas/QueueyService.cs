@@ -702,6 +702,16 @@ public sealed class QueueyService : IQueueyService
     }
 
     /// <inheritdoc />
+    public Task<FlowVerification> VerifyFlowAsync(
+        string queue, FlowVerificationRequest request, IProgress<FlowVerification>? progress = null, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(queue)) throw new ArgumentException("A queue, its id or its name, is required.", nameof(queue));
+        if (request is null) throw new ArgumentNullException(nameof(request));
+
+        return FlowVerifier.RunAsync(_controlPlane, Management, _options.TenantPublicId, queue, request, progress, cancellationToken);
+    }
+
+    /// <inheritdoc />
     public async Task<QueueSyncResult> ApplyDeploymentAsync(
         DeploymentFile file, SyncOptions? options = null, CancellationToken cancellationToken = default)
     {
