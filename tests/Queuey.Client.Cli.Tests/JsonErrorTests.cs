@@ -5,7 +5,7 @@ namespace Queuey.Client.Cli.Tests;
 
 /// <summary>
 /// Med --json er en feil JSON på stdout, og stderr er tom (review 2026-09-24). Før ga flere feilveier
-/// fortsatt prosa: en manglende fil, verify uten --data, og --json=true, som ble sjekket som rå tekst.
+/// fortsatt prosa: en manglende fil, verify uten testevent, og --json=true, som ble sjekket som rå tekst.
 /// Hver test går hele veien gjennom <see cref="CliEntry"/>, slik et skall kaller CLI-en.
 /// </summary>
 [Collection(ConsoleCollection.Name)]
@@ -41,9 +41,11 @@ public sealed class JsonErrorTests : IDisposable
         { new[] { "apply", "--json", "--file", "{missing}" }, "missing_file", ExitCodes.Usage },
         { new[] { "plan", "--json", "--file", "{missing}" }, "missing_file", ExitCodes.Usage },
         { new[] { "apply", "--json=true", "--file", "{missing}" }, "missing_file", ExitCodes.Usage },
-        { new[] { "verify", "orders", "--json" }, "missing_body", ExitCodes.Usage },
+        { new[] { "verify", "orders", "--send", "--json" }, "missing_body", ExitCodes.Usage },
+        { new[] { "verify", "orders", "--json" }, "missing_argument", ExitCodes.Usage },
         { new[] { "verify", "--json" }, "missing_argument", ExitCodes.Usage },
-        { new[] { "verify", "orders", "--data", "{}", "--timeout", "0", "--json" }, "invalid_value", ExitCodes.Usage },
+        { new[] { "verify", "orders", "--data", "{}", "--json" }, "send_required", ExitCodes.Usage },
+        { new[] { "verify", "orders", "--event", "evt_1", "--timeout", "0", "--json" }, "invalid_value", ExitCodes.Usage },
         { new[] { "publish", "orders", "--json" }, "missing_argument", ExitCodes.Usage },
         { new[] { "credentials", "nope", "--json" }, "unknown_subcommand", ExitCodes.Usage },
         { new[] { "plna", "--json" }, "unknown_command", ExitCodes.Usage },
@@ -78,11 +80,11 @@ public sealed class JsonErrorTests : IDisposable
     [Fact]
     public async Task Without_json_the_same_errors_stay_prose_on_stderr()
     {
-        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "verify", "orders" }));
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "verify", "orders", "--send" }));
 
         Assert.Equal(ExitCodes.Usage, run.Exit);
         Assert.Equal(string.Empty, run.Stdout);
-        Assert.Contains("verify requires the event to send", run.Stderr);
+        Assert.Contains("--send needs the test event", run.Stderr);
         Assert.Contains("→ It is delivered to the real receiver", run.Stderr);
     }
 

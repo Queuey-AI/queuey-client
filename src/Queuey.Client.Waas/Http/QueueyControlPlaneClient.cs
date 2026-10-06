@@ -361,6 +361,36 @@ internal sealed class QueueyControlPlaneClient
     }
 
     /// <summary>
+    /// Starts a flow verification of a queue (<c>POST /queues/{que}/verifications</c>): 201 with a new one, or 200 with the
+    /// open one that already follows the same event. Either way the body is the verification as it stands.
+    /// </summary>
+    public async Task<FlowVerification> StartVerificationAsync(string queuePublicId, FlowVerificationWireRequest request, CancellationToken cancellationToken)
+    {
+        if (request is null) throw new ArgumentNullException(nameof(request));
+
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues", queuePublicId, "verifications");
+        byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
+        return await _connection.SendForJsonAsync<FlowVerification>(
+            HttpMethod.Post, uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reads a flow verification (<c>GET /queues/{que}/verifications/{ver}?waitSeconds=N</c>). Queuey waits up to
+    /// <paramref name="waitSeconds"/> (at most 20) for it to settle before it answers.
+    /// </summary>
+    public async Task<FlowVerification> GetVerificationAsync(string queuePublicId, string verificationId, int waitSeconds, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), "waitSeconds=" + waitSeconds.ToString(CultureInfo.InvariantCulture),
+            "queues", queuePublicId, "verifications", verificationId);
+        return await _connection.SendForJsonAsync<FlowVerification>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// A write sent as a dry run (<c>?dryRun=true</c>): the server runs it the same way, stops before it
     /// stores anything, and answers with what it would have done. Refusals come back as they would.
     /// </summary>
