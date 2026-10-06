@@ -87,6 +87,8 @@ public static class DeploymentDrift
                 Compare(prefix + ".delivery.url", wd.Url, hd.Url, drift);
                 Compare(prefix + ".delivery.authMode", wd.AuthMode, hd.AuthMode, drift);
                 Compare(prefix + ".delivery.credentialRef", wd.CredentialRef, hd.CredentialRef, drift);
+                // Typen i filas ord (Queuey F2.3): "LocalForward" og "localForward" er samme type.
+                Compare(prefix + ".delivery.kind", DeploymentDeliveryKinds.Parse(wd.Kind, prefix + ".delivery.kind")?.ToFileText(), hd.Kind, drift);
             }
 
             CompareIngress(prefix + ".ingress", want.Ingress, have.Ingress, drift);
@@ -151,6 +153,35 @@ public static class DeploymentDrift
         Compare($"{prefix}.successStatusCode", want.SuccessStatusCode, actual.SuccessStatusCode, drift);
         CompareSource($"{prefix}.eventType", want.EventType, actual.EventType, drift);
         CompareSource($"{prefix}.groupKey", want.GroupKey, actual.GroupKey, drift);
+        CompareSignedRequest($"{prefix}.signedRequest", want.SignedRequest, actual.SignedRequest, drift);
+    }
+
+    /// <summary>
+    /// The signed request's template and credential (Queuey F2.3). A credential the file names by id matches the bound one's
+    /// id; one the ingress waits for matches by name, until it is stored: then apply would bind it, and that is drift.
+    /// </summary>
+    private static void CompareSignedRequest(string path, DeploymentSignedRequest? want, DeploymentSignedRequest? have, List<DriftItem> drift)
+    {
+        if (want is null) return;
+
+        string? declaredTemplate = want.Template?.Trim().ToLowerInvariant();
+        string? actualTemplate = have?.Template?.Trim().ToLowerInvariant();
+        if (!string.Equals(declaredTemplate, actualTemplate, StringComparison.Ordinal))
+            drift.Add(new DriftItem(path + ".template", declaredTemplate, actualTemplate));
+
+        if (want.CredentialRef?.Trim() is not { } declared)
+            return;
+
+        if (have?.AwaitsStoredCredential == true)
+        {
+            drift.Add(new DriftItem(path + ".credentialRef", declared,
+                $"waiting for '{have.CredentialRef}', which is stored now: apply points the ingress at it"));
+            return;
+        }
+
+        if (!string.Equals(declared, have?.CredentialRef, StringComparison.Ordinal)
+            && !string.Equals(declared, have?.BoundCredentialId, StringComparison.Ordinal))
+            drift.Add(new DriftItem(path + ".credentialRef", declared, have?.CredentialRef));
     }
 
     private static void CompareSource(string path, ContextSource? want, ContextSource? have, List<DriftItem> drift)
