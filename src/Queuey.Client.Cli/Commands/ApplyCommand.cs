@@ -176,25 +176,39 @@ internal static class ApplyCommand
 
     /// <summary>
     /// The API host a dry run judges a local destination by. With a profile, its connection's when the user's file has it:
-    /// a dry run never connects, so it needs only the file's half of the profile.
+    /// a dry run never connects, so it needs only the file's half of the profile, and says on stderr what is wrong with the
+    /// other half.
     /// </summary>
     private static Uri DryRunApiBase(ArgMap map, string? profile)
     {
         if (profile is null)
             return CliHost.Resolve(map).ResolvedApiBase();
 
+        string? problem, action;
         try
         {
             return CliHost.Resolve(map, profiles: true).ResolvedApiBase();
         }
-        catch (QueueyConfigurationException)
+        catch (QueueyConfigurationException ex)
         {
-            // Uten brukerens fil (en CI-jobb uten nøkler, for eksempel): --api-base, ellers standardverten.
-            return new ResolvedConfig
-            {
-                ApiBaseOverride = map.Get("api-base") is { } apiBase && Uri.TryCreate(apiBase, UriKind.Absolute, out Uri? uri) ? uri : null,
-            }.ResolvedApiBase();
+            (problem, action) = (ex.Message, ex.SuggestedAction);
         }
+        catch (CliUsageException ex)
+        {
+            (problem, action) = (ex.Message, ex.Action);
+        }
+
+        // Uten brukerens fil (en CI-jobb uten nøkler, for eksempel): --api-base, ellers standardverten. Feilen sies likevel, på
+        // stderr (herding før tag, review av #53): ellers fikk brukeren vite det først når en ekte apply stoppet på den.
+        Console.Error.WriteLine(
+            $"Warning: the dry run went on without profile {profile}'s connection, which apply --profile {profile} needs: {problem}");
+        if (!string.IsNullOrWhiteSpace(action))
+            Console.Error.WriteLine($"  → {action}");
+
+        return new ResolvedConfig
+        {
+            ApiBaseOverride = map.Get("api-base") is { } apiBase && Uri.TryCreate(apiBase, UriKind.Absolute, out Uri? uri) ? uri : null,
+        }.ResolvedApiBase();
     }
 
     /// <summary>

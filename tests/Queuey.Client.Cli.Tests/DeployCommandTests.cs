@@ -182,13 +182,14 @@ public sealed class DeployCommandTests : IDisposable
     [Fact]
     public async Task A_dry_run_shows_a_variable_as_written_in_json_and_in_text()
     {
-        // Review 2026-10-05: --json skrev de utvidede verdiene, også et token i en ?code=, mens teksten viste fila.
-        Environment.SetEnvironmentVariable("QUEUEY_TEST_HOOK_TOKEN", "s3cr3t-token");
+        // Review 2026-10-05: --json skrev de utvidede verdiene, også et token i en ?code=, mens teksten viste fila. Variabelen
+        // het QUEUEY_TEST_HOOK_TOKEN; CLI-ens egne QUEUEY_-navn leses ikke av en deploy-fil (herding før tag, 2026-10-06).
+        Environment.SetEnvironmentVariable("TEST_HOOK_TOKEN", "s3cr3t-token");
         try
         {
             string path = DeployFile("""
-                { "workspace": { "delivery": { "baseUrl": "https://hooks.example.com/in?code=${QUEUEY_TEST_HOOK_TOKEN}" } },
-                  "queues": { "orders": { "delivery": { "url": "https://other.example.com/orders?code=${QUEUEY_TEST_HOOK_TOKEN}" } } } }
+                { "workspace": { "delivery": { "baseUrl": "https://hooks.example.com/in?code=${TEST_HOOK_TOKEN}" } },
+                  "queues": { "orders": { "delivery": { "url": "https://other.example.com/orders?code=${TEST_HOOK_TOKEN}" } } } }
                 """);
 
             CliRun json = await CliHarness.RunAsync(() => ApplyCommand.RunAsync(new[] { "--file", path, "--dry-run", "--json" }));
@@ -197,28 +198,61 @@ public sealed class DeployCommandTests : IDisposable
             Assert.Equal(ExitCodes.Success, json.Exit);
             Assert.Equal(ExitCodes.Success, text.Exit);
             JsonElement root = JsonDocument.Parse(json.Stdout).RootElement;
-            Assert.Equal("https://hooks.example.com/in?code=${QUEUEY_TEST_HOOK_TOKEN}",
+            Assert.Equal("https://hooks.example.com/in?code=${TEST_HOOK_TOKEN}",
                 root.GetProperty("workspace").GetProperty("delivery").GetProperty("baseUrl").GetString());
-            Assert.Equal("https://other.example.com/orders?code=${QUEUEY_TEST_HOOK_TOKEN}",
+            Assert.Equal("https://other.example.com/orders?code=${TEST_HOOK_TOKEN}",
                 root.GetProperty("queues")[0].GetProperty("delivery").GetProperty("url").GetString());
             Assert.DoesNotContain("s3cr3t-token", json.Stdout + text.Stdout);
-            Assert.Contains("${QUEUEY_TEST_HOOK_TOKEN}", text.Stdout);
+            Assert.Contains("${TEST_HOOK_TOKEN}", text.Stdout);
         }
         finally
         {
-            Environment.SetEnvironmentVariable("QUEUEY_TEST_HOOK_TOKEN", null);
+            Environment.SetEnvironmentVariable("TEST_HOOK_TOKEN", null);
         }
     }
 
     [Fact]
     public async Task A_dry_run_still_fails_on_a_variable_that_is_not_set()
     {
-        string path = DeployFile("""{ "workspace": { "delivery": { "baseUrl": "${QUEUEY_TEST_NOT_SET_ANYWHERE}" } } }""");
+        string path = DeployFile("""{ "workspace": { "delivery": { "baseUrl": "${TEST_NOT_SET_ANYWHERE}" } } }""");
 
         var ex = await Assert.ThrowsAsync<Queuey.Client.QueueyConfigurationException>(
             () => CliHarness.RunAsync(() => ApplyCommand.RunAsync(new[] { "--file", path, "--dry-run", "--json" })));
 
-        Assert.Contains("QUEUEY_TEST_NOT_SET_ANYWHERE", ex.Message);
+        Assert.Contains("TEST_NOT_SET_ANYWHERE", ex.Message);
+    }
+
+    [Fact]
+    public async Task A_file_that_refers_to_the_api_key_fails_before_the_key_is_read_or_anything_is_sent()
+    {
+        // Herding før tag (review av #53, 2026-10-06): i CI med nøkkelen i miljøet ville ${QUEUEY_API_KEY} i en leverings-URL
+        // gitt nøkkelen til Queuey sin konfigurasjon og til mottakeren.
+        string? before = Environment.GetEnvironmentVariable("QUEUEY_API_KEY");
+        Environment.SetEnvironmentVariable("QUEUEY_API_KEY", "qak_kid.in-the-ci-environment");
+        try
+        {
+            string path = DeployFile("""
+                { "queues": { "orders": { "delivery": { "url": "https://receiver.example.com/in?k=${QUEUEY_API_KEY}" } } } }
+                """);
+            var api = new RecordingHandler(_ => throw new InvalidOperationException("nothing is sent"));
+
+            CliRun dryRun = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "apply", "--file", path, "--dry-run", "--json" }));
+            CliRun apply = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path)), api);
+
+            foreach (CliRun run in new[] { dryRun, apply })
+            {
+                Assert.Equal(ExitCodes.Configuration, run.Exit);
+                Assert.Contains("${QUEUEY_API_KEY} in queues.orders.delivery.url is a variable a deployment file may not read", run.Stdout + run.Stderr);
+                Assert.DoesNotContain("in-the-ci-environment", run.Stdout + run.Stderr);
+            }
+
+            Assert.Equal("config_error", JsonDocument.Parse(dryRun.Stdout).RootElement.GetProperty("error").GetProperty("code").GetString());
+            Assert.Empty(api.Requests);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("QUEUEY_API_KEY", before);
+        }
     }
 
     [Fact]
@@ -512,7 +546,7 @@ public sealed class DeployCommandTests : IDisposable
         Assert.Equal("${QUEUEY_WORKSPACE_ENVIRONMENT:-staging}",
             JsonDocument.Parse(json.Stdout).RootElement.GetProperty("workspace").GetProperty("environment").GetString());
 
-        string wrong = DeployFile("""{ "workspace": { "environment": "${QUEUEY_F22_NEVER_SET:-qa}" }, "queues": {} }""");
+        string wrong = DeployFile("""{ "workspace": { "environment": "${F22_NEVER_SET:-qa}" }, "queues": {} }""");
         CliRun refused = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "apply", "--file", wrong, "--dry-run" }));
 
         Assert.Equal(ExitCodes.Configuration, refused.Exit);
@@ -596,9 +630,9 @@ public sealed class DeployCommandTests : IDisposable
         // Samme workspace som apply skrev til; bare tenant ekspanderes, så en annen ${VAR} som
         // mangler i skallet der verify kjøres, spiller ingen rolle.
         DeploymentFile file = DeploymentFile.Parse("""
-        { "tenant": "${QUEUEY_TENANT_FOR_TEST}", "queues": { "orders": { "delivery": { "url": "${UNSET_IN_THIS_SHELL}" } } } }
+        { "tenant": "${TENANT_FOR_TEST}", "queues": { "orders": { "delivery": { "url": "${UNSET_IN_THIS_SHELL}" } } } }
         """);
 
-        Assert.Equal("ten_file", file.ResolveTenant(name => name == "QUEUEY_TENANT_FOR_TEST" ? "ten_file" : null));
+        Assert.Equal("ten_file", file.ResolveTenant(name => name == "TENANT_FOR_TEST" ? "ten_file" : null));
     }
 }

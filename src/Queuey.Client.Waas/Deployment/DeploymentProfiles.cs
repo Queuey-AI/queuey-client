@@ -102,6 +102,15 @@ internal static class DeploymentProfiles
                         $"{where}.variables has a name that is not a variable name: letters, digits and '_', not starting with a " +
                         "digit, as ${VAR} takes it, and not shaped like a key. The name is not shown.");
 
+                // Samme regel som utvidelsen (DeploymentVariables): en variabel fila ikke får lese, kan ikke en profil gi heller.
+                if (DeploymentVariables.RefusalOf(variable.Key) is { } refused)
+                    throw new QueueyConfigurationException(
+                        $"{where}.variables.{variable.Key} is a variable a deployment file may not read: {refused}. A profile cannot " +
+                        "give it a value either.")
+                    {
+                        SuggestedAction = DeploymentVariables.RefusalAction,
+                    };
+
                 if (ValueRefusal(variable.Value) is { } why)
                     throw new QueueyConfigurationException($"{where}.variables.{variable.Key} {why} Its value is not shown.")
                     {
@@ -201,8 +210,10 @@ internal static class DeploymentProfiles
         }
         catch (JsonException ex)
         {
+            // Stien er relativ til profiles: $.<profil>.variables.<VAR>. Et navn uten den formen vises ikke (JsonErrorPaths).
+            string? path = JsonErrorPaths.Mask(ex.Path, IsName, JsonErrorPaths.Fields("variables"), IsVariableName);
             throw new QueueyConfigurationException(
-                $"Could not read the deployment file's profiles{(string.IsNullOrEmpty(ex.Path) ? "" : $" ({ex.Path})")}: each profile is " +
+                $"Could not read the deployment file's profiles{(path is null ? "" : $" ({path})")}: each profile is " +
                 "{ \"variables\": { \"NAME\": \"value\" } }, with text values. Nothing of it is shown.");
         }
     }

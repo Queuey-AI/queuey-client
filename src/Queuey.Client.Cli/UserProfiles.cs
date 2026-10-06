@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Queuey.Client.Waas;
@@ -16,6 +17,12 @@ namespace Queuey.Client.Cli;
 // mappa den ligger i, ikke kan skrives av andre. Valgt fremfor en advarsel (som ssh gjør med en privat nøkkel): en advarsel på
 // stderr overses i CI og av en agent, og en fil andre kan skrive, kan peke CLI-en mot en annen API-vert og fange nøkkelen.
 // Windows har ikke Unix-rettighetene; der beskytter brukerprofilens ACL fila.
+//
+// Herding før tag (review av #53, 2026-10-06), som StrictModes i ssh: en lenke følges til fila den til slutt peker på, og det er
+// den som sjekkes og leses. Fila må eies av brukeren som kjører (også når det er root: root leser alles filer, så en fil en
+// annen eier, avvises), og hver mappe over den, opp til og med hjemmemappa, må eies av brukeren eller root og ikke kunne
+// skrives av andre. Ett avvik fra ssh: en mappe med sticky-bit (som /tmp) godtas, siden andre der ikke kan bytte ut en fil de
+// ikke eier, og fila må være brukerens egen. ACL-er leses ikke; det står i README og `queuey --help`.
 
 /// <summary>One environment's connection, as <c>~/.queuey/config.json</c> holds it under <c>profiles</c>.</summary>
 internal sealed class ConnectionProfile
@@ -79,12 +86,13 @@ internal static class UserProfiles
                                   "\"tenant\", \"apiBase\", \"ingressBase\" }} }}. `queuey --help` shows the format.",
             };
 
-        EnsureOnlyTheUserCanReachIt(path);
+        // Fila som leses, er den som ble sjekket: lenkens endelige mål.
+        string target = EnsureOnlyTheUserCanReachIt(path);
 
         string json;
         try
         {
-            json = File.ReadAllText(path);
+            json = File.ReadAllText(target);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -98,10 +106,13 @@ internal static class UserProfiles
         }
         catch (JsonException ex)
         {
-            // Meldingen fra parseren kan ta med et tegn av fila; stien i JSON-en og linjen gjør ikke det.
+            // Meldingen fra parseren kan ta med et tegn av fila, og stien har navnene i den: en nøkkel limt inn som feltnavn
+            // eller profilnavn sto der. Stien vises med feltene fila har og navn med formen til et profilnavn; resten maskeres.
+            string? at = JsonErrorPaths.Mask(ex.Path, JsonErrorPaths.Fields("profiles"), DeploymentProfiles.IsName,
+                JsonErrorPaths.Fields("apiKey", "license", "tenant", "apiBase", "ingressBase", "source"));
             throw new QueueyConfigurationException(
                 $"Could not read {path} at line {(ex.LineNumber ?? 0) + 1}" +
-                (string.IsNullOrEmpty(ex.Path) ? "" : $" ({ex.Path})") +
+                (at is null ? "" : $" ({at})") +
                 ": it holds a field the file does not have, a value that is not text, or JSON that is not valid. Nothing of it is shown.")
             {
                 SuggestedAction = "Each profile takes apiKey, license, tenant, apiBase, ingressBase and source, all text.",
@@ -120,35 +131,195 @@ internal static class UserProfiles
     }
 
     /// <summary>
-    /// Throws when anyone but the owner can read or write the file, or another user can replace it through its directory.
-    /// Not on Windows, which has no Unix permissions; the user profile's ACL protects the file there.
+    /// The file to read for <paramref name="path"/>: the file a link finally points to, or the path itself. Throws when
+    /// anyone but the user running the CLI can reach that file: another user owns it, others may read or write it, or a
+    /// folder above it, up to and including the home folder, belongs to another user than the user or root, or others can
+    /// write to it without the sticky bit. Not on Windows, which has no Unix permissions; the user profile's ACL protects the
+    /// file there. ACLs on Unix are not read.
     /// </summary>
-    internal static void EnsureOnlyTheUserCanReachIt(string path)
+    internal static string EnsureOnlyTheUserCanReachIt(string path) => EnsureOnlyTheUserCanReachIt(path, Home());
+
+    /// <summary><see cref="EnsureOnlyTheUserCanReachIt(string)"/> with the home folder the walk stops at given.</summary>
+    internal static string EnsureOnlyTheUserCanReachIt(string path, string? home)
     {
         if (OperatingSystem.IsWindows())
-            return;
+            return path;
+
+        string target = FinalTarget(path);
+        string shown = string.Equals(target, Path.GetFullPath(path), StringComparison.Ordinal) ? path : $"{path} (a link to {target})";
+        uint me = CurrentUser();
+
+        (uint owner, UnixFileMode mode) = Inspect(target);
+        if (owner != me)
+            throw new QueueyConfigurationException(
+                $"{shown} belongs to another user (uid {owner}), not the one running queuey (uid {me}), so it was not read.")
+            {
+                SuggestedAction = "Keep your connections in a file of your own, readable only by you (chmod 600).",
+            };
 
         const UnixFileMode GroupOrOthers = UnixFileMode.GroupRead | UnixFileMode.GroupWrite | UnixFileMode.GroupExecute
                                            | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
-        UnixFileMode mode = File.GetUnixFileMode(path);
         if ((mode & GroupOrOthers) != 0)
             throw new QueueyConfigurationException(
-                $"{path} holds API keys, and other users can reach it (mode {Octal(mode)}), so it was not read.")
+                $"{shown} holds API keys, and other users can reach it (mode {Octal(mode)}), so it was not read.")
             {
-                SuggestedAction = $"Let only you read and write it: chmod 600 {path}",
+                SuggestedAction = $"Let only you read and write it: chmod 600 {target}",
             };
 
-        // En mappe andre kan skrive i, lar dem bytte ut fila, med mindre sticky-biten hindrer det (som i /tmp).
-        string? directory = Path.GetDirectoryName(Path.GetFullPath(path));
-        if (directory is null)
-            return;
-        UnixFileMode directoryMode = File.GetUnixFileMode(directory);
-        if ((directoryMode & (UnixFileMode.GroupWrite | UnixFileMode.OtherWrite)) != 0 && (directoryMode & UnixFileMode.StickyBit) == 0)
-            throw new QueueyConfigurationException(
-                $"{directory} can be written by other users (mode {Octal(directoryMode)}), who could replace {path}, so it was not read.")
+        // Hver mappe over fila, som ssh: til og med hjemmemappa når fila ligger der, ellers helt til roten.
+        for (string? folder = Path.GetDirectoryName(target); folder is not null; folder = Path.GetDirectoryName(folder))
+        {
+            (uint folderOwner, UnixFileMode folderMode) = Inspect(folder);
+            if (folderOwner != me && folderOwner != 0)
+                throw new QueueyConfigurationException(
+                    $"{folder} belongs to another user (uid {folderOwner}), who could replace {shown}, so it was not read.")
+                {
+                    SuggestedAction = "Keep the file in a folder that belongs to you, such as ~/.queuey.",
+                };
+
+            // En mappe andre kan skrive i, lar dem bytte ut fila, med mindre sticky-biten hindrer det (som i /tmp).
+            if ((folderMode & (UnixFileMode.GroupWrite | UnixFileMode.OtherWrite)) != 0 && (folderMode & UnixFileMode.StickyBit) == 0)
+                throw new QueueyConfigurationException(
+                    $"{folder} can be written by other users (mode {Octal(folderMode)}), who could replace {shown}, so it was not read.")
+                {
+                    SuggestedAction = $"Let only you write to it: chmod go-w {folder}",
+                };
+
+            if (home is not null && string.Equals(folder, home, StringComparison.Ordinal))
+                break;
+        }
+
+        return target;
+    }
+
+    /// <summary>The file a link at <paramref name="path"/> finally points to, as a full path; the path itself when it is no link.</summary>
+    private static string FinalTarget(string path)
+    {
+        string full = Path.GetFullPath(path);
+        try
+        {
+            FileSystemInfo? target = File.ResolveLinkTarget(full, returnFinalTarget: true);
+            return target is null ? full : Path.GetFullPath(target.FullName);
+        }
+        catch (IOException ex)
+        {
+            throw new QueueyConfigurationException($"Could not follow the link {path} to a file ({ex.GetType().Name}), so it was not read.");
+        }
+    }
+
+    /// <summary>The home folder as a full path without a trailing separator, or null when there is none.</summary>
+    private static string? Home()
+    {
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (string.IsNullOrEmpty(home))
+            return null;
+
+        string full = Path.GetFullPath(home);
+        return full.Length > 1 ? full.TrimEnd(Path.DirectorySeparatorChar) : full;
+    }
+
+    /// <summary>
+    /// Who owns a file or folder, and its mode, following links as stat(2) does. A seam: a test can make a file belong to
+    /// another user, which a test cannot do on disk without root.
+    /// </summary>
+    internal static Func<string, (uint Owner, UnixFileMode Mode)> Inspect = Native.Inspect;
+
+    /// <summary>The user the process runs as (its effective uid). A seam, as <see cref="Inspect"/>.</summary>
+    internal static Func<uint> CurrentUser = Native.CurrentUser;
+
+    /// <summary>
+    /// The effective uid from libc's <c>geteuid</c>, loaded by name, or null when no libc could be loaded: the fallback
+    /// <see cref="CurrentUser"/> takes when the runtime's shim has no <c>SystemNative_GetEUid</c>.
+    /// </summary>
+    internal static uint? EffectiveUserFromLibc() => Native.LibcEffectiveUser();
+
+    // .NET har ikke et offentlig API for eieren av en fil; File.GetUnixFileMode gir bare modusen. Runtimens egen shim har det:
+    // libSystem.Native, som File.GetUnixFileMode selv kaller, fyller FileStatus med Flags, Mode, Uid og Gid først, og de fire har
+    // stått der siden .NET Core 2.0. Bufferen er romslig, så felt runtimen legger til bak dem, får plass. Modusen fra den
+    // sammenlignes med File.GetUnixFileMode, så en annen rekkefølge i en senere runtime gir en feil, aldri en eier som er lest
+    // feil. Finnes ikke shimen, leses fila ikke: sjekken faller aldri bort i stillhet.
+    //
+    // Orkestreringen (review av #55, 2026-10-06): uid-en til prosessen har en reserve i libc sin geteuid, lastet ved navn med
+    // NativeLibrary (libc.so.6 i glibc, libc.so i musl, libSystem.dylib i macOS). Eieren av en fil har ingen reserve: stat(2)
+    // har ulik struct per plattform, og en eier som er lest feil, er verre enn en fil som ikke leses. release.yml kjører
+    // --profile i den publiserte binærfila for hver RID, så en runtime uten shimen stopper releasen, ikke brukeren.
+    private static class Native
+    {
+        private static readonly string[] Libc = { "libc.so.6", "libc.so", "libSystem.dylib" };
+
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate uint GetEUidFunction();
+
+        [StructLayout(LayoutKind.Sequential, Size = 512)]
+        private struct FileStatus
+        {
+            public int Flags;
+            public int Mode;
+            public uint Uid;
+            public uint Gid;
+        }
+
+        [DllImport("libSystem.Native", EntryPoint = "SystemNative_Stat", SetLastError = true)]
+        private static extern int Stat(string path, out FileStatus status);
+
+        [DllImport("libSystem.Native", EntryPoint = "SystemNative_GetEUid")]
+        private static extern uint GetEUid();
+
+        internal static (uint Owner, UnixFileMode Mode) Inspect(string path)
+        {
+            if (OperatingSystem.IsWindows())
+                throw new PlatformNotSupportedException("Windows has no Unix owner or mode.");
+
+            UnixFileMode mode = File.GetUnixFileMode(path);
+            int result;
+            FileStatus status;
+            try
             {
-                SuggestedAction = $"Let only you write to it: chmod 700 {directory}",
-            };
+                result = Stat(path, out status);
+            }
+            catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+            {
+                throw Unchecked(path);
+            }
+
+            if (result != 0 || (status.Mode & 0xFFF) != ((int)mode & 0xFFF))
+                throw Unchecked(path);
+
+            return (status.Uid, mode);
+        }
+
+        internal static uint CurrentUser()
+        {
+            try
+            {
+                return GetEUid();
+            }
+            catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+            {
+                return LibcEffectiveUser() ?? throw new QueueyConfigurationException(
+                    "Could not tell which user runs queuey on this .NET runtime, so the connections file was not read.")
+                {
+                    SuggestedAction = "Update the queuey CLI, or run without --profile.",
+                };
+            }
+        }
+
+        internal static uint? LibcEffectiveUser()
+        {
+            foreach (string name in Libc)
+            {
+                if (NativeLibrary.TryLoad(name, out IntPtr library) && NativeLibrary.TryGetExport(library, "geteuid", out IntPtr geteuid))
+                    return Marshal.GetDelegateForFunctionPointer<GetEUidFunction>(geteuid)();
+            }
+
+            return null;
+        }
+
+        private static QueueyConfigurationException Unchecked(string path) => new(
+            $"Could not check who owns {path} on this .NET runtime, so it was not read.")
+        {
+            SuggestedAction = "Update the queuey CLI, or run without --profile.",
+        };
     }
 
     private static string Octal(UnixFileMode mode) => "0" + Convert.ToString((int)mode & 0xFFF, 8).PadLeft(3, '0');

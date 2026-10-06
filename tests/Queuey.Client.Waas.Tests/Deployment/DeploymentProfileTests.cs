@@ -216,11 +216,11 @@ public class DeploymentProfileTests
     [InlineData("   ", "is empty")]
     public void A_value_a_profile_may_not_hold_is_refused_without_showing_it(string value, string why)
     {
-        string json = $$"""{ "queues": {}, "profiles": { "dev": { "variables": { "QUEUEY_X": {{JsonSerializer.Serialize(value)}} } } } }""";
+        string json = $$"""{ "queues": {}, "profiles": { "dev": { "variables": { "DEPLOY_X": {{JsonSerializer.Serialize(value)}} } } } }""";
 
         var ex = Assert.Throws<QueueyConfigurationException>(() => DeploymentFile.Parse(json).Resolve());
 
-        Assert.StartsWith("profiles.dev.variables.QUEUEY_X ", ex.Message);
+        Assert.StartsWith("profiles.dev.variables.DEPLOY_X ", ex.Message);
         Assert.Contains(why, ex.Message);
         Assert.EndsWith("Its value is not shown.", ex.Message);
         if (value.Trim().Length > 0)
@@ -235,7 +235,7 @@ public class DeploymentProfileTests
     [InlineData("stripe-whsec")]
     public void A_queuey_id_or_a_plain_value_passes(string value)
     {
-        string json = $$"""{ "queues": {}, "profiles": { "dev": { "variables": { "QUEUEY_X": {{JsonSerializer.Serialize(value)}} } } } }""";
+        string json = $$"""{ "queues": {}, "profiles": { "dev": { "variables": { "DEPLOY_X": {{JsonSerializer.Serialize(value)}} } } } }""";
 
         DeploymentFile.Parse(json).Resolve();
     }
@@ -248,8 +248,8 @@ public class DeploymentProfileTests
             {
               "queues": {},
               "profiles": {
-                "dev": { "variables": { "QUEUEY_X": "dev" } },
-                "prod": { "variables": { "QUEUEY_X": "qak_kid.secret" } }
+                "dev": { "variables": { "DEPLOY_X": "dev" } },
+                "prod": { "variables": { "DEPLOY_X": "qak_kid.secret" } }
               }
             }
             """;

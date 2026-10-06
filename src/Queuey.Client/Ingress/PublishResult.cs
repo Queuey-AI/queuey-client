@@ -5,8 +5,9 @@ namespace Queuey.Client;
 /// <summary>The result of a successful publish (HTTP 202 Accepted).</summary>
 /// <remarks>
 /// A queue whose ingress is set to answer 204 (for producers that accept nothing else) sends no receipt. The event was
-/// taken all the same, and <see cref="EventId"/>, <see cref="QueuePublicId"/> and <see cref="Mode"/> are then empty: its
-/// id is unknown to the publisher. Publish with an idempotency key to send such an event again without a duplicate.
+/// taken all the same, and <see cref="EventId"/>, <see cref="QueuePublicId"/> and <see cref="Mode"/> are then empty and
+/// <see cref="ReceivedAtUtc"/> is <c>default</c>: the publisher knows neither its id nor when Queuey received it. Publish with
+/// an idempotency key to send such an event again without a duplicate.
 /// </remarks>
 public sealed class PublishResult
 {
@@ -19,7 +20,10 @@ public sealed class PublishResult
     /// </summary>
     public string EventId { get; init; } = default!;
 
-    /// <summary>Server receive time.</summary>
+    /// <summary>
+    /// Server receive time. <c>default</c> (0001-01-01) when the ingress answered without a receipt, since the time is then
+    /// unknown; never the publisher's own clock.
+    /// </summary>
     public DateTimeOffset ReceivedAtUtc { get; init; }
 
     /// <summary>

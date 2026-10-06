@@ -246,6 +246,8 @@ public class PublishTests
             Assert.Equal("", r.EventId);
             Assert.Equal("", r.QueuePublicId);
             Assert.Equal("", r.Mode);
+            // Tiden er ukjent som id-ene (herding før tag): aldri klientens klokke vist som serverens mottakstid.
+            Assert.Equal(default, r.ReceivedAtUtc);
         }
     }
 

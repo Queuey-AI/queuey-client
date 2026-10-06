@@ -111,11 +111,13 @@ internal sealed class QueueyIngressClient : IQueueyIngress
         PublishResult? receipt = await SendCoreAsync(queueName, body, contentType, sandbox, query, eventType, groupKey, idempotencyKey,
             source, cancellationToken).ConfigureAwait(false);
 
+        // Uten kvittering er tiden ukjent, som id-ene (herding før tag, review av #53): UtcNow var klientens klokke vist som
+        // serverens mottakstid. Typen er ikke nullbar (en offentlig kontrakt), så den er default, som PublishResult dokumenterer.
         return Checked(receipt) ?? new PublishResult
         {
             QueuePublicId = string.Empty,
             EventId = string.Empty,
-            ReceivedAtUtc = DateTimeOffset.UtcNow,
+            ReceivedAtUtc = default,
             Mode = string.Empty,
         };
     }
