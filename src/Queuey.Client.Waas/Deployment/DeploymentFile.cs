@@ -416,7 +416,7 @@ public sealed class DeploymentFile
 
         if (!DeploymentWorkspace.EnvironmentValues.Contains(environment.Trim(), StringComparer.OrdinalIgnoreCase))
             throw new QueueyConfigurationException(
-                $"workspace.environment must be one of {string.Join(", ", DeploymentWorkspace.EnvironmentValues)}; got '{environment}'.");
+                $"workspace.environment must be one of {string.Join(", ", DeploymentWorkspace.EnvironmentValues)}; got '{ShownValue.Of(environment)}'.");
     }
 
     private static void ValidateDelivery(string where, string? authMode, string? method)
@@ -749,8 +749,9 @@ public static class DeploymentDeliveryKinds
         {
             "http" => DeploymentDeliveryKind.Http,
             "localforward" => DeploymentDeliveryKind.LocalForward,
+            // Verdien kan komme fra en ${VAR}, så feilen viser høyst tre tegn av den (ShownValue).
             _ => throw new QueueyConfigurationException(
-                $"{where} must be one of {string.Join(", ", QueueDelivery.KindValues)}; got '{text}'."),
+                $"{where} must be one of {string.Join(", ", QueueDelivery.KindValues)}; got '{ShownValue.Of(text)}'."),
         };
     }
 }
