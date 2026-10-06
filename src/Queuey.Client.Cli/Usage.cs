@@ -266,17 +266,31 @@ ISSUES
                 [--queue <que_...>] [--limit N] [--cursor <c>] [--json]
 
 LISTEN
-  queuey listen --forward-to <url> [--queue <que_...> | --tenant <ten_...>]
-                [--forward-exact] [--tee] [--yes]
-                 Receives delivered webhooks over an outbound push session (no inbound port
-                 exposed) and replays each to --forward-to. By default it preserves fidelity —
-                 same method, path, query, headers, and body (only the host is swapped, so a
-                 tenant with a base URL + per-queue routes mirrors fully). --forward-exact posts
-                 to --forward-to VERBATIM (ignoring the original path), for bridging deliveries
-                 into a FIXED local endpoint such as a local ingress route. Scope defaults to the
-                 configured tenant. Default (redirect) sends only to you and returns your local
-                 response code to the delivery record; --tee also delivers to the real endpoint.
-                 A tenant-wide redirect asks for confirmation (--yes to skip). Ctrl-C to stop.
+  queuey listen --forward-to <origin> [--queue <name|que_...> | --tenant <ten_...>]
+                [--take-over] [--forward-exact] [--json]
+                 Receives the deliveries of a queue set to forward to a local listener (Local
+                 forward) over an outbound push session (no inbound port exposed) and sends each
+                 to --forward-to. Give the origin only, e.g. http://localhost:5000: a delivery
+                 keeps the path and query of the queue's endpoint (/api/stripe), its method,
+                 headers and body; only the host is swapped. --forward-exact posts to
+                 --forward-to as given instead, for a FIXED local endpoint such as a local
+                 ingress route. --queue takes the queue's name (its workspace from --tenant or
+                 QUEUEY_TENANT) or its id; without --queue the session listens on the workspace.
+                 Your local response is the delivery's outcome; the app gets 18 s, then it is a
+                 504. The same event can come more than once, as after a listener went away.
+                 One session listens on a queue at a time: the first one. Another is refused
+                 (listener_already_connected) until it stops, or takes the queue over with
+                 --take-over, and the session it took over from stops. A queue under a workspace
+                 another session listens on is that session's: listening on the queue takes
+                 --take-over too, and the workspace session is told it lost the queue.
+                 --json prints one JSON object per line on stdout, each with ""schemaVersion"": 1
+                 and a ""type"": listening, then delivery per forward (eventId, path, localUrl,
+                 status, durationMs, signatureHeaders; path and localUrl without the query or a
+                 part that may be a secret), lost when a workspace session loses a queue, and
+                 one last line: refused (also for an error before the session), superseded, or
+                 closed. Output nobody reads any more (a closed pipe) stops the session too.
+                 Exit 0 after Ctrl-C, 1 when refused, taken over, the connection is lost for good
+                 or the output is gone, 2 on a usage error, 3 on a key error, 143 after SIGTERM.
 
 REPLAY
   queuey replay <event-id> --queue <que_...> [--json]

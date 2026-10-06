@@ -41,6 +41,7 @@ internal static class CliHarness
         Console.SetOut(stdout);
         Console.SetError(stderr);
         CliHost.TestHandler = api ?? new RecordingHandler(_ => throw new InvalidOperationException("This test sends nothing."));
+        CliHost.StreamOut = stdout;
         CliHost.Env = name => env is not null && env.TryGetValue(name, out string? value) ? value : null;
         try
         {
@@ -50,6 +51,7 @@ internal static class CliHarness
         finally
         {
             CliHost.TestHandler = null;
+            CliHost.StreamOut = null;
             CliHost.Env = originalEnv;
             Console.SetOut(originalOut);
             Console.SetError(originalErr);

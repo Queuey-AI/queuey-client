@@ -281,9 +281,9 @@ Rotating keys, or accepting more than one signer? `QueueyDeliveryVerifier.ReadKe
 reads the claimed key id before verification, so you can pick the right secret.
 It is a lookup hint and nothing more until `Verify` passes.
 
-While you build, `queuey listen --forward-to http://localhost:5000/webhooks/queuey`
-delivers real events to your machine over an outbound session, with no inbound
-port open and no tunnel.
+While you build, `queuey listen --queue <name> --forward-to http://localhost:5000`
+delivers real events to your machine, at the path of the queue's endpoint, over an
+outbound session, with no inbound port open and no tunnel.
 
 ## Delivery as code (`queuey.deploy.json`)
 
@@ -900,26 +900,22 @@ how an intentional, not-yet-applied edit disappears.
 ### `queuey listen` — receive webhooks on your machine
 
 Opens an **outbound** authenticated push session (no inbound port exposed) and forwards each
-delivered event to a local URL — Stripe-`listen` style. Scope it to one queue (`--queue`) or a whole
-tenant (`--tenant`, where one listener covers every queue under it):
+delivery of a queue set to forward to a local listener (Local forward, `"kind": "localForward"`) to
+your machine — Stripe-`listen` style. Scope it to one queue (`--queue`, by name or by id) or a whole
+workspace (`--tenant`, where one listener covers every queue under it):
 
 ```bash
-# receive this queue's deliveries on your machine and forward them locally — Ctrl-C to stop
-queuey listen \
-  --api-key qak_… \
-  --queue que_… \
-  --forward-to http://localhost:5094/webhook
+# receive this queue's deliveries on your machine — Ctrl-C to stop
+queuey listen --queue orders --tenant ten_… --forward-to http://localhost:5000
 # targets production by default; add --api-base http://localhost:5223 to point at a local instance
 ```
 
-**Two forwarding modes:**
-
-- **Path fidelity (default)** — replays the request faithfully (same method, path, query, headers,
-  body), appending the original delivery path onto `--forward-to`. Use it to replay a webhook to a
-  local server that expects the same route.
-- **`--forward-exact`** — posts to `--forward-to` **verbatim**, ignoring the original path. Use it to
-  bridge deliveries into a **fixed** local endpoint — e.g. piping a queue straight into a local
-  Queuey ingress route:
+**`--forward-to` is the origin only.** Each delivery keeps the path and query of the queue's endpoint:
+a queue that delivers to `https://api.example.com/api/orders` arrives at
+`http://localhost:5000/api/orders`, with the same method, headers and body, and only the host swapped.
+A path in `--forward-to` goes in front of the endpoint's path. `--forward-exact` posts to
+`--forward-to` **verbatim** instead, to bridge deliveries into a **fixed** local endpoint — e.g. a
+local Queuey ingress route:
 
   ```bash
   queuey listen --api-key qak_… \
@@ -928,9 +924,39 @@ queuey listen \
     --forward-exact
   ```
 
-`--tee` also delivers to the real endpoint (default is redirect — only you receive it); a tenant-wide
-redirect asks to confirm (`--yes` to skip). The API key needs **`queue.read`** on the queue/tenant (a
-FullAccess or ProducerAdmin key — an ingress-only publish key can't listen).
+**One listener per queue.** The first session that listens on a queue owns it. Another one is
+refused with `listener_already_connected`, and told since when the queue has been held, until the
+first one stops. `--take-over` takes the queue over on purpose, and the session it took over from
+stops (exit 1). A queue under a workspace another session listens on is that session's too:
+listening on the queue is refused the same way unless you pass `--take-over`, and then the workspace
+session is told it lost that queue and keeps the others. Only the owner gets the queue's
+deliveries, and only its answer counts: your local response is the delivery's outcome — a 2xx
+delivers the event, anything else dead-letters it, and `queuey replay` sends it again. Your app gets
+18 seconds to answer, then the delivery records a 504. A listener that goes away before it answers
+leaves the event waiting for the next listener, so **the same event can arrive more than once**:
+make your handler idempotent. The API key needs **`queue.listen`** on the queue or workspace (a
+Build, Full access or ProducerAdmin key).
+
+**`--json` for agents and scripts:** one JSON object per line on stdout, each with
+`"schemaVersion": 1` and a `type` — `listening` first, a `delivery` per forward, `lost` when a
+workspace session loses one of its queues, and one last line: `refused` (it never listened, an error
+before the session included), `superseded` (another session took the queue over) or `closed`
+(stopped, terminated, or the connection was lost for good). The last line comes after the session
+has stopped, so the queue is free when you read it. When whatever reads the output closes it (as
+`head -n 5` does), or falls more than about 1024 lines behind, the session stops and frees the queue
+too: the stream then ends without a last line, and the exit code is 1. After a lost connection the
+session reconnects at once and again after 1, 2, 4 and 8 seconds, so it is back within the 10
+seconds Queuey keeps its queue for it. `path` and `localUrl` leave out the query and
+any part of the path that may be a secret; your app still gets the whole URL. Exit codes: 0 after
+Ctrl-C, 1 when refused, taken over or the connection is lost for good, 2 on a usage error, 3 when
+the key is missing or refused, and 143 after SIGTERM.
+
+```json
+{"schemaVersion":1,"type":"delivery","eventId":"evt_…","eventType":"invoice.paid","queue":"que_…","method":"POST","path":"/api/stripe","localUrl":"http://localhost:5000/api/stripe","status":200,"durationMs":12,"signatureHeaders":["Stripe-Signature"],"error":null}
+```
+
+`signatureHeaders` names the headers Queuey's signing set on the delivery, such as a recalculated
+`Stripe-Signature`. A queue without an endpoint has no path to keep, and nothing signs its deliveries.
 
 ### `queuey replay` — re-send one event to your listener
 
@@ -944,7 +970,7 @@ is shape only, a person changes it in the console first; live deliveries still r
 
 ```bash
 # terminal 1 — start a listener
-queuey listen --api-key qak_… --queue que_… --forward-to http://localhost:5094/webhook
+queuey listen --api-key qak_… --queue que_… --forward-to http://localhost:5094
 # terminal 2 — replay an event to it
 queuey replay evt_… --api-key qak_… --queue que_…
 ```

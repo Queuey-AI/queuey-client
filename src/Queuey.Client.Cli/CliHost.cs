@@ -36,6 +36,10 @@ internal static class CliHost
     // stedet for ut på nettet, så en test ser nøyaktig hva en kommando ville sendt. Alltid null ellers.
     internal static HttpMessageHandler? TestHandler { get; set; }
 
+    // Testsøm for queuey listen, som skriver strømmen sin rett til fd 1 og ikke gjennom Console.Out (review av
+    // queuey-client #50, K3b). Står en writer her, går strømmen dit. Alltid null ellers.
+    internal static TextWriter? StreamOut { get; set; }
+
     public static ServiceProvider BuildProvider(ResolvedConfig config, Action<IQueueyBuilder>? build = null)
     {
         var services = new ServiceCollection();
