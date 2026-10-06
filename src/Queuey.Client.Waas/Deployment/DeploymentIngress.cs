@@ -126,7 +126,18 @@ public sealed class DeploymentSignedRequest
                 $"{where}.credentialRef is empty. Name the credential that holds the signing secret, or leave the field out for a template that takes none.");
         if (CredentialRef is not null && CredentialRef.Trim().Length > MaxCredentialRefLength)
             throw new QueueyConfigurationException($"{where}.credentialRef is longer than {MaxCredentialRefLength} characters, the longest a credential name can be.");
+
+        // Queuey lagrer et navn som ikke finnes ennå, og viser det tilbake. En hemmelighet limt inn der navnet skal stå, avvises
+        // derfor før noe sendes, og gjentas ikke (samme prefikser som Queuey, F2.3).
+        if (CredentialRef is not null && SecretPrefixes.Any(p => CredentialRef.Trim().StartsWith(p, StringComparison.OrdinalIgnoreCase)))
+            throw new QueueyConfigurationException(
+                $"{where}.credentialRef looks like a secret, not the name of a credential. Its value is not shown.")
+            {
+                SuggestedAction = "Store the secret with queuey credentials set --name <name> --type HmacSigning --key-id <name> --from-env <VARIABLE>, name that credential here, and keep the secret out of the file.",
+            };
     }
+
+    private static readonly string[] SecretPrefixes = { "whsec_", "sk_live_", "sk_test_", "rk_live_", "rk_test_", "qak_" };
 }
 
 /// <summary>

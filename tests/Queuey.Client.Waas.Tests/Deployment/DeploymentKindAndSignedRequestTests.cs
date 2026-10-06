@@ -178,6 +178,18 @@ public class DeploymentKindAndSignedRequestTests
         DeploymentFile.Parse("""{ "queues": { "stripe": { "ingress": { "signedRequest": { "template": "stripe", "credentialRef": "whsec" } } } } }""").Resolve();
     }
 
+    [Theory]
+    [InlineData("whsec_1a2b3c4d5e6f")]
+    [InlineData("sk_test_51Hx")]
+    public void A_secret_pasted_where_the_name_goes_is_refused_without_repeating_it(string pasted)
+    {
+        var ex = Assert.Throws<QueueyConfigurationException>(() => DeploymentFile.Parse(
+            $$"""{ "queues": { "stripe": { "ingress": { "signedRequest": { "template": "stripe", "credentialRef": "{{pasted}}" } } } } }""").Resolve());
+
+        Assert.Contains("queues.stripe.ingress.signedRequest.credentialRef looks like a secret", ex.Message);
+        Assert.DoesNotContain(pasted, ex.Message + ex.SuggestedAction);
+    }
+
     [Fact]
     public async Task Apply_sends_the_credential_by_name_as_written_and_does_not_need_it_to_exist()
     {
