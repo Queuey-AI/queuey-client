@@ -23,10 +23,11 @@ done
 
 client="$(cd "$(dirname "$0")/.." && pwd)"
 repo="${repo:-$client/../Queuey}"
-if ! git -C "$repo" rev-parse --verify --quiet "$ref^{commit}" >/dev/null; then
+if ! commit="$(git -C "$repo" rev-parse --verify --quiet "$ref^{commit}")"; then
   echo "No Queuey repository with $ref at $repo. Pass its path, or set QUEUEY_REPO." >&2
   exit 2
 fi
+echo "Queuey at $ref ($commit), the CLI at $(git -C "$client" rev-parse HEAD 2>/dev/null || echo 'an unknown commit')."
 
 # The arguments of each [InlineData(...)] line, as written, prefixed with the test method that follows them:
 #   <method><TAB><arguments>
@@ -67,6 +68,18 @@ queuey_file() { git -C "$repo" show "$ref:$1" 2>/dev/null || true; }
 client_file() { cat "$client/$1" 2>/dev/null || true; }
 
 failed=0
+
+# Every [InlineData( line has to be read, or a vector the parser misses (one spread over lines, say) would pass unseen.
+check_parsed() { # <what> <file text>
+  local lines parsed
+  lines="$(printf '%s\n' "$2" | grep -c '^[[:space:]]*\[InlineData(' || true)"
+  parsed="$(printf '%s\n' "$2" | inline_data | wc -l | tr -d ' ')"
+  if [[ "$lines" != "$parsed" ]]; then
+    echo "✗ $1: $lines [InlineData( lines, but $parsed read. Keep each vector on one line, with its test method below it."
+    failed=1
+  fi
+}
+
 compare() { # <what> <Queuey's vectors> <the CLI's vectors>
   local only_queuey only_client
   only_queuey="$(LC_ALL=C comm -23 <(printf '%s\n' "$2") <(printf '%s\n' "$3") | sed '/^$/d')"
@@ -86,6 +99,18 @@ compare() { # <what> <Queuey's vectors> <the CLI's vectors>
 
 egress_queuey="$(queuey_file tests/Api/Queuey.Api.Tests/Tests/Security/SsrfEgressPolicyTests.cs)"
 egress_client="$(client_file tests/Queuey.Client.Waas.Tests/Deployment/DeploymentDestinationsTests.cs)"
+check_parsed "Queuey's egress tests" "$egress_queuey"
+check_parsed "The CLI's egress tests" "$egress_client"
+
+# An IsBlockedIp_ theory that is neither a blocked nor an allowed list would be left out of the comparison silently.
+unsorted="$(printf '%s\n' "$egress_queuey" | inline_data | cut -f1 | LC_ALL=C sort -u \
+  | grep '^IsBlockedIp_' | grep -Ev '^IsBlockedIp_(blocks|allows|lets)_' || true)"
+if [[ -n "$unsorted" ]]; then
+  echo "✗ Queuey has IsBlockedIp_ tests that are neither blocks_ nor allows_ or lets_, so they are not compared:"
+  sed 's/^/      /' <<< "$unsorted"
+  failed=1
+fi
+
 compare "Blocked addresses" \
   "$(vectors "$egress_queuey" '^IsBlockedIp_blocks_')" \
   "$(vectors "$egress_client" '^An_address_queueys_egress_guard_blocks_is_refused_before_anything_is_sent$')"
@@ -96,6 +121,8 @@ compare "Addresses let through" \
 # The credential name tests are twins: the same method names on both sides, each with the same vectors.
 names_queuey="$(queuey_file tests/Api/Queuey.Api.Tests/Tests/Security/CredentialNameRulesTests.cs)"
 names_client="$(client_file tests/Queuey.Client.Waas.Tests/Deployment/CredentialNameRulesTests.cs)"
+check_parsed "Queuey's credential name tests" "$names_queuey"
+check_parsed "The CLI's credential name tests" "$names_client"
 methods="$( (printf '%s\n' "$names_queuey"; printf '%s\n' "$names_client") | inline_data | cut -f1 | LC_ALL=C sort -u)"
 for method in $methods; do
   compare "Credential names, $method" "$(vectors "$names_queuey" "^$method\$")" "$(vectors "$names_client" "^$method\$")"
