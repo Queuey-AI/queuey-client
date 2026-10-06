@@ -47,25 +47,28 @@ internal static class FileEnvironments
         => file.Environment is { } environment && environment.IndexOf("${", StringComparison.Ordinal) >= 0 && Variable(file) is null;
 
     /// <summary>
-    /// A value the file gives the environment that apply would refuse: where it is, and the value. A profile's value counts
-    /// when it is not empty, as plan and apply read it; the <c>${VAR:-default}</c> only otherwise. Null when all are valid.
+    /// The value the file gives the environment with <paramref name="profile"/>, or without a profile, that apply would
+    /// refuse: where it is, and the value. The profile's value counts when it is not empty, as plan and apply read it; the
+    /// <c>${VAR:-default}</c> only when it is used. Null when the value used is valid, or there is none.
     /// </summary>
     // Review av #60: en ugyldig profilverdi falt tilbake på standardverdien, mens plan og apply bruker profilverdien og nekter.
-    internal static (string Where, string Value)? Refused(ExistingDeployFile file)
+    // Re-review: bare profilen som brukes, teller. En ugyldig verdi i en annen profil (qa: "qa") stopper ikke --profile dev.
+    internal static (string Where, string Value)? Refused(ExistingDeployFile file, string? profile)
     {
         if (Fixed(file) is not null || Variable(file) is not { } variable)
             return null;
 
-        foreach (string profile in file.Profiles)
-        {
-            if (ProfileValue(file, profile, variable.Name) is { Length: > 0 } value && Valid(value) is null)
-                return ($"profiles.{profile}.variables.{variable.Name}", value);
-        }
+        if (profile is not null && ProfileValue(file, profile, variable.Name) is { Length: > 0 } value)
+            return Valid(value) is null ? ($"profiles.{profile}.variables.{variable.Name}", value) : null;
 
         return variable.Default is { Length: > 0 } fallback && Valid(fallback) is null
             ? ($"the default in workspace.environment (${{{variable.Name}:-…}})", fallback)
             : null;
     }
+
+    /// <summary>Whether some profile, or the file without one, can give an environment other than dev: one CI or a profile sets.</summary>
+    internal static bool CanRunOutsideDev(ExistingDeployFile file)
+        => Variable(file) is not null || file.Profiles.Any(p => GivenBy(file, p) is { } given && given != "dev");
 
     /// <summary>The fixed environment the file names, lower case; null for one from a variable, none, or one apply refuses.</summary>
     internal static string? Fixed(ExistingDeployFile file)
@@ -112,14 +115,15 @@ internal static class FileEnvironments
 
     /// <summary>The profiles and what each gives, for a conflict: <c>local (dev), production (prod), staging (no environment)</c>.</summary>
     internal static string Describe(ExistingDeployFile file)
-        => string.Join(", ", file.Profiles.Select(p => $"{p} ({GivenBy(file, p) ?? "no environment"})"));
+        => string.Join(", ", file.Profiles.Select(p => $"{p} ({GivenBy(file, p) ?? (Refused(file, p) is null ? "no environment" : "refused value")})"));
 
     /// <summary>The profiles and what each gives, as a conflict's found value.</summary>
     internal static JsonObject Found(ExistingDeployFile file)
     {
         var found = new JsonObject();
         foreach (string profile in file.Profiles)
-            found[profile] = GivenBy(file, profile) is { } given ? JsonValue.Create(given) : null;
+            found[profile] = GivenBy(file, profile) is { } given ? JsonValue.Create(given)
+                : Refused(file, profile) is not null ? JsonValue.Create("refused") : null;
         return found;
     }
 

@@ -209,8 +209,28 @@ public static class FlowDesigner
         // kommer fra: oppgitt, fast i fila eller fra profilen, som en profil prod med KIND=localForward kopiert fra dev.
         private void ForwardingOutsideDev()
         {
-            if (_devInPractice || FileQueueKind() is not { Kind: "localforward" } forwarding)
+            if (FileQueueKind() is not { Kind: "localforward" } forwarding)
                 return;
+
+            // Re-review av #60: en fast localForward i en fil som også kan kjøre utenfor dev, fordi miljøet kommer fra en
+            // variabel (CI setter prod) eller en profil gir noe annet enn dev, sender køen til en lytter også der. Det gjelder
+            // selv om flyten nå er for dev.
+            if (_devInPractice)
+            {
+                if (forwarding.Where != $"queues.{_queue}.delivery.kind" || !FileEnvironments.CanRunOutsideDev(_file!))
+                    return;
+
+                string variable = DeploymentTemplate.QueueKindVariable(_queue);
+                _conflicts.Add(new FlowConflict("ambiguous", "environment", null, JsonValue.Create("localForward"),
+                    new[] { new FlowEvidence(_file!.File, null, $"{forwarding.Where} is localForward") },
+                    $"{_file.File} forwards queues.{_queue} to a local listener with a fixed kind, but the file can run outside dev: " +
+                    (FileEnvironments.Variable(_file) is { } environment
+                        ? $"its environment comes from ${{{environment.Name}}}."
+                        : $"its profiles give {FileEnvironments.Describe(_file)}."),
+                    $"Take the kind from a variable, as advise writes it: set {forwarding.Where} to ${{{variable}}}, which is " +
+                    $"localForward in dev and http elsewhere. Then run advise --intent again."));
+                return;
+            }
 
             bool stated = _flow.IsStated("environment");
             string where = _flow["environment"]?.Provenance == Provenance.Assumed
@@ -1204,11 +1224,16 @@ public static class FlowDesigner
             {
                 // Leveringstypen fra en variabel (som pull --as skriver den) får verdien den skal ha her (før tag): uten profil
                 // sier ingenting ellers at den er http i prod.
+                // Re-review av #60: begge verdiene, knyttet til miljøvariabelen, så en agent ikke setter localForward der prod kjører.
                 string? kindVariable = KindVariable();
-                string Named(string variable) => variable == kindVariable ? $"{variable}={(_local ? "localForward" : "http")}" : variable;
+                string kindValues = kindVariable is null || !variables.Contains(kindVariable) ? ""
+                    : (_file is not null && FileEnvironments.Variable(_file) is { } environment
+                          ? $" Where {environment.Name} is dev, set {kindVariable}=localForward"
+                          : $" In a dev workspace, set {kindVariable}=localForward") +
+                      $"; everywhere else (CI, prod), set {kindVariable}=http.";
                 bool baseUrl = variables.Contains(DeploymentTemplate.BaseUrlVariable);
-                _next.Add($"Set {string.Join(", ", variables.Select(Named))} where plan and apply run: the file reads {(variables.Count == 1 ? "it" : "them")} " +
-                          "from the environment." +
+                _next.Add($"Set {string.Join(", ", variables)} where plan and apply run: the file reads {(variables.Count == 1 ? "it" : "them")} " +
+                          "from the environment." + kindValues +
                           (baseUrl
                               ? $" {DeploymentTemplate.BaseUrlVariable} is where the receiver is reachable over HTTP, such as production's URL" +
                                 (_local ? "; while the queue forwards to a listener, Queuey sends nothing there and takes only the path." : ".")

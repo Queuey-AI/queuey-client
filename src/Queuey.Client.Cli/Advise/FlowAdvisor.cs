@@ -828,21 +828,24 @@ internal sealed class Enrichment
                 "environment, then run advise --intent again.");
             return;
         }
-        if (file is not null && FileEnvironments.Refused(file) is { } refused)
-        {
-            Conflict("unsupported", "environment", null, null,
-                new[] { new FlowEvidence(file.File, null, refused.Where) },
-                $"{refused.Where} in {file.File} is {Shown(refused.Value)}, which apply refuses: workspace.environment must be one " +
-                $"of {string.Join(", ", DeploymentWorkspace.EnvironmentValues)}.",
-                $"Set it to one of {string.Join(", ", DeploymentWorkspace.EnvironmentValues)} in {file.File}, then run advise --intent again.");
-            return;
-        }
-
         // advise --profile velger profilen selv (review av #60): for profiler som deler et miljø, som eu og us i prod, kan
         // ikke et oppgitt miljø skille dem. Profilen må finnes i fila; bare en ny fil får den laget.
         if (_profile is not null && file is not null)
         {
             ChosenProfile(file, _profile, existing, evidence);
+            return;
+        }
+
+        // Re-review av #60: --profile i en ny fil ga et dev-design mot profilens tilkobling. Med --profile prod ble testmodus
+        // credentials set --profile prod, som kunne byttet ut prod sin ekte signeringsnøkkel med Stripe CLI-ens testnøkkel.
+        // Navnet sier ikke miljøet, så profilen i en ny fil krever et oppgitt miljø, aldri et antatt dev.
+        if (_profile is not null && _flow["environment"] is null)
+        {
+            Conflict("missing", "environment", null, null, Array.Empty<FlowEvidence>(),
+                $"--profile {_profile} names the profile a new deployment file gets, and the intent states no environment, so advise " +
+                "cannot tell which environment the profile is for: its name does not say.",
+                $"State the environment profile {_profile} is for in the intent as environment ({string.Join(", ", DeploymentWorkspace.EnvironmentValues)}), " +
+                "then run advise --intent again.");
             return;
         }
 
@@ -859,6 +862,8 @@ internal sealed class Enrichment
                 _flow.Set("environment", stated.WithEvidence(evidence));
             if (file is { Profiles.Count: > 0 })
                 StatedProfile(file, stated.AsString!);
+            else if (file is not null)
+                RefusedIn(file, null);   // uten profiler brukes standardverdien når variabelen ikke er satt
             return;
         }
 
@@ -873,6 +878,9 @@ internal sealed class Enrichment
                 ProfileQuestion(file));
             return;
         }
+
+        if (file is not null && RefusedIn(file, file.Profiles.Count == 1 ? file.Profiles[0] : null))
+            return;
 
         if (file is { Profiles.Count: 1 } && FileEnvironments.GivenBy(file, file.Profiles[0]) is { } given)
         {
@@ -915,6 +923,9 @@ internal sealed class Enrichment
             return;
         }
 
+        if (RefusedIn(file, profile))
+            return;
+
         string? given = FileEnvironments.GivenBy(file, profile);
         if (_flow["environment"] is { } stated)
         {
@@ -933,6 +944,22 @@ internal sealed class Enrichment
             : FlowValue.Of("prod", Provenance.Assumed));
     }
 
+    /// <summary>
+    /// A conflict, and true, when the value the file gives the environment with <paramref name="profile"/>, or without a
+    /// profile, is one apply refuses (review of #60): never a fallback to the default. Only the value in use counts.
+    /// </summary>
+    private bool RefusedIn(ExistingDeployFile file, string? profile)
+    {
+        if (FileEnvironments.Refused(file, profile) is not { } refused)
+            return false;
+
+        Conflict("unsupported", "environment", null, null, new[] { new FlowEvidence(file.File, null, refused.Where) },
+            $"{refused.Where} in {file.File} is {Shown(refused.Value)}, which apply refuses: workspace.environment must be one of " +
+            $"{string.Join(", ", DeploymentWorkspace.EnvironmentValues)}.",
+            $"Set it to one of {string.Join(", ", DeploymentWorkspace.EnvironmentValues)} in {file.File}, then run advise --intent again.");
+        return true;
+    }
+
     /// <summary>A value from the file as a conflict shows it: quoted when it is plain, else in words.</summary>
     private static string Shown(string value)
         => string.IsNullOrWhiteSpace(value) ? "blank"
@@ -948,8 +975,13 @@ internal sealed class Enrichment
     private void StatedProfile(ExistingDeployFile file, string environment)
     {
         string[] giving = file.Profiles.Where(p => FileEnvironments.GivenBy(file, p) == environment).ToArray();
-        if (giving.Length == 1 || (giving.Length == 0 && file.Profiles.Count == 1 && FileEnvironments.GivenBy(file, file.Profiles[0]) is null))
+        if (giving.Length == 1)
             return;
+        if (giving.Length == 0 && file.Profiles.Count == 1 && FileEnvironments.GivenBy(file, file.Profiles[0]) is null)
+        {
+            RefusedIn(file, file.Profiles[0]);
+            return;
+        }
 
         Conflict(giving.Length > 1 ? "ambiguous" : "contradiction", "environment", JsonValue.Create(environment), FileEnvironments.Found(file),
             ProfileEvidence(file),
