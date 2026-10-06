@@ -76,7 +76,8 @@ public static class FlowSchema
             ["description"] = "What the flow takes for granted that no field says, in words. The fields marked assumed are " +
                               "assumptions too.",
             ["type"] = "array",
-            ["items"] = new JsonObject { ["type"] = "string", ["minLength"] = 1 },
+            ["items"] = new JsonObject { ["type"] = "string", ["minLength"] = 1, ["maxLength"] = DesiredFlow.MaxStringLength },
+            ["maxItems"] = DesiredFlow.MaxItems,
         };
         properties["conflicts"] = new JsonObject
         {
@@ -85,6 +86,7 @@ public static class FlowSchema
                               "fills this in; in an intent it is ignored.",
             ["type"] = "array",
             ["items"] = new JsonObject { ["$ref"] = "#/$defs/conflict" },
+            ["maxItems"] = DesiredFlow.MaxItems,
         };
 
         root["properties"] = properties;
@@ -104,9 +106,15 @@ public static class FlowSchema
                 ["type"] = "object",
                 ["properties"] = new JsonObject
                 {
-                    ["file"] = new JsonObject { ["description"] = "Repository-relative path.", ["type"] = "string", ["minLength"] = 1 },
+                    ["file"] = new JsonObject
+                    {
+                        ["description"] = "Repository-relative path.", ["type"] = "string", ["minLength"] = 1, ["maxLength"] = DesiredFlow.MaxStringLength,
+                    },
                     ["line"] = new JsonObject { ["description"] = "The line, from 1.", ["type"] = "integer", ["minimum"] = 1 },
-                    ["what"] = new JsonObject { ["description"] = "What is there, in words.", ["type"] = "string" },
+                    ["what"] = new JsonObject
+                    {
+                        ["description"] = "What is there, in words.", ["type"] = "string", ["maxLength"] = DesiredFlow.MaxStringLength,
+                    },
                 },
                 ["required"] = new JsonArray("file"),
                 ["additionalProperties"] = false,
@@ -123,7 +131,12 @@ public static class FlowSchema
                                           "asks. missing: the design needs what neither says.",
                         ["enum"] = new JsonArray("contradiction", "ambiguous", "unsupported", "missing"),
                     },
-                    ["field"] = new JsonObject { ["description"] = "The flow field it is about, such as destination.route.", ["type"] = "string" },
+                    ["field"] = new JsonObject
+                    {
+                        ["description"] = "The flow field it is about, such as destination.route, or queuey.deploy.json when it is about " +
+                                          "the deployment file as a whole.",
+                        ["type"] = "string",
+                    },
                     ["stated"] = new JsonObject { ["description"] = "What the intent says, or null." },
                     ["found"] = new JsonObject { ["description"] = "What the repository shows, or null." },
                     ["evidence"] = new JsonObject { ["type"] = "array", ["items"] = new JsonObject { ["$ref"] = "#/$defs/evidence" } },
@@ -150,7 +163,10 @@ public static class FlowSchema
         {
             ["value"] = Value(spec),
             ["provenance"] = new JsonObject { ["$ref"] = "#/$defs/provenance" },
-            ["evidence"] = new JsonObject { ["type"] = "array", ["items"] = new JsonObject { ["$ref"] = "#/$defs/evidence" } },
+            ["evidence"] = new JsonObject
+            {
+                ["type"] = "array", ["items"] = new JsonObject { ["$ref"] = "#/$defs/evidence" }, ["maxItems"] = DesiredFlow.MaxItems,
+            },
         },
         ["required"] = new JsonArray("value", "provenance"),
         ["additionalProperties"] = false,
@@ -165,10 +181,16 @@ public static class FlowSchema
             case FlowValueType.Integer:
                 return new JsonObject { ["type"] = "integer", ["minimum"] = 1, ["maximum"] = 65535 };
             case FlowValueType.StringList:
-                return new JsonObject { ["type"] = "array", ["items"] = new JsonObject { ["type"] = "string", ["minLength"] = 1 } };
+                return new JsonObject
+                {
+                    ["type"] = "array",
+                    ["items"] = new JsonObject { ["type"] = "string", ["pattern"] = "^[A-Za-z0-9_.*-]{1,200}$" },
+                    ["maxItems"] = DesiredFlow.MaxItems,
+                };
         }
 
-        var value = new JsonObject { ["type"] = "string" };
+        // En ${ leser deploy-fila som en variabel, så en verdi i flyten har aldri en.
+        var value = new JsonObject { ["type"] = "string", ["maxLength"] = DesiredFlow.MaxStringLength, ["not"] = new JsonObject { ["pattern"] = "\\$\\{" } };
         if (spec.Values is { } values)
         {
             var list = new JsonArray(values.Select(v => (JsonNode?)JsonValue.Create(v)).ToArray());

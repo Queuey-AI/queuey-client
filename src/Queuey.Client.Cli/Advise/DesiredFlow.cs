@@ -355,6 +355,8 @@ public sealed class DesiredFlow
                 case "conflicts":
                     if (property.Value is not JsonArray conflicts || conflicts.Any(c => c is not JsonObject))
                         throw new FlowFormatException("conflicts must be an array of objects.");
+                    if (conflicts.Count > MaxItems)
+                        throw new FlowFormatException($"conflicts has more than {MaxItems} items.");
                     break;
 
                 default:
@@ -431,12 +433,20 @@ public sealed class DesiredFlow
                 throw new FlowFormatException($"{path} must be a whole number from 1 to 65535.");
 
             case FlowValueType.StringList:
-                return new JsonArray(ReadStrings(node, path, allowEmptyItems: false)
-                    .Select(s => (JsonNode?)JsonValue.Create(s)).ToArray());
+                IReadOnlyList<string> items = ReadStrings(node, path, allowEmptyItems: false);
+                // Eventtypene går inn i kommandoer advise foreslår (stripe trigger, verify --event-type), så de har et smalt tegnsett.
+                if (spec.Path == "source.eventTypes" && items.Any(i => !EventTypeName.IsMatch(i)))
+                    throw new FlowFormatException($"{path} must hold event type names: letters, digits and . _ * -, at most 200 each.");
+                return new JsonArray(items.Select(i => (JsonNode?)JsonValue.Create(i)).ToArray());
 
             default:
                 if (node is not JsonValue s || !s.TryGetValue(out string? text) || string.IsNullOrWhiteSpace(text))
                     throw new FlowFormatException($"{path} must be a string that is not empty.");
+                if (text.Length > MaxStringLength)
+                    throw new FlowFormatException($"{path} is longer than {MaxStringLength} characters.");
+                // Et ${ ville deploy-fila lest som en variabel fra miljøet der planen kjøres, og sendt verdien til mottakeren.
+                if (text.Contains("${", StringComparison.Ordinal))
+                    throw new FlowFormatException($"{path} may not contain ${{, which a deployment file reads as a variable.");
                 return JsonValue.Create(Normalize(spec, text.Trim(), path))!;
         }
     }
@@ -495,6 +505,8 @@ public sealed class DesiredFlow
     {
         if (node is not JsonArray items)
             throw new FlowFormatException($"{path} must be an array.");
+        if (items.Count > MaxItems)
+            throw new FlowFormatException($"{path} has more than {MaxItems} items.");
 
         var evidence = new List<FlowEvidence>();
         for (int i = 0; i < items.Count; i++)
@@ -512,8 +524,9 @@ public sealed class DesiredFlow
                 {
                     case "file":
                         file = property.Value is JsonValue f && f.TryGetValue(out string? fs) && !string.IsNullOrWhiteSpace(fs)
+                               && fs.Length <= MaxStringLength
                             ? fs
-                            : throw new FlowFormatException($"{at}.file must be a string that is not empty.");
+                            : throw new FlowFormatException($"{at}.file must be a string that is not empty, at most {MaxStringLength} characters.");
                         break;
                     case "line":
                         line = property.Value is JsonValue l && l.TryGetValue(out int li) && li >= 1
@@ -521,9 +534,9 @@ public sealed class DesiredFlow
                             : throw new FlowFormatException($"{at}.line must be a whole number from 1.");
                         break;
                     case "what":
-                        what = property.Value is JsonValue w && w.TryGetValue(out string? ws)
+                        what = property.Value is JsonValue w && w.TryGetValue(out string? ws) && (ws ?? "").Length <= MaxStringLength
                             ? ws ?? ""
-                            : throw new FlowFormatException($"{at}.what must be a string.");
+                            : throw new FlowFormatException($"{at}.what must be a string, at most {MaxStringLength} characters.");
                         break;
                     default:
                         throw new FlowFormatException($"{at} has a property the schema does not: {Shown(property.Key)}.");
@@ -540,16 +553,29 @@ public sealed class DesiredFlow
     {
         if (node is not JsonArray items)
             throw new FlowFormatException($"{path} must be an array of strings.");
+        if (items.Count > MaxItems)
+            throw new FlowFormatException($"{path} has more than {MaxItems} items.");
 
         var strings = new List<string>();
         foreach (JsonNode? item in items)
         {
             if (item is not JsonValue v || !v.TryGetValue(out string? s) || (!allowEmptyItems && string.IsNullOrWhiteSpace(s)))
                 throw new FlowFormatException($"{path} must be an array of strings that are not empty.");
-            strings.Add(s!.Trim());
+            if (s!.Length > MaxStringLength)
+                throw new FlowFormatException($"{path} has a string longer than {MaxStringLength} characters.");
+            strings.Add(s.Trim());
         }
         return strings;
     }
+
+    /// <summary>The longest string a flow holds: a route, a URL or an assumption in words.</summary>
+    internal const int MaxStringLength = 2048;
+
+    /// <summary>The most items a list in a flow holds: assumptions, event types, evidence.</summary>
+    internal const int MaxItems = 100;
+
+    private static readonly System.Text.RegularExpressions.Regex EventTypeName = new(
+        @"^[A-Za-z0-9_.*-]{1,200}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
     /// <summary>A property name as an error may show it: the name when it reads as one, otherwise a stand-in.</summary>
     private static string Shown(string name)

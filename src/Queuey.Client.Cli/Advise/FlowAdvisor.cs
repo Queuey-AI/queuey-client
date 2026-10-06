@@ -124,20 +124,27 @@ internal sealed record Handler(string Kind, string File, int Line, RouteFinding?
     }
 
     /// <summary>
-    /// The route with the prefix its router is mounted at, when a mount names the router's file: app.use('/webhooks',
-    /// webhooksRouter) for routes/webhooks.js. Otherwise the route as it is written.
+    /// The route with the prefix it is mounted at, within its own project: a mount that names the router's file
+    /// (app.use('/webhooks', webhooksRouter) for routes/webhooks.js), a Python router's prefix in the same file
+    /// (APIRouter(prefix="/api")), or a prefix for every route (Nest's setGlobalPrefix). Otherwise the route as it is written.
     /// </summary>
     internal static RouteFinding Mounted(FlowFacts facts, RouteFinding route)
     {
         if (route.FromPath)
             return route;
 
+        string project = facts.ProjectOf(route.File);
         string module = Path.GetFileNameWithoutExtension(route.File);
-        if (module.Length < 3 || module is "index" or "main" or "app" or "server")
-            return route;
+        bool named = module.Length >= 3 && module is not ("index" or "main" or "app" or "server");
 
-        MountFinding? mount = facts.Mounts.FirstOrDefault(m => m.File != route.File
-            && m.Target.Contains(module, StringComparison.OrdinalIgnoreCase));
+        // Bare monteringer i samme prosjekt: i et monorepo kan en annen app montere en fil med samme navn.
+        MountFinding? mount = facts.Mounts
+            .Where(m => facts.ProjectOf(m.File) == project)
+            .FirstOrDefault(m =>
+                m.Target == "*"
+                || (m.File == route.File && (m.Target.Contains("APIRouter(", StringComparison.Ordinal)
+                                             || m.Target.Contains("Blueprint(", StringComparison.Ordinal)))
+                || (named && m.File != route.File && m.Target.Contains(module, StringComparison.OrdinalIgnoreCase)));
         return mount is null ? route : route with { Route = FlowScan.NormalizeRoute(FlowScan.Combine(mount.Prefix, route.Route)) };
     }
 }
@@ -165,6 +172,7 @@ internal sealed class Enrichment
         if (_seed is not null)
             Seed(_seed);
 
+        ResolveDeployFile();
         ResolveSourceKind();
         string? kind = _flow.String("source.kind");
         bool known = kind is not null && FlowFields.SourceKinds.Contains(kind);
@@ -189,6 +197,21 @@ internal sealed class Enrichment
         ResolveEnvironment();
         if (known)
             ResolveQueue(kind!);
+    }
+
+    /// <summary>
+    /// A deployment file apply cannot read is one advise cannot propose a whole file from: what it proposes is the file
+    /// that is there with the flow's queue in it (F2.10-review), so the file has to read first.
+    /// </summary>
+    private void ResolveDeployFile()
+    {
+        if (_facts.DeployFile is not { Problem: { } problem } file)
+            return;
+
+        Conflict("unsupported", file.File, null, null, new[] { new FlowEvidence(file.File, null, "a deployment file apply cannot read as it is") },
+            $"{file.File} is there, but apply cannot read it as it is: {problem}",
+            $"Fix {file.File} first (queuey apply --dry-run says what is wrong), then run advise --intent again: advise proposes " +
+            "the whole file, starting from the one that is there.");
     }
 
     private void Seed(Handler seed)
@@ -290,10 +313,11 @@ internal sealed class Enrichment
             if (route.FromPath)
                 continue;
 
-            // Løst med vilje: et prefiks som er montert et sted i repoet, holder. En falsk konflikt koster mer enn et
-            // treff på en rute som ligger under feil prefiks.
-            MountFinding? mount = _facts.Mounts.FirstOrDefault(m =>
-                FlowScan.SameRoute(FlowScan.Combine(m.Prefix, route.Route), stated));
+            // Løst med vilje: et prefiks som er montert et sted i samme prosjekt, holder. En falsk konflikt koster mer enn et
+            // treff på en rute som ligger under feil prefiks. Et annet prosjekt i et monorepo teller ikke.
+            string project = _facts.ProjectOf(route.File);
+            MountFinding? mount = _facts.Mounts.FirstOrDefault(m => _facts.ProjectOf(m.File) == project
+                && FlowScan.SameRoute(FlowScan.Combine(m.Prefix, route.Route), stated));
             if (mount is not null)
                 found.Add((route, mount));
         }
@@ -331,7 +355,9 @@ internal sealed class Enrichment
                     .Take(6).ToArray();
                 Conflict("contradiction", "destination.route", stated.Value, Values(known.Select(r => r.Route)),
                     known.Select(r => r.ToEvidence()).ToArray(),
-                    $"No handler in this repository takes POST {route}.",
+                    $"No handler in this repository takes POST {route}." + (_facts.Limits.Count > 0
+                        ? $" The scan was limited ({string.Join("; ", _facts.Limits)}), so the handler may be in what it left out."
+                        : ""),
                     "Which route should Queuey deliver to? If the receiver is in another repository, run queuey advise there.");
                 return;
             }

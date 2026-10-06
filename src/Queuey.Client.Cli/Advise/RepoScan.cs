@@ -42,6 +42,9 @@ public sealed record RepoFacts
     /// <summary>A browser bundle is built here, and everything compiled into one is public.</summary>
     public IReadOnlyList<Evidence> BrowserApp { get; init; } = Array.Empty<Evidence>();
 
+    /// <summary>What the scan left out because of a limit, in words. Empty when it read everything it wanted.</summary>
+    public IReadOnlyList<string> ScanLimits { get; init; } = Array.Empty<string>();
+
     public bool IsDotNet => Ecosystems.Contains("dotnet");
     public bool HasDurability => Durability.Count > 0;
     public bool HasDurableDisk => DurableDisk.Count > 0;
@@ -64,7 +67,9 @@ public sealed record RepoFacts
 /// </summary>
 public static class RepoScan
 {
-    private const int MaxFilesScanned = 4000;
+    // Den samme gangen gjennom repoet som FlowScan (F2.10-review, 2026-10-06): ingen lenker følges, filer leses med en grense,
+    // og hele skanningen har et budsjett. Før fulgte begge lenker, og en lenke til /dev/zero leste for alltid.
+    private static readonly ScanBudget Budget = ScanBudget.Default with { MaxFiles = 4000 };
 
     /// <summary>Packages that mean "events already survive a crash here".</summary>
     private static readonly (string Token, string Name)[] DurabilityPackages =
@@ -120,12 +125,16 @@ public static class RepoScan
         "*.csproj", "package.json", "pyproject.toml", "requirements.txt", "go.mod",
     };
 
-    public static RepoFacts Scan(string root)
+    public static RepoFacts Scan(string root) => Scan(root, Budget);
+
+    /// <summary>Scans within <paramref name="budget"/>: a limit it reaches stops the scan and is named in <see cref="RepoFacts.ScanLimits"/>.</summary>
+    public static RepoFacts Scan(string root, ScanBudget budget)
     {
         if (string.IsNullOrWhiteSpace(root)) throw new ArgumentException("A repository path is required.", nameof(root));
         if (!Directory.Exists(root)) throw new DirectoryNotFoundException($"No such directory: {root}");
 
-        var files = EnumerateInterestingFiles(root).Take(MaxFilesScanned).ToList();
+        var walk = new RepoWalk(root, budget, name => SkippedDirectories.Contains(name, StringComparer.OrdinalIgnoreCase), IsInteresting);
+        var files = walk.Files().ToList();
 
         var ecosystems = new SortedSet<string>(StringComparer.Ordinal);
         var durability = new List<Evidence>();
@@ -140,7 +149,7 @@ public static class RepoScan
         {
             var relative = Relative(root, file);
             var name = Path.GetFileName(file);
-            var text = ReadTextOrEmpty(file);
+            var text = walk.Read(file);
             if (text.Length == 0) continue;
 
             DetectEcosystem(name, ecosystems);
@@ -161,6 +170,7 @@ public static class RepoScan
             QueueyAlready = Dedupe(queueyAlready),
             ServerSide = Dedupe(serverSide),
             BrowserApp = Dedupe(browserApp),
+            ScanLimits = walk.Limits,
         };
     }
 
@@ -355,39 +365,14 @@ public static class RepoScan
     /// Build output and dependencies are skipped — a package in node_modules is
     /// not a statement about this repository.
     /// </summary>
-    private static IEnumerable<string> EnumerateInterestingFiles(string root)
+    /// <summary>
+    /// Folders that are not statements about this repository: dependencies and build output. A package in node_modules is
+    /// not this repository using it.
+    /// </summary>
+    private static readonly string[] SkippedDirectories =
     {
-        var skipped = new[] { "node_modules", "bin", "obj", ".git", "dist", "build", "venv", ".venv", "__pycache__", "vendor", ".next" };
-        var stack = new Stack<string>();
-        stack.Push(root);
-
-        while (stack.Count > 0)
-        {
-            var dir = stack.Pop();
-
-            string[] entries;
-            try { entries = Directory.GetFiles(dir); }
-            catch (UnauthorizedAccessException) { continue; }
-            catch (IOException) { continue; }
-
-            foreach (var file in entries)
-            {
-                if (IsInteresting(Path.GetFileName(file))) yield return file;
-            }
-
-            string[] subdirectories;
-            try { subdirectories = Directory.GetDirectories(dir); }
-            catch (UnauthorizedAccessException) { continue; }
-            catch (IOException) { continue; }
-
-            foreach (var sub in subdirectories)
-            {
-                var name = Path.GetFileName(sub);
-                if (name.Length > 0 && skipped.Contains(name, StringComparer.OrdinalIgnoreCase)) continue;
-                stack.Push(sub);
-            }
-        }
-    }
+        "node_modules", "bin", "obj", ".git", "dist", "build", "venv", ".venv", "__pycache__", "vendor", ".next",
+    };
 
     private static bool IsInteresting(string name)
     {
@@ -411,18 +396,6 @@ public static class RepoScan
             || name.EndsWith(".bicep", StringComparison.OrdinalIgnoreCase)
             || name.EndsWith(".tf", StringComparison.OrdinalIgnoreCase)
             || name.EndsWith(".service", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string ReadTextOrEmpty(string path)
-    {
-        try
-        {
-            var info = new FileInfo(path);
-            if (info.Length > 512 * 1024) return string.Empty; // a generated blob says nothing useful
-            return File.ReadAllText(path);
-        }
-        catch (IOException) { return string.Empty; }
-        catch (UnauthorizedAccessException) { return string.Empty; }
     }
 
     private static string Relative(string root, string file)

@@ -71,21 +71,27 @@ ADVISE
                  evidence, default or recommendation. What differs between environments goes
                  in a profile named after the flow's environment, so plan and apply take it
                  with that profile; a deployment file that is there without profiles keeps
-                 fixed values. Where the repository contradicts the
-                 intent, points several ways, or the intent asks for what Queuey cannot do, it
-                 lists conflicts, proposes nothing and exits 1: answer them in the intent, and
-                 run it again. Only stated fields are intent, so the flow it returns can go
-                 back in. It writes nothing, so --write-files and --apply do not go with it.
+                 fixed values. Where the repository contradicts the intent, points several
+                 ways, or the intent asks for what Queuey cannot do, it lists conflicts,
+                 proposes nothing and exits 1: answer them in the intent, and run it again.
+                 Only stated fields are intent, so the flow it returns can go back in. It
+                 writes nothing, so --write-files and --apply do not go with it.
                  The schema command prints the Desired Flow's schema (see SCHEMA).
+                 infrastructure.content is the whole deployment file, to write as it is: with a
+                 queuey.deploy.json there, that file with the flow's queue and profile values
+                 merged in. The file wins over what the intent does not state; a stated value
+                 it contradicts, or a file apply cannot read, is a conflict.
                  --json prints { ""schemaVersion"": 1, ""outcome"": ""proposed"" or ""conflicts"",
-                 ""flow"", ""existing"", ""infrastructure"", ""code"", ""nextSteps"" }; check
-                 schemaVersion first. ""flow"" is the enriched Desired Flow, to keep beside the
-                 code or in the pull request. It explains queuey.deploy.json, and apply never
-                 reads it. ""existing"" is Queuey where the repository has it already. Without
-                 --intent, --json carries the same schemaVersion and lists ""candidates"": the
-                 Stripe and Supabase flows the repository shows, each a Desired Flow with its
-                 evidence. advise reads the names
-                 in a .env file and never a value, and shows no payload from the repository.
+                 ""flow"", ""existing"", ""scanLimited"", ""infrastructure"", ""code"",
+                 ""nextSteps"" }; check schemaVersion first. ""flow"" is the enriched Desired
+                 Flow, to keep beside the code or in the pull request. It explains
+                 queuey.deploy.json, and apply never reads it. ""existing"" is Queuey where the
+                 repository has it already. ""scanLimited"" lists what the scan left out: it
+                 follows no symbolic link, and stops at fixed limits of files, folders, bytes
+                 and time. Without --intent, --json carries the same schemaVersion and lists
+                 ""candidates"": the Stripe and Supabase flows the repository shows, each a
+                 Desired Flow with its evidence. advise reads the names in a .env file and
+                 never a value, and shows no payload from the repository.
 
 SYNC
   queuey sync --assembly <path.dll> [--dry-run] [--only a,b] [--continue-on-error] [--json]

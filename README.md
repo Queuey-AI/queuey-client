@@ -1059,6 +1059,12 @@ What differs between environments goes in a profile named after the flow's envir
 where the queue delivers, and the base URL when the intent gives it. So `queuey plan --profile dev` works on the file as
 proposed, and production is one more profile. A deployment file that is there without profiles keeps fixed values.
 
+**`infrastructure.content` is the whole file, to write as it is.** With a `queuey.deploy.json` already there, it is that
+file with the flow's queue and profile values merged in. The file wins over everything the intent does not state. A
+stated value the file contradicts, such as the same queue with another route, is a conflict rather than an overwrite,
+and so is a file `apply` cannot read. `infrastructure.merge` says what was added and what the file kept. Comments in the
+file are not carried over, and `merge` says so.
+
 **Stripe.** advise finds the handler and its route, `constructEvent`, the raw body, the framework and the port. It
 proposes a queue whose ingress verifies Stripe's signature and whose deliveries Queuey signs again in Stripe's format,
 so the handler keeps `constructEvent` as it is. In dev the queue delivers to `queuey listen` on your machine.
@@ -1072,11 +1078,20 @@ that does not verify Stripe's signature, or an order key Queuey cannot read: the
 proposed, and the command exits 1. Answer them in the intent and run it again.
 
 `--json` prints `schemaVersion` 1, the `outcome` (`proposed` or `conflicts`), the enriched `flow`, `existing` (Queuey
-where the repository has it already: a package, a registration, a deployment file), `infrastructure` (the file, each
-setting with its basis and reason, and the credentials it names), `code` and `nextSteps`. Keep the flow
+where the repository has it already: a package, a registration, a deployment file), `scanLimited`, `infrastructure` (the
+file, each setting with its basis and reason, and the credentials it names), `code` and `nextSteps`. Keep the flow
 beside the code or in the pull request: it explains `queuey.deploy.json`, and `apply` never reads it. Without
 `--intent`, `advise --json` lists the `candidates` the repository shows. advise reads the names in a `.env` file and
 never a value.
+
+**The scan has limits, and says when it reaches one.**
+
+- It never follows a symbolic link, not even one inside the repository.
+- It reads only regular files, at most 512 KiB of each, 6000 files, 20,000 folders and 64 MiB in all, for at most 15 seconds.
+- It skips lines longer than 4 KiB, folders with tests, fixtures and docs, and names with control or direction characters.
+
+`scanLimited` lists what it left out, and is empty when it read everything. A router mounted from another app in a
+monorepo is not followed: mounting counts within the app's own folder.
 
 ### `queuey listen` — receive webhooks on your machine
 

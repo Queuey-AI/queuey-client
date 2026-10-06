@@ -25,6 +25,19 @@ internal static class TerminalText
     /// <summary>As <see cref="Line"/>, keeping line breaks, for a block such as pretty-printed JSON.</summary>
     internal static string Block(string? value) => Clean(value, keepLineBreaks: true);
 
+    /// <summary>Whether <paramref name="value"/> has a control character or a bidirectional override, which <see cref="Line"/> removes.</summary>
+    internal static bool HasUnsafeCharacters(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return false;
+        foreach (char c in value!)
+        {
+            if (char.IsControl(c) || IsBidiControl(c))
+                return true;
+        }
+        return false;
+    }
+
     private static string Clean(string? value, bool keepLineBreaks)
     {
         if (string.IsNullOrEmpty(value))

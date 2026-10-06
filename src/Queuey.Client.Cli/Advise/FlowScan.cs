@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Queuey.Client.Waas;
 
@@ -80,6 +81,12 @@ public sealed class ExistingDeployFile
 
     /// <summary>The profiles it has, by name: the values its ${VAR} references take per environment.</summary>
     public IReadOnlyList<string> Profiles { get; init; } = Array.Empty<string>();
+
+    /// <summary>The file as JSON, when it reads: what a proposal for it starts from and keeps.</summary>
+    public JsonObject? Json { get; init; }
+
+    /// <summary>Whether it has comments or trailing commas, which JSON written from it does not keep.</summary>
+    public bool HasComments { get; init; }
 }
 
 /// <summary>What the repository shows about the flows it takes part in, each finding with its file and line.</summary>
@@ -102,6 +109,9 @@ public sealed class FlowFacts
     public IReadOnlyList<Finding> Queuey { get; init; } = Array.Empty<Finding>();
     public ExistingDeployFile? DeployFile { get; init; }
 
+    /// <summary>What the scan left out because of a limit, in words. Empty when it read everything it wanted.</summary>
+    public IReadOnlyList<string> Limits { get; init; } = Array.Empty<string>();
+
     /// <summary>The project each file belongs to: the nearest folder above it with a manifest, repository-relative.</summary>
     internal Func<string, string> ProjectOf { get; init; } = _ => "";
 
@@ -121,9 +131,6 @@ public sealed class FlowFacts
 /// </remarks>
 public static class FlowScan
 {
-    private const int MaxFilesScanned = 6000;
-    private const int MaxFileBytes = 512 * 1024;
-
     private static readonly string[] SkippedDirectories =
     {
         "node_modules", "bin", "obj", ".git", "dist", "build", "out", "coverage", "venv", ".venv", "__pycache__", "vendor",
@@ -140,12 +147,15 @@ public static class FlowScan
     // Stripe-handler (2026-10-06). En handler er .ts eller .js.
     private static readonly string[] SourceExtensions = { ".cs", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".py", ".go" };
 
-    public static FlowFacts Scan(string root)
+    public static FlowFacts Scan(string root) => Scan(root, ScanBudget.Default);
+
+    /// <summary>Scans within <paramref name="budget"/>: a limit it reaches stops the scan and is named in <see cref="FlowFacts.Limits"/>.</summary>
+    public static FlowFacts Scan(string root, ScanBudget budget)
     {
         if (string.IsNullOrWhiteSpace(root)) throw new ArgumentException("A repository path is required.", nameof(root));
         if (!Directory.Exists(root)) throw new DirectoryNotFoundException($"No such directory: {root}");
 
-        var scan = new Scanner(Path.GetFullPath(root));
+        var scan = new Scanner(Path.GetFullPath(root), budget);
         scan.Run();
         return scan.Facts();
     }
@@ -153,7 +163,11 @@ public static class FlowScan
     private sealed class Scanner
     {
         private readonly string _root;
+        private readonly ScanBudget _budget;
+        private readonly RepoWalk _walk;
         private readonly List<string> _files = new();
+        private int _longLines;
+        private int _slowFiles;
         private readonly Dictionary<string, string> _manifests = new(StringComparer.Ordinal);   // mappe → manifest-tekst
         private readonly Dictionary<string, string> _nodeFrameworks = new(StringComparer.Ordinal);
         private readonly Dictionary<string, string> _pythonFrameworks = new(StringComparer.Ordinal);
@@ -175,11 +189,17 @@ public static class FlowScan
         private readonly List<Finding> _queuey = new();
         private ExistingDeployFile? _deployFile;
 
-        public Scanner(string root) => _root = root;
+        public Scanner(string root, ScanBudget budget)
+        {
+            _root = root;
+            _budget = budget;
+            _walk = new RepoWalk(root, budget, SkipDirectory, IsInteresting);
+        }
 
         public void Run()
         {
-            _files.AddRange(Enumerate(_root).Take(MaxFilesScanned));
+            _files.AddRange(_walk.Files());
+            var texts = new Dictionary<string, string>(StringComparer.Ordinal);
 
             // Manifestene først: rammeverket til en fil avhenger av package.json-en over den.
             foreach (string file in _files)
@@ -189,44 +209,85 @@ public static class FlowScan
                     || name is "pyproject.toml" or "requirements.txt" or "go.mod")
                 {
                     string dir = Relative(Path.GetDirectoryName(file)!);
-                    string text = Read(file);
+                    string text = texts[file] = _walk.Read(file);
                     _manifests[dir] = _manifests.TryGetValue(dir, out string? before) ? before + "\n" + text : text;
                 }
             }
 
             foreach (string file in _files)
             {
+                if (_walk.Expired)
+                    break;
+
                 string relative = Relative(file);
                 string name = Path.GetFileName(file);
-                string text = Read(file);
+                string text = texts.TryGetValue(file, out string? read) ? read : _walk.Read(file);
                 if (text.Length == 0)
                     continue;
 
-                if (IsEnvFile(name))
+                try
                 {
-                    ReadEnvNames(relative, text);
-                    continue;
+                    Read(relative, name, text);
                 }
-
-                string[] lines = text.Replace("\r\n", "\n").Split('\n');
-
-                if (name.Equals("package.json", StringComparison.OrdinalIgnoreCase))
-                    ReadPackageJson(relative, lines);
-                else if (name.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
-                    ReadProject(relative, lines);
-                else if (name.Equals("launchSettings.json", StringComparison.OrdinalIgnoreCase))
-                    ReadLaunchSettings(relative, lines);
-                else if (relative.EndsWith("supabase/config.toml", StringComparison.Ordinal))
-                    ReadSupabaseConfig(relative, lines);
-                else if (name.EndsWith(".sql", StringComparison.OrdinalIgnoreCase))
-                    ReadSql(relative, text, lines);
-                else if (relative == DeploymentFile.DefaultFileName)
-                    ReadDeployFile(relative, text);
-                else if (SourceExtensions.Any(e => name.EndsWith(e, StringComparison.OrdinalIgnoreCase)))
-                    ReadSource(relative, name, lines);
+                catch (RegexMatchTimeoutException)
+                {
+                    // En linje som tar for lang tid å matche, er ingen evidens. Fila hoppes over, og grensen står i svaret.
+                    _slowFiles++;
+                }
             }
 
             ResolveTriggerTargets();
+        }
+
+        private void Read(string relative, string name, string text)
+        {
+            if (IsEnvFile(name))
+            {
+                ReadEnvNames(relative, text);
+                return;
+            }
+
+            string[] lines = Lines(text);
+
+            if (name.Equals("package.json", StringComparison.OrdinalIgnoreCase))
+                ReadPackageJson(relative, lines);
+            else if (name.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase))
+                ReadProject(relative, lines);
+            else if (name.Equals("launchSettings.json", StringComparison.OrdinalIgnoreCase))
+                ReadLaunchSettings(relative, lines);
+            else if (relative.EndsWith("supabase/config.toml", StringComparison.Ordinal))
+                ReadSupabaseConfig(relative, lines);
+            else if (name.EndsWith(".sql", StringComparison.OrdinalIgnoreCase))
+                ReadSql(relative, text, lines);
+            else if (relative == DeploymentFile.DefaultFileName)
+                ReadDeployFile(relative, text);
+            else if (SourceExtensions.Any(e => name.EndsWith(e, StringComparison.OrdinalIgnoreCase)))
+                ReadSource(relative, name, lines);
+        }
+
+        /// <summary>The file's lines, with a line longer than the budget allows left empty, so the numbering holds.</summary>
+        private string[] Lines(string text)
+        {
+            string[] lines = text.Replace("\r\n", "\n").Split('\n');
+            for (int i = 0; i < lines.Length; i++)
+            {
+                if (lines[i].Length > _budget.MaxLineLength)
+                {
+                    lines[i] = string.Empty;
+                    _longLines++;
+                }
+            }
+            return lines;
+        }
+
+        private IReadOnlyList<string> Limits()
+        {
+            var limits = new List<string>(_walk.Limits);
+            if (_longLines > 0)
+                limits.Add($"{(_longLines == 1 ? "1 line" : $"{_longLines} lines")} longer than {_budget.MaxLineLength} characters skipped, such as minified code");
+            if (_slowFiles > 0)
+                limits.Add($"{(_slowFiles == 1 ? "1 file" : $"{_slowFiles} files")} skipped because a line took too long to match");
+            return limits;
         }
 
         public FlowFacts Facts() => new()
@@ -247,6 +308,7 @@ public static class FlowScan
             SupabaseFunctionsWithoutJwt = _noJwt.ToArray(),
             Queuey = _queuey.ToArray(),
             DeployFile = _deployFile,
+            Limits = Limits(),
             ProjectOf = ProjectOf,
             FrameworkOf = FrameworkOf,
         };
@@ -451,7 +513,7 @@ public static class FlowScan
         internal void AddRoute(string relative, int line, string route, string framework)
         {
             string normalized = NormalizeRoute(route);
-            if (normalized.Length > 0 && Showable(normalized))
+            if (normalized.Length > 0 && Showable(normalized) && !TerminalText.HasUnsafeCharacters(normalized))
                 _routes.Add(new RouteFinding(relative, line, normalized, framework, FromPath: false));
         }
 
@@ -522,7 +584,8 @@ public static class FlowScan
                 if (section == "api" && TomlPort.Match(line) is { Success: true } port && int.TryParse(port.Groups[1].Value, out int p))
                     _ports.Add(new PortFinding(relative, i + 1, p, HardCoded: false, $"the Supabase API serves functions on port {p}"));
 
-                if (section.StartsWith("functions.", StringComparison.Ordinal) && NoVerifyJwt.IsMatch(line))
+                if (section.StartsWith("functions.", StringComparison.Ordinal) && NoVerifyJwt.IsMatch(line)
+                    && FunctionName.IsMatch(section["functions.".Length..].Trim('"')))
                     _noJwt.Add(new NameFinding(relative, i + 1, section["functions.".Length..].Trim('"')));
             }
         }
@@ -533,7 +596,7 @@ public static class FlowScan
             {
                 int line = text[..m.Index].Count(c => c == '\n') + 1;
                 string table = m.Groups["table"].Value.Replace("\"", "");
-                string[] events = Regex.Split(m.Groups["events"].Value.Trim(), @"\s+or\s+", RegexOptions.IgnoreCase)
+                string[] events = OrSeparator.Split(m.Groups["events"].Value.Trim())
                     .Select(e => e.Trim().ToUpperInvariant()).Where(e => e.Length > 0).ToArray();
                 string url = m.Groups["url"].Value;
 
@@ -571,6 +634,12 @@ public static class FlowScan
                     BaseUrl = file.Workspace?.Delivery?.BaseUrl,
                     Queues = file.Queues.ToDictionary(q => q.Key, q => q.Value?.Ingress?.SignedRequest?.Template, StringComparer.Ordinal),
                     Profiles = file.Profiles?.Keys.OrderBy(k => k, StringComparer.Ordinal).ToArray() ?? Array.Empty<string>(),
+                    Json = JsonNode.Parse(text, documentOptions: new JsonDocumentOptions
+                    {
+                        CommentHandling = JsonCommentHandling.Skip,
+                        AllowTrailingCommas = true,
+                    }) as JsonObject,
+                    HasComments = !IsPlainJson(text),
                 };
                 _queuey.Add(new Finding(relative, 1, file.Queues.Count == 0
                     ? "a deployment file that declares no queues"
@@ -661,43 +730,25 @@ public static class FlowScan
 
         // ── filene ───────────────────────────────────────────────────────
 
-        private IEnumerable<string> Enumerate(string root)
+        /// <summary>Whether the file is JSON as it stands, without the comments or trailing commas the parser allows.</summary>
+        private static bool IsPlainJson(string text)
         {
-            var stack = new Stack<string>();
-            stack.Push(root);
-
-            while (stack.Count > 0)
+            try
             {
-                string dir = stack.Pop();
-
-                string[] entries;
-                try { entries = Directory.GetFiles(dir); }
-                catch (UnauthorizedAccessException) { continue; }
-                catch (IOException) { continue; }
-
-                foreach (string file in entries.OrderBy(f => f, StringComparer.Ordinal))
-                {
-                    if (IsInteresting(Path.GetFileName(file)))
-                        yield return file;
-                }
-
-                string[] subdirectories;
-                try { subdirectories = Directory.GetDirectories(dir); }
-                catch (UnauthorizedAccessException) { continue; }
-                catch (IOException) { continue; }
-
-                foreach (string sub in subdirectories.OrderByDescending(d => d, StringComparer.Ordinal))
-                {
-                    string name = Path.GetFileName(sub);
-                    // En skjult mappe (.claude, .github, .vscode) er verktøy, og .claude/worktrees er hele kopier av repoet.
-                    if (name.Length == 0 || name.StartsWith(".", StringComparison.Ordinal)
-                        || SkippedDirectories.Contains(name, StringComparer.OrdinalIgnoreCase)
-                        || SkippedDirectorySuffixes.Any(s => name.EndsWith(s, StringComparison.OrdinalIgnoreCase)))
-                        continue;
-                    stack.Push(sub);
-                }
+                using JsonDocument _ = JsonDocument.Parse(text);
+                return true;
+            }
+            catch (JsonException)
+            {
+                return false;
             }
         }
+
+        // En skjult mappe (.claude, .github, .vscode) er verktøy, og .claude/worktrees er hele kopier av repoet.
+        private static bool SkipDirectory(string name)
+            => name.StartsWith(".", StringComparison.Ordinal)
+               || SkippedDirectories.Contains(name, StringComparer.OrdinalIgnoreCase)
+               || SkippedDirectorySuffixes.Any(s => name.EndsWith(s, StringComparison.OrdinalIgnoreCase));
 
         private static bool IsInteresting(string name)
             => IsEnvFile(name)
@@ -711,18 +762,6 @@ public static class FlowScan
         /// <summary><c>.env</c>, <c>.env.local</c>, <c>.env.example</c> and the like.</summary>
         private static bool IsEnvFile(string name)
             => name.Equals(".env", StringComparison.OrdinalIgnoreCase) || name.StartsWith(".env.", StringComparison.OrdinalIgnoreCase);
-
-        private string Read(string path)
-        {
-            try
-            {
-                var info = new FileInfo(path);
-                if (info.Length > MaxFileBytes) return string.Empty;   // en generert klump sier ingenting nyttig
-                return File.ReadAllText(path);
-            }
-            catch (IOException) { return string.Empty; }
-            catch (UnauthorizedAccessException) { return string.Empty; }
-        }
 
         private string Relative(string path)
         {
@@ -888,7 +927,7 @@ public static class FlowScan
     }
 
     private static bool LooksLikeAFileName(string value)
-        => Regex.IsMatch(value, @"\.(js|mjs|cjs|ts|tsx|jsx|json|cs|py|go|html|css|md|txt|ya?ml|sql|toml|env|lock|config)$");
+        => FileNameEnding.IsMatch(value);
 
     private static IEnumerable<string> SecretNames(string line)
     {
@@ -954,7 +993,7 @@ public static class FlowScan
         (Regex Pattern, bool HardCoded)[] patterns = ext switch
         {
             ".cs" => new[] { (CsUseUrls, true) },
-            ".py" => new[] { (PyRunPort, true), (CliPortFlag, false) },
+            ".py" => new[] { (PyRunPort, true) },
             ".go" => new[] { (GoListen, true) },
             _ => new[] { (JsListen, true), (JsListenObject, true), (JsPortDefault, false) },
         };
@@ -994,102 +1033,108 @@ public static class FlowScan
     private const RegexOptions Compiled = RegexOptions.Compiled | RegexOptions.CultureInvariant;
     private const RegexOptions CompiledIgnoreCase = Compiled | RegexOptions.IgnoreCase;
 
-    private static readonly Regex TemplateParameter = new(@"\$\{\s*(\w+)\s*\}", Compiled);
-    private static readonly Regex ColonParameter = new(@"(?<=/):(\w+)", Compiled);
+    // Hvert mønster har en tidsgrense: en linje som får et mønster til å gå i ring, hopper fila over (RegexMatchTimeoutException),
+    // i stedet for å holde skanningen. Linjer over budsjettets lengde matches ikke i det hele tatt.
+    private static readonly TimeSpan MatchTimeout = TimeSpan.FromMilliseconds(250);
+    private static readonly Regex OrSeparator = new(@"\s+or\s+", CompiledIgnoreCase, MatchTimeout);
+    private static readonly Regex FunctionName = new(@"^[A-Za-z0-9_-]{1,64}$", Compiled, MatchTimeout);
+    private static readonly Regex FileNameEnding = new(
+        @"\.(js|mjs|cjs|ts|tsx|jsx|json|cs|py|go|html|css|md|txt|ya?ml|sql|toml|env|lock|config)$", Compiled, MatchTimeout);
+
+    private static readonly Regex TemplateParameter = new(@"\$\{\s*(\w+)\s*\}", Compiled, MatchTimeout);
+    private static readonly Regex ColonParameter = new(@"(?<=/):(\w+)", Compiled, MatchTimeout);
 
     // C#
-    private static readonly Regex CsMapPost = new(@"\b(?<recv>\w+)\s*\.\s*MapPost\s*\(\s*@?""(?<path>[^""]*)""", Compiled);
-    private static readonly Regex CsMapGroup = new(@"\b(?<var>\w+)\s*=\s*(?<recv>\w+)\s*\.\s*MapGroup\s*\(\s*@?""(?<path>[^""]*)""", Compiled);
-    private static readonly Regex CsRouteAttribute = new(@"\bRoute\s*\(\s*@?""([^""]*)""", Compiled);
-    private static readonly Regex CsHttpPost = new(@"\[\s*(?:[^\]]*,\s*)?HttpPost\b(?:\s*\(\s*@?""([^""]*)"")?", Compiled);
-    private static readonly Regex CsClass = new(@"\bclass\s+(\w+)", Compiled);
-    private static readonly Regex CsStripe = new(@"\bEventUtility\s*\.\s*ConstructEvent\s*\(", Compiled);
-    private static readonly Regex CsRawBody = new(@"\bRequest\s*\.\s*Body\b|\brequest\s*\.\s*Body\b", Compiled);
-    private static readonly Regex CsUseUrls = new(@"\bUseUrls\s*\(\s*""[^""]*:(\d{2,5})\b", Compiled);
-    private static readonly Regex CsHeader = new(@"\bHeaders\s*(?:\[\s*|\.TryGetValue\s*\(\s*)""([\w-]+)""", Compiled);
-    private static readonly Regex QueueyRegistration = new(@"\b(AddQueueyClient|AddQueueyEdge|AddQueueyEdgeMqttSource|AddQueuey)\s*\(", Compiled);
-    private static readonly Regex QueueyPackage = new(@"Include\s*=\s*""(Queuey\.(?:Client(?:\.Waas)?|Edge(?:\.Mqtt)?))""", Compiled);
+    private static readonly Regex CsMapPost = new(@"\b(?<recv>\w+)\s*\.\s*MapPost\s*\(\s*@?""(?<path>[^""]*)""", Compiled, MatchTimeout);
+    private static readonly Regex CsMapGroup = new(@"\b(?<var>\w+)\s*=\s*(?<recv>\w+)\s*\.\s*MapGroup\s*\(\s*@?""(?<path>[^""]*)""", Compiled, MatchTimeout);
+    private static readonly Regex CsRouteAttribute = new(@"\bRoute\s*\(\s*@?""([^""]*)""", Compiled, MatchTimeout);
+    private static readonly Regex CsHttpPost = new(@"\[\s*(?:[^\]]*,\s*)?HttpPost\b(?:\s*\(\s*@?""([^""]*)"")?", Compiled, MatchTimeout);
+    private static readonly Regex CsClass = new(@"\bclass\s+(\w+)", Compiled, MatchTimeout);
+    private static readonly Regex CsStripe = new(@"\bEventUtility\s*\.\s*ConstructEvent\s*\(", Compiled, MatchTimeout);
+    private static readonly Regex CsRawBody = new(@"\bRequest\s*\.\s*Body\b|\brequest\s*\.\s*Body\b", Compiled, MatchTimeout);
+    private static readonly Regex CsUseUrls = new(@"\bUseUrls\s*\(\s*""[^""]*:(\d{2,5})\b", Compiled, MatchTimeout);
+    private static readonly Regex CsHeader = new(@"\bHeaders\s*(?:\[\s*|\.TryGetValue\s*\(\s*)""([\w-]+)""", Compiled, MatchTimeout);
+    private static readonly Regex QueueyRegistration = new(@"\b(AddQueueyClient|AddQueueyEdge|AddQueueyEdgeMqttSource|AddQueuey)\s*\(", Compiled, MatchTimeout);
+    private static readonly Regex QueueyPackage = new(@"Include\s*=\s*""(Queuey\.(?:Client(?:\.Waas)?|Edge(?:\.Mqtt)?))""", Compiled, MatchTimeout);
 
     // JavaScript og TypeScript
-    private static readonly Regex JsPost = new(@"\b([\w$]+)\s*\.\s*(post|all)\s*\(\s*(['""`])(/[^'""`]*)\3", Compiled);
+    private static readonly Regex JsPost = new(@"\b([\w$]+)\s*\.\s*(post)\s*\(\s*(['""`])(/[^'""`]*)\3", Compiled, MatchTimeout);
     private static readonly Regex HttpClientName = new(
-        @"^(?:axios|https?|client|request|ky|got|superagent|fetcher|httpClient|apiClient|\$http|supertest)$", CompiledIgnoreCase);
-    private static readonly Regex BrowserBundler = new(@"""(?:vite|react-scripts|@sveltejs/kit|nuxt|@vue/cli-service)""", Compiled);
-    private static readonly Regex JsRoutePost = new(@"\.\s*route\s*\(\s*(['""`])(/[^'""`]*)\1\s*\)\s*\.\s*(?:post|all)\s*\(", Compiled);
-    private static readonly Regex JsMount = new(@"\.\s*use\s*\(\s*(['""`])(/[^'""`]*)\1\s*,\s*([^\n]*)", Compiled);
-    private static readonly Regex HonoMount = new(@"\.\s*route\s*\(\s*(['""`])(/[^'""`]*)\1\s*,\s*(\w+)", Compiled);
-    private static readonly Regex NestController = new(@"@Controller\s*\(\s*(?:['""`]([^'""`]*)['""`])?", Compiled);
-    private static readonly Regex NestPost = new(@"@Post\s*\(\s*(?:['""`]([^'""`]*)['""`])?\s*\)", Compiled);
-    private static readonly Regex NestGlobalPrefix = new(@"\bsetGlobalPrefix\s*\(\s*['""`]([^'""`]*)['""`]", Compiled);
-    private static readonly Regex JsStripe = new(@"\.\s*webhooks\s*\.\s*constructEvent(Async)?\s*\(", Compiled);
+        @"^(?:axios|https?|client|request|ky|got|superagent|fetcher|httpClient|apiClient|\$http|supertest)$", CompiledIgnoreCase, MatchTimeout);
+    private static readonly Regex BrowserBundler = new(@"""(?:vite|react-scripts|@sveltejs/kit|nuxt|@vue/cli-service)""", Compiled, MatchTimeout);
+    private static readonly Regex JsRoutePost = new(@"\.\s*route\s*\(\s*(['""`])(/[^'""`]*)\1\s*\)\s*\.\s*post\s*\(", Compiled, MatchTimeout);
+    private static readonly Regex JsMount = new(@"\.\s*use\s*\(\s*(['""`])(/[^'""`]*)\1\s*,\s*([^\n]*)", Compiled, MatchTimeout);
+    private static readonly Regex HonoMount = new(@"\.\s*route\s*\(\s*(['""`])(/[^'""`]*)\1\s*,\s*(\w+)", Compiled, MatchTimeout);
+    private static readonly Regex NestController = new(@"@Controller\s*\(\s*(?:['""`]([^'""`]*)['""`])?", Compiled, MatchTimeout);
+    private static readonly Regex NestPost = new(@"@Post\s*\(\s*(?:['""`]([^'""`]*)['""`])?\s*\)", Compiled, MatchTimeout);
+    private static readonly Regex NestGlobalPrefix = new(@"\bsetGlobalPrefix\s*\(\s*['""`]([^'""`]*)['""`]", Compiled, MatchTimeout);
+    private static readonly Regex JsStripe = new(@"\.\s*webhooks\s*\.\s*constructEvent(Async)?\s*\(", Compiled, MatchTimeout);
     private static readonly Regex JsRawBody = new(
         @"\bawait\s+(?:\w+\.)*(?:req|request)\s*\.\s*(?:text|arrayBuffer)\s*\(\s*\)|\b(?:express|bodyParser)\s*\.\s*raw\s*\(|\brawBody\b|\bbuffer\s*\(\s*req\s*\)|\bgetRawBody\s*\(|\bbodyParser\s*:\s*false\b",
-        Compiled);
-    private static readonly Regex JsonParser = new(@"\b(?:express|bodyParser)\s*\.\s*json\s*\(", Compiled);
-    private static readonly Regex JsListen = new(@"\.\s*listen\s*\(\s*(\d{2,5})\b", Compiled);
-    private static readonly Regex JsListenObject = new(@"\.\s*listen\s*\(\s*\{[^}]*\bport\s*:\s*(\d{2,5})\b", Compiled);
-    private static readonly Regex JsPortDefault = new(@"\bPORT\b[^\n;]{0,40}?(?:\|\||\?\?)\s*['""]?(\d{2,5})\b", Compiled);
+        Compiled, MatchTimeout);
+    private static readonly Regex JsonParser = new(@"\b(?:express|bodyParser)\s*\.\s*json\s*\(", Compiled, MatchTimeout);
+    private static readonly Regex JsListen = new(@"\.\s*listen\s*\(\s*(\d{2,5})\b", Compiled, MatchTimeout);
+    private static readonly Regex JsListenObject = new(@"\.\s*listen\s*\(\s*\{[^}]*\bport\s*:\s*(\d{2,5})\b", Compiled, MatchTimeout);
+    private static readonly Regex JsPortDefault = new(@"\bPORT\b[^\n;]{0,40}?(?:\|\||\?\?)\s*['""]?(\d{2,5})\b", Compiled, MatchTimeout);
     private static readonly Regex JsHeaderGet = new(
-        @"(?:\bheaders?\s*\.\s*get|\.\s*header|\breq\s*\.\s*get)\s*\(\s*['""`]([\w-]+)['""`]\s*\)", Compiled);
-    private static readonly Regex JsHeaderIndex = new(@"\bheaders\s*\[\s*['""`]([\w-]+)['""`]\s*\]", Compiled);
-    private static readonly Regex NextPostExport = new(@"\bexport\s+(?:async\s+)?function\s+POST\b|\bexport\s+const\s+POST\b|\bexport\s*\{[^}]*\bPOST\b", Compiled);
-    private static readonly Regex ExportDefault = new(@"\bexport\s+default\b", Compiled);
-    private static readonly Regex ServeCall = new(@"\b(?:Deno\.)?serve\s*\(", Compiled);
-    private static readonly Regex NextRouteHandlerFile = new(@"^(?:.*/)?(?:src/)?app/(?<segs>(?:[^/]+/)*)route\.(?:ts|js|mts|mjs)$", Compiled);
-    private static readonly Regex NextApiFile = new(@"^(?:.*/)?(?:src/)?pages/api/(?<path>.+)\.(?:ts|js|mts|mjs)$", Compiled);
-    private static readonly Regex SupabaseFunctionFile = new(@"^(?:.*/)?supabase/functions/(?<name>[^/_.][^/]*)/index\.(?:ts|js|mts|mjs)$", Compiled);
+        @"(?:\bheaders?\s*\.\s*get|\.\s*header|\breq\s*\.\s*get)\s*\(\s*['""`]([\w-]+)['""`]\s*\)", Compiled, MatchTimeout);
+    private static readonly Regex JsHeaderIndex = new(@"\bheaders\s*\[\s*['""`]([\w-]+)['""`]\s*\]", Compiled, MatchTimeout);
+    private static readonly Regex NextPostExport = new(@"\bexport\s+(?:async\s+)?function\s+POST\b|\bexport\s+const\s+POST\b|\bexport\s*\{[^}]*\bPOST\b", Compiled, MatchTimeout);
+    private static readonly Regex ExportDefault = new(@"\bexport\s+default\b", Compiled, MatchTimeout);
+    private static readonly Regex ServeCall = new(@"\b(?:Deno\.)?serve\s*\(", Compiled, MatchTimeout);
+    private static readonly Regex NextRouteHandlerFile = new(@"^(?:.*/)?(?:src/)?app/(?<segs>(?:[^/]+/)*)route\.(?:ts|js|mts|mjs)$", Compiled, MatchTimeout);
+    private static readonly Regex NextApiFile = new(@"^(?:.*/)?(?:src/)?pages/api/(?<path>.+)\.(?:ts|js|mts|mjs)$", Compiled, MatchTimeout);
+    private static readonly Regex SupabaseFunctionFile = new(@"^(?:.*/)?supabase/functions/(?<name>[^/_.][^/]*)/index\.(?:ts|js|mts|mjs)$", Compiled, MatchTimeout);
 
     // Python
-    private static readonly Regex PythonRoute = new(@"@(\w+)\s*\.\s*(post|route|api_route)\s*\(\s*['""](/[^'""]*)['""]([^\n]*)", Compiled);
-    private static readonly Regex PostInMethods = new(@"methods\s*=\s*[\[(][^\])]*['""]POST['""]", CompiledIgnoreCase);
-    private static readonly Regex PythonPrefix = new(@"\b(?:APIRouter|include_router|Blueprint|register_blueprint)\s*\([^\n]*?\b(?:url_)?prefix\s*=\s*['""](/[^'""]*)['""]", Compiled);
-    private static readonly Regex PyStripe = new(@"\bWebhook\s*\.\s*construct_event\s*\(", Compiled);
-    private static readonly Regex PyRawBody = new(@"\brequest\s*\.\s*data\b|\brequest\s*\.\s*get_data\s*\(|\bawait\s+request\s*\.\s*body\s*\(\s*\)", Compiled);
-    private static readonly Regex PyRunPort = new(@"\b(?:uvicorn\s*\.\s*run|\w+\s*\.\s*run)\s*\([^\n]*\bport\s*=\s*(\d{2,5})\b", Compiled);
-    private static readonly Regex CliPortFlag = new(@"--port[ =](\d{2,5})\b", Compiled);
-    private static readonly Regex PyHeader = new(@"\bheaders\s*(?:\.\s*get\s*\(\s*|\[\s*)['""]([\w-]+)['""]", Compiled);
+    private static readonly Regex PythonRoute = new(@"@(\w+)\s*\.\s*(post|route)\s*\(\s*['""](/[^'""]*)['""]([^\n]*)", Compiled, MatchTimeout);
+    private static readonly Regex PostInMethods = new(@"methods\s*=\s*[\[(][^\])]*['""]POST['""]", CompiledIgnoreCase, MatchTimeout);
+    private static readonly Regex PythonPrefix = new(@"\b(?:APIRouter|include_router|Blueprint|register_blueprint)\s*\([^\n]*?\b(?:url_)?prefix\s*=\s*['""](/[^'""]*)['""]", Compiled, MatchTimeout);
+    private static readonly Regex PyStripe = new(@"\bWebhook\s*\.\s*construct_event\s*\(", Compiled, MatchTimeout);
+    private static readonly Regex PyRawBody = new(@"\brequest\s*\.\s*data\b|\brequest\s*\.\s*get_data\s*\(|\bawait\s+request\s*\.\s*body\s*\(\s*\)", Compiled, MatchTimeout);
+    private static readonly Regex PyRunPort = new(@"\b(?:uvicorn\s*\.\s*run|\w+\s*\.\s*run)\s*\([^\n]*\bport\s*=\s*(\d{2,5})\b", Compiled, MatchTimeout);
+    private static readonly Regex PyHeader = new(@"\bheaders\s*(?:\.\s*get\s*\(\s*|\[\s*)['""]([\w-]+)['""]", Compiled, MatchTimeout);
 
     // Go
     private static readonly Regex GoRoute = new(
-        @"\b(?<recv>\w+)\s*\.\s*(?:HandleFunc|Handle|POST|Post|Any)\s*\(\s*""(?:POST\s+)?(?<path>/[^""]*)""", Compiled);
-    private static readonly Regex GoGroup = new(@"(?:\b(?<var>\w+)\s*:?=\s*)?\b(?<recv>\w+)\s*\.\s*(?:Group|Route)\s*\(\s*""(?<path>/[^""]*)""", Compiled);
-    private static readonly Regex GoStripe = new(@"\bwebhook\s*\.\s*ConstructEvent(?:WithOptions)?\s*\(", Compiled);
-    private static readonly Regex GoRawBody = new(@"\b(?:io|ioutil)\s*\.\s*ReadAll\s*\(\s*\w+\s*\.\s*Body\b", Compiled);
-    private static readonly Regex GoListen = new(@"\b(?:ListenAndServe(?:TLS)?|Run)\s*\(\s*""[^""]*:(\d{2,5})""", Compiled);
-    private static readonly Regex GoHeader = new(@"\bHeader\s*\.\s*Get\s*\(\s*""([\w-]+)""", Compiled);
+        @"\b(?<recv>\w+)\s*\.\s*(?:HandleFunc|Handle|POST)\s*\(\s*""(?:POST\s+)?(?<path>/[^""]*)""", Compiled, MatchTimeout);
+    private static readonly Regex GoGroup = new(@"(?:\b(?<var>\w+)\s*:?=\s*)?\b(?<recv>\w+)\s*\.\s*Group\s*\(\s*""(?<path>/[^""]*)""", Compiled, MatchTimeout);
+    private static readonly Regex GoStripe = new(@"\bwebhook\s*\.\s*ConstructEvent(?:WithOptions)?\s*\(", Compiled, MatchTimeout);
+    private static readonly Regex GoRawBody = new(@"\b(?:io|ioutil)\s*\.\s*ReadAll\s*\(\s*[\w.]*\bBody\b", Compiled, MatchTimeout);
+    private static readonly Regex GoListen = new(@"\b(?:ListenAndServe(?:TLS)?|Run)\s*\(\s*""[^""]*:(\d{2,5})""", Compiled, MatchTimeout);
+    private static readonly Regex GoHeader = new(@"\bHeader\s*\.\s*Get\s*\(\s*""([\w-]+)""", Compiled, MatchTimeout);
 
     // Navn på hemmeligheter, slik koden leser dem fra miljøet eller konfigurasjonen.
     private static readonly Regex[] SecretReads =
     {
-        new(@"\bprocess\.env\.([A-Za-z_][A-Za-z0-9_]*)", Compiled),
-        new(@"\bprocess\.env\[\s*['""]([A-Za-z_][A-Za-z0-9_]*)['""]\s*\]", Compiled),
-        new(@"\bDeno\.env\.get\(\s*['""]([A-Za-z_][A-Za-z0-9_]*)['""]", Compiled),
-        new(@"\bimport\.meta\.env\.([A-Za-z_][A-Za-z0-9_]*)", Compiled),
-        new(@"\bGetEnvironmentVariable\(\s*""([A-Za-z_][A-Za-z0-9_]*)""", Compiled),
-        new(@"\b(?:Configuration|configuration|config|_config\w*|_configuration)\s*\[\s*""([A-Za-z][\w:.-]*)""\s*\]", Compiled),
-        new(@"\bGet(?:Value<string>|Section)\(\s*""([A-Za-z][\w:.-]*)""", Compiled),
-        new(@"\bos\.environ(?:\.get)?\s*[\[(]\s*['""]([A-Za-z_][A-Za-z0-9_]*)['""]", Compiled),
-        new(@"\bos\.getenv\(\s*['""]([A-Za-z_][A-Za-z0-9_]*)['""]", Compiled),
-        new(@"\bos\.Getenv\(\s*""([A-Za-z_][A-Za-z0-9_]*)""", Compiled),
+        new(@"\bprocess\.env\.([A-Za-z_][A-Za-z0-9_]*)", Compiled, MatchTimeout),
+        new(@"\bprocess\.env\[\s*['""]([A-Za-z_][A-Za-z0-9_]*)['""]\s*\]", Compiled, MatchTimeout),
+        new(@"\bDeno\.env\.get\(\s*['""]([A-Za-z_][A-Za-z0-9_]*)['""]", Compiled, MatchTimeout),
+        new(@"\bGetEnvironmentVariable\(\s*""([A-Za-z_][A-Za-z0-9_]*)""", Compiled, MatchTimeout),
+        new(@"\b(?:Configuration|configuration|config|_config\w*|_configuration)\s*\[\s*""([A-Za-z][\w:.-]*)""\s*\]", Compiled, MatchTimeout),
+        new(@"\bGetValue<string>\(\s*""([A-Za-z][\w:.-]*)""", Compiled, MatchTimeout),
+        new(@"\bos\.environ(?:\.get)?\s*[\[(]\s*['""]([A-Za-z_][A-Za-z0-9_]*)['""]", Compiled, MatchTimeout),
+        new(@"\bos\.getenv\(\s*['""]([A-Za-z_][A-Za-z0-9_]*)['""]", Compiled, MatchTimeout),
+        new(@"\bos\.Getenv\(\s*""([A-Za-z_][A-Za-z0-9_]*)""", Compiled, MatchTimeout),
     };
 
-    private static readonly Regex SecretHeader = new(@"secret|token|signature|auth|api[-_]?key|hook", CompiledIgnoreCase);
-    private static readonly Regex NotASecretHeader = new(@"^(?:stripe-signature|x-queuey-[\w-]*|webhook-id|webhook-timestamp)$", CompiledIgnoreCase);
-    private static readonly Regex QueueySignature = new(@"\bQueueyDeliveryVerifier\b|x-queuey-signature", CompiledIgnoreCase);
+    private static readonly Regex SecretHeader = new(@"secret|token|signature|auth|api[-_]?key|hook", CompiledIgnoreCase, MatchTimeout);
+    private static readonly Regex NotASecretHeader = new(@"^(?:stripe-signature|x-queuey-[\w-]*|webhook-id|webhook-timestamp)$", CompiledIgnoreCase, MatchTimeout);
+    private static readonly Regex QueueySignature = new(@"\bQueueyDeliveryVerifier\b|x-queuey-signature", CompiledIgnoreCase, MatchTimeout);
     // Uten ordgrenser med vilje: HasProcessedEventAsync og processed_events er det samme mønsteret.
     private static readonly Regex Dedup = new(
         @"(?:processed|handled|seen)_?(?:stripe_?)?(?:webhook_?)?events?|stripe_?event_?ids?|webhook_?events?|idempotency_?keys?",
-        CompiledIgnoreCase);
-    private static readonly Regex StripeEventType = new(@"(?:\bcase\s+|===?\s*|\bEquals\(\s*)['""`]([a-z][a-z_]*(?:\.[a-z][a-z_]*){1,4})['""`]", Compiled);
-    private static readonly Regex RowEventType = new(@"(?:\bcase\s+|===?\s*|\bEquals\(\s*)['""`](INSERT|UPDATE|DELETE)['""`]", Compiled);
-    private static readonly Regex OldRecord = new(@"\bold_record\b", Compiled);
-    private static readonly Regex EnvAssignment = new(@"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=", Compiled);
-    private static readonly Regex ScriptPort = new(@"""[\w:-]+""\s*:\s*""[^""]*(?:-p|--port)[ =](\d{2,5})\b", Compiled);
-    private static readonly Regex HttpLocalPort = new(@"http://[^;""/]*:(\d{2,5})\b", Compiled);
-    private static readonly Regex TomlSection = new(@"^\[\s*([^\]]+)\s*\]$", Compiled);
-    private static readonly Regex TomlPort = new(@"^port\s*=\s*(\d{2,5})\b", Compiled);
-    private static readonly Regex NoVerifyJwt = new(@"^verify_jwt\s*=\s*false\b", Compiled);
+        CompiledIgnoreCase, MatchTimeout);
+    private static readonly Regex StripeEventType = new(@"(?:\bcase\s+|===?\s*|\bEquals\(\s*)['""`]([a-z][a-z_]*(?:\.[a-z][a-z_]*){1,4})['""`]", Compiled, MatchTimeout);
+    private static readonly Regex RowEventType = new(@"(?:\bcase\s+|===?\s*|\bEquals\(\s*)['""`](INSERT|UPDATE|DELETE)['""`]", Compiled, MatchTimeout);
+    private static readonly Regex OldRecord = new(@"\bold_record\b", Compiled, MatchTimeout);
+    private static readonly Regex EnvAssignment = new(@"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=", Compiled, MatchTimeout);
+    private static readonly Regex ScriptPort = new(@"""[\w:-]+""\s*:\s*""[^""]*(?:-p|--port)[ =](\d{2,5})\b", Compiled, MatchTimeout);
+    private static readonly Regex HttpLocalPort = new(@"http://[^;""/]*:(\d{2,5})\b", Compiled, MatchTimeout);
+    private static readonly Regex TomlSection = new(@"^\[\s*([^\]]+)\s*\]$", Compiled, MatchTimeout);
+    private static readonly Regex TomlPort = new(@"^port\s*=\s*(\d{2,5})\b", Compiled, MatchTimeout);
+    private static readonly Regex NoVerifyJwt = new(@"^verify_jwt\s*=\s*false\b", Compiled, MatchTimeout);
     private static readonly Regex SupabaseTrigger = new(
         @"create\s+(?:or\s+replace\s+)?trigger\s+""?[\w-]+""?\s+(?:after|before)\s+(?<events>(?:insert|update|delete)(?:\s+or\s+(?:insert|update|delete))*)\s+on\s+(?<table>(?:""?\w+""?\.)?""?\w+""?)[\s\S]{0,600}?""?supabase_functions""?\s*\.\s*""?http_request""?\s*\(\s*'(?<url>[^']*)'",
-        CompiledIgnoreCase);
+        CompiledIgnoreCase, MatchTimeout);
 }

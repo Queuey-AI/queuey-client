@@ -14,6 +14,10 @@
       "properties": {
         "value": {
           "type": "string",
+          "maxLength": 2048,
+          "not": {
+            "pattern": "\\$\\{"
+          },
           "enum": [
             "dev",
             "test",
@@ -28,7 +32,8 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/evidence"
-          }
+          },
+          "maxItems": 100
         }
       },
       "required": [
@@ -43,8 +48,11 @@
       "properties": {
         "value": {
           "type": "string",
-          "pattern": "^[a-z0-9][a-z0-9._-]*$",
-          "maxLength": 64
+          "maxLength": 64,
+          "not": {
+            "pattern": "\\$\\{"
+          },
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
         },
         "provenance": {
           "$ref": "#/$defs/provenance"
@@ -53,7 +61,8 @@
           "type": "array",
           "items": {
             "$ref": "#/$defs/evidence"
-          }
+          },
+          "maxItems": 100
         }
       },
       "required": [
@@ -72,6 +81,10 @@
           "properties": {
             "value": {
               "type": "string",
+              "maxLength": 2048,
+              "not": {
+                "pattern": "\\$\\{"
+              },
               "examples": [
                 "stripe",
                 "supabase",
@@ -86,7 +99,8 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/evidence"
-              }
+              },
+              "maxItems": 100
             }
           },
           "required": [
@@ -101,6 +115,10 @@
           "properties": {
             "value": {
               "type": "string",
+              "maxLength": 2048,
+              "not": {
+                "pattern": "\\$\\{"
+              },
               "enum": [
                 "stripe-signature",
                 "api-key",
@@ -115,7 +133,8 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/evidence"
-              }
+              },
+              "maxItems": 100
             }
           },
           "required": [
@@ -132,8 +151,9 @@
               "type": "array",
               "items": {
                 "type": "string",
-                "minLength": 1
-              }
+                "pattern": "^[A-Za-z0-9_.*-]{1,200}$"
+              },
+              "maxItems": 100
             },
             "provenance": {
               "$ref": "#/$defs/provenance"
@@ -142,7 +162,8 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/evidence"
-              }
+              },
+              "maxItems": 100
             }
           },
           "required": [
@@ -157,6 +178,10 @@
           "properties": {
             "value": {
               "type": "string",
+              "maxLength": 2048,
+              "not": {
+                "pattern": "\\$\\{"
+              },
               "minLength": 1
             },
             "provenance": {
@@ -166,7 +191,8 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/evidence"
-              }
+              },
+              "maxItems": 100
             }
           },
           "required": [
@@ -188,6 +214,10 @@
           "properties": {
             "value": {
               "type": "string",
+              "maxLength": 2048,
+              "not": {
+                "pattern": "\\$\\{"
+              },
               "pattern": "^/[^?#\\s]*$"
             },
             "provenance": {
@@ -197,7 +227,8 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/evidence"
-              }
+              },
+              "maxItems": 100
             }
           },
           "required": [
@@ -212,6 +243,10 @@
           "properties": {
             "value": {
               "type": "string",
+              "maxLength": 2048,
+              "not": {
+                "pattern": "\\$\\{"
+              },
               "examples": [
                 "aspnet",
                 "express",
@@ -235,7 +270,8 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/evidence"
-              }
+              },
+              "maxItems": 100
             }
           },
           "required": [
@@ -260,7 +296,8 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/evidence"
-              }
+              },
+              "maxItems": 100
             }
           },
           "required": [
@@ -275,6 +312,10 @@
           "properties": {
             "value": {
               "type": "string",
+              "maxLength": 2048,
+              "not": {
+                "pattern": "\\$\\{"
+              },
               "pattern": "^https?://[^?#\\s]+$"
             },
             "provenance": {
@@ -284,7 +325,8 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/evidence"
-              }
+              },
+              "maxItems": 100
             }
           },
           "required": [
@@ -307,7 +349,8 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/evidence"
-              }
+              },
+              "maxItems": 100
             }
           },
           "required": [
@@ -329,6 +372,10 @@
           "properties": {
             "value": {
               "type": "string",
+              "maxLength": 2048,
+              "not": {
+                "pattern": "\\$\\{"
+              },
               "enum": [
                 "stripe-signature",
                 "queuey-signature",
@@ -343,7 +390,8 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/evidence"
-              }
+              },
+              "maxItems": 100
             }
           },
           "required": [
@@ -358,6 +406,10 @@
           "properties": {
             "value": {
               "type": "string",
+              "maxLength": 2048,
+              "not": {
+                "pattern": "\\$\\{"
+              },
               "enum": [
                 "none",
                 "per-key",
@@ -371,7 +423,8 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/evidence"
-              }
+              },
+              "maxItems": 100
             }
           },
           "required": [
@@ -386,6 +439,10 @@
           "properties": {
             "value": {
               "type": "string",
+              "maxLength": 2048,
+              "not": {
+                "pattern": "\\$\\{"
+              },
               "minLength": 1
             },
             "provenance": {
@@ -395,7 +452,8 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/evidence"
-              }
+              },
+              "maxItems": 100
             }
           },
           "required": [
@@ -418,7 +476,8 @@
               "type": "array",
               "items": {
                 "$ref": "#/$defs/evidence"
-              }
+              },
+              "maxItems": 100
             }
           },
           "required": [
@@ -435,15 +494,18 @@
       "type": "array",
       "items": {
         "type": "string",
-        "minLength": 1
-      }
+        "minLength": 1,
+        "maxLength": 2048
+      },
+      "maxItems": 100
     },
     "conflicts": {
       "description": "What advise will not decide: where the repository contradicts the intent, points several ways, or the intent asks for what Queuey cannot do. While there is one, advise proposes nothing. Advise fills this in; in an intent it is ignored.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/conflict"
-      }
+      },
+      "maxItems": 100
     }
   },
   "additionalProperties": false,
@@ -463,7 +525,8 @@
         "file": {
           "description": "Repository-relative path.",
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "maxLength": 2048
         },
         "line": {
           "description": "The line, from 1.",
@@ -472,7 +535,8 @@
         },
         "what": {
           "description": "What is there, in words.",
-          "type": "string"
+          "type": "string",
+          "maxLength": 2048
         }
       },
       "required": [
@@ -493,7 +557,7 @@
           ]
         },
         "field": {
-          "description": "The flow field it is about, such as destination.route.",
+          "description": "The flow field it is about, such as destination.route, or queuey.deploy.json when it is about the deployment file as a whole.",
           "type": "string"
         },
         "stated": {

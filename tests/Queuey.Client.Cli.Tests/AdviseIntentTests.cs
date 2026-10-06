@@ -602,8 +602,9 @@ public sealed class AdviseIntentTests : IDisposable
         Assert.Equal(("dev", Provenance.Evidence), (advice.Flow.String("environment"), advice.Flow["environment"]!.Provenance));
         FlowDesign design = advice.Design!;
         Assert.True(design.Exists);
-        Assert.Contains("declares queues.payments already", design.Merge, StringComparison.Ordinal);
+        Assert.Contains("everything that is there kept", design.Merge, StringComparison.Ordinal);
         Assert.Equal("/api/stripe", design.Content["queues"]!["payments"]!["delivery"]!["url"]!.GetValue<string>());
+        Assert.Equal("https://api.example.com", design.Content["workspace"]!["delivery"]!["baseUrl"]!.GetValue<string>());
         Assert.Empty(design.Variables);
 
         // En fil uten profiler får faste verdier, som resten av den, og kommandoene tar ingen --profile.
@@ -629,7 +630,9 @@ public sealed class AdviseIntentTests : IDisposable
 
         Assert.Equal("${QUEUEY_WORKSPACE_ENVIRONMENT}", design.Content["workspace"]!["environment"]!.GetValue<string>());
         Assert.Equal("dev", design.Content["profiles"]!["dev"]!["variables"]!["QUEUEY_WORKSPACE_ENVIRONMENT"]!.GetValue<string>());
-        Assert.Contains("Add profiles.dev from the proposal", design.Merge, StringComparison.Ordinal);
+        Assert.Equal("prod", design.Content["profiles"]!["prod"]!["variables"]!["QUEUEY_WORKSPACE_ENVIRONMENT"]!.GetValue<string>());
+        Assert.Equal("https://orders.example.com/hook", design.Content["queues"]!["orders"]!["delivery"]!["url"]!.GetValue<string>());
+        Assert.Contains("profiles.dev.variables.QUEUEY_WORKSPACE_ENVIRONMENT", design.Merge, StringComparison.Ordinal);
         Assert.Contains(design.NextSteps, s => s.Contains("queuey apply --profile dev", StringComparison.Ordinal));
     }
 
@@ -762,7 +765,7 @@ public sealed class AdviseIntentTests : IDisposable
 
         Assert.Equal(ExitCodes.Success, run.Exit);
         JsonElement root = JsonDocument.Parse(run.Stdout).RootElement;
-        Assert.Equal(new[] { "schemaVersion", "path", "intent", "outcome", "flow", "existing", "infrastructure", "code", "nextSteps" },
+        Assert.Equal(new[] { "schemaVersion", "path", "intent", "outcome", "flow", "existing", "scanLimited", "infrastructure", "code", "nextSteps" },
             root.EnumerateObject().Select(p => p.Name).ToArray());
         Assert.Equal(1, root.GetProperty("schemaVersion").GetInt32());
         Assert.Equal("proposed", root.GetProperty("outcome").GetString());
@@ -896,6 +899,331 @@ public sealed class AdviseIntentTests : IDisposable
         Assert.Equal(ExitCodes.Success, flow.Exit);
         Assert.Equal(FlowSchema.Json, flow.Stdout);
         Assert.Equal(DeploymentFile.JsonSchema, deploy.Stdout);
+    }
+
+    // ── hele fila (B1 i review av #56) ───────────────────────────────────
+
+    [Fact]
+    public void An_existing_deployment_file_comes_back_whole_with_the_flows_queue_added()
+    {
+        // Agenten skriver content som det er. Før var det et utdrag, og orders, refunds og workspace-blokka forsvant.
+        Fixture("stripe-aspnet");
+        const string existing = """
+            {
+              "workspace": { "delivery": { "baseUrl": "https://api.example.com", "timeoutMs": 10000 }, "retentionDays": 14 },
+              "queues": {
+                "orders": { "delivery": { "url": "/orders" }, "ordering": "bykey", "ingress": { "groupKey": { "from": "body", "name": "customer_id" } } },
+                "refunds": { "delivery": { "url": "/refunds" }, "dlqEnabled": true }
+              }
+            }
+            """;
+        File_("queuey.deploy.json", existing);
+
+        FlowDesign design = Advise(StripeIntent).Design!;
+
+        JsonObject before = JsonNode.Parse(existing)!.AsObject();
+        Assert.True(JsonNode.DeepEquals(before["workspace"], design.Content["workspace"]));
+        Assert.True(JsonNode.DeepEquals(before["queues"]!["orders"], design.Content["queues"]!["orders"]));
+        Assert.True(JsonNode.DeepEquals(before["queues"]!["refunds"], design.Content["queues"]!["refunds"]));
+        Assert.Equal(new[] { "orders", "refunds", "stripe" }, design.Content["queues"]!.AsObject().Select(q => q.Key).ToArray());
+        Assert.Equal("/api/stripe", design.Content["queues"]!["stripe"]!["delivery"]!["url"]!.GetValue<string>());
+        Assert.Null(design.Content["workspace"]!["environment"]);   // antatt dev skrives ikke inn i en fil som ikke har noe
+        Assert.Contains("it adds queues.stripe", design.Merge, StringComparison.Ordinal);
+        Assert.StartsWith("Write infrastructure.content to queuey.deploy.json as it is: it is the whole file", design.NextSteps[0], StringComparison.Ordinal);
+
+        DeploymentFile.Parse(design.Content.ToJsonString()).Resolve();
+    }
+
+    [Fact]
+    public void What_the_intent_does_not_state_gives_way_to_the_file_and_the_reason_says_so()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """
+            {
+              "queues": {
+                "stripe": {
+                  "ordering": "fifo",
+                  "dlqEnabled": false,
+                  "delivery": { "url": "https://hooks.example.com/api/stripe", "kind": "http" }
+                }
+              }
+            }
+            """);
+
+        FlowDesign design = Advise(StripeIntent).Design!;
+        JsonNode queue = design.Content["queues"]!["stripe"]!;
+
+        Assert.Equal("fifo", queue["ordering"]!.GetValue<string>());
+        Assert.False(queue["dlqEnabled"]!.GetValue<bool>());
+        Assert.Equal("https://hooks.example.com/api/stripe", queue["delivery"]!["url"]!.GetValue<string>());
+        Assert.Equal("http", queue["delivery"]!["kind"]!.GetValue<string>());
+        Assert.Equal("SignedRequest", queue["ingress"]!["authMode"]!.GetValue<string>());   // det fila ikke hadde, legges til
+
+        DesignSetting ordering = Assert.Single(design.Settings, s => s.Path == "queues.stripe.ordering");
+        Assert.Equal(("evidence", "\"fifo\""), (ordering.Basis, ordering.Value!.ToJsonString()));
+        Assert.Contains("Kept as queuey.deploy.json has it", ordering.Because, StringComparison.Ordinal);
+        Assert.Contains("queues.stripe.ordering stays as the file has it", design.Merge, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_stated_route_the_file_contradicts_on_the_same_queue_is_a_conflict_not_an_overwrite()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """{ "queues": { "stripe": { "delivery": { "url": "https://api.example.com/webhooks/stripe" } } } }""");
+
+        FlowAdvice advice = Advise(StripeIntent);
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("contradiction", "destination.route"), (conflict.Kind, conflict.Field));
+        Assert.Equal(("\"/api/stripe\"", "\"/webhooks/stripe\""), (conflict.Stated!.ToJsonString(), conflict.Found!.ToJsonString()));
+        Assert.Null(advice.Design);
+    }
+
+    [Fact]
+    public void A_stated_source_the_files_ingress_contradicts_is_a_conflict()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """{ "queues": { "stripe": { "ingress": { "authMode": "ApiKey" } } } }""");
+
+        FlowAdvice advice = Advise(StripeIntent);
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("contradiction", "source.kind", "\"ApiKey\""), (conflict.Kind, conflict.Field, conflict.Found!.ToJsonString()));
+        Assert.Contains("queues.stripe.ingress.authMode", conflict.Message, StringComparison.Ordinal);
+        Assert.Null(advice.Design);
+    }
+
+    [Fact]
+    public void A_stated_profile_value_the_file_contradicts_is_a_conflict()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """
+            {
+              "queues": {},
+              "profiles": { "dev": { "variables": { "QUEUEY_BASE_URL": "https://dev.example.com" } } }
+            }
+            """);
+
+        FlowConflict conflict = Assert.Single(Advise("""
+            {
+              "source": { "kind": { "value": "stripe", "provenance": "stated" } },
+              "destination": { "baseUrl": { "value": "https://staging.example.com", "provenance": "stated" } }
+            }
+            """).Flow.Conflicts);
+
+        Assert.Equal(("contradiction", "destination.baseUrl"), (conflict.Kind, conflict.Field));
+        Assert.Equal("\"https://dev.example.com\"", conflict.Found!.ToJsonString());
+    }
+
+    [Fact]
+    public void A_deployment_file_apply_cannot_read_is_a_conflict_not_a_fragment()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """{ "queues": { "stripe": { "mode": "sometimes" } } }""");
+
+        FlowAdvice advice = Advise(StripeIntent);
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("unsupported", "queuey.deploy.json"), (conflict.Kind, conflict.Field));
+        Assert.Contains("apply cannot read it as it is", conflict.Message, StringComparison.Ordinal);
+        Assert.Null(advice.Design);
+    }
+
+    [Fact]
+    public void A_deployment_file_with_comments_is_kept_and_the_merge_says_they_are_not_in_the_content()
+    {
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """
+            {
+              // the orders queue
+              "queues": { "orders": { "delivery": { "url": "https://orders.example.com/hook" } } },
+            }
+            """);
+
+        FlowDesign design = Advise(StripeIntent).Design!;
+
+        Assert.Equal("https://orders.example.com/hook", design.Content["queues"]!["orders"]!["delivery"]!["url"]!.GetValue<string>());
+        Assert.Contains("comments or trailing commas", design.Merge, StringComparison.Ordinal);
+    }
+
+    // ── det fila ikke kan holde, blir en konflikt (S1) ───────────────────
+
+    [Fact]
+    public void A_variable_a_deployment_file_may_not_read_is_a_conflict_with_the_way_out()
+    {
+        // ${QUEUEY_STAGE} er en av CLI-ens egne innstillinger (#55), og profilen kan ikke gi den en verdi.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """
+            {
+              "workspace": { "environment": "${QUEUEY_STAGE}" },
+              "queues": {},
+              "profiles": { "prod": { "variables": { "ORDERS_HOST": "orders.example.com" } } }
+            }
+            """);
+
+        FlowAdvice advice = Advise(StripeIntent);
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("unsupported", "environment"), (conflict.Kind, conflict.Field));
+        Assert.Contains("QUEUEY_STAGE", conflict.Message, StringComparison.Ordinal);
+        Assert.Contains("Rename ${QUEUEY_STAGE}", conflict.Question, StringComparison.Ordinal);
+        Assert.Null(advice.Design);
+    }
+
+    [Fact]
+    public void A_base_url_a_profile_cannot_hold_is_a_conflict_that_points_to_the_environment()
+    {
+        // Et ngrok-navn i heks ser ut som en hemmelighet for profilregelen, og ble en InternalError før.
+        Fixture("stripe-aspnet");
+
+        FlowAdvice advice = Advise("""
+            {
+              "source": { "kind": { "value": "stripe", "provenance": "stated" } },
+              "destination": { "baseUrl": { "value": "https://9f86d081884c7d659a2feaa0c55ad015.ngrok-free.app", "provenance": "stated" } }
+            }
+            """);
+
+        FlowConflict conflict = Assert.Single(advice.Flow.Conflicts);
+        Assert.Equal(("unsupported", "destination.baseUrl"), (conflict.Kind, conflict.Field));
+        Assert.Contains("set QUEUEY_BASE_URL where plan and apply run", conflict.Question, StringComparison.Ordinal);
+        Assert.DoesNotContain("9f86d081884c7d659a2feaa0c55ad015", conflict.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_design_apply_would_refuse_is_a_conflict_in_the_output_never_an_internal_error()
+    {
+        Fixture("stripe-aspnet");
+        File_("flow.json", """
+            {
+              "source": { "kind": { "value": "stripe", "provenance": "stated" } },
+              "destination": { "baseUrl": { "value": "https://9f86d081884c7d659a2feaa0c55ad015.ngrok-free.app", "provenance": "stated" } }
+            }
+            """);
+
+        CliRun json = await CliHarness.RunAsync(() => AdviseCommand.RunAsync(new[] { _root, "--intent", Path.Combine(_root, "flow.json"), "--json" }));
+        CliRun text = await CliHarness.RunAsync(() => AdviseCommand.RunAsync(new[] { _root, "--intent", Path.Combine(_root, "flow.json") }));
+
+        Assert.Equal(ExitCodes.RuntimeError, json.Exit);
+        Assert.Equal("conflicts", JsonDocument.Parse(json.Stdout).RootElement.GetProperty("outcome").GetString());
+        Assert.Equal(ExitCodes.RuntimeError, text.Exit);
+        Assert.Contains("Stopped: nothing is proposed", text.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain("Exception", text.Stdout + text.Stderr, StringComparison.Ordinal);
+    }
+
+    // ── rekkefølgen på stegene (S2) ──────────────────────────────────────
+
+    [Fact]
+    public void A_delivery_credential_is_stored_before_plan_and_apply_look_it_up()
+    {
+        Fixture("supabase-db-webhook");
+
+        FlowDesign design = Advise("""{ "source": { "kind": { "value": "supabase", "provenance": "stated" } } }""").Design!;
+
+        int store = design.NextSteps.ToList().FindIndex(s => s.StartsWith("Store the secret the handler checks", StringComparison.Ordinal));
+        int plan = design.NextSteps.ToList().FindIndex(s => s.Contains("queuey plan", StringComparison.Ordinal));
+        int apply = design.NextSteps.ToList().FindIndex(s => s.StartsWith("queuey apply --profile dev.", StringComparison.Ordinal));
+        Assert.True(store >= 0 && store < plan && plan < apply, string.Join(" | ", design.NextSteps));
+        Assert.Equal("delivery", Assert.Single(design.Credentials).For);
+    }
+
+    [Fact]
+    public void An_app_flow_to_a_receiver_that_checks_a_secret_gets_the_credential_and_the_step_to_store_it()
+    {
+        File_("package.json", """{ "name": "orders", "dependencies": { "express": "^4" } }""");
+        File_("server.js", """
+            app.post('/hooks/orders', express.json(), (req, res) => {
+              if (req.get('x-webhook-secret') !== process.env.ORDERS_HOOK_SECRET) return res.sendStatus(401);
+              res.sendStatus(200);
+            });
+            """);
+
+        FlowDesign design = Advise("""
+            {
+              "queue": { "value": "orders", "provenance": "stated" },
+              "source": { "kind": { "value": "app", "provenance": "stated" } },
+              "destination": { "route": { "value": "/hooks/orders", "provenance": "stated" } }
+            }
+            """).Design!;
+
+        CredentialNeed credential = Assert.Single(design.Credentials);
+        Assert.Equal(("orders-webhook-secret", "delivery"), (credential.Name, credential.For));
+        Assert.Equal("x-webhook-secret", design.Content["queues"]!["orders"]!["delivery"]!["authHeaderName"]!.GetValue<string>());
+        int store = design.NextSteps.ToList().FindIndex(s => s.Contains("--from-env ORDERS_HOOK_SECRET", StringComparison.Ordinal));
+        int plan = design.NextSteps.ToList().FindIndex(s => s.Contains("queuey plan", StringComparison.Ordinal));
+        Assert.True(store >= 0 && store < plan, string.Join(" | ", design.NextSteps));
+    }
+
+    [Fact]
+    public void The_stripe_ingress_credential_may_wait_until_after_apply()
+    {
+        Fixture("stripe-aspnet");
+
+        FlowDesign design = Advise(StripeIntent).Design!;
+
+        Assert.Equal("ingress", Assert.Single(design.Credentials).For);
+        int apply = design.NextSteps.ToList().FindIndex(s => s.StartsWith("queuey apply --profile dev.", StringComparison.Ordinal));
+        int store = design.NextSteps.ToList().FindIndex(s => s.Contains("--name stripe-whsec", StringComparison.Ordinal));
+        Assert.True(apply >= 0 && apply < store, string.Join(" | ", design.NextSteps));
+    }
+
+    // ── tekst fra repoet til terminalen (S3) ─────────────────────────────
+
+    [Fact]
+    public async Task Text_from_the_repository_reaches_the_terminal_without_escape_sequences_or_direction_overrides()
+    {
+        Fixture("stripe-aspnet");
+        // En deploy-fil kan ha hva som helst i en streng, og den skrives ut som content og i konflikter.
+        File_("queuey.deploy.json", "{ \"queues\": { \"orders\": { \"delivery\": { \"url\": \"https://orders.example.com/x\\u001b]0;pwned\\u0007\\u202e\" } } } }");
+        File_("flow.json", StripeIntent);
+
+        CliRun run = await CliHarness.RunAsync(() => AdviseCommand.RunAsync(new[] { _root, "--intent", Path.Combine(_root, "flow.json") }));
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.Contains("https://orders.example.com/x", run.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain('\u001b', run.Stdout);
+        Assert.DoesNotContain('\u0007', run.Stdout);
+        Assert.DoesNotContain('‮', run.Stdout);
+    }
+
+    [Fact]
+    public async Task A_parser_message_that_quotes_the_file_reaches_the_terminal_clean()
+    {
+        // Et kønavn som ikke er et kønavn, siteres av parseren, og meldingen står i konflikten.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", "{ \"queues\": { \"orders\\u001b[2J\\u0007\": {} } }");
+        File_("flow.json", StripeIntent);
+
+        CliRun run = await CliHarness.RunAsync(() => AdviseCommand.RunAsync(new[] { _root, "--intent", Path.Combine(_root, "flow.json") }));
+
+        Assert.Equal(ExitCodes.RuntimeError, run.Exit);
+        Assert.Contains("1. queuey.deploy.json (unsupported): queuey.deploy.json is there", run.Stdout, StringComparison.Ordinal);
+        Assert.DoesNotContain('\u001b', run.Stdout);
+        Assert.DoesNotContain('\u0007', run.Stdout);
+    }
+
+    // ── grensene på intensjonen ──────────────────────────────────────────
+
+    [Fact]
+    public async Task An_intent_larger_than_advise_reads_is_refused_without_being_read_whole()
+    {
+        Fixture("stripe-aspnet");
+        File_("flow.json", "{ \"assumptions\": [\"" + new string('x', AdviseCommand.MaxIntentBytes) + "\"] }");
+
+        CliRun run = await CliHarness.RunAsync(() => AdviseCommand.RunAsync(new[] { _root, "--intent", Path.Combine(_root, "flow.json"), "--json" }));
+
+        Assert.Equal(ExitCodes.Usage, run.Exit);
+        Assert.Equal("intent_too_large", JsonDocument.Parse(run.Stdout).RootElement.GetProperty("error").GetProperty("code").GetString());
+    }
+
+    [Theory]
+    [InlineData("""{ "source": { "eventTypes": { "value": ["checkout.session.completed; rm -rf ~"], "provenance": "stated" } } }""", "event type names")]
+    [InlineData("""{ "destination": { "route": { "value": "/api/${HOME}", "provenance": "stated" } } }""", "may not contain ${")]
+    [InlineData("""{ "destination": { "baseUrl": { "value": "https://${API_HOST}", "provenance": "stated" } } }""", "may not contain ${")]
+    public void A_stated_value_that_would_go_into_a_command_or_be_read_as_a_variable_is_refused(string json, string expected)
+    {
+        FlowFormatException ex = Assert.Throws<FlowFormatException>(() => DesiredFlow.Parse(json));
+
+        Assert.Contains(expected, ex.Message, StringComparison.Ordinal);
     }
 
     // ── hjelpere ─────────────────────────────────────────────────────────
