@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Text;
@@ -24,12 +25,53 @@ internal sealed class StubHttpMessageHandler : HttpMessageHandler
     public List<HttpRequestMessage> Requests { get; } = new();
     public List<byte[]?> Bodies { get; } = new();
 
+    /// <summary>
+    /// Whether the test answers the calls for managed resources itself (Queuey F2.4): starting an apply and reading the
+    /// workspace. Without it, the stub answers as a Queuey from before managed resources, 404 to both, and records them in
+    /// <see cref="ManagementRequests"/> instead of <see cref="Requests"/>, so a test of something else sees what it did before.
+    /// </summary>
+    public bool AnswersManagement { get; init; }
+
+    /// <summary>The managed-resource calls the stub answered itself.</summary>
+    public List<HttpRequestMessage> ManagementRequests { get; } = new();
+
+    /// <summary>The token <see cref="ApplyStarted"/> answers with.</summary>
+    public const string ApplyToken = "apply-token-1";
+
+    /// <summary>True for <c>POST /tenants/{t}/deployment/applies</c> and <c>GET /tenants/{t}</c>.</summary>
+    public static bool IsManagementCall(HttpRequestMessage req)
+    {
+        string path = req.RequestUri!.AbsolutePath;
+        return (req.Method == HttpMethod.Post && path.EndsWith("/deployment/applies", StringComparison.Ordinal))
+               || (req.Method == HttpMethod.Get && path.StartsWith("/tenants/", StringComparison.Ordinal) && path.Count(c => c == '/') == 2);
+    }
+
+    /// <summary>A started apply, with the workspace's management when <paramref name="workspaceState"/> is given.</summary>
+    public static HttpResponseMessage ApplyStarted(string? workspaceState = null, string enforcement = "Enforce")
+        => Json(HttpStatusCode.OK, new
+        {
+            token = ApplyToken,
+            expiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(30),
+            enforcement,
+            workspace = workspaceState is null ? null : new
+            {
+                state = workspaceState, detachReason = "moved off the file",
+                detachedAtUtc = DateTimeOffset.Parse("2026-10-06T10:00:00Z"), detachedBy = new { kind = "user", name = "Kenneth" },
+            },
+        });
+
     public HttpRequestMessage? LastRequest => Requests.Count == 0 ? null : Requests[^1];
     public byte[]? LastBody => Bodies.Count == 0 ? null : Bodies[^1];
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         byte[]? body = request.Content is null ? null : await request.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+        if (!AnswersManagement && IsManagementCall(request))
+        {
+            ManagementRequests.Add(request);
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        }
+
         Requests.Add(request);
         Bodies.Add(body);
         return _responder(_count++, request, body);

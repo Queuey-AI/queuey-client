@@ -75,6 +75,8 @@ QUEUE
 
 APPLY
   queuey apply [--file queuey.deploy.json] [--dry-run] [--check] [--continue-on-error] [--json]
+               [--repo <url|owner/repo>] [--repo-path <path>] [--commit <sha>] [--no-git]
+               [--adopt <queue>|workspace[,…]]
                  Converges the workspace's delivery defaults, then each declared queue's
                  behaviour and destination. Idempotent; exits non-zero unless it fully
                  converged. --dry-run validates the file locally and sends nothing. To ask
@@ -119,9 +121,21 @@ APPLY
                  QUEUEY_TENANT / queuey.json. When --tenant or QUEUEY_TENANT names another
                  workspace than the file, apply fails and names both. plan and verify use the
                  same rule.
+                 Queuey marks each queue apply writes, and the workspace's settings when the
+                 file declares them, as managed by the file: the repository, the file's path
+                 in it and the commit. They come from git (origin's URL without user info, the
+                 path from the repository root, HEAD) unless --repo, --repo-path or --commit
+                 gives them; --no-git leaves git alone. A change to a managed queue's or
+                 workspace's configuration from anywhere else is refused, or only warned about,
+                 with where the file is. A person can detach one, with a reason: apply then
+                 skips it, and --check reports it with who detached it, when and why. --adopt
+                 takes it back: apply shows what the file changes on it, then writes it.
+                 --json prints { ""schemaVersion"": 1, ""file"", ""source"", ""enforcement"",
+                 ""skipped"": […], ""queues"": […], … }; --check --json { ""schemaVersion"": 1,
+                 ""file"", ""inSync"", ""drift"": […], ""detached"": […] }.
 
 PLAN
-  queuey plan [--file queuey.deploy.json] [--json]
+  queuey plan [--file queuey.deploy.json] [--adopt <queue>|workspace[,…]] [--json]
                  Asks Queuey itself what apply would do: every write apply would send goes as
                  a dry run (?dryRun=true), so it shows each value that would change and each
                  refusal Queuey would give that write — retention caps, queue limits, bad
@@ -142,6 +156,9 @@ PLAN
                  ""wouldSucceed"", ""changeCount"", ""queues"": […], ""steps"": […] }; check
                  schemaVersion first. A change's from and to are JSON values, as Queuey's
                  config reads them back.
+                 A queue or workspace a person detached from the file gets no steps, as apply
+                 skips it; it is listed under ""skipped"", with who detached it. --adopt plans
+                 it as apply --adopt would write it.
 
 VERIFY
   queuey verify <queue> (--data <json> | --file <path> | --stdin)

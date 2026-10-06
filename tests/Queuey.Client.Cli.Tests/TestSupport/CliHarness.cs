@@ -76,11 +76,38 @@ internal sealed class RecordingHandler : HttpMessageHandler
 
     public IEnumerable<RecordedRequest> Writes => Requests.Where(r => r.Method != HttpMethod.Get);
 
+    /// <summary>
+    /// Whether the test answers the calls for managed resources itself (Queuey F2.4): starting an apply and reading the
+    /// workspace. Without it, the server answers as a Queuey from before managed resources, 404 to both, and records them in
+    /// <see cref="ManagementRequests"/> instead of <see cref="Requests"/>.
+    /// </summary>
+    public bool AnswersManagement { get; init; }
+
+    /// <summary>The managed-resource calls the server answered itself.</summary>
+    public List<RecordedRequest> ManagementRequests { get; } = new();
+
+    /// <summary>The headers each request carried, by its place in <see cref="Requests"/>.</summary>
+    public List<Dictionary<string, string>> Headers { get; } = new();
+
+    public static bool IsManagementCall(HttpMethod method, string path)
+        => (method == HttpMethod.Post && path.EndsWith("/deployment/applies", StringComparison.Ordinal))
+           || (method == HttpMethod.Get && path.StartsWith("/tenants/", StringComparison.Ordinal) && path.Count(c => c == '/') == 2);
+
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         string? body = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
         var recorded = new RecordedRequest(request.Method, request.RequestUri!, string.IsNullOrEmpty(body) ? null : body);
-        lock (Requests) Requests.Add(recorded);
+        if (!AnswersManagement && IsManagementCall(request.Method, request.RequestUri!.AbsolutePath))
+        {
+            lock (ManagementRequests) ManagementRequests.Add(recorded);
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        }
+
+        lock (Requests)
+        {
+            Requests.Add(recorded);
+            Headers.Add(request.Headers.ToDictionary(h => h.Key, h => string.Join(",", h.Value), StringComparer.OrdinalIgnoreCase));
+        }
         return _respond(recorded);
     }
 

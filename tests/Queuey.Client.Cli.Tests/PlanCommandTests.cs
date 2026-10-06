@@ -65,8 +65,9 @@ public sealed class PlanCommandTests : IDisposable
 
         Assert.Equal(ExitCodes.Success, run.Exit);
         JsonElement root = JsonDocument.Parse(run.Stdout).RootElement;
-        // planId, planHash og queues kom til i versjon 1 med Queuey F2.3 (2026-10-06), før noen tag hadde sluppet den.
-        Assert.Equal(new[] { "schemaVersion", "file", "tenant", "planId", "planHash", "wouldSucceed", "changeCount", "queues", "steps" },
+        // planId, planHash og queues kom til i versjon 1 med Queuey F2.3 (2026-10-06), før noen tag hadde sluppet den, og
+        // skipped med Queuey F2.4 samme dag.
+        Assert.Equal(new[] { "schemaVersion", "file", "tenant", "planId", "planHash", "wouldSucceed", "changeCount", "queues", "steps", "skipped" },
             root.EnumerateObject().Select(p => p.Name).ToArray());
         Assert.Equal(1, root.GetProperty("schemaVersion").GetInt32());
         Assert.Equal("ten_abc", root.GetProperty("tenant").GetString());

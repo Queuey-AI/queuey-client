@@ -18,10 +18,11 @@ internal static class ApplyCommand
 {
     // --plan ble et eget verb (2026-09-24): et verb en eldre CLI ikke kjenner, feiler i alle versjoner,
     // mens `apply --plan` i en CLI fra før flagget var en ekte apply. Ordet får et hint i stedet.
+    // --repo, --repo-path, --commit og --no-git sier hvor fila ligger, og --adopt hva applyen tar tilbake (Queuey F2.4).
     internal static readonly CommandOptions Options = new(
         "apply",
-        flags: new[] { "dry-run", "check", "continue-on-error", "json" },
-        values: new[] { "file" },
+        flags: new[] { "dry-run", "check", "continue-on-error", "json", "no-git" },
+        values: new[] { "file", "repo", "repo-path", "commit", "adopt" },
         hints: new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["plan"] = "`apply --plan` is now `queuey plan`: it asks Queuey what apply would change, and writes nothing.",
@@ -67,10 +68,20 @@ internal static class ApplyCommand
         if (map.Has("check"))
             return await CheckAsync(service, file, path, map);
 
+        // Hvor fila ligger, til merket på det applyen styrer (Queuey F2.4): flaggene først, så git, med mindre --no-git.
+        DeploymentFileSource? source = GitSource.Resolve(path, map.Get("repo"), map.Get("repo-path"), map.Get("commit"), map.Has("no-git"));
+        IReadOnlyList<string> adopt = DeploymentAdopt.Parse(map.Get("adopt"));
+        var options = new SyncOptions { ContinueOnError = map.Has("continue-on-error"), Source = source, Adopt = adopt };
+
+        // --adopt viser diffen fila vil påføre det den tar tilbake, før den skriver: planen for de samme målene, som dry runs.
+        DeploymentPlan? adoptPlan = adopt.Count > 0 ? await service.PlanDeploymentAsync(file, options) : null;
+        if (adoptPlan is not null && !map.Has("json"))
+            WriteAdoptPlan(adoptPlan, adopt);
+
         QueueSyncResult result;
         try
         {
-            result = await service.ApplyDeploymentAsync(file, new SyncOptions { ContinueOnError = map.Has("continue-on-error") });
+            result = await service.ApplyDeploymentAsync(file, options);
         }
         catch (QueueySyncException ex)
         {
@@ -80,11 +91,36 @@ internal static class ApplyCommand
         string? tenant = config.TenantPublicId;
 
         if (map.Has("json"))
-            Console.WriteLine(JsonSerializer.Serialize(ToJsonResult(result, path, config, tenant), CliHost.JsonOut));
+            Console.WriteLine(JsonSerializer.Serialize(ToJsonResult(result, path, config, tenant, source, adopt, adoptPlan), CliHost.JsonOut));
         else
             WriteHuman(result, path, config, tenant);
 
         return result.AllSucceeded ? ExitCodes.Success : ExitCodes.RuntimeError;
+    }
+
+    /// <summary>The version of <c>apply --json</c>'s and <c>apply --check --json</c>'s shapes, which had none before Queuey F2.4.</summary>
+    internal const int ResultJsonSchemaVersion = 1;
+
+    /// <summary>The targets an adopt names, as a plan writes them: <c>workspace</c> and <c>queues.&lt;name&gt;</c>.</summary>
+    internal static HashSet<string> AdoptTargets(IReadOnlyList<string> adopt)
+        => new(adopt.Select(DeploymentAdopt.TargetOf), StringComparer.Ordinal);
+
+    // Diffen for det --adopt tar tilbake, før applyen skriver: hver endring fila påfører, og hvert avslag.
+    private static void WriteAdoptPlan(DeploymentPlan plan, IReadOnlyList<string> adopt)
+    {
+        HashSet<string> targets = AdoptTargets(adopt);
+        Console.WriteLine($"Adopting {string.Join(", ", targets)} back into deployment management. What the file changes on it:");
+        var steps = plan.Steps.Where(s => targets.Contains(s.Target)).ToList();
+        if (steps.Count == 0)
+            Console.WriteLine("  nothing: it already matches the file.");
+        foreach (DeploymentPlanStep step in steps)
+        {
+            Console.WriteLine($"  {step.Target} · {step.Aspect}{(step.Changes.Count == 0 && step.Error is null ? "  (no change)" : "")}");
+            foreach (PlannedChange change in step.Changes)
+                Console.WriteLine($"      ~ {change}");
+            if (step.Error is { } error)
+                Console.WriteLine($"      ✗ {error.ErrorCode ?? "refused"}: {error.Message}");
+        }
     }
 
     /// <summary>
@@ -135,31 +171,59 @@ internal static class ApplyCommand
     /// </summary>
     private static async Task<int> CheckAsync(IQueueyService service, DeploymentFile file, string path, ArgMap map)
     {
-        IReadOnlyList<DriftItem> drift = await service.CheckDeploymentAsync(file);
+        // Det en person har løsrevet, hopper apply over (Queuey F2.4): det er ikke drift, men sjekken melder det, med hvem og når.
+        DeploymentCheck check = await service.InspectDeploymentAsync(file);
+        IReadOnlyList<DriftItem> drift = check.Drift;
 
         if (map.Has("json"))
         {
             Console.WriteLine(JsonSerializer.Serialize(new
             {
+                schemaVersion = ResultJsonSchemaVersion,
                 file = path,
                 inSync = drift.Count == 0,
                 drift = drift.Select(d => new { d.Path, d.Declared, d.Actual }),
+                detached = check.Detached.Select(ToJson),
             }, CliHost.JsonOut));
-        }
-        else if (drift.Count == 0)
-        {
-            Console.WriteLine($"{path} matches the workspace — applying it would change nothing.");
         }
         else
         {
-            Console.WriteLine($"{path} has drifted from the workspace ({drift.Count} difference(s)):");
-            foreach (DriftItem d in drift)
-                Console.WriteLine($"  ~ {d}");
-            Console.WriteLine("Run `queuey apply` to converge, or `queuey pull` if the workspace is right.");
+            if (drift.Count == 0)
+            {
+                Console.WriteLine($"{path} matches the workspace — applying it would change nothing.");
+            }
+            else
+            {
+                Console.WriteLine($"{path} has drifted from the workspace ({drift.Count} difference(s)):");
+                foreach (DriftItem d in drift)
+                    Console.WriteLine($"  ~ {d}");
+                Console.WriteLine("Run `queuey apply` to converge, or `queuey pull` if the workspace is right.");
+            }
+
+            WriteDetached(check.Detached, "apply skips it");
         }
 
         return drift.Count == 0 ? ExitCodes.Success : ExitCodes.RuntimeError;
     }
+
+    // Hvert løsrevne mål, med hvem, når og hvorfor, og hvordan det tas tilbake.
+    internal static void WriteDetached(IReadOnlyList<SkippedResource> detached, string consequence)
+    {
+        foreach (SkippedResource skipped in detached)
+            Console.WriteLine($"  – {skipped.Target}\t{skipped.Management.DetachedText()} — {consequence}; `queuey apply --adopt {skipped.AdoptAs}` takes it back");
+    }
+
+    internal static object ToJson(SkippedResource skipped) => new
+    {
+        target = skipped.Target,
+        queue = skipped.QueueName,
+        state = skipped.Management.State,
+        detachedBy = skipped.Management.DetachedBy is { } by ? new { kind = by.Kind, name = by.Name, apiClientPublicId = by.ApiClientPublicId } : null,
+        detachedAtUtc = skipped.Management.DetachedAtUtc,
+        detachReason = skipped.Management.DetachReason,
+        file = skipped.Management.File,
+        adoptAs = skipped.AdoptAs,
+    };
 
     private static void WritePlan(string path, DeploymentFile file, IReadOnlyList<DeploymentQueuePlan> plans)
     {
@@ -262,6 +326,9 @@ internal static class ApplyCommand
 
         foreach (string skipped in result.NotAttempted)
             Console.WriteLine($"  – {skipped}\tnot attempted (stopped at an earlier failure)");
+
+        // Løsrevet av en person (Queuey F2.4): applyen rørte det ikke.
+        WriteDetached(result.Skipped, "skipped");
 
         foreach (string warning in result.Warnings)
             Console.WriteLine($"  ! {warning}");
@@ -382,9 +449,24 @@ internal static class ApplyCommand
 
     private static object? ToJson(ContextSource? s) => s is null ? null : new { s.From, s.Name };
 
-    private static object ToJsonResult(QueueSyncResult result, string path, ResolvedConfig config, string? tenant) => new
+    private static object ToJsonResult(
+        QueueSyncResult result, string path, ResolvedConfig config, string? tenant,
+        DeploymentFileSource? source, IReadOnlyList<string> adopt, DeploymentPlan? adoptPlan) => new
     {
+        schemaVersion = ResultJsonSchemaVersion,
         file = path,
+        // Fila slik Queuey merker det applyen styrer med (F2.4): uten userinfo, query og fragment.
+        source = source is null ? null : new { repo = source.Repo, path = source.Path, commit = source.Commit },
+        enforcement = result.Enforcement,
+        skipped = result.Skipped.Select(ToJson),
+        adopted = adopt,
+        adoptPlan = adoptPlan is null ? null : adoptPlan.Steps.Where(s => AdoptTargets(adopt).Contains(s.Target)).Select(s => new
+        {
+            target = s.Target,
+            aspect = s.Aspect,
+            changes = s.Changes.Select(c => new { path = c.Path, from = c.From, to = c.To }),
+            error = s.Error is null ? null : new { code = s.Error.ErrorCode, message = s.Error.Message },
+        }),
         apiHost = config.ResolvedApiBase().ToString(),
         tenant,
         total = result.Total,

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace Queuey.Client.Waas;
 
@@ -28,4 +29,17 @@ public sealed class SyncOptions
 
     /// <summary>Optional predicate to sync only a subset of queues. The queue twin of <see cref="Filter"/>.</summary>
     public Func<QueueDefinition, bool>? QueueFilter { get; set; }
+
+    /// <summary>
+    /// Where the deployment file lives, for <see cref="IQueueyService.ApplyDeploymentAsync"/>: Queuey marks every queue and
+    /// workspace the apply writes as managed from it (Queuey F2.4). User info, query and fragment are stripped from the
+    /// repository before it is sent. Null marks them without a source.
+    /// </summary>
+    public DeploymentFileSource? Source { get; set; }
+
+    /// <summary>
+    /// What a deployment apply takes back from a detach (<c>queuey apply --adopt</c>): <c>workspace</c>, and queue names. A
+    /// detached queue or workspace not named here is skipped and reported in <see cref="QueueSyncResult.Skipped"/>.
+    /// </summary>
+    public IReadOnlyList<string>? Adopt { get; set; }
 }

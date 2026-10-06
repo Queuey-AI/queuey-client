@@ -18,14 +18,15 @@ namespace Queuey.Client.Cli;
 /// </remarks>
 internal static class PlanCommand
 {
-    internal static readonly CommandOptions Options = new("plan", flags: new[] { "json" }, values: new[] { "file" });
+    // --adopt planlegger det en person har løsrevet, som apply --adopt ville skrevet det (Queuey F2.4).
+    internal static readonly CommandOptions Options = new("plan", flags: new[] { "json" }, values: new[] { "file", "adopt" });
 
     /// <summary>
     /// The version of <c>plan --json</c>'s shape: <c>{ schemaVersion, file, tenant, planId, planHash, wouldSucceed,
     /// changeCount, queues, steps }</c>. A script that reads it checks this first, as it does in <c>apply --dry-run --json</c>.
     /// </summary>
     // planId, planHash, queues og hvert stegs state kom til i samme versjon (Queuey F2.3, 2026-10-06): ingen tag har sluppet
-    // versjon 1 ennå, og feltene legger bare til.
+    // versjon 1 ennå, og feltene legger bare til. Det samme gjelder skipped (Queuey F2.4, 2026-10-06).
     // Samme mønster som apply --dry-run --json, der Kenneth valgte et versjonert objekt (2026-10-05). Formen er ny med
     // queuey plan, så den har en versjon fra første utgave, og ingen leser må gjette når den endres.
     internal const int JsonSchemaVersion = 1;
@@ -42,7 +43,8 @@ internal static class PlanCommand
         using ServiceProvider provider = CliHost.BuildProvider(config);
         var service = provider.GetRequiredService<IQueueyService>();
 
-        DeploymentPlan plan = await service.PlanDeploymentAsync(file);
+        // Det en person har løsrevet, planlegges ikke, med mindre --adopt tar det tilbake: planen viser det apply ville gjort.
+        DeploymentPlan plan = await service.PlanDeploymentAsync(file, new SyncOptions { Adopt = DeploymentAdopt.Parse(map.Get("adopt")) });
 
         if (map.Has("json"))
         {
@@ -67,6 +69,7 @@ internal static class PlanCommand
                     desired = s.Desired,
                     error = s.Error is null ? null : new { code = s.Error.ErrorCode, message = s.Error.Message, action = s.Error.SuggestedAction, status = s.Error.StatusCode },
                 }),
+                skipped = plan.Skipped.Select(ApplyCommand.ToJson),
             }, CliHost.JsonOut));
             return plan.WouldSucceed ? ExitCodes.Success : ExitCodes.RuntimeError;
         }
@@ -92,6 +95,9 @@ internal static class PlanCommand
                     Console.WriteLine($"        → {action}");
             }
         }
+
+        // Løsrevet av en person (Queuey F2.4): ingen steg, fordi apply lar det være.
+        ApplyCommand.WriteDetached(plan.Skipped, "apply skips it");
 
         int refusals = plan.Steps.Count(s => s.Error is not null);
         Console.WriteLine($"{plan.ChangeCount} change(s), {refusals} refusal(s). Nothing was changed."

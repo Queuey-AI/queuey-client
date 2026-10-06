@@ -563,8 +563,80 @@ internal sealed class QueueyControlPlaneClient
         return parts.Count == 0 ? null : string.Join("&", parts);
     }
 
+    // Apply-tokenet (Queuey F2.4) følger hvert kall i applyen, også lesingene og dry runs: serveren leser det bare på
+    // skrivingene apply sender. AsyncLocal, så to applyer i samme prosess, eller en apply og andre kall, ikke deler det.
+    private static readonly AsyncLocal<string?> CurrentApply = new();
+
+    /// <summary>The header that carries the apply token on each write of an apply.</summary>
+    internal const string ApplyHeader = "X-Queuey-Apply";
+
+    /// <summary>
+    /// Makes every call in the current async flow part of the apply <paramref name="token"/> names, until the returned
+    /// scope is disposed. A null or blank token changes nothing.
+    /// </summary>
+    internal static IDisposable InApply(string? token)
+    {
+        string? before = CurrentApply.Value;
+        if (!string.IsNullOrWhiteSpace(token))
+            CurrentApply.Value = token;
+        return new ApplyScope(before);
+    }
+
+    private sealed class ApplyScope : IDisposable
+    {
+        private readonly string? _before;
+        public ApplyScope(string? before) => _before = before;
+        public void Dispose() => CurrentApply.Value = _before;
+    }
+
     private static Action<HttpRequestHeaders> LicenseHeader(string license)
-        => headers => QueueyHttpHeaders.Set(headers, QueueyHeaders.LicensePublicId, license);
+        => headers =>
+        {
+            QueueyHttpHeaders.Set(headers, QueueyHeaders.LicensePublicId, license);
+            if (CurrentApply.Value is { } token)
+                QueueyHttpHeaders.Set(headers, ApplyHeader, token);
+        };
+
+    /// <summary>
+    /// Starts an apply of a deployment file (<c>POST /tenants/{ten}/deployment/applies</c>): the token for its writes, and the
+    /// workspace's management as it is. Null from a Queuey that predates managed resources (404), which has nothing to mark.
+    /// </summary>
+    public async Task<StartApplyWireResponse?> StartApplyAsync(string tenantPublicId, StartApplyWireRequest request, CancellationToken cancellationToken)
+    {
+        if (request is null) throw new ArgumentNullException(nameof(request));
+
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "deployment", "applies");
+        byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
+        try
+        {
+            return await _connection.SendForJsonAsync<StartApplyWireResponse>(
+                HttpMethod.Post, uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+        }
+        catch (QueueyException ex) when (ex.StatusCode == 404 || ex.StatusCode == 405)
+        {
+            return null;
+        }
+        catch (JsonException)
+        {
+            // Et svar uten en apply er det samme som ingen apply: skrivingene sendes uten token, og en styrt ressurs nekter
+            // dem med Queuey sin egen nektelse.
+            return null;
+        }
+    }
+
+    /// <summary>Reads how the workspace's own settings are managed (<c>GET /tenants/{ten}</c>, the <c>deployment</c> field).</summary>
+    public async Task<TenantDeploymentResponse> GetTenantDeploymentAsync(string tenantPublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId);
+        return await _connection.SendForJsonAsync<TenantDeploymentResponse>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
 
     // «(SyncStreams)» sto i meldingene for alle kall, også apply og verify, og ingen sa hvor verdien settes (review
     // 2026-10-05). Handlingen nevner både SDK-en og CLI-en, fordi begge ender her.

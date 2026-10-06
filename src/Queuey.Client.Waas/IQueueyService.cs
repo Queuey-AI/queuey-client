@@ -99,6 +99,12 @@ public interface IQueueyService
     Task<IReadOnlyList<DriftItem>> CheckDeploymentAsync(DeploymentFile file, string? tenantPublicId = null, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// <see cref="CheckDeploymentAsync"/> with the queues and the workspace a person detached from deployment management
+    /// (Queuey F2.4): apply skips them, so they are not drift, and the check reports them with who, when and why.
+    /// </summary>
+    Task<DeploymentCheck> InspectDeploymentAsync(DeploymentFile file, string? tenantPublicId = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Asks Queuey what applying <paramref name="file"/> would do, without changing anything: every
     /// write <see cref="ApplyDeploymentAsync"/> would send runs as a dry run on the server — the same
     /// validation and the same refusals — and comes back as a list of changes. Needs the same key an
@@ -119,6 +125,13 @@ public interface IQueueyService
     /// when a later answer is not a plan.
     /// </exception>
     Task<DeploymentPlan> PlanDeploymentAsync(DeploymentFile file, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// <see cref="PlanDeploymentAsync(DeploymentFile, CancellationToken)"/> with what apply takes back from a detach
+    /// (<see cref="SyncOptions.Adopt"/>) and where the file lives (<see cref="SyncOptions.Source"/>). Without them, a detached
+    /// queue or workspace is left out of the plan and listed in <see cref="DeploymentPlan.Skipped"/>.
+    /// </summary>
+    Task<DeploymentPlan> PlanDeploymentAsync(DeploymentFile file, SyncOptions? options, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Proves a queue delivers: publishes <paramref name="payload"/> to <paramref name="queueName"/>

@@ -51,6 +51,7 @@ internal sealed class QueueyManagement : IQueueyManagement
             IngressClosed = r.IngressClosed,
             DeliveryHeld = r.DeliveryHeld,
             Suspended = r.Suspended,
+            Deployment = r.Deployment?.ToInfo(),
         }).ToArray();
     }
 
