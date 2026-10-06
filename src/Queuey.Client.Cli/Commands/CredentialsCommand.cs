@@ -17,8 +17,10 @@ namespace Queuey.Client.Cli;
 /// </summary>
 internal static class CredentialsCommand
 {
+    // --replace (Queuey, besluttet av Kenneth 2026-10-06): en annen verdi for et navn workspacet har, bytter hemmeligheten bare
+    // når den som kjører kommandoen, ber om det.
     internal static readonly CommandOptions SetOptions = new(
-        "credentials set", flags: new[] { "json" }, values: new[] { "name", "from-env", "type", "key-id", "username", "profile" });
+        "credentials set", flags: new[] { "json", "replace" }, values: new[] { "name", "from-env", "type", "key-id", "username", "profile" });
 
     internal static readonly CommandOptions ListOptions = new("credentials list", flags: new[] { "json" }, values: new[] { "profile" });
 
@@ -138,9 +140,29 @@ internal static class CredentialsCommand
         using ServiceProvider provider = CliHost.BuildProvider(config);
         var service = provider.GetRequiredService<IQueueyService>();
 
-        CredentialResult created = await service.Management.CreateCredentialAsync(
-            tenant!, name!, type, secret,
-            keyId: map.Get("key-id"), username: map.Get("username"));
+        // Queuey (besluttet av Kenneth 2026-10-06, review av queuey-client#60): `set` byttet hemmeligheten til et navn workspacet
+        // hadde, uten et ord. En agent som tok feil av miljøet, kunne kjøre `credentials set --profile prod --name stripe-whsec`
+        // med Stripe CLI-ens testhemmelighet, og prods ingress ville avvist hvert ekte Stripe-event. Nå nekter Queuey en annen
+        // verdi uten --replace, og feilen sier hva et bytte gjør. Samme verdi lagres som før, så en idempotent set i CI virker.
+        CredentialResult created;
+        try
+        {
+            created = await service.Management.CreateCredentialAsync(
+                tenant!, name!, type, secret,
+                keyId: map.Get("key-id"), username: map.Get("username"), replace: map.Has("replace"));
+        }
+        catch (QueueyConflictException ex) when (ex.ErrorCode == "credential_exists")
+        {
+            // Navnet er sjekket over (FitsShape, ikke en hemmelighet), og går likevel gjennom Showable og TerminalText (CliErrors).
+            // Et bytte er en persons beslutning (review av queuey-client#60): teksten sier det, så en agent ikke bare legger til
+            // --replace og prøver igjen.
+            string holder = CredentialNameRules.Showable(name) is { } shown ? $"'{shown}'" : "The name";
+            return CliErrors.Write(map.Has("json"), "credential_exists",
+                $"{holder} already holds a different secret, used by every queue and ingress that names it.",
+                "Replacing it is a decision for a person: if that is intended, run again with --replace; to keep it, store the new "
+                + "value under another name.",
+                status: 409, ExitCodes.RuntimeError, "Queuey error");
+        }
 
         if (map.Has("json"))
         {

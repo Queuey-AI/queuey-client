@@ -98,7 +98,7 @@ internal sealed class QueueyManagement : IQueueyManagement
 
     public async Task<CredentialResult> CreateCredentialAsync(
         string tenantPublicId, string name, string type, string secret,
-        string? keyId = null, string? username = null, CancellationToken cancellationToken = default)
+        string? keyId = null, string? username = null, bool replace = false, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(tenantPublicId)) throw new ArgumentException("A tenant public id is required.", nameof(tenantPublicId));
         if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("A credential name is required.", nameof(name));
@@ -112,6 +112,7 @@ internal sealed class QueueyManagement : IQueueyManagement
             Secret = secret,
             KeyId = keyId,
             Username = username,
+            Replace = replace ? true : null,
         }, cancellationToken).ConfigureAwait(false);
 
         return ToResult(r);

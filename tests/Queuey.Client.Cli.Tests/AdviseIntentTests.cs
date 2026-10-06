@@ -1723,6 +1723,26 @@ public sealed class AdviseIntentTests : IDisposable
     // miljø, får derfor credentials request og et ekte endepunkt, som plan og apply gir. Testmodus krever at fila gir dev: et
     // oppgitt dev mot en fil uten miljø er en konflikt (re-review av #60, runde 5).
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void No_suggestion_advise_makes_replaces_a_stored_secret_not_even_in_test_mode(bool existingFileForProd)
+    {
+        // Queuey (besluttet av Kenneth 2026-10-06, review av #60): et bytte av en lagret hemmelighet er en persons beslutning, så
+        // --replace står aldri i et forslag. Testmodus sier bare at set nekter en annen testhemmelighet under samme navn.
+        Fixture("stripe-aspnet");
+        if (existingFileForProd)
+            File_("queuey.deploy.json", """{ "queues": {} }""");
+
+        FlowDesign design = Advise(StripeIntent).Design!;
+
+        Assert.DoesNotContain(design.NextSteps, s => s.Contains("--replace", StringComparison.Ordinal));
+        Assert.DoesNotContain(design.Credentials, c => c.Store.Contains("--replace", StringComparison.Ordinal));
+        if (!existingFileForProd)
+            Assert.Contains("set refuses it, and replacing it is a decision for a person",
+                Assert.Single(design.NextSteps, s => s.StartsWith("Test mode", StringComparison.Ordinal)), StringComparison.Ordinal);
+    }
+
     [Fact]
     public void An_existing_file_without_an_environment_gets_a_real_endpoint_and_a_request_not_test_mode()
     {

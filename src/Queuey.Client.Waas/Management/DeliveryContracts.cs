@@ -219,6 +219,10 @@ internal sealed class CreateCredentialWireRequest
     public string Secret { get; set; } = default!;
     public string? KeyId { get; set; }
     public string? Username { get; set; }
+
+    // Queuey (2026-10-06): true lar en annen verdi bytte hemmeligheten til credentialen som har navnet. Null sendes ikke, så
+    // kroppen er som før når den ikke er satt.
+    public bool? Replace { get; set; }
 }
 
 internal sealed class CredentialWireResponse

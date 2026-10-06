@@ -28,6 +28,32 @@ public class CredentialStoringTests
     // ── regelen ──────────────────────────────────────────────────────────
 
     [Theory]
+    [InlineData("dev")]
+    [InlineData("test")]
+    [InlineData("staging")]
+    [InlineData("prod")]
+    [InlineData(null)]
+    public void No_command_plan_or_apply_suggests_ever_replaces_a_stored_secret(string? environment)
+    {
+        // Queuey (besluttet av Kenneth 2026-10-06, review av #60): en annen verdi for et navn workspacet har, krever --replace, og
+        // et bytte er en persons beslutning. Ingen kommando plan og apply foreslår, har flagget, i noe miljø.
+        foreach (string? profile in new[] { null, "prod" })
+        {
+            var storing = new CredentialStoring(environment, profile);
+            foreach (string? type in new[] { "HmacSigning", "ApiKeyHeader", "BearerToken", "BasicPassword", null })
+            {
+                foreach (string name in new[] { "stripe-whsec", CredentialStoring.Placeholder })
+                {
+                    Assert.DoesNotContain("--replace", storing.Set(name, type), StringComparison.Ordinal);
+                    Assert.DoesNotContain("--replace", storing.Request(name, type), StringComparison.Ordinal);
+                    Assert.DoesNotContain("--replace", storing.Store(name, type), StringComparison.Ordinal);
+                    Assert.DoesNotContain("--replace", storing.HowToStore(name, type), StringComparison.Ordinal);
+                }
+            }
+        }
+    }
+
+    [Theory]
     [InlineData("prod")]
     [InlineData("staging")]
     [InlineData("test")]

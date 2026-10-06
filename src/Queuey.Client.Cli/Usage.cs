@@ -312,14 +312,18 @@ KEYS
 
 CREDENTIALS
   queuey credentials set --name <name> --from-env <ENV_VAR> [--type <type>]
-                [--key-id <id>] [--username <u>] [--profile <name>] [--json]
+                [--key-id <id>] [--username <u>] [--replace] [--profile <name>] [--json]
                  Stores a delivery secret under the workspace and names it, so a deployment
                  file can refer to it as credentialRef. The value is read from the
                  environment — never an argument, which would land in shell history and CI
-                 logs — is encrypted at rest, and is never readable again. A name the
-                 workspace has gets the value as a new version of its secret, under the
-                 same id (the value it already holds keeps its version), and an ingress
-                 that waits for the name verifies with it at once.
+                 logs — is encrypted at rest, and is never readable again. An ingress that
+                 waits for the name verifies with it at once. For a name the workspace has,
+                 the value it already holds is stored as before and keeps its version, so
+                 running the same set again changes nothing. A different value is refused
+                 (credential_exists, exit 1): replacing it changes every queue and ingress
+                 that uses the credential at once, and is a decision for a person.
+                 --replace replaces it, as a new version of its secret under the same id.
+                 The commands advise, plan and apply suggest never carry --replace.
   queuey credentials request <name> [--type <type>] [--key-id <id>] [--username <u>]
                 [--profile <name>] [--json]
                  Asks a person for a secret, so it never passes through this terminal or a

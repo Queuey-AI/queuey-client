@@ -1308,7 +1308,9 @@ public static class FlowDesigner
                         // Testmodus: Stripe CLI-ens egen hemmelighet er en testhemmelighet agenten kan holde, aldri i utdata. Et
                         // ekte endepunkts hemmelighet limer en person inn (F2.9, playbooken fra F2.11). Hentingen og lagringen står
                         // på én linje (K1 i runde 2 av #58): i et agentverktøy er hvert kall et nytt skall, og en variabel fra et
-                        // kall er borte i det neste.
+                        // kall er borte i det neste. --replace står aldri i et forslag, heller ikke i testmodus (besluttet av Kenneth
+                        // 2026-10-06, review av #60): et bytte er en persons beslutning. Teksten sier bare at set nekter en annen
+                        // testhemmelighet under samme navn.
                         // Re-review av #60: bare en apply som gikk gjennom, viser at workspacet er dev. Ble fila nektet, er det ikke
                         // det, og testnøkkelen skal ikke lagres der.
                         _next.Add("Test mode, with Stripe's own CLI, once that apply has gone through: if it refused the file, the " +
@@ -1318,7 +1320,9 @@ public static class FlowDesigner
                                   $"In a POSIX shell: STRIPE_WHSEC=\"$(stripe listen --print-secret)\" {set}. In PowerShell: " +
                                   $"$env:STRIPE_WHSEC = stripe listen --print-secret; {set}; Remove-Item Env:STRIPE_WHSEC, since $env: lasts " +
                                   $"for the session. Then run queuey apply{_profileFlag} again, " +
-                                  "which points the ingress at it, and stripe listen --forward-to <ingress URL> in the background. A real " +
+                                  "which points the ingress at it, and stripe listen --forward-to <ingress URL> in the background. " +
+                                  $"The same secret stored again changes nothing. If {StripeCredential} holds another test secret, from " +
+                                  "another machine or Stripe account, set refuses it, and replacing it is a decision for a person. A real " +
                                   $"endpoint's secret is never yours to hold: a person pastes it on the page {request} opens.");
                         _next.Add((SecretName() is { } secret
                                       ? $"Run the app with {secret} set to that same secret."

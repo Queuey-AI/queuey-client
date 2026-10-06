@@ -568,6 +568,7 @@ queuey apply                   # creates the queue; its ingress refuses every ev
 # POSIX sh, one command: the Stripe CLI's own test secret is never printed, and needs no variable from an earlier shell
 STRIPE_WHSEC="$(stripe listen --print-secret)" queuey credentials set --name stripe-whsec --type HmacSigning --key-id stripe-whsec --from-env STRIPE_WHSEC
                                # the ingress verifies with it at once (a Queuey that predates this: run apply again)
+                               # another machine's or account's test secret is refused: replacing it is a person's decision (--replace)
 stripe listen --forward-to <ingress URL>        # in the background: Stripe's test events, signed with that secret
 queuey listen --queue stripe --forward-to http://localhost:5000
 ```
@@ -1047,10 +1048,16 @@ purpose: a pipeline key that could hand out credentials would turn repo access i
 Mint once from an admin credential and put the result in your secret store.
 
 **`credentials set` reads the secret from the environment, never an argument.** Arguments land in
-shell history and CI logs. Setting a name the workspace has gives that credential the new value as a new version
-of its secret, under the same id, so everything that refers to it uses it. Setting the value it already holds
-keeps its version, and makes it usable again if it had expired. When the value is not yours to hold,
-`credentials request` asks the person who has it to paste it in the console instead.
+shell history and CI logs. Setting the value a credential already holds keeps its version, and makes it usable again
+if it had expired, so running the same `set` again in CI changes nothing.
+
+**A different value for a name the workspace has needs `--replace`.** Without it, `credentials set` refuses the
+value (`credential_exists`, exit 1) and stores nothing: replacing the secret changes every queue and ingress that
+uses the credential at once, and a test secret set against prod by mistake would make prod's ingress refuse every
+real event. With `--replace` the credential gets the new value as a new version of its secret, under the same id,
+so everything that refers to it uses it. Replacing a secret is a decision for a person: the commands advise, plan and
+apply suggest never carry `--replace`, not even in test mode. When the value is not yours to hold, `credentials request` asks the person who has it to paste it
+in the console instead.
 
 **`pull` won't overwrite.** Use `--stdout` and diff it first — replacing a committed declaration is
 how an intentional, not-yet-applied edit disappears.
