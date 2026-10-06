@@ -31,6 +31,22 @@ internal static class DeploymentTenant
         ResolvedConfig config, ArgMap args, Func<string, string?> getEnv, string? fileTenant, string filePath)
     {
         EnsureNoConflict(args, getEnv, fileTenant, filePath);
+
+        // F2.7: med en profil kan både brukerens tilkobling og fila navngi workspacet. Begge er det samme miljøet, så når de
+        // er uenige, er en av dem feil, og ingen av dem velges, som for --tenant mot fila.
+        if (config.Profile is { } profile && config.ProfileTenant is { } connectionTenant && !string.IsNullOrWhiteSpace(fileTenant)
+            && string.IsNullOrWhiteSpace(args.Get("tenant")) && !string.Equals(connectionTenant, fileTenant!.Trim(), StringComparison.Ordinal))
+        {
+            string named = fileTenant.Trim();
+            throw new QueueyConfigurationException(
+                $"Profile {profile} in {config.ProfileFile} names workspace {connectionTenant}, and {filePath} names " +
+                $"{(CliErrors.LooksLikeAWorkspaceId(named) ? $"workspace {named}" : "another")} for profile {profile}. A profile is one " +
+                "environment, so neither is picked.")
+            {
+                SuggestedAction = "Make them name the same workspace, or leave the tenant out of one of them.",
+            };
+        }
+
         return string.IsNullOrWhiteSpace(fileTenant) ? config : config.WithTenant(fileTenant!.Trim());
     }
 
@@ -71,30 +87,46 @@ internal static class DeploymentTenant
     /// <c>--deployment</c> names, or the default one here when there is one — and the file's path. For <c>verify</c>,
     /// <c>publish</c> and <c>events get</c>, so they reach the workspace apply writes to.
     /// </summary>
-    public static (string? Tenant, string Path) FromDeploymentOption(ArgMap map)
+    /// <remarks>
+    /// With <paramref name="profile"/>, the file is the profile's other half (F2.7): it must be there and have the profile,
+    /// whose values expand the file's tenant. <c>listen</c> and <c>credentials</c> read it only with a profile.
+    /// </remarks>
+    public static (string? Tenant, string Path) FromDeploymentOption(ArgMap map, string? profile = null)
     {
         string? named = map.Get("deployment");
         string path = named ?? DeploymentFile.DefaultFileName;
         if (!System.IO.File.Exists(path))
         {
+            if (profile is not null)
+                throw new QueueyConfigurationException(
+                    $"--profile {profile} needs the deployment file's values for {profile}, and there is no deployment file at '{path}'.")
+                {
+                    SuggestedAction = "Run it where the deployment file is" + (named is null ? "" : ", or name it with --deployment") +
+                                      $", or run without --profile. A profile is both the connection in ~/.queuey/config.json and " +
+                                      "the file's values.",
+                };
             if (named is not null)
                 throw new QueueyConfigurationException($"No deployment file at '{path}'.");
             return (null, path);
         }
 
-        return (ReadFromFile(CliFiles.ReadAllText(path), path), path);
+        return (ReadFromFile(CliFiles.ReadAllText(path), path, profile), path);
     }
 
     /// <summary>
     /// The tenant a deployment file names, with its <c>${VAR}</c> expanded, read without the rest of the
     /// file. For <c>verify</c>, which needs nothing else from it. Null when the file names none.
     /// </summary>
-    public static string? ReadFromFile(string json, string path)
+    public static string? ReadFromFile(string json, string path, string? profile = null)
     {
         // verify leser bare tenant (review 2026-10-05): et felt apply avviser et annet sted i fila, som forsøkene,
         // stoppet en verifisering som ikke bruker det. JSON som ikke kan leses, feiler fortsatt, med fila navngitt.
         if (string.IsNullOrWhiteSpace(json))
+        {
+            if (profile is not null)
+                throw new QueueyConfigurationException($"{path}: The deployment file is empty, so it has no profile {profile}.");
             return null;
+        }
 
         JsonDocument document;
         try
@@ -119,15 +151,40 @@ internal static class DeploymentTenant
             if (tenants.Length > 1)
                 throw new QueueyConfigurationException(
                     $"{path}: The deployment file names the tenant {tenants.Length} times ({string.Join(", ", tenants.Select(t => t.Name))}), and only the last would count. Keep one.");
+            // Med en profil leses profilene også, og profilens verdier utvider tenant (F2.7). Fila må ha profilen.
+            Func<string, string?>? lookup = null;
+            string? notSetHint = null;
+            if (profile is not null)
+            {
+                try
+                {
+                    DeploymentProfile values = DeploymentProfiles.Find(DeploymentProfiles.ReadFrom(document.RootElement), profile);
+                    lookup = DeploymentProfiles.Lookup(profile, values, CliHost.Env);
+                    notSetHint = DeploymentProfiles.NotSetHint(profile);
+                }
+                catch (QueueyConfigurationException ex)
+                {
+                    throw new QueueyConfigurationException($"{path}: {ex.Message}") { SuggestedAction = ex.SuggestedAction };
+                }
+            }
+
             if (tenants.Length == 0)
                 return null;
 
-            string? tenant = tenants[0].Value.ValueKind switch
+            string? tenant;
+            try
             {
-                JsonValueKind.String => DeploymentVariables.Expand(tenants[0].Value.GetString(), null, "tenant"),
-                JsonValueKind.Null => null,
-                _ => throw new QueueyConfigurationException($"{path}: tenant is a workspace id in quotes, like \"ten_…\"."),
-            };
+                tenant = tenants[0].Value.ValueKind switch
+                {
+                    JsonValueKind.String => DeploymentVariables.Expand(tenants[0].Value.GetString(), lookup, "tenant", notSetHint),
+                    JsonValueKind.Null => null,
+                    _ => throw new QueueyConfigurationException("tenant is a workspace id in quotes, like \"ten_…\"."),
+                };
+            }
+            catch (QueueyConfigurationException ex)
+            {
+                throw new QueueyConfigurationException($"{path}: {ex.Message}") { SuggestedAction = ex.SuggestedAction };
+            }
 
             // Samme regel som når apply leser hele fila (DeploymentFile.Resolve, F2.7): verify og publish leser bare tenant,
             // og sendte den ellers i URL-ene uten at noen hadde sjekket den.

@@ -23,7 +23,7 @@ internal static class PublishCommand
     internal static readonly CommandOptions Options = new(
         "publish",
         flags: new[] { "stdin", "json" },
-        values: new[] { "event", "key", "data", "file", "idempotency-key", "content-type", "stream", "queue", "deployment" },
+        values: new[] { "event", "key", "data", "file", "idempotency-key", "content-type", "stream", "queue", "deployment", "profile" },
         positionals: 1);
 
     // Kildene til eventen. Én av dem.
@@ -67,13 +67,14 @@ internal static class PublishCommand
 
         // Workspacet etter samme regel som apply og verify: fila sin tenant, ellers den konfigurerte, og feil når --tenant
         // eller QUEUEY_TENANT navngir et annet enn fila. Ellers kunne verify lete etter køen i et annet workspace.
-        (string? fileTenant, string filePath) = DeploymentTenant.FromDeploymentOption(map);
-        ResolvedConfig configured = CliHost.Resolve(map);
+        (string? fileTenant, string filePath) = DeploymentTenant.FromDeploymentOption(map, CliHost.Profile(map));
+        ResolvedConfig configured = CliHost.Resolve(map, profiles: true);
         ResolvedConfig config = DeploymentTenant.Resolve(configured, map, CliHost.Env, fileTenant, filePath);
 
         // En publisering er en skriving på dataplanet (F2.7-review): bestemmer deploy-fila workspacet, sies det før noe sendes,
         // og hvilket workspace konfigurasjonen ellers ville gitt. Ellers kunne en testevent havne et annet sted enn ventet.
         string? tenantFrom = string.IsNullOrWhiteSpace(fileTenant) ? null : filePath;
+        // Med en profil (F2.7) har profilen allerede krevd at fila og tilkoblingen er enige om workspacet.
         string? passedOver = tenantFrom is not null && configured.TenantPublicId is { } other
                              && !string.Equals(other, config.TenantPublicId, StringComparison.Ordinal) ? other : null;
         bool json = map.Has("json");

@@ -19,7 +19,7 @@ namespace Queuey.Client.Cli;
 internal static class PlanCommand
 {
     // --adopt planlegger det en person har løsrevet, som apply --adopt ville skrevet det (Queuey F2.4).
-    internal static readonly CommandOptions Options = new("plan", flags: new[] { "json" }, values: new[] { "file", "adopt" });
+    internal static readonly CommandOptions Options = new("plan", flags: new[] { "json" }, values: new[] { "file", "adopt", "profile" });
 
     /// <summary>
     /// The version of <c>plan --json</c>'s shape: <c>{ schemaVersion, file, tenant, planId, planHash, wouldSucceed,
@@ -36,10 +36,14 @@ internal static class PlanCommand
         if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
 
-        if (!ApplyCommand.TryReadDeploymentFile(map, out string path, out DeploymentFile file, out failure)) return failure;
+        // Samme profil som apply (F2.7): fila med profilens verdier, og tilkoblingen hos brukeren.
+        string? profile = CliHost.Profile(map);
+        if (!ApplyCommand.TryReadDeploymentFile(map, out string path, out DeploymentFile file, out failure, profile)) return failure;
+        if (profile is not null)
+            file = ApplyCommand.ForProfile(file, profile, path);
 
         // Samme workspace som apply ville skrevet til, etter samme regel.
-        ResolvedConfig config = CliHost.ResolveForDeployment(map, file.ResolveTenant(), path);
+        ResolvedConfig config = CliHost.ResolveForDeployment(map, profile is null ? file.ResolveTenant() : file.Tenant, path);
         using ServiceProvider provider = CliHost.BuildProvider(config);
         var service = provider.GetRequiredService<IQueueyService>();
 

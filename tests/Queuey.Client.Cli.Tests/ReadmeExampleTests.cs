@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Queuey.Client.Cli;
 
@@ -40,22 +41,41 @@ public sealed class ReadmeExampleTests : IDisposable
     [MemberData(nameof(ExampleLines))]
     public async Task Every_deployment_file_in_the_readme_passes_a_dry_run(int line)
     {
+        string example = DeploymentFileExamples()[line];
         string path = Path.Combine(_dir, "queuey.deploy.json");
-        File.WriteAllText(path, DeploymentFileExamples()[line]);
+        File.WriteAllText(path, example);
 
-        CliRun run;
-        try
+        // Et eksempel med profiler (F2.7) kjøres én gang per profil, slik `apply --profile` kjører det: hver av dem skal gi
+        // ${VAR}-ene verdier som består. Uten profiler, én gang, som før.
+        string?[] profiles = ProfilesOf(example) is { Length: > 0 } names ? names : new string?[] { null };
+        foreach (string? profile in profiles)
         {
-            run = await CliHarness.RunAsync(() => ApplyCommand.RunAsync(new[] { "--file", path, "--dry-run" }));
-        }
-        catch (QueueyConfigurationException ex)
-        {
-            Assert.Fail($"README.md line {line}: {ex.Message}");
-            return;
-        }
+            string[] args = profile is null
+                ? new[] { "--file", path, "--dry-run" }
+                : new[] { "--file", path, "--dry-run", "--profile", profile };
+            string where = profile is null ? $"README.md line {line}" : $"README.md line {line}, --profile {profile}";
 
-        Assert.True(run.Exit == ExitCodes.Success, $"README.md line {line}: exit {run.Exit}. {run.Stdout}{run.Stderr}");
-        Assert.Contains("Nothing was sent.", run.Stdout);
+            CliRun run;
+            try
+            {
+                run = await CliHarness.RunAsync(() => ApplyCommand.RunAsync(args));
+            }
+            catch (QueueyConfigurationException ex)
+            {
+                Assert.Fail($"{where}: {ex.Message}");
+                return;
+            }
+
+            Assert.True(run.Exit == ExitCodes.Success, $"{where}: exit {run.Exit}. {run.Stdout}{run.Stderr}");
+            Assert.Contains("Nothing was sent.", run.Stdout);
+        }
+    }
+
+    [Fact]
+    public void The_readme_shows_a_deployment_file_with_profiles()
+    {
+        // Vakt mot at profil-eksemplet (F2.7) faller ut av uttrekket, så teorien over aldri kjører det med --profile.
+        Assert.Contains(DeploymentFileExamples().Values, example => ProfilesOf(example).Length >= 2);
     }
 
     /// <summary>
@@ -76,6 +96,16 @@ public sealed class ReadmeExampleTests : IDisposable
         }
 
         return examples;
+    }
+
+    /// <summary>The profiles a deployment-file example declares, in order: none for most.</summary>
+    private static string[] ProfilesOf(string example)
+    {
+        using JsonDocument document = JsonDocument.Parse(example,
+            new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true });
+        return document.RootElement.TryGetProperty("profiles", out JsonElement profiles) && profiles.ValueKind == JsonValueKind.Object
+            ? profiles.EnumerateObject().Select(p => p.Name).ToArray()
+            : Array.Empty<string>();
     }
 
     private static string RepoRoot()

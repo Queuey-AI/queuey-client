@@ -25,6 +25,9 @@ internal static class CliHarness
 
     public static string[] With(params string[] args) => args.Concat(Connection).ToArray();
 
+    /// <summary>A user connection file that does not exist, so no test reads the real <c>~/.queuey/config.json</c>.</summary>
+    public static readonly string NoUserConfig = Path.Combine(Path.GetTempPath(), "queuey-cli-tests-no-user-config", "config.json");
+
     /// <param name="command">The command to run.</param>
     /// <param name="api">The test server. Without one, any request fails the test.</param>
     /// <param name="env">
@@ -42,7 +45,10 @@ internal static class CliHarness
         Console.SetError(stderr);
         CliHost.TestHandler = api ?? new RecordingHandler(_ => throw new InvalidOperationException("This test sends nothing."));
         CliHost.StreamOut = stdout;
-        CliHost.Env = name => env is not null && env.TryGetValue(name, out string? value) ? value : null;
+        // Brukerens tilkoblinger (F2.7) leses aldri fra hjemmemappa til den som kjører testene: uten en fil fra testen peker
+        // QUEUEY_USER_CONFIG på en som ikke finnes.
+        CliHost.Env = name => env is not null && env.TryGetValue(name, out string? value) ? value
+            : name == "QUEUEY_USER_CONFIG" ? NoUserConfig : null;
         try
         {
             int exit = await command();

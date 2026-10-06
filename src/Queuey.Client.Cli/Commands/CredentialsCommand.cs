@@ -17,9 +17,9 @@ namespace Queuey.Client.Cli;
 internal static class CredentialsCommand
 {
     internal static readonly CommandOptions SetOptions = new(
-        "credentials set", flags: new[] { "json" }, values: new[] { "name", "from-env", "type", "key-id", "username" });
+        "credentials set", flags: new[] { "json" }, values: new[] { "name", "from-env", "type", "key-id", "username", "profile" });
 
-    internal static readonly CommandOptions ListOptions = new("credentials list", flags: new[] { "json" });
+    internal static readonly CommandOptions ListOptions = new("credentials list", flags: new[] { "json" }, values: new[] { "profile" });
 
     /// <summary>The credential types Queuey stores. Mirrors the server's <c>CredentialType</c>.</summary>
     private static readonly string[] CredentialTypes =
@@ -108,7 +108,8 @@ internal static class CredentialsCommand
                     : "The environment variable --from-env names is not set or is empty.",
                 "--from-env takes the name of an environment variable that holds the secret, such as PARTNER_KEY, never the secret itself.");
 
-        ResolvedConfig config = CliHost.Resolve(map);
+        // Med en profil (F2.7) lagres credentialen i workspacet profilen og deploy-fila navngir, det apply skriver til.
+        ResolvedConfig config = ListenCommand.Connection(map);
         string? tenant = config.TenantPublicId;
         if (string.IsNullOrWhiteSpace(tenant))
             return CliErrors.Configuration(map, "config_error", "A tenant is required. Set --tenant, QUEUEY_TENANT, or tenant in queuey.json.");
@@ -134,7 +135,8 @@ internal static class CredentialsCommand
         if (!ListOptions.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) return Help();
 
-        ResolvedConfig config = CliHost.Resolve(map);
+        // Med en profil (F2.7) lagres credentialen i workspacet profilen og deploy-fila navngir, det apply skriver til.
+        ResolvedConfig config = ListenCommand.Connection(map);
         string? tenant = config.TenantPublicId;
         if (string.IsNullOrWhiteSpace(tenant))
             return CliErrors.Configuration(map, "config_error", "A tenant is required. Set --tenant, QUEUEY_TENANT, or tenant in queuey.json.");
