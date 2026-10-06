@@ -1004,8 +1004,10 @@ public sealed class AdviseIntentTests : IDisposable
             }
             """);
 
+        // Fila har ikke noe miljø, så dev oppgis for å treffe profilen dev (uten er fila for prod, oppfølging av #58).
         FlowConflict conflict = Assert.Single(Advise("""
             {
+              "environment": { "value": "dev", "provenance": "stated" },
               "source": { "kind": { "value": "stripe", "provenance": "stated" } },
               "destination": { "baseUrl": { "value": "https://staging.example.com", "provenance": "stated" } }
             }
@@ -1152,7 +1154,9 @@ public sealed class AdviseIntentTests : IDisposable
         string step = Assert.Single(design.NextSteps, s => s.StartsWith("Test mode", StringComparison.Ordinal));
         // Én kommando (K1 i runde 2 av #58): i et agentverktøy er hvert kall et nytt skall.
         Assert.Contains("In a POSIX shell: STRIPE_WHSEC=\"$(stripe listen --print-secret)\" " + set + ".", step, StringComparison.Ordinal);
-        Assert.Contains("In PowerShell: $env:STRIPE_WHSEC = stripe listen --print-secret; " + set + ".", step, StringComparison.Ordinal);
+        // $env: varer hele økten, så variabelen fjernes etterpå (re-review av #58).
+        Assert.Contains("In PowerShell: $env:STRIPE_WHSEC = stripe listen --print-secret; " + set + "; Remove-Item Env:STRIPE_WHSEC,",
+            step, StringComparison.Ordinal);
         Assert.Contains("so it stays out of the output", step, StringComparison.Ordinal);
         Assert.Contains("A real endpoint's secret is never yours to hold: a person pastes it on the page queuey credentials request " +
                         "stripe-whsec --profile dev opens", step, StringComparison.Ordinal);
@@ -1178,7 +1182,9 @@ public sealed class AdviseIntentTests : IDisposable
             StringComparison.Ordinal));
         Assert.Contains(design.NextSteps, s => s.StartsWith("For test mode with stripe listen instead, state the environment dev in the " +
                                                             "intent", StringComparison.Ordinal));
-        Assert.Contains(design.NextSteps, s => s.StartsWith("queuey listen --queue stripe", StringComparison.Ordinal));   // køen leverer lokalt
+        // Hele designet er for prod (oppfølging av #58): HTTP, og ingen lytter som et ekte endepunkt ville levert til.
+        Assert.DoesNotContain(design.NextSteps, s => s.Contains("queuey listen", StringComparison.Ordinal));
+        Assert.Equal("http", design.Content["queues"]!["stripe"]!["delivery"]!["kind"]!.GetValue<string>());
     }
 
     [Fact]
@@ -1212,6 +1218,84 @@ public sealed class AdviseIntentTests : IDisposable
 
         Assert.Equal("queuey credentials request stripe-whsec", Assert.Single(design.Credentials).Store);
         Assert.DoesNotContain(design.NextSteps, s => s.StartsWith("Test mode", StringComparison.Ordinal));
+    }
+
+    // Hele designet følger miljøet i praksis (oppfølging av #58, før tag). Før antok advise dev også for en fil som fantes uten
+    // miljø, og designet ble en blanding: localForward og queuey listen, mens Stripe-stegene pekte et ekte endepunkt mot køen,
+    // i et workspace Queuey regner som prod.
+
+    [Theory]
+    [InlineData("stripe", false)]
+    [InlineData("stripe", true)]
+    [InlineData("supabase", false)]
+    [InlineData("supabase", true)]
+    [InlineData("app", false)]
+    [InlineData("app", true)]
+    public void An_existing_file_without_an_environment_is_designed_for_prod_and_for_dev_only_when_the_intent_says_so(string kind, bool devStated)
+    {
+        (string queue, string intent) = Repository(kind, devStated);
+        File_("queuey.deploy.json", """{ "queues": {} }""");
+
+        FlowAdvice advice = Advise(intent);
+        FlowDesign design = advice.Design!;
+
+        Assert.Equal((devStated ? "dev" : "prod", devStated ? Provenance.Stated : Provenance.Assumed),
+            (advice.Flow.String("environment"), advice.Flow["environment"]!.Provenance));
+        Assert.Equal(devStated ? "localForward" : "http", design.Content["queues"]![queue]!["delivery"]!["kind"]!.GetValue<string>());
+        Assert.Equal(devStated, design.NextSteps.Any(s => s.Contains("queuey listen", StringComparison.Ordinal)));
+        Assert.Equal(devStated, design.NextSteps.Any(s => s.StartsWith("Apply it to a workspace set to dev", StringComparison.Ordinal)));
+        Assert.StartsWith(devStated ? "queuey credentials set " : "queuey credentials request ", Assert.Single(design.Credentials).Store,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_profile_that_already_gives_the_environment_another_value_decides_it()
+    {
+        // Re-review av #58: profilen dev i fila sier test, og fila vinner over det advise bare antar.
+        Fixture("stripe-aspnet");
+        File_("queuey.deploy.json", """
+            {
+              "workspace": { "environment": "${QUEUEY_WORKSPACE_ENVIRONMENT}" },
+              "queues": {},
+              "profiles": { "dev": { "variables": { "QUEUEY_WORKSPACE_ENVIRONMENT": "test" } } }
+            }
+            """);
+
+        FlowDesign design = Advise(StripeIntent).Design!;
+
+        JsonNode variables = design.Content["profiles"]!["dev"]!["variables"]!;
+        Assert.Equal("test", variables["QUEUEY_WORKSPACE_ENVIRONMENT"]!.GetValue<string>());
+        Assert.Equal("http", variables["QUEUEY_STRIPE_DELIVERY_KIND"]!.GetValue<string>());
+        Assert.Equal("queuey credentials request stripe-whsec --profile dev", Assert.Single(design.Credentials).Store);
+        Assert.DoesNotContain(design.NextSteps, s => s.StartsWith("Test mode", StringComparison.Ordinal)
+                                                   || s.Contains("queuey listen", StringComparison.Ordinal));
+    }
+
+    /// <summary>A repository with a handler of <paramref name="kind"/>, and an intent for it: the queue's name, and the JSON.</summary>
+    private (string Queue, string Intent) Repository(string kind, bool devStated)
+    {
+        string environment = devStated ? "\"environment\": { \"value\": \"dev\", \"provenance\": \"stated\" }, " : "";
+        switch (kind)
+        {
+            case "stripe":
+                Fixture("stripe-aspnet");
+                return ("stripe", "{ " + environment + "\"source\": { \"kind\": { \"value\": \"stripe\", \"provenance\": \"stated\" } }, " +
+                                  "\"destination\": { \"route\": { \"value\": \"/api/stripe\", \"provenance\": \"stated\" } } }");
+            case "supabase":
+                Fixture("supabase-db-webhook");
+                return ("orders", "{ " + environment + "\"source\": { \"kind\": { \"value\": \"supabase\", \"provenance\": \"stated\" } } }");
+            default:
+                File_("package.json", """{ "name": "orders", "dependencies": { "express": "^4" } }""");
+                File_("server.js", """
+                    app.post('/hooks/orders', express.json(), (req, res) => {
+                      if (req.get('x-webhook-secret') !== process.env.ORDERS_HOOK_SECRET) return res.sendStatus(401);
+                      res.sendStatus(200);
+                    });
+                    """);
+                return ("orders", "{ " + environment + "\"queue\": { \"value\": \"orders\", \"provenance\": \"stated\" }, " +
+                                  "\"source\": { \"kind\": { \"value\": \"app\", \"provenance\": \"stated\" } }, " +
+                                  "\"destination\": { \"route\": { \"value\": \"/hooks/orders\", \"provenance\": \"stated\" } } }");
+        }
     }
 
     [Fact]

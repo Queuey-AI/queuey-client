@@ -823,8 +823,23 @@ internal sealed class Enrichment
 
         _flow.Set("environment", existing is not null
             ? FlowValue.Of(existing, Provenance.Evidence, evidence)
-            : FlowValue.Of("dev", Provenance.Assumed));
+            : FlowValue.Of(AssumedEnvironment(), Provenance.Assumed));
     }
+
+    /// <summary>
+    /// The environment advise assumes when neither the intent nor the file names one. A new file is for dev, which advise
+    /// writes into it. A file that is there without one applies to an unmarked workspace, which Queuey counts as prod, and
+    /// advise writes no assumed environment into it; so does a file that takes it from a variable without profiles, which
+    /// only the environment where apply runs sets. A file that takes it from a variable with profiles gets it from the
+    /// profile advise writes for dev (the design reads one the file already has).
+    /// </summary>
+    // Før tag (oppfølging av #58, 2026-10-06): advise antok dev også for en fil som fantes uten miljø. Designet ble da en
+    // blanding: localForward og queuey listen, mens Stripe-stegene pekte et ekte endepunkt mot køen, i et workspace Queuey
+    // regner som prod. Et umerket workspace er prod (Kenneths beslutning), og nå følger hele designet det.
+    private string AssumedEnvironment()
+        => _facts.DeployFile is not { } file ? "dev"
+           : file.Environment is { } env && env.IndexOf("${", StringComparison.Ordinal) >= 0 && file.Profiles.Count > 0 ? "dev"
+           : "prod";
 
     private void ResolveQueue(string kind)
     {

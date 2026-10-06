@@ -114,10 +114,15 @@ public static class FlowDesigner
         private readonly ExistingDeployFile? _file;
 
         // Et umerket workspace er prod, og et antatt miljø skrives bare inn i en ny fil (Kenneths beslutninger, review av #58,
-        // B2). Dev i praksis er derfor et miljø intensjonen oppgir, fila sier, eller advise skriver inn: i en ny fil, eller i
-        // profilen til en fil som tar miljøet fra en variabel. En fil som finnes uten miljø, eller med en variabel uten profiler,
-        // er det ikke: der gir advise credentials request og et ekte Stripe-endepunkt, som plan og apply.
+        // B2). FlowAdvisor antar derfor prod for en fil som finnes uten miljø, og hele designet følger miljøet i praksis: et
+        // miljø intensjonen oppgir, fila sier, eller advise skriver inn, i en ny fil eller i profilen til en fil med en
+        // miljøvariabel. Gir profilen for miljøet alt variabelen en verdi, er det fila sin som gjelder (re-review av #58).
+        // Bare dev i praksis leverer til en lytter og gir Stripe sin testmodus; ellers HTTP, credentials request og et ekte
+        // endepunkt, som plan og apply sier.
         private readonly bool _devInPractice;
+
+        // Miljøet var antatt for en fil som finnes uten et, så prod-veien sier hvordan man får dev.
+        private readonly bool _assumedForUnmarkedFile;
 
         // Med profiler (F2.7, #53) står verdiene som skiller miljøene, i profilen med miljøets navn, og fila tar dem som
         // ${VAR}: `queuey plan --profile dev` virker da, og prod er en PR som legger til en profil. En fil som finnes uten
@@ -135,16 +140,34 @@ public static class FlowDesigner
             _env = flow.String("environment") ?? "dev";
             _queue = flow.String("queue") ?? throw new InvalidOperationException("A design needs the queue.");
             _route = flow.String("destination.route") ?? throw new InvalidOperationException("A design needs the route.");
-            _local = _env == "dev";
             _prefix = $"queues.{_queue}";
             _file = facts.DeployFile;
             _portable = _file is null || _file.Profiles.Count > 0;
             _profileFlag = _portable ? $" --profile {_env}" : "";
+
             bool assumed = flow["environment"] is not { Provenance: not Provenance.Assumed };
-            bool writesIt = _file is null || (_portable && _file.Environment is { } existing && existing.IndexOf("${", StringComparison.Ordinal) >= 0);
-            _devInPractice = _local && (!assumed || writesIt);
-            _storing = new CredentialStoring(_devInPractice || !assumed ? _env : null, _portable ? _env : null);
+            string? variable = EnvironmentVariable(_file);
+            string environment = assumed && _portable && variable is not null && FileProfileValue(variable) is { } given
+                ? given.Trim().ToLowerInvariant()
+                : _env;
+            _devInPractice = environment == "dev";
+            _local = _devInPractice;
+            _assumedForUnmarkedFile = assumed && _file is not null && !(_portable && variable is not null);
+            _storing = new CredentialStoring(environment, _portable ? _env : null);
         }
+
+        /// <summary>The variable a file takes the workspace's environment from, such as QUEUEY_WORKSPACE_ENVIRONMENT, or null.</summary>
+        private static string? EnvironmentVariable(ExistingDeployFile? file)
+            => file?.Environment is { } environment && environment.IndexOf("${", StringComparison.Ordinal) >= 0
+                ? DeploymentVariables.Referenced(environment).FirstOrDefault()
+                : null;
+
+        /// <summary>The value the file's profile for the flow's environment already gives <paramref name="variable"/>, or null.</summary>
+        private string? FileProfileValue(string variable)
+            => Property((Property(_file?.Json, "profiles") as JsonObject)?[_env] as JsonObject, "variables") is JsonObject given
+               && given[variable] is JsonValue value && value.TryGetValue(out string? text) && !string.IsNullOrWhiteSpace(text)
+                ? text
+                : null;
 
         public FlowDesign? Build()
         {
@@ -1148,7 +1171,8 @@ public static class FlowDesigner
                         _next.Add("Test mode, with Stripe's own CLI, whose signing secret is a test secret you may hold. Take it and " +
                                   "store it in one command, so it stays out of the output and needs no variable from an earlier shell. " +
                                   $"In a POSIX shell: STRIPE_WHSEC=\"$(stripe listen --print-secret)\" {set}. In PowerShell: " +
-                                  $"$env:STRIPE_WHSEC = stripe listen --print-secret; {set}. Then run queuey apply{_profileFlag} again, " +
+                                  $"$env:STRIPE_WHSEC = stripe listen --print-secret; {set}; Remove-Item Env:STRIPE_WHSEC, since $env: lasts " +
+                                  $"for the session. Then run queuey apply{_profileFlag} again, " +
                                   "which points the ingress at it, and stripe listen --forward-to <ingress URL> in the background. A real " +
                                   $"endpoint's secret is never yours to hold: a person pastes it on the page {request} opens.");
                         _next.Add((SecretName() is { } secret
@@ -1172,13 +1196,9 @@ public static class FlowDesigner
                         _next.Add("Then point the Stripe webhook endpoint at the queue's ingress URL, in the dashboard or with Stripe's " +
                                   "API. Changing the URL of an endpoint that exists keeps its secret, which the handler has. A new " +
                                   "endpoint has a secret of its own: the person pastes that one, and gives the handler the same.");
-                        // Køen leverer til en lytter når designet antar dev, også der fila ikke sier det (B2).
-                        if (_local)
-                            _next.Add($"queuey listen{_profileFlag} --queue {_queue} --forward-to http://localhost:{port} --json, in " +
-                                      "the background: the queue forwards each delivery to it.");
                         _next.Add($"queuey verify {_queue}{_profileFlag} --event-type {type} --ingress-auth stripe --json, and send that " +
                                   "event from Stripe while it waits.");
-                        if (_local)
+                        if (_assumedForUnmarkedFile)
                             _next.Add("For test mode with stripe listen instead, state the environment dev in the intent, or give the " +
                                       "deployment file workspace.environment dev. Only a person lowers a workspace to dev, in the Queuey " +
                                       "console.");
