@@ -704,17 +704,22 @@ An unset variable is an **error**, never an empty string — expanding to nothin
 you a base URL of `https://` and a deploy that "succeeded" while pointing at nowhere. Use
 `${VAR:-default}` when a default is genuinely intended.
 
-**A file never reads a secret from the environment.** Whatever a file expands is stored in Queuey, and
-a delivery URL sends it on to the receiver, so `${QUEUEY_API_KEY}` in a URL would hand your key to
-whoever the URL points at. The CLI refuses, before it reads the variable:
+**A file never reads the CLI's key.** Whatever a file expands is stored in Queuey, and a delivery URL
+sends it on to the receiver, so `${QUEUEY_API_KEY}` in a URL would hand your key to whoever the URL
+points at. Two things are refused:
 
-- a name that contains `KEY`, `SECRET`, `TOKEN`, `PASSWORD`, `PASSWD` or `PASSPHRASE`, in any case;
-- the CLI's own `QUEUEY_` settings. A file may use `QUEUEY_TENANT`, `QUEUEY_WORKSPACE_ENVIRONMENT`, and
-  the `QUEUEY_…_URL` and `QUEUEY_…_DELIVERY_KIND` names `pull --as` writes;
-- a value, from any variable or default, that starts like a secret (`qak_`, `whsec_`, `sk_live_` …).
+- **The CLI's own `QUEUEY_` settings**, refused before the variable is read. A file may still use
+  `QUEUEY_TENANT`, `QUEUEY_WORKSPACE_ENVIRONMENT`, and the `QUEUEY_…_URL` and `QUEUEY_…_DELIVERY_KIND`
+  names `pull --as` writes.
+- **A value that starts like a secret** (`qak_`, `whsec_`, `sk_live_`/`sk_test_`, `rk_live_`/`rk_test_`),
+  whatever the variable is called, and from a `${VAR:-default}` too.
 
-Keep a secret in a credential (`queuey credentials set`) and name it in `credentialRef`. A
-`credentialRef` takes the credential's name, never its value, so it never needs such a variable.
+Your own variables are yours, whatever they are called. Where a secret goes:
+
+- **A receiver whose URL carries a token** (a Slack or Zapier hook, an Azure Function's `?code=`) takes
+  the whole URL from one variable: `"url": "${ORDERS_HOOK_URL}"`.
+- **A secret sent in a header** is a credential (`queuey credentials set`), named in `credentialRef` with
+  an `authMode`. A `credentialRef` takes the credential's name, never its value.
 
 `--check` compares only what the file declares. A workspace holding settings your file is silent
 about is inheritance working as designed, not drift — so you can put as much or as little under code

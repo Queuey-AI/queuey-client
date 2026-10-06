@@ -95,12 +95,13 @@ APPLY
                  workspace holding settings the file is silent about is not drift.
                  ${VAR} in a value is expanded from the environment; an unset one is an
                  error, never an empty string. Use ${VAR:-default} when a default is meant.
-                 A variable whose name contains KEY, SECRET, TOKEN, PASSWORD, PASSWD or
-                 PASSPHRASE is never read, nor are the CLI's own QUEUEY_ settings (a file may
-                 use QUEUEY_TENANT, QUEUEY_WORKSPACE_ENVIRONMENT and the QUEUEY_…_URL and
-                 QUEUEY_…_DELIVERY_KIND names queuey pull writes), and a value that starts like
-                 a secret (qak_, whsec_ …) is refused: what a file expands is stored in Queuey
-                 and sent on. Keep a secret in a credential and name it in credentialRef.
+                 The CLI's own QUEUEY_ settings are never read (a file may use QUEUEY_TENANT,
+                 QUEUEY_WORKSPACE_ENVIRONMENT and the QUEUEY_…_URL and QUEUEY_…_DELIVERY_KIND
+                 names queuey pull writes), and a value that starts like a secret (qak_,
+                 whsec_, sk_live_ …) is refused: what a file expands is stored in Queuey and
+                 sent on. A receiver whose URL carries a token takes the whole URL from one
+                 variable, such as ${ORDERS_HOOK_URL}; a secret sent in a header is a
+                 credential, named in credentialRef with an authMode.
                  A queue this file creates delivers when it has a destination (its own
                  delivery.url or workspace.delivery.baseUrl) and logs events until it has one.
                  Declare ""mode"": ""deliver"" or ""logOnly"" to own it; an existing queue keeps its
