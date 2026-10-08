@@ -33,7 +33,7 @@ public sealed class SecretEchoTests : IDisposable
     [InlineData(new[] { "whoami", "--json", "3f9c0a7e5b2d4c18a6e9f0b1c2d3e4f5" }, "3f9c0a7e5b2d4c18a6e9f0b1c2d3e4f5", "Unexpected argument '3f9…' for queuey whoami.")]
     [InlineData(new[] { "qak_kid.s3cr3t", "--json" }, "qak_kid.s3cr3t", "Unknown command 'qak…'.")]
     [InlineData(new[] { "FAKEtok3nAbc123", "--json" }, "FAKEtok3nAbc123", "Unknown command 'FAK…'.")]
-    [InlineData(new[] { "credentials", "sk_test_s3cr3t", "--json" }, "sk_test_s3cr3t", "Unknown credentials subcommand 'sk…'. Expected 'set', 'request' or 'list'.")]
+    [InlineData(new[] { "credentials", "sk_test_s3cr3t", "--json" }, "sk_test_s3cr3t", "Unknown credentials subcommand 'sk…'. Expected 'set', 'rotate', 'request' or 'list'.")]
     [InlineData(new[] { "keys", "FAKEtok3nAbc123", "--json" }, "FAKEtok3nAbc123", "Unknown keys subcommand 'FAK…'. Expected 'mint'.")]
     [InlineData(new[] { "queue", "FAKEtok3nAbc123", "--json" }, "FAKEtok3nAbc123", "Unknown queue subcommand 'FAK…'. Expected 'plan' or 'sync'.")]
     public async Task A_command_subcommand_or_argument_shows_three_characters_at_most(string[] args, string secret, string message)
