@@ -118,6 +118,26 @@ internal sealed class QueueyManagement : IQueueyManagement
         return ToResult(r);
     }
 
+    // Queuey F3.7: rotasjonen. Bare en intern hjelper, som WireOfEnvironment: IQueueyManagement er offentlig i en tagget
+    // versjon, og et nytt medlem der ville brutt dem som implementerer det. `queuey credentials rotate` kaller den.
+    internal async Task<CredentialResult> RotateCredentialAsync(
+        string tenantPublicId, string name, string secret, int? graceMinutes, int? expectedVersion = null, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(tenantPublicId)) throw new ArgumentException("A tenant public id is required.", nameof(tenantPublicId));
+        if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("A credential name is required.", nameof(name));
+        if (string.IsNullOrEmpty(secret)) throw new ArgumentException("A secret is required.", nameof(secret));
+
+        CredentialWireResponse r = await _controlPlane.RotateCredentialAsync(tenantPublicId, new RotateCredentialWireRequest
+        {
+            Name = name.Trim(),
+            Secret = secret,
+            GraceMinutes = graceMinutes,
+            ExpectedVersion = expectedVersion,
+        }, cancellationToken).ConfigureAwait(false);
+
+        return ToResult(r);
+    }
+
     public async Task<IReadOnlyList<CredentialResult>> ListCredentialsAsync(string tenantPublicId, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(tenantPublicId)) throw new ArgumentException("A tenant public id is required.", nameof(tenantPublicId));
@@ -245,6 +265,7 @@ internal sealed class QueueyManagement : IQueueyManagement
             PublicId = r.PublicId, Name = r.Name, Type = r.Type, KeyId = r.KeyId,
             Version = r.Version, Created = r.Created, BoundWorkspace = r.BoundWorkspace, BoundQueues = r.BoundQueues,
             SecretReplaced = r.Created == false ? r.SecretReplaced : null,
+            PreviousVersionValidUntil = r.PreviousVersionValidUntil,
         };
 
     private static PatchSigningWire? ToWire(DeliverySigning? s)

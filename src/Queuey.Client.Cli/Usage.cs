@@ -18,7 +18,7 @@ COMMANDS
   verify         Verify a queue's flow with Queuey, step by step from the ingress to the final state.
   schema         Print the JSON Schema for queuey.deploy.json, or a Desired Flow's. Reads nothing, needs no credentials.
   pull           Read a workspace back into a deployment file (the inverse of apply).
-  credentials    Store delivery secrets a deployment file refers to: credentials set | request | list.
+  credentials    Store delivery secrets a deployment file refers to: credentials set | rotate | request | list.
   keys           Mint an ingress signing key for a queue: keys mint.
   publish        Publish one event to a queue the way a producer does, and print its id for verify.
   events         Read one event's status and attempts as Queuey serves them: events get.
@@ -327,6 +327,19 @@ CREDENTIALS
                  that uses the credential at once, and is a decision for a person.
                  --replace replaces it, as a new version of its secret under the same id.
                  The commands advise, plan and apply suggest never carry --replace.
+  queuey credentials rotate --name <name> --from-env <ENV_VAR> [--grace <minutes>]
+                [--profile <name>] [--json]
+                 Rotates the secret of a credential the workspace has: the value, read from
+                 the environment, becomes a new version under the same id, and everything
+                 that uses the credential switches to it at once. Queuey runs it as the
+                 operation rotate_credential. Without --grace the previous secret stops
+                 verifying at once. --grace <minutes> (1 to 1440, HmacSigning only) keeps
+                 it verifying at the ingress that long, so senders can switch over; each
+                 event records which version verified it. Rotating again while a window is
+                 open keeps only the secret it replaces, and without --grace closes it, so
+                 a leaked old secret stops verifying at once. The value the credential
+                 already holds rotates nothing. A name the workspace has no credential under
+                 is refused (credential_not_found, exit 1).
   queuey credentials request <name> [--type <type>] [--key-id <id>] [--username <u>]
                 [--profile <name>] [--json]
                  Asks a person for a secret, so it never passes through this terminal or a

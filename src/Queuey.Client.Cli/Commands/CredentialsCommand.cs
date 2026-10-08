@@ -10,7 +10,7 @@ using Queuey.Client.Waas;
 namespace Queuey.Client.Cli;
 
 /// <summary>
-/// <c>queuey credentials set|request|list</c> — the delivery secrets a deployment file refers to by name.
+/// <c>queuey credentials set|rotate|request|list</c> — the delivery secrets a deployment file refers to by name.
 /// The value is written once and stored encrypted; it is never readable again, which is exactly what
 /// lets <c>queuey.deploy.json</c> be committed. <c>request</c> asks a person to paste it in the console,
 /// so whoever runs it — an agent, a script — never holds the value at all.
@@ -23,6 +23,21 @@ internal static class CredentialsCommand
         "credentials set", flags: new[] { "json", "replace" }, values: new[] { "name", "from-env", "type", "key-id", "username", "profile" });
 
     internal static readonly CommandOptions ListOptions = new("credentials list", flags: new[] { "json" }, values: new[] { "profile" });
+
+    // Queuey F3.7 (besluttet 2026-10-07): rotasjonen er en operasjon (rotate_credential). Navnet og verdien som for `set`, og
+    // et vindu bare når --grace er gitt. Typen er credentialens egen, så --type, --key-id og --username hører til `set`.
+    internal static readonly CommandOptions RotateOptions = new(
+        "credentials rotate", flags: new[] { "json" }, values: new[] { "name", "from-env", "grace", "profile" },
+        hints: new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["replace"] = "credentials rotate always replaces the secret: it needs no --replace.",
+            ["type"] = "credentials rotate keeps the credential's type. To store a credential of another type, use credentials set under another name.",
+            ["key-id"] = "credentials rotate replaces only the secret. To change the key id, use credentials set --key-id.",
+            ["username"] = "credentials rotate replaces only the secret. To change the username, use credentials set --username.",
+        });
+
+    /// <summary>The longest grace window <c>credentials rotate --grace</c> takes, in minutes: a day, as Queuey's.</summary>
+    internal const int MaxGraceMinutes = 24 * 60;
 
     // Queuey F2.9 (2026-10-06): navnet er argumentet. Et valg som hører til `set`, sier hva som gjelder i stedet.
     internal static readonly CommandOptions RequestOptions = new(
@@ -59,6 +74,7 @@ internal static class CredentialsCommand
         {
             "set" => await SetAsync(rest),
             "request" => await RequestAsync(rest),
+            "rotate" => await RotateAsync(rest),
             "list" => await ListAsync(rest),
             "" or "-h" or "--help" or "help" => Help(),
             _ => Unknown(sub, rest),
@@ -69,7 +85,7 @@ internal static class CredentialsCommand
 
     private static int Unknown(string sub, string[] rest)
         => CliErrors.Write(CliErrors.WantsJson(rest), "unknown_subcommand",
-            $"Unknown credentials subcommand '{CliErrors.Shown(sub)}'. Expected 'set', 'request' or 'list'.", action: null, status: null, ExitCodes.Usage);
+            $"Unknown credentials subcommand '{CliErrors.Shown(sub)}'. Expected 'set', 'rotate', 'request' or 'list'.", action: null, status: null, ExitCodes.Usage);
 
     private static async Task<int> SetAsync(string[] args)
     {
@@ -190,6 +206,115 @@ internal static class CredentialsCommand
               + "the value is encrypted and can't be read back."));
         WriteBinding(created.BoundWorkspace == true, created.BoundQueues);
 
+        return ExitCodes.Success;
+    }
+
+    private static async Task<int> RotateAsync(string[] args)
+    {
+        if (!RotateOptions.TryParse(args, out ArgMap map, out int failure)) return failure;
+        if (map.Has("help") || map.Has("h")) return Help();
+
+        // Navnet sjekkes som for `set` og deploy-fila, før noe annet: et navn som ser ut som en hemmelighet, vises ikke.
+        string? name = map.Get("name")?.Trim();
+        if (string.IsNullOrWhiteSpace(name))
+            return CliErrors.Usage(map, "missing_argument", "credentials rotate requires --name <name>.",
+                "Give the name the workspace has the credential under, as a deployment file's credentialRef names it.");
+        if (DeploymentCredentialNames.LooksLikeASecret(name!))
+            return CliErrors.Usage(map, "invalid_value",
+                "--name looks like a secret, not the name of a credential. Its value is not shown.",
+                "Give the name the credential is stored under, such as stripe-whsec, and keep the new secret in the environment "
+                + "variable --from-env names.");
+        if (!DeploymentCredentialNames.FitsShape(name))
+            return CliErrors.Usage(map, "invalid_value",
+                $"--name '{CliErrors.Shown(name!)}' can't name a credential: a name may only use letters, digits and . _ : @ / -, "
+                + $"starting with a letter or digit, at most {DeploymentCredentialNames.MaxLength} characters.",
+                "Give the name the workspace has the credential under.");
+
+        // Vinduet åpnes bare uttrykkelig, og høyst et døgn (Queuey F3.7). Sjekket før miljøet og workspacet, som andre bruksfeil.
+        int? grace = null;
+        if (map.Get("grace") is { } graceText)
+        {
+            if (!int.TryParse(graceText, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int minutes)
+                || minutes < 1 || minutes > MaxGraceMinutes)
+                return CliErrors.Usage(map, "invalid_value",
+                    $"--grace takes whole minutes, 1 to {MaxGraceMinutes}: a grace window lasts at most a day.",
+                    "Give the minutes the old secret should still verify, such as --grace 60, or leave --grace out to stop it at once.");
+            grace = minutes;
+        }
+
+        // Verdien kommer fra en miljøvariabel, aldri et argument, som for `set`.
+        string? fromEnv = map.Get("from-env");
+        if (string.IsNullOrWhiteSpace(fromEnv))
+            return CliErrors.Usage(map, "missing_argument",
+                "credentials rotate requires --from-env <ENV_VAR> — the new secret is read from the environment, "
+                + "never passed as an argument (arguments land in shell history and CI logs).");
+        string? secret = Environment.GetEnvironmentVariable(fromEnv!);
+        if (string.IsNullOrEmpty(secret))
+            return CliErrors.Configuration(map, "config_error",
+                LooksLikeAVariableName(fromEnv!)
+                    ? $"Environment variable '{fromEnv}' is not set or is empty."
+                    : "The environment variable --from-env names is not set or is empty.",
+                "--from-env takes the name of an environment variable that holds the secret, such as PARTNER_KEY, never the secret itself.");
+
+        ResolvedConfig config = ListenCommand.Connection(map);
+        string? tenant = config.TenantPublicId;
+        if (string.IsNullOrWhiteSpace(tenant))
+            return CliErrors.Configuration(map, "config_error", "A tenant is required. Set --tenant, QUEUEY_TENANT, or tenant in queuey.json.");
+
+        using ServiceProvider provider = CliHost.BuildProvider(config);
+        var service = provider.GetRequiredService<IQueueyService>();
+        if (service.Management is not QueueyManagement management)
+            return CliErrors.Write(map.Has("json"), "unsupported", "This build's Queuey client can't rotate credentials.", null,
+                status: null, ExitCodes.RuntimeError, "Queuey error");
+
+        string holder = CredentialNameRules.Showable(name) is { } shown ? $"'{shown}'" : "The credential";
+        CredentialResult rotated;
+        try
+        {
+            rotated = await management.RotateCredentialAsync(tenant!, name!, secret!, grace);
+        }
+        catch (QueueyNotFoundException ex) when (ex.ErrorCode is null)
+        {
+            // En Queuey uten ruten svarer 404 uten feilkonvolutt. En credential som ikke finnes, har koden sin.
+            return CliErrors.Write(map.Has("json"), "credential_rotation_unsupported",
+                "This Queuey can't rotate a credential (it predates rotations).",
+                $"Replace the secret with queuey credentials set --name {name} --from-env {fromEnv} --replace, which opens no grace window.",
+                status: 404, ExitCodes.RuntimeError, "Queuey error");
+        }
+        catch (QueueyConflictException ex) when (ex.ErrorCode == "credential_changed_meanwhile")
+        {
+            return CliErrors.Write(map.Has("json"), "credential_changed_meanwhile",
+                $"{holder} was changed by someone else while it was rotated, and nothing was stored.",
+                "Look at what changed with queuey credentials list, and rotate again if it is still intended.",
+                status: 409, ExitCodes.RuntimeError, "Queuey error");
+        }
+
+        if (map.Has("json"))
+        {
+            Console.WriteLine(JsonSerializer.Serialize(new
+            {
+                rotated.PublicId, rotated.Name, rotated.Type, rotated.KeyId, rotated.Version, rotated.SecretReplaced,
+                rotated.PreviousVersionValidUntil, rotated.BoundWorkspace, rotated.BoundQueues,
+            }, CliHost.JsonOut));
+            return ExitCodes.Success;
+        }
+
+        // Navn og typer kommer fra serveren, så linjene går gjennom TerminalText (F2.7-regelen).
+        if (rotated.SecretReplaced == false)
+        {
+            Console.WriteLine(TerminalText.Line(
+                $"'{rotated.Name}' ({rotated.Type}) already holds this value: nothing was rotated, and its secret stays version "
+                + $"{rotated.Version}."));
+            return ExitCodes.Success;
+        }
+
+        Console.WriteLine(TerminalText.Line(
+            $"Rotated the secret of '{rotated.Name}' ({rotated.Type}): it holds version {rotated.Version} now, under the same id, so "
+            + "everything that refers to it uses the new value. The value is encrypted and can't be read back."));
+        Console.WriteLine(rotated.PreviousVersionValidUntil is { } until
+            ? $"The previous secret still verifies at the ingress until {until.UtcDateTime:yyyy-MM-dd HH:mm} UTC, so senders can switch "
+              + "over; each event records which version verified it. Rotate again without --grace to stop it sooner."
+            : "The previous secret stopped verifying at once.");
         return ExitCodes.Success;
     }
 

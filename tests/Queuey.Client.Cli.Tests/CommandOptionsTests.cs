@@ -201,7 +201,7 @@ public sealed class CommandOptionsTests : IDisposable
             ["SCHEMA"] = new[] { SchemaCommand.Options },
             ["PULL"] = new[] { PullCommand.Options },
             ["KEYS"] = new[] { KeysCommand.MintOptions },
-            ["CREDENTIALS"] = new[] { CredentialsCommand.SetOptions, CredentialsCommand.RequestOptions, CredentialsCommand.ListOptions },
+            ["CREDENTIALS"] = new[] { CredentialsCommand.SetOptions, CredentialsCommand.RotateOptions, CredentialsCommand.RequestOptions, CredentialsCommand.ListOptions },
             ["PUBLISH"] = new[] { PublishCommand.Options },
             ["EVENTS"] = new[] { EventsCommand.GetOptions },
             ["CREATE-TENANT"] = new[] { CreateTenantCommand.Options },

@@ -171,6 +171,12 @@ public sealed class CredentialResult
 
     /// <summary>When it was just stored: the queues (<c>que_…</c>) whose ingress waited for it and verifies with it now.</summary>
     public IReadOnlyList<string>? BoundQueues { get; set; }
+
+    /// <summary>
+    /// When a rotation opened a grace window (Queuey F3.7): until when the secret it replaced still verifies at the ingress.
+    /// Null when no window is open, and from a Queuey that predates rotations.
+    /// </summary>
+    public System.DateTimeOffset? PreviousVersionValidUntil { get; set; }
 }
 
 // ── wire shapes ───────────────────────────────────────────────────────────────
@@ -225,8 +231,19 @@ internal sealed class CreateCredentialWireRequest
     public bool? Replace { get; set; }
 }
 
+// Queuey F3.7 (besluttet 2026-10-07): POST /tenants/{ten}/credentials/rotate. Vinduet sendes bare når det er gitt, så kroppen
+// har ikke et felt en eldre Queuey ikke kjenner uten at noen ba om det.
+internal sealed class RotateCredentialWireRequest
+{
+    public string Name { get; set; } = default!;
+    public string Secret { get; set; } = default!;
+    public int? GraceMinutes { get; set; }
+    public int? ExpectedVersion { get; set; }
+}
+
 internal sealed class CredentialWireResponse
 {
+    public System.DateTimeOffset? PreviousVersionValidUntil { get; set; }
     public string? PublicId { get; set; }
     public string? Name { get; set; }
     public string? Type { get; set; }

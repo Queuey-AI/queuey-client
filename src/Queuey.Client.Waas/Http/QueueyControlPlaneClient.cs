@@ -269,6 +269,22 @@ internal sealed class QueueyControlPlaneClient
     }
 
     /// <summary>
+    /// Rotates the secret of a credential the workspace has (<c>POST /tenants/{ten}/credentials/rotate</c>, Queuey F3.7): the
+    /// value becomes a new version under the same id, as the operation <c>rotate_credential</c>. The value is never readable again.
+    /// </summary>
+    public async Task<CredentialWireResponse> RotateCredentialAsync(string tenantPublicId, RotateCredentialWireRequest request, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "credentials", "rotate");
+        byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
+
+        return await _connection.SendForJsonAsync<CredentialWireResponse>(
+            HttpMethod.Post, uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Asks for the secret of a credential that a signed-in person pastes in the console
     /// (<c>POST /tenants/{ten}/credential-requests</c>). 201 for a new request, 200 for the one open for the same name.
     /// </summary>
