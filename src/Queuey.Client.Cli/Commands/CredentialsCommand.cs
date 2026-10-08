@@ -27,7 +27,7 @@ internal static class CredentialsCommand
     // Queuey F3.7 (besluttet 2026-10-07): rotasjonen er en operasjon (rotate_credential). Navnet og verdien som for `set`, og
     // et vindu bare når --grace er gitt. Typen er credentialens egen, så --type, --key-id og --username hører til `set`.
     internal static readonly CommandOptions RotateOptions = new(
-        "credentials rotate", flags: new[] { "json" }, values: new[] { "name", "from-env", "grace", "profile" },
+        "credentials rotate", flags: new[] { "json" }, values: new[] { "name", "from-env", "grace", "expect-version", "profile" },
         hints: new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["replace"] = "credentials rotate always replaces the secret: it needs no --replace.",
@@ -242,6 +242,19 @@ internal static class CredentialsCommand
             grace = minutes;
         }
 
+        // Versjonen kalleren vet den bytter (review av #63, K1): en rotasjon fra CI skriver da aldri over en rotasjon en person
+        // gjorde imellom. Queuey nekter en annen versjon med credential_changed_meanwhile, og ingenting lagres.
+        int? expectVersion = null;
+        if (map.Get("expect-version") is { } versionText)
+        {
+            if (!int.TryParse(versionText, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int version)
+                || version < 1)
+                return CliErrors.Usage(map, "invalid_value",
+                    "--expect-version takes the version of the secret the credential holds now, a whole number from 1.",
+                    "queuey credentials list shows each credential's version. Leave --expect-version out to rotate whatever version it holds.");
+            expectVersion = version;
+        }
+
         // Verdien kommer fra en miljøvariabel, aldri et argument, som for `set`.
         string? fromEnv = map.Get("from-env");
         if (string.IsNullOrWhiteSpace(fromEnv))
@@ -271,7 +284,7 @@ internal static class CredentialsCommand
         CredentialResult rotated;
         try
         {
-            rotated = await management.RotateCredentialAsync(tenant!, name!, secret!, grace);
+            rotated = await management.RotateCredentialAsync(tenant!, name!, secret!, grace, expectVersion);
         }
         catch (QueueyNotFoundException ex) when (ex.ErrorCode is null)
         {
@@ -284,7 +297,9 @@ internal static class CredentialsCommand
         catch (QueueyConflictException ex) when (ex.ErrorCode == "credential_changed_meanwhile")
         {
             return CliErrors.Write(map.Has("json"), "credential_changed_meanwhile",
-                $"{holder} was changed by someone else while it was rotated, and nothing was stored.",
+                expectVersion is { } expected
+                    ? $"{holder} does not hold version {expected} of its secret now, which --expect-version confirmed, and nothing was stored."
+                    : $"{holder} was changed by someone else while it was rotated, and nothing was stored.",
                 "Look at what changed with queuey credentials list, and rotate again if it is still intended.",
                 status: 409, ExitCodes.RuntimeError, "Queuey error");
         }
@@ -294,17 +309,28 @@ internal static class CredentialsCommand
             Console.WriteLine(JsonSerializer.Serialize(new
             {
                 rotated.PublicId, rotated.Name, rotated.Type, rotated.KeyId, rotated.Version, rotated.SecretReplaced,
-                rotated.PreviousVersionValidUntil, rotated.BoundWorkspace, rotated.BoundQueues,
+                rotated.PreviousVersionValidUntil, rotated.GraceWindowClosed, rotated.BoundWorkspace, rotated.BoundQueues,
             }, CliHost.JsonOut));
             return ExitCodes.Success;
         }
 
         // Navn og typer kommer fra serveren, så linjene går gjennom TerminalText (F2.7-regelen).
+        // Samme verdi (review av #63, M1): linjen sier alltid hvordan det står med vinduet, så ingen tror en lekket gammel
+        // hemmelighet er kuttet når den ikke er det. Queuey lukker et åpent vindu når --grace mangler (Queuey #462). En eldre
+        // Queuey lot det stå, og da står tiden i svaret.
         if (rotated.SecretReplaced == false)
         {
             Console.WriteLine(TerminalText.Line(
                 $"'{rotated.Name}' ({rotated.Type}) already holds this value: nothing was rotated, and its secret stays version "
                 + $"{rotated.Version}."));
+            Console.WriteLine(rotated.GraceWindowClosed == true
+                ? "The grace window is closed: the previous secret stopped verifying at once."
+                : rotated.PreviousVersionValidUntil is { } stillUntil
+                    ? $"The grace window is still open: the previous secret verifies at the ingress until {stillUntil.UtcDateTime:yyyy-MM-dd HH:mm} "
+                      + "UTC. " + (grace is null
+                          ? "This Queuey keeps it open for the same value; to stop it now, rotate to a new value without --grace, or revoke the credential."
+                          : "Run the same rotation without --grace to close it now.")
+                    : "No grace window is open: only this value verifies.");
             return ExitCodes.Success;
         }
 
@@ -313,7 +339,8 @@ internal static class CredentialsCommand
             + "everything that refers to it uses the new value. The value is encrypted and can't be read back."));
         Console.WriteLine(rotated.PreviousVersionValidUntil is { } until
             ? $"The previous secret still verifies at the ingress until {until.UtcDateTime:yyyy-MM-dd HH:mm} UTC, so senders can switch "
-              + "over; each event records which version verified it. Rotate again without --grace to stop it sooner."
+              + "over; each event records which version verified it. To stop it sooner, run the same rotation again without --grace: "
+              + "the same value closes the window."
             : "The previous secret stopped verifying at once.");
         return ExitCodes.Success;
     }
@@ -466,15 +493,22 @@ internal static class CredentialsCommand
 
         if (map.Has("json"))
         {
-            Console.WriteLine(JsonSerializer.Serialize(creds.Select(c => new { c.PublicId, c.Name, c.Type, c.KeyId }), CliHost.JsonOut));
+            Console.WriteLine(JsonSerializer.Serialize(
+                creds.Select(c => new { c.PublicId, c.Name, c.Type, c.KeyId, c.Version, c.PreviousVersionValidUntil }), CliHost.JsonOut));
             return ExitCodes.Success;
         }
 
         // Navn, typer og key id-er kommer fra serveren: hver verdi går gjennom TerminalText, og tabulatorene mellom dem står.
+        // Versjonen er det `rotate --expect-version` tar, og et åpent vindu vises, så ingen tror en gammel hemmelighet er kuttet
+        // (review av #63, Queuey F3.7).
         Console.WriteLine(TerminalText.Line($"{creds.Count} credential(s) in {tenant}"));
         foreach (CredentialResult c in creds)
             Console.WriteLine($"  {TerminalText.Line(c.Name)}\t{TerminalText.Line(c.Type)}"
-                              + (string.IsNullOrEmpty(c.KeyId) ? "" : $"\tkeyId={TerminalText.Line(c.KeyId)}"));
+                              + (string.IsNullOrEmpty(c.KeyId) ? "" : $"\tkeyId={TerminalText.Line(c.KeyId)}")
+                              + (c.Version is { } version ? $"\tversion={version}" : "")
+                              + (c.PreviousVersionValidUntil is { } until
+                                  ? $"\tprevious version verifies until {until.UtcDateTime:yyyy-MM-dd HH:mm} UTC"
+                                  : ""));
 
         return ExitCodes.Success;
     }

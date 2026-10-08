@@ -17,10 +17,11 @@ public sealed class CredentialsRotateTests
 
     private static JsonElement Error(CliRun run) => JsonDocument.Parse(run.Stdout).RootElement.GetProperty("error");
 
-    private static object Rotated(string? graceUntil = "2026-10-08T13:00:00+00:00", bool replaced = true) => new
+    private static object Rotated(string? graceUntil = "2026-10-08T13:00:00+00:00", bool replaced = true, bool? closed = null) => new
     {
         publicId = "cred_9Lm2", name = "stripe-whsec", type = "HmacSigning", keyId = "stripe-whsec", version = 4, created = false,
         secretReplaced = replaced, boundWorkspace = false, boundQueues = Array.Empty<string>(), previousVersionValidUntil = graceUntil,
+        graceWindowClosed = closed,
     };
 
     private static async Task<(CliRun Run, RecordingHandler Api)> Rotate(Func<HttpResponseMessage> answer, params string[] extra)
@@ -80,12 +81,108 @@ public sealed class CredentialsRotateTests
     }
 
     [Fact]
-    public async Task The_value_the_credential_holds_rotates_nothing_and_says_so()
+    public async Task The_value_the_credential_holds_rotates_nothing_and_says_no_window_is_open()
     {
-        (CliRun run, _) = await Rotate(() => RecordingHandler.Json(HttpStatusCode.OK, Rotated(graceUntil: null, replaced: false)));
+        (CliRun run, _) = await Rotate(() => RecordingHandler.Json(HttpStatusCode.OK, Rotated(graceUntil: null, replaced: false, closed: false)));
 
         Assert.Equal(ExitCodes.Success, run.Exit);
         Assert.Contains("already holds this value: nothing was rotated", run.Stdout);
+        Assert.Contains("No grace window is open: only this value verifies.", run.Stdout);
+    }
+
+    [Fact]
+    public async Task The_value_the_credential_holds_without_grace_says_the_open_window_was_closed()
+    {
+        // Review av #63, M1: en operatør kjører samme rotasjon uten --grace for å kutte en lekket gammel hemmelighet. Queuey
+        // lukker vinduet (Queuey #462), og linjen sier det.
+        (CliRun run, _) = await Rotate(() => RecordingHandler.Json(HttpStatusCode.OK, Rotated(graceUntil: null, replaced: false, closed: true)));
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.Contains("already holds this value: nothing was rotated", run.Stdout);
+        Assert.Contains("The grace window is closed: the previous secret stopped verifying at once.", run.Stdout);
+    }
+
+    [Fact]
+    public async Task The_value_the_credential_holds_from_a_Queuey_that_keeps_the_window_says_it_still_verifies_and_how_to_stop_it()
+    {
+        // En Queuey fra før #462 lukker ikke vinduet for samme verdi. Linjen sier at den gamle hemmeligheten fortsatt verifiserer,
+        // og at bare en ny verdi uten --grace, eller en tilbakekalling, stopper den.
+        (CliRun run, _) = await Rotate(() => RecordingHandler.Json(HttpStatusCode.OK, Rotated(replaced: false)));
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.Contains("The grace window is still open: the previous secret verifies at the ingress until 2026-10-08 13:00 UTC.", run.Stdout);
+        Assert.Contains("rotate to a new value without --grace, or revoke the credential", run.Stdout);
+        Assert.DoesNotContain("closed", run.Stdout);
+    }
+
+    [Fact]
+    public async Task The_value_the_credential_holds_with_grace_leaves_the_window_and_says_how_to_close_it()
+    {
+        (CliRun run, _) = await Rotate(() => RecordingHandler.Json(HttpStatusCode.OK, Rotated(replaced: false, closed: false)), "--grace", "30");
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.Contains("The grace window is still open: the previous secret verifies at the ingress until 2026-10-08 13:00 UTC.", run.Stdout);
+        Assert.Contains("Run the same rotation without --grace to close it now.", run.Stdout);
+    }
+
+    [Fact]
+    public async Task A_rotation_with_a_window_says_the_same_rotation_without_grace_stops_it_sooner()
+    {
+        (CliRun run, _) = await Rotate(() => RecordingHandler.Json(HttpStatusCode.OK, Rotated()), "--grace", "60");
+
+        Assert.Contains("To stop it sooner, run the same rotation again without --grace: the same value closes the window.", run.Stdout);
+    }
+
+    [Fact]
+    public async Task Expect_version_is_sent_only_when_given_and_a_rotation_of_another_version_says_so()
+    {
+        // Review av #63, K1: CI som kjenner versjonen, skriver aldri over en rotasjon en person gjorde imellom.
+        (CliRun given, RecordingHandler givenApi) = await Rotate(() => RecordingHandler.Json(HttpStatusCode.OK, Rotated(graceUntil: null)),
+            "--expect-version", "3");
+        (CliRun refused, _) = await Rotate(() => RecordingHandler.Error(HttpStatusCode.Conflict, "credential_changed_meanwhile",
+            "Credential 'stripe-whsec' (cred_9Lm2) holds version 5 of its secret now, not version 3.", "Look at what changed."),
+            "--expect-version", "3", "--json");
+
+        Assert.Equal(ExitCodes.Success, given.Exit);
+        Assert.Equal(3, Assert.Single(givenApi.Requests).Json.GetProperty("expectedVersion").GetInt32());
+        Assert.Equal(ExitCodes.RuntimeError, refused.Exit);
+        Assert.Equal("credential_changed_meanwhile", Error(refused).GetProperty("code").GetString());
+        Assert.Contains("does not hold version 3 of its secret now", Error(refused).GetProperty("message").GetString());
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-1")]
+    [InlineData("v3")]
+    public async Task An_expected_version_that_is_not_a_version_is_refused_before_anything_is_sent(string version)
+    {
+        (CliRun run, RecordingHandler api) = await Rotate(() => throw new InvalidOperationException("nothing is sent"), "--expect-version", version, "--json");
+
+        Assert.Equal(ExitCodes.Usage, run.Exit);
+        Assert.Empty(api.Requests);
+        Assert.Contains("--expect-version", Error(run).GetProperty("message").GetString());
+    }
+
+    [Fact]
+    public async Task List_shows_the_version_and_an_open_window()
+    {
+        RecordingHandler api = new(req => req switch
+        {
+            { Method.Method: "GET", Path: "/tenants/ten_abc/credentials" } => RecordingHandler.Json(HttpStatusCode.OK, new object[]
+            {
+                new { publicId = "cred_1", name = "stripe-whsec", type = "HmacSigning", keyId = "stripe-live", version = 4,
+                      previousVersionValidUntil = "2026-10-08T13:00:00+00:00" },
+                new { publicId = "cred_2", name = "partner-token", type = "BearerToken", keyId = (string?)null, version = 1,
+                      previousVersionValidUntil = (string?)null },
+            }),
+            _ => throw new InvalidOperationException(req.Key),
+        });
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("credentials", "list", "--tenant", "ten_abc")), api);
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.Contains("  stripe-whsec\tHmacSigning\tkeyId=stripe-live\tversion=4\tprevious version verifies until 2026-10-08 13:00 UTC", run.Stdout);
+        Assert.Contains("  partner-token\tBearerToken\tversion=1" + Environment.NewLine, run.Stdout);
     }
 
     [Fact]

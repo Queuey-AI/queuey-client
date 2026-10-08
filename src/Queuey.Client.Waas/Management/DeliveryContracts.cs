@@ -177,6 +177,13 @@ public sealed class CredentialResult
     /// Null when no window is open, and from a Queuey that predates rotations.
     /// </summary>
     public System.DateTimeOffset? PreviousVersionValidUntil { get; set; }
+
+    /// <summary>
+    /// When a rotation to the value the credential holds, without a grace window, closed the window that was open (Queuey
+    /// F3.7): true, and the secret the last rotation replaced no longer verifies. Null from a Queuey that predates it, which
+    /// left the window open.
+    /// </summary>
+    public bool? GraceWindowClosed { get; set; }
 }
 
 // ── wire shapes ───────────────────────────────────────────────────────────────
@@ -253,6 +260,7 @@ internal sealed class CredentialWireResponse
     public bool? BoundWorkspace { get; set; }
     public List<string>? BoundQueues { get; set; }
     public bool? SecretReplaced { get; set; }
+    public bool? GraceWindowClosed { get; set; }
 }
 
 /// <summary>Wire shape of <c>GET /tenants/{ten}/config</c> — the workspace's delivery + policy.</summary>

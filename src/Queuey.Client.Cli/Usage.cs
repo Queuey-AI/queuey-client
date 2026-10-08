@@ -328,18 +328,23 @@ CREDENTIALS
                  --replace replaces it, as a new version of its secret under the same id.
                  The commands advise, plan and apply suggest never carry --replace.
   queuey credentials rotate --name <name> --from-env <ENV_VAR> [--grace <minutes>]
-                [--profile <name>] [--json]
+                [--expect-version <n>] [--profile <name>] [--json]
                  Rotates the secret of a credential the workspace has: the value, read from
                  the environment, becomes a new version under the same id, and everything
                  that uses the credential switches to it at once. Queuey runs it as the
                  operation rotate_credential. Without --grace the previous secret stops
                  verifying at once. --grace <minutes> (1 to 1440, HmacSigning only) keeps
                  it verifying at the ingress that long, so senders can switch over; each
-                 event records which version verified it. Rotating again while a window is
-                 open keeps only the secret it replaces, and without --grace closes it, so
-                 a leaked old secret stops verifying at once. The value the credential
-                 already holds rotates nothing. A name the workspace has no credential under
-                 is refused (credential_not_found, exit 1).
+                 event records which version verified it. A Stripe ingress verifies only
+                 the new secret: Stripe's own roll signs with both while it lasts. Rotating
+                 again while a window is open keeps only the secret it replaces, and without
+                 --grace closes it, so a leaked old secret stops verifying at once. That
+                 holds for the value the credential already holds too: it rotates nothing,
+                 but without --grace it closes an open window, and the output says how the
+                 window stands. --expect-version <n> rotates only while the credential holds
+                 version n of its secret (credentials list shows it); another is refused
+                 (credential_changed_meanwhile, exit 1) and nothing is stored. A name the
+                 workspace has no credential under is refused (credential_not_found, exit 1).
   queuey credentials request <name> [--type <type>] [--key-id <id>] [--username <u>]
                 [--profile <name>] [--json]
                  Asks a person for a secret, so it never passes through this terminal or a
@@ -360,6 +365,9 @@ CREDENTIALS
                  ""url"", ""expiresAt"", ""replacesCredentialId"" }; replacesCredentialId names
                  the credential whose secret the value replaces, when the name has one.
   queuey credentials list [--profile <name>] [--json]
+                 Lists the workspace's credentials by name and type, with the version of
+                 each secret and, while a rotation's grace window is open, until when the
+                 previous version still verifies. Never a value.
 
 PUBLISH
   queuey publish <queue> (--data <json> | --file <path> | --stdin)

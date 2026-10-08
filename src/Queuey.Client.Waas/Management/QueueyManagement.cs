@@ -266,6 +266,7 @@ internal sealed class QueueyManagement : IQueueyManagement
             Version = r.Version, Created = r.Created, BoundWorkspace = r.BoundWorkspace, BoundQueues = r.BoundQueues,
             SecretReplaced = r.Created == false ? r.SecretReplaced : null,
             PreviousVersionValidUntil = r.PreviousVersionValidUntil,
+            GraceWindowClosed = r.GraceWindowClosed,
         };
 
     private static PatchSigningWire? ToWire(DeliverySigning? s)
