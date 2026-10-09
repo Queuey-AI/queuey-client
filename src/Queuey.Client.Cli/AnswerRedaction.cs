@@ -36,7 +36,21 @@ internal static class AnswerRedaction
             case JsonObject obj:
                 foreach ((string name, JsonNode? child) in obj.ToList())
                 {
-                    if (child is JsonValue value && value.TryGetValue(out string? text))
+                    // Queuey #517: svarheadere leses som headere, så en relativ Location (/webhooks/<token>/) også redigeres.
+                    if (name.EndsWith("HeadersJson", StringComparison.OrdinalIgnoreCase) && child is JsonValue headersJson
+                        && headersJson.TryGetValue(out string? headersText))
+                        obj[name] = RestTargetUrlRedaction.RedactHeadersJson(headersText);
+                    else if (name.EndsWith("Headers", StringComparison.OrdinalIgnoreCase) && child is JsonObject headers)
+                    {
+                        foreach ((string header, JsonNode? headerValue) in headers.ToList())
+                        {
+                            if (headerValue is JsonValue hv && hv.TryGetValue(out string? hvText))
+                                headers[header] = TargetUrlRedaction.RedactHeaderValue(header, hvText);
+                            else
+                                CheckLinks(headerValue, config);
+                        }
+                    }
+                    else if (child is JsonValue value && value.TryGetValue(out string? text))
                     {
                         if (ConsoleLinks.Contains(name))
                         {

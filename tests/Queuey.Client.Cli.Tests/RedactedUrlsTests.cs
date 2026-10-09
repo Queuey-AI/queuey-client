@@ -219,7 +219,7 @@ public sealed class RedactedUrlsTests
     {
         // Et token av bokstaver ble vist med den gamle porten; #514 skjuler det.
         Assert.Equal("https://h.test/in/…", UrlRedaction.Redact("https://h.test/in/AbCdEfGhIjKlMn"));
-        Assert.Equal("/in/…", UrlRedaction.EndpointPath(null, "/in/AbCdEfGhIjKlMn?token=x"));
+        Assert.Equal("/in/…?…", UrlRedaction.EndpointPath(null, "/in/AbCdEfGhIjKlMn?token=x"));
         Assert.Equal("/services/T1/B2/…", UrlRedaction.EndpointPath("https://hooks.slack.com/services/T1/B2/xoxb", "/ignored"));
     }
 
@@ -278,6 +278,9 @@ public sealed class RedactedUrlsTests
     [InlineData("https://h.test/in?token=abc123")]                 // B1: bare en spørring
     [InlineData("https://ops:abc123@h.test/in")]                   // bare brukerinfo
     [InlineData("https://h.test/in/s3cr3t-abc123")]                // en hel URL med en hemmelig del (N2: en person, en eldre Queuey)
+    [InlineData("https://h.test/in#abc123")]                       // fragment
+    [InlineData("https://h.test/in?\u2026")]                         // #517: slik Queuey nå leser en URL med bare query
+    [InlineData("https://h.test/in/...")]                          // «...» der markøren står
     public async Task Pull_writes_a_variable_for_any_url_that_reads_differently_redacted(string url)
     {
         (CliRun run, JsonElement file) = await Pull(QueuesServer(new { baseUrl = url }, ("orders", "que_orders", url)));
@@ -286,6 +289,8 @@ public sealed class RedactedUrlsTests
         Assert.Equal("${QUEUEY_WORKSPACE_URL}", file.GetProperty("workspace").GetProperty("delivery").GetProperty("baseUrl").GetString());
         Assert.Equal("${QUEUEY_ORDERS_URL}", file.GetProperty("queues").GetProperty("orders").GetProperty("delivery").GetProperty("url").GetString());
         Assert.DoesNotContain("abc123", file.GetRawText() + run.Stdout + run.Stderr);
+        Assert.DoesNotContain("\u2026", file.GetRawText());
+        Assert.DoesNotContain("/...", file.GetRawText());
     }
 
     [Fact]
@@ -341,20 +346,26 @@ public sealed class RedactedUrlsTests
         }
     }
 
-    [Fact]
-    public async Task Check_takes_a_url_queuey_read_without_its_query_as_the_files_url_read_redacted()
+    [Theory]
+    [InlineData("https://h.test/in?token=abc123", "https://h.test/in?\u2026")]        // bare query
+    [InlineData("https://ops:abc123@h.test/in", "https://\u2026@h.test/in")]          // bare brukerinfo
+    [InlineData("https://h.test/in#abc123", "https://h.test/in#\u2026")]             // fragment
+    [InlineData("https://h.test/in?token=abc123", "https://h.test/in")]                // en Queuey fra før #517: drift, aldri stille i synk
+    public async Task Check_compares_a_url_queuey_read_redacted_as_the_files_url_reads_redacted(string fileUrl, string serverUrl)
     {
-        // B1: uten markør, men spørringen er tatt bort. Sammenlignet redigert: i synk, og stien er listet.
+        // #517: det som tas bort, står som ?…, #… og …@. Sammenlignet redigert: i synk, og stien er listet.
         string dir = Directory.CreateTempSubdirectory("queuey-redacted-b1-").FullName;
         string path = Path.Combine(dir, "queuey.deploy.json");
-        File.WriteAllText(path, """{ "tenant": "ten_abc", "queues": { "orders": { "delivery": { "url": "https://h.test/in?token=abc123" } } } }""");
+        File.WriteAllText(path, $$"""{ "tenant": "ten_abc", "queues": { "orders": { "delivery": { "url": "{{fileUrl}}" } } } }""");
 
         CliRun json = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path, "--check", "--json")),
-            QueuesServer(new { }, ("orders", "que_orders", "https://h.test/in")));
+            QueuesServer(new { }, ("orders", "que_orders", serverUrl)));
 
         JsonElement root = JsonDocument.Parse(json.Stdout).RootElement;
-        Assert.True(root.GetProperty("inSync").GetBoolean());
-        Assert.Equal("queues.orders.delivery.url", root.GetProperty("comparedRedacted")[0].GetString());
+        bool marked = serverUrl.Contains('\u2026');
+        Assert.Equal(marked, root.GetProperty("inSync").GetBoolean());
+        if (marked)
+            Assert.Equal("queues.orders.delivery.url", root.GetProperty("comparedRedacted")[0].GetString());
         Assert.DoesNotContain("abc123", json.Stdout);
     }
 
@@ -368,5 +379,64 @@ public sealed class RedactedUrlsTests
 
         Assert.True(PlanCommand.HiddenPartChanged(change));
         Assert.False(PlanCommand.HiddenPartChanged(other));
+    }
+
+    // ── #517: markøren, «...», og headere ───────────────────────────────────
+
+    [Theory]
+    [InlineData("https://h.test/in?token=abc", "https://h.test/in?\u2026")]
+    [InlineData("https://ops:pw@h.test/in", "https://\u2026@h.test/in")]
+    [InlineData("https://h.test/in#tok", "https://h.test/in#\u2026")]
+    public void Whatever_the_redaction_removes_is_marked(string url, string shown)
+        => Assert.Equal(shown, TargetUrlRedaction.Redact(url));
+
+    [Fact]
+    public async Task Apply_names_a_url_written_with_three_dots_as_a_redacted_reading()
+    {
+        string dir = Directory.CreateTempSubdirectory("queuey-redacted-dots-").FullName;
+        string path = Path.Combine(dir, "queuey.deploy.json");
+        File.WriteAllText(path, """{ "tenant": "ten_abc", "queues": { "orders": { "delivery": { "url": "https://warehouse.test/orders/..." } } } }""");
+        var api = new RecordingHandler(req => req.Method.Method switch
+        {
+            "GET" => RecordingHandler.Json(HttpStatusCode.OK, Array.Empty<object>()),
+            _ => RecordingHandler.Error(HttpStatusCode.BadRequest, "redacted_url_written_back", WrittenBackMessage, WrittenBackAction),
+        });
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path, "--no-git")), api);
+
+        Assert.Contains("queues.orders.delivery.url in the file is a redacted reading", run.Stderr);
+    }
+
+    [Fact]
+    public async Task Response_headers_are_read_as_headers_so_a_relative_location_is_redacted_too()
+    {
+        var api = new RecordingHandler(req => req.Key switch
+        {
+            "GET /events/que_1/evt_1" => RecordingHandler.Json(HttpStatusCode.OK, new
+            {
+                publicId = "evt_1", queuePublicId = "que_1", status = 4,
+                attempts = new[]
+                {
+                    new
+                    {
+                        attemptNumber = 1, responseCode = 302,
+                        payloadHeadersJson = "{\"Location\":\"/webhooks/s3cr3tT0kenAbc/\",\"Content-Type\":\"text/plain\"}",
+                        responseHeaders = new Dictionary<string, string> { ["Location"] = "/webhooks/s3cr3tT0kenAbc/?sig=abc123" },
+                    },
+                },
+            }),
+            _ => throw new InvalidOperationException(req.Key),
+        });
+
+        CliRun json = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("events", "get", "evt_1", "--queue", "que_1", "--json")), api);
+
+        Assert.True(json.Exit == ExitCodes.Success, json.Stdout + json.Stderr);
+        Assert.DoesNotContain("s3cr3tT0kenAbc", json.Stdout);
+        Assert.DoesNotContain("abc123", json.Stdout);
+        JsonElement attempt = JsonDocument.Parse(json.Stdout).RootElement.GetProperty("event").GetProperty("attempts")[0];
+        // Headerne er fortsatt gyldig JSON, med Location redigert og resten urørt.
+        JsonElement headers = JsonDocument.Parse(attempt.GetProperty("payloadHeadersJson").GetString()!).RootElement;
+        Assert.Equal("/webhooks/\u2026/", headers.GetProperty("Location").GetString());
+        Assert.Equal("text/plain", headers.GetProperty("Content-Type").GetString());
     }
 }

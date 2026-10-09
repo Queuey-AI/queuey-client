@@ -6,15 +6,15 @@ using System.Text.RegularExpressions;
 namespace Queuey.Client.Cli;
 
 // Kopiert ordrett fra Queuey: src/BuildingBlocks/Queuey.SharedKernel/Abstractions/Delivery/TargetUrlRedaction.cs på
-// integration/agents (#514, b88ce69a, 2026-10-09). Bare using-linjene og navnerommet er klientens. Endres reglene der, kopieres
+// integration/agents (#517, ad6596f5, 2026-10-09). Bare using-linjene og navnerommet er klientens. Endres reglene der, kopieres
 // fila på nytt; klienten har ingen egne regler for hva som skjules.
-
 
 // En mottakers adresse slik en agent, en modell eller et sammendrag får lese den (F1.5, 2026-10-05; delt fra
 // get_target_health 2026-10-05). En leverings-URL kan bære hemmeligheten: i spørringen (token=, sig=), i brukerinfoen
 // (bruker:passord@), og hos mange webhook-mottakere i selve stien (Slack, Zapier, Discord, Make, Microsoft Teams). Det som
 // når en agent, havner i transkriptet, og gjennom årsaksanalysen hos AI-leverandøren. Hele URL-en vises derfor aldri:
-//   - spørringen, fragmentet og brukerinfoen tas aldri med;
+//   - spørringen, fragmentet og brukerinfoen tas aldri med, men der de var, står «?…», «#…» og «…@», så det alltid synes at
+//     noe er tatt bort (security-reviewen av klient #72, 2026-10-09);
 //   - på en kjent webhook-vert vises ruten, og resten blir «…»;
 //   - ellers vises et stisegment bare når det leses som et vanlig stiord: høyst 15 bokstaver, eventuelt ord bundet med -
 //     eller ., der hvert ord ser ut som et ord (små bokstaver eller CamelCase, en vokal, ikke fem konsonanter på rad), en
@@ -57,8 +57,9 @@ public static class TargetUrlRedaction
     }
 
     /// <summary>
-    /// <paramref name="url"/> as one string an agent may read: <c>https://api.example.com/hooks/…</c>, with
-    /// <see cref="HostAndPath"/>'s rules. A blank value stays as it is, a path alone (<c>/orders</c>) reads with the same
+    /// <paramref name="url"/> as one string an agent may read: <c>https://api.example.com/hooks/…</c>, with a removed query,
+    /// fragment or user info shown as <c>?…</c>, <c>#…</c> and <c>…@</c>, so a redacted reading always carries the marker,
+    /// and the path read with <see cref="HostAndPath"/>'s rules. A blank value stays as it is, a path alone (<c>/orders</c>) reads with the same
     /// rules for its path, and any other value that is not an absolute URL reads as <see cref="Hidden"/>, since nothing says
     /// what it carries.
     /// </summary>
@@ -73,7 +74,36 @@ public static class TargetUrlRedaction
         if (!TryParseAbsolute(url.Trim(), out var uri))
             return Hidden;
 
-        return $"{uri.Scheme}://{uri.Authority}{RedactedPath(uri.Host.ToLowerInvariant(), uri.AbsolutePath)}";
+        // Det som tas bort, står som «…» (security-reviewen av klient #72, 2026-10-09): før ble en URL med bare et token i
+        // spørringen, eller bare brukerinfo, lest uten markør. Da så verken klienten eller RedactedUrlWrites at den var
+        // redigert, og en apply lagret den uten tokenet.
+        var userInfo = uri.UserInfo.Length > 0 ? Hidden + "@" : string.Empty;
+        return $"{uri.Scheme}://{userInfo}{uri.Authority}{RedactedPath(uri.Host.ToLowerInvariant(), uri.AbsolutePath)}"
+               + Removed('?', uri.Query) + Removed('#', uri.Fragment);
+    }
+
+    // «?…» for en spørring og «#…» for et fragment som er tatt bort, aldri noe av innholdet.
+    private static string Removed(char separator, string part)
+        => part.Length > 1 ? $"{separator}{Hidden}" : string.Empty;
+
+    /// <summary>
+    /// A receiver's response header as an agent may read it: <c>Location</c> and <c>Content-Location</c>, which hold one address
+    /// that can be relative (<c>/webhooks/&lt;token&gt;/</c>), read as <see cref="Redact"/>; any other value (<c>Refresh</c>,
+    /// <c>Link</c>) has the URLs in it redacted (<see cref="RedactUrlsIn"/>).
+    /// </summary>
+    public static string? RedactHeaderValue(string name, string? value)
+        => string.Equals(name, "Location", StringComparison.OrdinalIgnoreCase)
+           || string.Equals(name, "Content-Location", StringComparison.OrdinalIgnoreCase)
+            ? Redact(value)
+            : RedactUrlsIn(value);
+
+    /// <summary>A receiver's response headers with every value read as <see cref="RedactHeaderValue"/>.</summary>
+    public static Dictionary<string, string> RedactHeaders(IEnumerable<KeyValuePair<string, string>> headers)
+    {
+        var redacted = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, value) in headers)
+            redacted[name] = RedactHeaderValue(name, value) ?? string.Empty;
+        return redacted;
     }
 
     /// <summary>
@@ -184,7 +214,10 @@ public static class TargetUrlRedaction
     private static readonly Regex SchemelessUserInfo = new(@"[^\s/@:""'<>()]+:[^\s/@""<>]*@[A-Za-z0-9][A-Za-z0-9.\-]*(?::[0-9]+)?(?:/[^\s""<>]*)?", RegexOptions.NonBacktracking);
     // vert.tld[:port]/sti: en vert med en sti, uten skjema (hooks.slack.com/services/…). En vert uten sti bærer ingen hemmelighet.
     private static readonly Regex SchemelessHostPath = new(@"(?:[A-Za-z0-9\-]+\.)+[A-Za-z]{2,}(?::[0-9]+)?/[^\s""<>]*", RegexOptions.NonBacktracking);
-    private static readonly Regex LeftoverQuery = new(@"\?\S+", RegexOptions.Compiled);
+    // En spørring redigeringen alt har satt markøren på («?…», eventuelt «?…#…»), står (2026-10-09), men bare når den er hele
+    // spørringen, fulgt av tegnsetting og så mellomrom eller slutten (security-reviewen av #517). «?…token=x» er ingen markør.
+    // Den spiser aldri forbi « " », «,» eller «>», så JSON og headere forblir gyldige.
+    private static readonly Regex LeftoverQuery = new(@"\?(?!…(?:#…)?[).,;:!'""]*(?:\s|$))[^\s"",>]+", RegexOptions.Compiled);
 
     private static string RedactLocation(string location)
     {
@@ -192,8 +225,13 @@ public static class TargetUrlRedaction
             return Redact(location) ?? Hidden;
 
         // En relativ plassering: stien med reglene for en vert vi ikke kjenner, uten spørring og fragment.
-        var path = location.Split('?', '#')[0];
-        return path.StartsWith('/') ? RedactedPath(host: string.Empty, path) : Hidden;
+        var cut = location.IndexOfAny(['?', '#']);
+        var path = cut < 0 ? location : location[..cut];
+        if (!path.StartsWith('/'))
+            return Hidden;
+        var query = location.IndexOf('?') is var q and >= 0 && q + 1 < location.Length && location[q + 1] != '#' ? $"?{Hidden}" : string.Empty;
+        var fragment = location.IndexOf('#') is var f and >= 0 && f + 1 < location.Length ? $"#{Hidden}" : string.Empty;
+        return RedactedPath(host: string.Empty, path) + query + fragment;
     }
 
     private static string RedactedPath(string host, string absolutePath)

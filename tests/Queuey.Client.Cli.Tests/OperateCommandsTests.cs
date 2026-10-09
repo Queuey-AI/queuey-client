@@ -308,7 +308,7 @@ public sealed class OperateCommandsTests
     private const string SecretUrl = "https://ops:hunter2@shop.test/hooks/s3cr3t-T0ken9/orders?sig=abc123";
 
     [Theory]
-    [InlineData(SecretUrl, "https://shop.test/hooks/…/orders")]
+    [InlineData(SecretUrl, "https://…@shop.test/hooks/…/orders?…")]                 // #517: det som tas bort, synes
     [InlineData("https://hooks.slack.com/services/T01/B02/xoxbSECRET", "https://hooks.slack.com/services/T01/B02/…")]
     [InlineData("not a url", "…")]
     public void A_receiver_url_keeps_its_host_and_plain_path_words_only(string url, string shown)
@@ -317,8 +317,8 @@ public sealed class OperateCommandsTests
     [Fact]
     public void A_url_in_text_and_a_refused_redirect_are_redacted()
     {
-        Assert.Equal("POST https://shop.test/hooks/…/orders failed.", TargetUrlRedaction.RedactUrlsIn($"POST {SecretUrl} failed."));
-        Assert.Equal("redirect_not_allowed: HTTP 302 → /login", TargetUrlRedaction.RedactUrlsIn("redirect_not_allowed: HTTP 302 → /login?session=abc123"));
+        Assert.Equal("POST https://…@shop.test/hooks/…/orders?… failed.", TargetUrlRedaction.RedactUrlsIn($"POST {SecretUrl} failed."));
+        Assert.Equal("redirect_not_allowed: HTTP 302 → /login?…", TargetUrlRedaction.RedactUrlsIn("redirect_not_allowed: HTTP 302 → /login?session=abc123"));
     }
 
     [Fact]
@@ -355,7 +355,7 @@ public sealed class OperateCommandsTests
         string all = string.Concat(runs.Select(r => r.Stdout + r.Stderr));
         foreach (string secret in new[] { "hunter2", "s3cr3t", "sig=", "abc123" })
             Assert.DoesNotContain(secret, all);
-        Assert.Contains("https://shop.test/hooks/…/orders", all);
+        Assert.Contains("https://…@shop.test/hooks/…/orders?…", all);
     }
 
     [Fact]

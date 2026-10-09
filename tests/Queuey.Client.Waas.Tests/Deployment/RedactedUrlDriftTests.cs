@@ -41,4 +41,17 @@ public class RedactedUrlDriftTests
     [Fact]
     public void The_check_says_which_urls_it_compared_redacted_on_its_public_surface()
         => Assert.NotNull(typeof(DeploymentCheck).GetProperty(nameof(DeploymentCheck.ComparedRedacted))!.GetGetMethod());
+
+    // Queuey #517: «...» gjelder som markøren der redigeringen setter den, som i RedactedUrlWrites.CarriesMarker.
+    [Theory]
+    [InlineData("https://h.test/in/...", true)]
+    [InlineData("https://h.test/in/.../x", true)]
+    [InlineData("https://h.test/in?...", true)]
+    [InlineData("https://h.test/in#...", true)]
+    [InlineData("https://...@h.test/in", true)]
+    [InlineData("https://h.test/in/a...b", false)]          // tre punktum utenfor markørens plass er en vanlig sti
+    [InlineData("https://h.test/in?q=...", false)]
+    public void Three_dots_count_as_the_marker_only_where_the_redaction_puts_it(string url, bool marker)
+        => Assert.Equal(marker, DeploymentUrls.CarriesMarker(url));
+
 }

@@ -21,10 +21,22 @@ internal static class DeploymentUrls
     /// </summary>
     internal static Func<string, string?>? Redact { get; set; }
 
-    /// <summary>Whether <paramref name="url"/> carries the marker, as such or percent-encoded.</summary>
+    /// <summary>
+    /// Whether <paramref name="url"/> carries the marker: as such, percent-encoded, or as <c>...</c> where the redaction puts
+    /// it (<c>scheme://...@</c>, a whole path segment <c>/.../</c>, <c>?...</c> as the whole query, <c>#...</c> as the whole
+    /// fragment), by the same rule as Queuey's RedactedUrlWrites.CarriesMarker.
+    /// </summary>
+    // Queuey #517 (2026-10-09): NFKC og mange editorer gjør «…» om til «...». Tre punktum gjelder som markøren bare der
+    // redigeringen setter den, så en sti med «...» et annet sted er en vanlig sti.
     internal static bool CarriesMarker(string? url)
         => url is not null && (url.IndexOf(Marker, StringComparison.Ordinal) >= 0
-                               || url.IndexOf(EncodedMarker, StringComparison.OrdinalIgnoreCase) >= 0);
+                               || url.IndexOf(EncodedMarker, StringComparison.OrdinalIgnoreCase) >= 0
+                               || DotsMarker.IsMatch(url));
+
+    // Ordrett fra Queuey sin RedactedUrlWrites (#517).
+    private static readonly System.Text.RegularExpressions.Regex DotsMarker = new(
+        @"(?:^\s*[A-Za-z][A-Za-z0-9+.\-]*://\.\.\.@)|(?:/\.\.\.(?=[/?#]|\s*$))|(?:\?\.\.\.(?=#|\s*$))|(?:#\.\.\.(?=\s*$))",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
 
     /// <summary>
     /// Whether <paramref name="url"/> is not safe to write or show as it is: it is a redacted reading (the marker), or it reads
