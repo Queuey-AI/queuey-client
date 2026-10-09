@@ -66,8 +66,7 @@ problem to Queuey:
 ```csharp
 builder.Services.AddQueueyEdge(o =>
 {
-    o.ApiKey = "qak_…";           // publish-only, tenant-scoped Edge key
-    o.TenantPublicId = "ten_…";
+    o.UseEnvironmentVariables();  // the queue's signing key from `queuey keys mint --write .env`, and QUEUEY_TENANT
 });
 
 // The whole delivery story in application code:
@@ -99,13 +98,15 @@ call returns once the event is durably on local disk; everything after that is Q
 ```csharp
 builder.Services.AddQueueyEdge(o =>
 {
-    o.ApiKey = cfg["Queuey:ApiKey"];        // publish-only, workspace-scoped
+    o.UseSettings(cfg);                     // QUEUEY_SIGNING_KEY_ID + QUEUEY_SIGNING_SECRET, e.g. from user-secrets
     o.TenantPublicId = cfg["Queuey:Tenant"];
     // Local durable disk — never a network share (SQLite locking over SMB/NFS is unreliable)
     // and never container-ephemeral storage unless you accept process-lifetime durability.
     o.Storage.Path = "/var/lib/myapp/queuey/spool.db";
 });
 
+// Edge signs each transfer with the same HMAC as Queuey.Client, when it sends it. A publish-only
+// o.ApiKey is the alternative; with both set, events are signed.
 // One queue name, one event type, one key. Nothing about retries anywhere.
 await _queuey.PublishAsync("temperature", reading, new PublishOptions
 {

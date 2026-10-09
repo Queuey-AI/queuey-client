@@ -342,7 +342,7 @@ public sealed class BlindTestFindingsTests : IDisposable
 
         Assert.Equal(ExitCodes.Configuration, run.Exit);
         Assert.Contains("queuey login", run.Stderr);
-        Assert.Contains("keys mint --queue <queue> --write .env", run.Stderr);
+        Assert.Contains("queuey keys mint --write user-secrets in a .NET project with a UserSecretsId, else --write .env", run.Stderr);
         Assert.DoesNotContain("Manage license → API keys", run.Stderr);
     }
 

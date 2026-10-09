@@ -27,16 +27,38 @@ await queuey.PublishAsync("temperature.updated", payload);
 
 ## Quick start
 
+Make the node's signing key for its queue. The secret goes straight where the app reads it, never through the
+terminal:
+
+```bash
+queuey keys mint --queue sensor-readings --write .env           # or --write user-secrets for a .NET project
+```
+
 ```csharp
 // Program.cs (any .NET host — worker service, ASP.NET, console)
 builder.Services.AddQueueyEdge(o =>
 {
-    o.ApiKey = "qak_...";          // a PUBLISH-ONLY, tenant-scoped Edge key
-    o.TenantPublicId = "ten_...";
-    // Optional: o.IngressBaseAddress = new Uri("http://localhost:5084");
+    o.UseEnvironmentVariables();   // QUEUEY_SIGNING_KEY_ID + QUEUEY_SIGNING_SECRET (and QUEUEY_TENANT)
+    // or, with user-secrets and appsettings: o.UseSettings(builder.Configuration);
     // Optional: o.Storage.Path = "/var/lib/myapp/queuey/spool.db";
 });
 ```
+
+Edge signs every transfer with the same HMAC as `Queuey.Client`, at the moment it sends: an event that waited in the
+spool through an outage goes out with a fresh timestamp and nonce, not the ones it had when it was published. The
+timestamp is this machine's clock, and the ingress refuses one more than 5 minutes off its own
+(`timestamp_out_of_range`), so the clock must be synchronised (NTP). With a clock that is off, Edge holds the events,
+says the clock is the cause, and drains once it is right. The secret stays in memory; the spool never holds it. A workspace that takes signed requests only
+(`authMode: SignedRequest`, template `queuey`, as `queuey advise --write-files` scaffolds it) accepts Edge as it
+accepts the SDK.
+
+The configuration follows `Queuey.Client`'s rules: a value set in code wins; the signing pair comes from the environment,
+or as a pair from `.env` in the working folder in Development only; with the pair set, `QUEUEY_API_KEY` is not read.
+`UseSettings(...)` reads the same names from .NET configuration and never `.env`.
+
+**Alternative: a publish-only API key.** `QUEUEY_API_KEY` (read when the pair is not set, from the environment or
+configuration — never a literal in code) works as before, for a workspace that takes API keys. With both set, events
+are signed.
 
 ```csharp
 // Anywhere in your app
@@ -107,6 +129,12 @@ o.Health.ReportToCloud = true;   // or: queuey edge run --report-health --node-n
 o.Health.NodeName = "barge-07";  // defaults to the machine name
 ```
 
+Queuey's check-in takes an API key today, not a signature. A node that signs its events checks in with
+`QUEUEY_EDGE_HEALTH_API_KEY`, a publish-only key that nothing but the check-in uses: put it in the environment
+(`UseEnvironmentVariables()`) or in configuration such as user-secrets (`UseSettings(builder.Configuration)`), never as a
+literal in code; for the daemon, in its environment file. Without one the node says so once at startup and sends no
+reports; its events flow as before. Queuey will take a signed check-in; then the health key goes away.
+
 The node then POSTs its health snapshot to Queuey Cloud — at startup, on
 every state change, and every 5 minutes otherwise; a refused report backs
 off and honours Cloud's `Retry-After` — and appears under
@@ -123,7 +151,8 @@ that from `last seen`; the node itself never escalates.
 ### Already have a broker on the gateway? Subscribe, don't rewrite (Queuey.Edge.Mqtt)
 
 ```bash
-queuey edge run --spool /var/lib/queuey/spool.db --tenant ten_… --api-key qak_… \
+# the signing key in the daemon's environment, as above
+queuey edge run --spool /var/lib/queuey/spool.db --tenant ten_… \
   --mqtt localhost:1883 --mqtt-routes "plant/+/alarms=alarms@1;plant/+/state=machine-state@1"
 ```
 
@@ -142,9 +171,9 @@ processes share it safely. So on a Linux box / IoT gateway you can run Edge
 as a **standalone daemon** and publish durably from *anything*:
 
 ```bash
-# once, e.g. as a systemd service:
-queuey edge run --spool /var/lib/queuey/spool.db \
-  --tenant ten_... --api-key qak_...          # publish-only, workspace-scoped key
+# once, e.g. as a systemd service, with QUEUEY_SIGNING_KEY_ID and QUEUEY_SIGNING_SECRET
+# in its environment (queuey keys mint --write edge.env makes that file):
+queuey edge run --spool /var/lib/queuey/spool.db --tenant ten_...
 
 # from any program on the machine (bash, Python, cron, a C binary):
 queuey edge publish sensor-readings \
@@ -252,9 +281,8 @@ queuey edge reset   --spool <path> --accept-data-loss # start clean; the old fil
 ## Requirements
 
 - .NET 8.0+
-- A Queuey queue and a **publish-only, tenant-scoped** API key (console → the
-  license menu → Manage license → API keys). Keys on edge machines should never
-  carry more.
+- A Queuey queue and its signing key (`queuey keys mint --queue <queue> --write …`), which reaches only that queue.
+  Or a **publish-only**, workspace-scoped API key. Keys on edge machines should never carry more.
 
 MIT licensed. Docs: [queuey.ai docs](https://queuey.ai/docs) · issues:
 [github.com/Queuey-AI/queuey-client](https://github.com/Queuey-AI/queuey-client).

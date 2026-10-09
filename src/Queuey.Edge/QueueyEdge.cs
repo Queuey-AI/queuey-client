@@ -18,9 +18,9 @@ namespace Queuey.Edge;
 /// <code>
 /// await using var edge = await QueueyEdge.StartAsync(o =>
 /// {
-///     o.ApiKey = "...";            // publish-only, tenant-scoped Edge key
+///     o.UseEnvironmentVariables(); // QUEUEY_SIGNING_KEY_ID + QUEUEY_SIGNING_SECRET from `queuey keys mint --write`
 ///     o.TenantPublicId = "ten_...";
-///     o.Health.ReportToCloud = true;
+///     o.Storage.Path = "/var/lib/queuey/spool.db";
 /// });
 /// await edge.PublishAsync("orders", payload);
 /// </code>

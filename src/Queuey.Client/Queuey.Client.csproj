@@ -27,6 +27,8 @@
     <InternalsVisibleTo Include="Queuey.Client.Tests" />
     <!-- The WaaS onboarding layer reuses the frozen transport (connection, auth, URI, error mapper). -->
     <InternalsVisibleTo Include="Queuey.Client.Waas" />
+    <!-- Edge-testene gir .env-mappa som søm (security-review av #70, K1). Edge selv bruker bare de offentlige metodene. -->
+    <InternalsVisibleTo Include="Queuey.Edge.Tests" />
   </ItemGroup>
 
   <ItemGroup>

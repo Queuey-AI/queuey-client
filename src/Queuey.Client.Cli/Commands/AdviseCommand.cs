@@ -374,8 +374,9 @@ internal static class AdviseCommand
         {
             Console.Error.WriteLine($"--apply needs a connection: {ex.Message}");
             Console.Error.WriteLine("Log in with queuey login (it prints a link to approve), and name the workspace with --tenant or QUEUEY_TENANT. " +
-                                    "The app's own key is a signing key for its queue: queuey keys mint --queue <queue> --write .env, " +
-                                    "which needs a login that may manage keys.");
+                                    "The app's own key is the workspace's signing key: queuey keys mint --write user-secrets in a .NET " +
+                                    "project with a UserSecretsId, else --write .env; --queue limits it to one queue. It needs a login " +
+                                    "that may manage keys.");
             Console.Error.WriteLine("Everything above this line still holds — the advice and any files written needed no credentials.");
             return ExitCodes.Configuration;
         }

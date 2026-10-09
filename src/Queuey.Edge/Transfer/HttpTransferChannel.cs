@@ -33,6 +33,7 @@ internal sealed class HttpTransferChannel : ITransferChannel
     private readonly ITransferOutcomeClassifier _classifier;
     private readonly IEdgeClock _clock;
     private readonly Uri _ingressBase;
+    private readonly Queuey.Client.IQueueyAuthenticator _authenticator;
 
     public HttpTransferChannel(
         HttpClient http, QueueyEdgeOptions options, ITransferOutcomeClassifier classifier, IEdgeClock clock)
@@ -42,11 +43,15 @@ internal sealed class HttpTransferChannel : ITransferChannel
         _classifier = classifier;
         _clock = clock;
         _ingressBase = options.ResolveIngressBaseAddress();
+        _authenticator = options.CreateEventAuthenticator(clock);
     }
 
     public async Task<TransferAttempt> SendAsync(EventEnvelope envelope, int attemptNumber, CancellationToken cancellationToken)
     {
         using var request = BuildRequest(envelope, attemptNumber);
+        // Signert her, ved sending, aldri ved spooling: et event som ventet gjennom et brudd får ferskt tidsstempel og ny
+        // nonce. Body er de samme bytene som sendes, så Content-SHA256 stemmer.
+        await _authenticator.AuthenticateAsync(request, envelope.Payload, cancellationToken).ConfigureAwait(false);
 
         // Per-attempt timeout, separate from the loop's token: an expiry is
         // INDETERMINATE (Cloud may hold the event) and classifies as
@@ -117,7 +122,6 @@ internal sealed class HttpTransferChannel : ITransferChannel
         };
         request.Content.Headers.TryAddWithoutValidation("Content-Type", envelope.ContentType);
 
-        request.Headers.TryAddWithoutValidation("X-Api-Key", _options.ApiKey);
         request.Headers.TryAddWithoutValidation("Idempotency-Key", envelope.TransferId);
         request.Headers.TryAddWithoutValidation("X-Queuey-Edge-Version", EdgeVersion);
         request.Headers.TryAddWithoutValidation("X-Queuey-Occurred-At",

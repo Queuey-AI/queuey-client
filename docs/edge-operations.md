@@ -4,10 +4,26 @@
 
 What it takes on a Pi-class device or industrial gateway, end to end:
 
-**1. Queuey side (once, in the console):** create a workspace + queue, then
-mint an API key with *Limit to ingress* + scoped to that one workspace —
-the key will live on a machine you don't control, and must not be able to
-do anything else.
+**1. Queuey side (once):** create a workspace + queue, then make the node's
+signing key for that queue on your own machine — the key will live on a
+machine you don't control, and reaches nothing but its queue:
+
+```bash
+queuey keys mint --queue sensor-readings --write edge.env   # the secret is never shown
+```
+
+Put it on the device as `/etc/queuey/edge.env`, owned by root and readable by
+nobody else (systemd reads it as root before it starts the service as `queuey`,
+so the service user never needs to read the file). Stream it straight into
+place — it never lands in `/tmp` on the device — then delete your copy:
+
+```bash
+ssh device 'sudo install -d -m 700 -o root -g root /etc/queuey'
+ssh device 'sudo install -m 600 -o root -g root /dev/stdin /etc/queuey/edge.env' < edge.env && rm edge.env
+```
+
+(A publish-only API key, *Limit to ingress* and scoped to the workspace, is the
+alternative to the signing key, as `QUEUEY_API_KEY` in the same file.)
 
 **2. Get the binary onto the device.** One self-contained file, no .NET
 runtime needed on the device:
@@ -30,8 +46,8 @@ non-event:
 # /etc/systemd/system/queuey-edge.service
 [Unit]
 Description=Queuey Edge
-After=network-online.target
-Wants=network-online.target
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
 
 [Service]
 ExecStart=/opt/queuey/queuey edge run --spool /var/lib/queuey/spool.db --listen 7311
@@ -46,14 +62,33 @@ WantedBy=multi-user.target
 ```
 
 ```bash
-# /etc/queuey/edge.env  (chmod 600, owned by the queuey user)
+# /etc/queuey/edge.env  (root:root, 0600 — installed as above)
 QUEUEY_TENANT=ten_...
-QUEUEY_API_KEY=qak_...
+QUEUEY_SIGNING_KEY_ID=hsk_...       # from queuey keys mint --write edge.env
+QUEUEY_SIGNING_SECRET=...
+# QUEUEY_EDGE_HEALTH_API_KEY=qak_...  # a publish-only key, only for --report-health (the check-in takes an API key today)
+# QUEUEY_API_KEY=qak_...            # alternative to the pair; with the pair set it is not read
 # QUEUEY_INGRESS_BASE=http://localhost:5084   # only for testing against a local Queuey
 ```
 
 `sudo systemctl enable --now queuey-edge` — done. `StateDirectory` gives
 the spool a durable home at `/var/lib/queuey` with the right ownership.
+
+**The clock matters.** Edge signs each transfer when it sends it, with this
+machine's clock, and Queuey refuses a signature more than 5 minutes off its
+own (`timestamp_out_of_range`). `time-sync.target` makes the service start
+after the clock is synchronised — but only when a wait service is enabled;
+without one the target is reached at once. Enable the one for the time daemon
+the device runs:
+
+```bash
+sudo systemctl enable systemd-time-wait-sync.service   # with systemd-timesyncd
+sudo systemctl enable chrony-wait.service              # with chrony
+```
+
+A device without NTP, or with a dead RTC battery, holds its events — Edge logs
+that the clock is off; the key is checked once the clock is right — until the
+clock is right, then drains by itself.
 
 **4. Publish from whatever the device runs** — all three are the same
 durable accept boundary:

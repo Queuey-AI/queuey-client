@@ -37,6 +37,9 @@ internal sealed class TransferOutcomeClassifier : ITransferOutcomeClassifier
             500 or 502 or 503 or 504 or 408
                 => new TransferOutcome(TransferClass.Transient, TransferReason.CloudServerError, evidence),
 
+            // Security-review av #70 (K2): en signatur med tidsstempel utenfor ingressens vindu er klokka, ikke nøkkelen.
+            401 when ErrorCode(bodySnippet) == "timestamp_out_of_range"
+                => new TransferOutcome(TransferClass.RequiresAction, TransferReason.ClockSkew, evidence),
             401 => new TransferOutcome(TransferClass.RequiresAction, TransferReason.AuthenticationRejected, evidence),
             403 => new TransferOutcome(TransferClass.RequiresAction, TransferReason.Forbidden, evidence),
             404 => new TransferOutcome(TransferClass.RequiresAction, TransferReason.RouteUnknown, evidence),
@@ -84,6 +87,27 @@ internal sealed class TransferOutcomeClassifier : ITransferOutcomeClassifier
             return new TransferOutcome(TransferClass.Transient, TransferReason.Unclassified, evidence);
 
         return new TransferOutcome(TransferClass.Unknown, TransferReason.Unclassified, evidence);
+    }
+
+    /// <summary>The ingress's <c>error.code</c>, or null when the body is not its error shape.</summary>
+    private static string? ErrorCode(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return null;
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(body);
+            return doc.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object
+                   && doc.RootElement.TryGetProperty("error", out var error)
+                   && error.ValueKind == System.Text.Json.JsonValueKind.Object
+                   && error.TryGetProperty("code", out var code)
+                   && code.ValueKind == System.Text.Json.JsonValueKind.String
+                ? code.GetString()
+                : null;
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            return null;
+        }
     }
 
     private static T? FindInner<T>(Exception exception) where T : Exception

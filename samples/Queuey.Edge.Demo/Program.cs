@@ -14,7 +14,9 @@ using Queuey.Edge.Demo;
 // when the world comes back.
 //
 // Configuration (environment):
-//   QUEUEY_API_KEY        publish-only, tenant-scoped Edge key   (required)
+//   QUEUEY_SIGNING_KEY_ID the queue's signing key                 (from `queuey keys mint --queue sensor-readings --write .env`)
+//   QUEUEY_SIGNING_SECRET its secret                              (the same command writes both; never shown)
+//   QUEUEY_API_KEY        alternative: a publish-only key         (read only without the signing pair)
 //   QUEUEY_TENANT         ten_... public id                      (required)
 //   QUEUEY_INGRESS_BASE   e.g. http://localhost:5084             (optional; default production)
 //   QUEUEY_DEMO_QUEUE     queue display name                     (optional; default "sensor-readings")
@@ -28,13 +30,9 @@ builder.Logging.AddFilter("Queuey", LogLevel.Information);  // ...but let Edge t
 
 builder.Services.AddQueueyEdge(o =>
 {
-    o.ApiKey = Environment.GetEnvironmentVariable("QUEUEY_API_KEY")
-        ?? throw new InvalidOperationException("Set QUEUEY_API_KEY (a publish-only, tenant-scoped Edge key).");
-    o.TenantPublicId = Environment.GetEnvironmentVariable("QUEUEY_TENANT")
-        ?? throw new InvalidOperationException("Set QUEUEY_TENANT (ten_... public id).");
-
-    if (Environment.GetEnvironmentVariable("QUEUEY_INGRESS_BASE") is { Length: > 0 } ingress)
-        o.IngressBaseAddress = new Uri(ingress);
+    // The signing pair, the tenant and the ingress base from the environment — and in Development the pair from .env,
+    // where `queuey keys mint --write .env` put it. Validate() at startup says what is missing.
+    o.UseEnvironmentVariables();
 
     o.Source = "edge-demo";
     // A durable path next to the executable — survives process AND machine

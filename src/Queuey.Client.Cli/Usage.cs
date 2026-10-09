@@ -20,8 +20,10 @@ COMMANDS
   verify         Verify a queue's flow with Queuey, step by step from the ingress to the final state.
   schema         Print the JSON Schema for queuey.deploy.json, or a Desired Flow's. Reads nothing, needs no credentials.
   pull           Read a workspace back into a deployment file (the inverse of apply).
-  credentials    Store delivery secrets a deployment file refers to: credentials set | rotate | request | list.
-  keys           Mint an ingress signing key for a queue: keys mint.
+  credentials    Store delivery secrets a deployment file refers to: credentials set | generate | rotate | request
+                 | list. generate makes a receiver's secret and writes it with --write, never shown.
+  keys           Mint the key a producer publishes with, for the workspace or one queue (--queue), as
+                 --type signing (default) or api-key, written with --write .env|user-secrets: keys mint | list | revoke.
   publish        Publish one event to a queue the way a producer does, and print its id for verify.
   events         Read one event's status and attempts as Queuey serves them: events get.
   create-tenant  Create a tenant under the current license.
@@ -94,10 +96,11 @@ ADVISE
                  a dev profile: `queuey apply --profile dev` makes a dev workspace from it. An
                  existing deployment file is kept unless --force.
                  --apply converges the workspace down the same path `queuey apply` takes, and
-                 needs a login (queuey login). It creates the queue. The app's signing key
-                 comes from `queuey keys mint --queue <queue>` with .env as its file (see KEYS),
-                 which needs a login that may manage keys and never shows the secret; a license-wide API
-                 key is a person's, minted in the console.
+                 needs a login (queuey login). It creates the queue. The app's signing key is
+                 the workspace's: `queuey keys mint --write user-secrets` in a .NET project with
+                 a UserSecretsId, else `queuey keys mint --write .env` (see KEYS; --queue limits it
+                 to one queue). It needs a login that may manage keys and never shows the secret;
+                 a license-wide API key is a person's, minted in the console.
                  The two flags are separate on purpose: a file lands in git diff and is undone
                  with git, while a workspace change is invisible from the repo and is undone in
                  the console. In a .NET project, adding the package stays a step you run
@@ -638,9 +641,15 @@ REPLAY
                  first so there's a listener to receive it.
 
 EDGE
-  queuey edge run     --spool <path> --tenant <ten_...> --api-key <qak_...>
+  queuey edge run     --spool <path> --tenant <ten_...>
                 [--listen <port>] [--report-health] [--node-name <name>] [--ingress-base <uri>] [--source <s>]
-                [--mqtt <host[:port]> --mqtt-routes ""filter=queue[@segment];…"" [--mqtt-user <u> --mqtt-password <p>] [--mqtt-tls]]
+                [--mqtt <host[:port]> --mqtt-routes ""filter=queue[@segment];…"" [--mqtt-user <u>] [--mqtt-tls]]
+                 Signs every transfer with the queue's signing key, read from the environment
+                 as QUEUEY_SIGNING_KEY_ID and QUEUEY_SIGNING_SECRET (queuey keys mint writes
+                 them into the service's environment file). Without the pair it publishes with
+                 QUEUEY_API_KEY, a publish-only key; with the pair, QUEUEY_API_KEY is not read.
+                 Keys come from the environment, not flags: argv is visible to every user on
+                 the machine.
                  Hosts the Edge transfer loop as a standalone daemon (systemd-friendly) — the
                  complete Edge for machines with no .NET app of their own: run this, and anything
                  on the box publishes durably with 'queuey edge publish'. --listen additionally
@@ -649,11 +658,15 @@ EDGE
                  HTTP one-liner becomes durable by swapping the base URL; 202 = committed to the
                  local spool. Ctrl-C/SIGTERM to stop; accepted events survive restarts.
                  --report-health (or QUEUEY_REPORT_HEALTH=1) makes the node check in to the
-                 console under Edge nodes (outbound only; reports are not events, never billed);
+                 console under Edge nodes (outbound only; reports are not events, never billed).
+                 Queuey's check-in takes an API key today: a node that signs checks in with
+                 QUEUEY_EDGE_HEALTH_API_KEY, a publish-only key in the same environment file,
+                 which nothing else uses;
                  --node-name (QUEUEY_NODE_NAME) is the label shown there, default: machine name.
                  --mqtt subscribes to a (usually local) broker and spools every message durably
                  BEFORE acking it (QoS 1); a route's @segment makes that topic level the lane
-                 (FIFO per machine). Env: QUEUEY_MQTT, QUEUEY_MQTT_ROUTES, QUEUEY_MQTT_USER/PASSWORD.
+                 (FIFO per machine). Env: QUEUEY_MQTT, QUEUEY_MQTT_ROUTES, QUEUEY_MQTT_USER; the
+                 broker's password only as QUEUEY_MQTT_PASSWORD, never in argv.
   queuey edge publish <queue> --spool <path> --tenant <ten_...>
                 (--data '<json>' | --file <path>) [--content-type <ct>]
                 [--idempotency-key <k>] [--event-type <t>] [--group-key <k>]
