@@ -116,15 +116,17 @@ internal sealed class EdgeTransferLoop : BackgroundService
                 _state.RecordAccepted(new AcceptedTransfer(claim.Envelope.Queue, claim.Envelope.TransferId, attempt.Ack!.CloudEventId,
                     attempt.Ack.Replayed, attempt.Ack.AtUtc));
                 // Blindtest 2 (2026-10-09, funn 13): event-id-en Cloud ga, så hendelsen kan slås opp med events get.
+                // Security-review av queuey-client #71: Idempotency-Key-en er produsentens tekst og kan bære personopplysninger
+                // (en e-post, et ordrenummer), så den logges bare på Debug. Event-id-en er Queuey sin.
                 if (attempt.Ack.CloudEventId is { } eventId)
                     _logger.LogInformation(EdgeLogEvents.Accepted,
-                        "Transfer {TransferId} (Idempotency-Key) to {Queue} accepted as event {EventId}; look it up with " +
-                        "queuey events get {EventId} --queue {Queue}.",
-                        claim.Envelope.TransferId, claim.Envelope.Queue, eventId, eventId, claim.Envelope.Queue);
+                        "Event {EventId} accepted in {Queue}; look it up with queuey events get {EventId} --queue {Queue}.",
+                        eventId, claim.Envelope.Queue, eventId, claim.Envelope.Queue);
                 else
                     _logger.LogInformation(EdgeLogEvents.Accepted,
-                        "Transfer {TransferId} (Idempotency-Key) to {Queue} accepted; the queue answers without a body, so there is no event id.",
-                        claim.Envelope.TransferId, claim.Envelope.Queue);
+                        "An event was accepted in {Queue}; the queue answers without a body, so there is no event id.", claim.Envelope.Queue);
+                _logger.LogDebug(EdgeLogEvents.Accepted, "Transfer {TransferId} (Idempotency-Key) was accepted as event {EventId}.",
+                    claim.Envelope.TransferId, attempt.Ack.CloudEventId ?? "(none)");
                 if (attempt.Ack.Replayed)
                 {
                     _logger.LogInformation(EdgeLogEvents.SettledAsReplay,

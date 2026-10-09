@@ -125,19 +125,24 @@ public class EdgeTransferLoopTests
         await fx.RunUntilAsync(async () =>
             (await fx.Spool.Spool.GetStatsAsync(CancellationToken.None)).PendingCount == 0);
 
-        Assert.Contains(logger.Lines, l => l.Contains("Transfer order-10042 (Idempotency-Key) to orders accepted as event evt_fresh", StringComparison.Ordinal)
-                                           && l.Contains("queuey events get evt_fresh --queue orders", StringComparison.Ordinal));
+        Assert.Contains(logger.Lines, l => l.Level == Microsoft.Extensions.Logging.LogLevel.Information
+                                           && l.Text.Contains("Event evt_fresh accepted in orders", StringComparison.Ordinal)
+                                           && l.Text.Contains("queuey events get evt_fresh --queue orders", StringComparison.Ordinal));
+        // Idempotency-Key-en kan bære personopplysninger: bare på Debug (security-review av #71).
+        Assert.DoesNotContain(logger.Lines, l => l.Level >= Microsoft.Extensions.Logging.LogLevel.Information && l.Text.Contains("order-10042", StringComparison.Ordinal));
+        Assert.Contains(logger.Lines, l => l.Level == Microsoft.Extensions.Logging.LogLevel.Debug
+                                           && l.Text.Contains("Transfer order-10042 (Idempotency-Key) was accepted as event evt_fresh", StringComparison.Ordinal));
         AcceptedTransfer last = fx.State.LastAcceptedTransfer!;
         Assert.Equal(("orders", "order-10042", "evt_fresh", false), (last.Queue, last.TransferId, last.EventId, last.Replayed));
     }
 
     private sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger<EdgeTransferLoop>
     {
-        public System.Collections.Concurrent.ConcurrentQueue<string> Lines { get; } = new();
+        public System.Collections.Concurrent.ConcurrentQueue<(Microsoft.Extensions.Logging.LogLevel Level, string Text)> Lines { get; } = new();
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
         public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
         public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state,
-            Exception? exception, Func<TState, Exception?, string> formatter) => Lines.Enqueue(formatter(state, exception));
+            Exception? exception, Func<TState, Exception?, string> formatter) => Lines.Enqueue((logLevel, formatter(state, exception)));
     }
 
     private sealed class LoopFixture : IDisposable
