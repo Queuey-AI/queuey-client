@@ -638,9 +638,14 @@ REPLAY
                  first so there's a listener to receive it.
 
 EDGE
-  queuey edge run     --spool <path> --tenant <ten_...> --api-key <qak_...>
+  queuey edge run     --spool <path> --tenant <ten_...> [--api-key <qak_...>]
                 [--listen <port>] [--report-health] [--node-name <name>] [--ingress-base <uri>] [--source <s>]
                 [--mqtt <host[:port]> --mqtt-routes ""filter=queue[@segment];…"" [--mqtt-user <u> --mqtt-password <p>] [--mqtt-tls]]
+                 Signs every transfer with the queue's signing key, read from the environment
+                 as QUEUEY_SIGNING_KEY_ID and QUEUEY_SIGNING_SECRET (queuey keys mint writes
+                 them into the service's environment file); a publish-only --api-key or
+                 QUEUEY_API_KEY is the alternative, and with the pair it serves only
+                 --report-health, since Queuey's check-in takes an API key.
                  Hosts the Edge transfer loop as a standalone daemon (systemd-friendly) — the
                  complete Edge for machines with no .NET app of their own: run this, and anything
                  on the box publishes durably with 'queuey edge publish'. --listen additionally

@@ -4,10 +4,17 @@
 
 What it takes on a Pi-class device or industrial gateway, end to end:
 
-**1. Queuey side (once, in the console):** create a workspace + queue, then
-mint an API key with *Limit to ingress* + scoped to that one workspace —
-the key will live on a machine you don't control, and must not be able to
-do anything else.
+**1. Queuey side (once):** create a workspace + queue, then make the node's
+signing key for that queue on your own machine — the key will live on a
+machine you don't control, and reaches nothing but its queue:
+
+```bash
+queuey keys mint --queue sensor-readings --write edge.env   # the secret is never shown
+```
+
+Copy `edge.env` to the device as `/etc/queuey/edge.env` and delete your copy.
+(A publish-only API key, *Limit to ingress* and scoped to the workspace, is the
+alternative; Queuey's fleet check-in, `--report-health`, still takes one.)
 
 **2. Get the binary onto the device.** One self-contained file, no .NET
 runtime needed on the device:
@@ -48,7 +55,9 @@ WantedBy=multi-user.target
 ```bash
 # /etc/queuey/edge.env  (chmod 600, owned by the queuey user)
 QUEUEY_TENANT=ten_...
-QUEUEY_API_KEY=qak_...
+QUEUEY_SIGNING_KEY_ID=hsk_...       # from queuey keys mint --write edge.env
+QUEUEY_SIGNING_SECRET=...
+# QUEUEY_API_KEY=qak_...            # alternative; with the pair set it is not read
 # QUEUEY_INGRESS_BASE=http://localhost:5084   # only for testing against a local Queuey
 ```
 

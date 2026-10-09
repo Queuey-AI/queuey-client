@@ -193,6 +193,17 @@ internal static class EdgeCommand
     // ── run ─────────────────────────────────────────────────────────────
 
     /// <summary>
+    /// The daemon's keys, by the same rules as <c>Queuey.Client</c> and an embedded Edge: <c>QUEUEY_SIGNING_KEY_ID</c> and
+    /// <c>QUEUEY_SIGNING_SECRET</c> from the environment (in Development also from <c>.env</c>), and <c>--api-key</c> or
+    /// <c>QUEUEY_API_KEY</c>. With the pair in the environment, <c>QUEUEY_API_KEY</c> is not read; an <c>--api-key</c> is kept,
+    /// and then only the health check-in uses it, since events are signed. The secret has no flag: argv is visible to
+    /// every user on the machine.
+    /// </summary>
+    // Edge-signering (Kenneth 2026-10-09): daemonen leser de samme variablene som SDK-en, gjennom QueueyEdgeOptions.
+    internal static QueueyEdgeOptions EdgeCredentials(ArgMap map)
+        => new QueueyEdgeOptions { ApiKey = map.Get("api-key") }.UseEnvironmentVariables(CliHost.Env);
+
+    /// <summary>
     /// Hosts the Edge transfer loop as a STANDALONE daemon — the complete
     /// Edge story for machines with no .NET application of their own:
     /// <c>queuey edge run</c> under systemd, and anything on the box
@@ -203,12 +214,19 @@ internal static class EdgeCommand
     private static async Task<int> RunHostAsync(string spoolPath, ArgMap map)
     {
         var tenant = EdgeTenant(map);
-        var apiKey = map.Get("api-key") ?? Environment.GetEnvironmentVariable("QUEUEY_API_KEY");
-        if (string.IsNullOrWhiteSpace(tenant) || string.IsNullOrWhiteSpace(apiKey))
+        var credentials = EdgeCredentials(map);
+        if (string.IsNullOrWhiteSpace(credentials.SigningKeyId) != string.IsNullOrWhiteSpace(credentials.SigningSecret))
         {
             Console.Error.WriteLine(
-                "edge run needs --tenant <ten_...> and --api-key <qak_...> " +
-                "(or QUEUEY_TENANT / QUEUEY_API_KEY). Use a publish-only, workspace-scoped key.");
+                "QUEUEY_SIGNING_KEY_ID and QUEUEY_SIGNING_SECRET go together: set both, as queuey keys mint --write writes them.");
+            return ExitCodes.Configuration;
+        }
+        if (string.IsNullOrWhiteSpace(tenant) || string.IsNullOrWhiteSpace(credentials.SigningKeyId) && string.IsNullOrWhiteSpace(credentials.ApiKey))
+        {
+            Console.Error.WriteLine(
+                "edge run needs --tenant <ten_...> (or QUEUEY_TENANT) and a key: the signing pair QUEUEY_SIGNING_KEY_ID and " +
+                "QUEUEY_SIGNING_SECRET in its environment, which queuey keys mint --write <file> writes for the service's " +
+                "environment file; or a publish-only key with --api-key <qak_...> or QUEUEY_API_KEY.");
             return ExitCodes.Configuration;
         }
 
@@ -254,7 +272,9 @@ internal static class EdgeCommand
 
         builder.Services.AddQueueyEdge(o =>
         {
-            o.ApiKey = apiKey;
+            o.ApiKey = credentials.ApiKey;
+            o.SigningKeyId = credentials.SigningKeyId;
+            o.SigningSecret = credentials.SigningSecret;
             o.TenantPublicId = tenant;
             o.Storage.Path = spoolPath;
             if (spoolKey is not null)
