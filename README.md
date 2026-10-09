@@ -995,7 +995,8 @@ still goes to the inbox. Every command without an API key uses it for the API ho
 - `--profile <name>` writes that profile in `~/.queuey/config.json`: the license, the hosts, and the
   workspace marked with the profile's environment (`dev`, `test`, `staging` or `prod`), or the one
   `--tenant` names. Other profiles, and the profile's other fields, stay as they were. A profile with an
-  `apiKey` keeps its host, license and workspace: login only fills the fields it lacks. A `QUEUEY_`
+  `apiKey` keeps its hosts, license and workspace: login never writes its hosts (a missing host is
+  Queuey's own), and adds a license or workspace only where none is. A `QUEUEY_`
   variable that disagrees with the profile fails, as with any `--profile`, and `--api-base` overrides the
   host, for a test or a self-hosted Queuey. When the license
   has no workspace for the environment yet, it says how to make one. Comments in the file are not kept.

@@ -154,8 +154,9 @@ internal static class UserProfiles
     /// <summary>
     /// Writes what <c>queuey login --profile</c> found into profile <paramref name="profile"/>: the license, the hosts and the
     /// workspace, or no workspace when <paramref name="tenant"/> is null. Every other profile, and every other field of this
-    /// one (an <c>apiKey</c>, a <c>source</c>), stays as it was. A profile with an <c>apiKey</c> gets only the fields it lacks,
-    /// since the key wins over the login. The file is created readable only by the user (0600) when it is not there, and
+    /// one (an <c>apiKey</c>, a <c>source</c>), stays as it was. A profile with an <c>apiKey</c> keeps its hosts as they are
+    /// (a missing host is Queuey's own), gets the license only when it has none, and the workspace only when it has none and
+    /// already had the login's license, since the key wins over the login. The file is created readable only by the user (0600) when it is not there, and
     /// replaced whole otherwise. Returns the file, whether the profile has an <c>apiKey</c>, and the workspace it names now.
     /// </summary>
     // Profilfletting (PR 4): fila leses som JSON-tre, ikke som UserConfig, så felt en nyere CLI har skrevet blir stående. Kommentarer
@@ -182,13 +183,26 @@ internal static class UserProfiles
         if (profiles[profile] is not JsonObject entry)
             profiles[profile] = entry = new JsonObject();
 
-        // En profil med apiKey kobler til med nøkkelen, og den er skrevet av en person. Login fyller da bare felt som mangler, og
-        // flytter aldri nøkkelen til en annen vert, lisens eller et annet workspace (security-review av #66, BØR 2).
+        // En profil med apiKey kobler til med nøkkelen, og den er skrevet av en person. Login flytter den aldri (security-review
+        // av #66, BØR 2, runde 2): vertene skrives ikke, for en vert som mangler, er Queueys egen, og å fylle den ville sendt
+        // nøkkelen til innloggingens vert. Lisensen fylles bare når den mangler, og workspacet bare når det mangler og profilen
+        // alt hadde innloggingens lisens.
         bool hasApiKey = Has(entry, "apiKey");
-        Set(entry, "license", license, hasApiKey);
-        Set(entry, "apiBase", apiBase, hasApiKey);
-        Set(entry, "ingressBase", ingressBase, hasApiKey);
-        Set(entry, "tenant", tenant, hasApiKey);
+        if (hasApiKey)
+        {
+            bool sameLicense = entry["license"] is JsonValue had && had.TryGetValue(out string? hadLicense)
+                               && string.Equals(hadLicense?.Trim(), license, StringComparison.Ordinal);
+            Set(entry, "license", license, fillOnly: true);
+            if (sameLicense)
+                Set(entry, "tenant", tenant, fillOnly: true);
+        }
+        else
+        {
+            Set(entry, "license", license, fillOnly: false);
+            Set(entry, "apiBase", apiBase, fillOnly: false);
+            Set(entry, "ingressBase", ingressBase, fillOnly: false);
+            Set(entry, "tenant", tenant, fillOnly: false);
+        }
 
         PrivateFiles.WriteAllText(target, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
         return (path, hasApiKey, entry["tenant"] is JsonValue written && written.TryGetValue(out string? kept) ? kept : null);

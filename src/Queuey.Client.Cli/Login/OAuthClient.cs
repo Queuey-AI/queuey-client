@@ -35,6 +35,13 @@ internal sealed class OAuthClient : IDisposable
 {
     public const string ClientId = "queuey-cli";
 
+    /// <summary>
+    /// How long one request may take. Polls and renewals run under <see cref="LoginStore.LockAsync"/>, at most two requests
+    /// each, so this is well under <see cref="LoginStore.LockTimeout"/>: a slow server never makes another process give up.
+    /// </summary>
+    // Security-review av #66, runde 2: med 30 s per kall og 30 s på låsen kunne én treg poll få en annen fornyelse til å feile.
+    internal static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(10);
+
     private readonly HttpClient _http;
     private readonly Uri _apiBase;
 
@@ -54,7 +61,7 @@ internal sealed class OAuthClient : IDisposable
         _http = CliHost.TestHandler is { } handler
             ? new HttpClient(handler, disposeHandler: false)
             : new HttpClient(new HttpClientHandler { AllowAutoRedirect = false });
-        _http.Timeout = TimeSpan.FromSeconds(30);
+        _http.Timeout = RequestTimeout;
         _http.DefaultRequestHeaders.UserAgent.ParseAdd($"queuey-cli/{CliVersion.Current}");
     }
 

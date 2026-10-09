@@ -457,7 +457,7 @@ public sealed class LoginCommandTests : IDisposable
     }
 
     [Fact]
-    public async Task A_profile_with_an_api_key_keeps_its_host_license_and_workspace_and_login_only_fills_what_it_lacks()
+    public async Task A_profile_with_an_api_key_keeps_its_host_license_and_workspace()
     {
         // Security-review av #66 (BØR 2): login skrev om vert, lisens og workspace i en profil med nøkkel.
         Directory.CreateDirectory(_queuey);
@@ -471,14 +471,71 @@ public sealed class LoginCommandTests : IDisposable
         CliRun run = await Run(server, "login", "--profile", "dev", "--wait");
 
         Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
-        Assert.Contains("has an apiKey, which wins over the login, so only the fields it lacked were filled", run.Stderr);
+        Assert.Contains("has an apiKey, which wins over the login", run.Stderr);
         JsonNode dev = JsonNode.Parse(File.ReadAllText(UserFile))!["profiles"]!["dev"]!;
         Assert.Equal("qak_dev.key-for-dev", (string?)dev["apiKey"]);
         Assert.Equal("https://api.test", (string?)dev["apiBase"]);
         Assert.Equal("lic_old", (string?)dev["license"]);
         Assert.Equal("ten_old", (string?)dev["tenant"]);
-        Assert.Equal("https://ingress.test", (string?)dev["ingressBase"]); // manglet, og ble fylt
+        Assert.Null(dev["ingressBase"]); // en vert som mangler, er Queueys egen, og den fylles aldri
         Assert.DoesNotContain("key-for-dev", run.Stdout + run.Stderr);
+    }
+
+    [Fact]
+    public async Task A_key_profile_without_hosts_never_gets_the_logins_host_so_the_key_stays_with_queueys_own()
+    {
+        // Runde 2: profilen uten apiBase bruker Queueys vert. Å fylle den med innloggingens (her lokal) ville sendt nøkkelen dit.
+        Directory.CreateDirectory(_queuey);
+        UserProfilesTests.WriteUserConfig(_queuey, """{ "profiles": { "dev": { "apiKey": "qak_dev.key-for-dev" } } }""");
+        var server = new FakeAuthServer();
+        server.PollAnswers.Enqueue("approve");
+
+        CliRun run = await Run(server, "login", "--profile", "dev", "--api-base", "http://localhost:5084", "--wait");
+
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        Assert.All(server.Handler.Requests, r => Assert.Equal("localhost", r.Uri.Host));
+        JsonNode dev = JsonNode.Parse(File.ReadAllText(UserFile))!["profiles"]!["dev"]!;
+        Assert.Null(dev["apiBase"]);
+        Assert.Null(dev["ingressBase"]);
+        Assert.Equal("lic_new", (string?)dev["license"]); // manglet, og fylles
+        Assert.Null(dev["tenant"]);                       // profilen hadde ikke innloggingens lisens fra før
+    }
+
+    [Fact]
+    public async Task A_narrower_scope_queuey_granted_is_accepted_and_said()
+    {
+        var server = new FakeAuthServer { GrantedScope = "read" };
+        server.PollAnswers.Enqueue("approve");
+
+        CliRun run = await Run(server, "login", "--api-base", FakeAuthServer.Api, "--wait");
+
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        Assert.Contains("scope read.", run.Stdout);
+        Assert.Contains("Queuey granted scope read, not operate.", run.Stderr);
+    }
+
+    [Fact]
+    public void A_login_another_process_finished_counts_whatever_scope_it_got()
+    {
+        DateTimeOffset since = new(2026, 10, 9, 12, 0, 0, TimeSpan.Zero);
+        var file = new CredentialsFile
+        {
+            Logins =
+            {
+                new StoredLogin { ApiBase = FakeAuthServer.Api, License = "lic_old", Scope = "operate", LoggedInAt = since - TimeSpan.FromDays(1) },
+                new StoredLogin { ApiBase = FakeAuthServer.Api, License = "lic_new", Scope = "read", LoggedInAt = since + TimeSpan.FromSeconds(3) },
+            },
+        };
+
+        Assert.Equal("lic_new", LoginCommand.FinishedMeanwhile(file, FakeAuthServer.Api, since)?.License);
+        Assert.Null(LoginCommand.FinishedMeanwhile(file, FakeAuthServer.Api, since + TimeSpan.FromMinutes(1)));
+    }
+
+    [Fact]
+    public void A_request_is_cut_off_well_before_another_process_gives_up_on_the_lock()
+    {
+        // En poll eller fornyelse under låsen er høyst to forespørsler.
+        Assert.True(OAuthClient.RequestTimeout * 2 < LoginStore.LockTimeout);
     }
 
     [Fact]
