@@ -9,6 +9,8 @@ USAGE
   queuey --version
 
 COMMANDS
+  login          Log in with your Queuey account: open the link it prints and approve the code. No key to copy.
+  logout         End the login with Queuey and remove it from this machine.
   advise         Read this repository and say how Queuey fits: Client, Edge or plain HTTP. Or turn a Desired
                  Flow into a deployment file and a code plan. Reads only.
   sync           Apply every [QueueyModel] stream found in an assembly (PUT /waas/streams).
@@ -29,7 +31,35 @@ COMMANDS
   listen         Receive webhooks locally over a secure push session (Stripe-listen style).
   replay         Replay one existing event to your connected listener (read-only DLQ debugging).
   edge           Operate a Queuey Edge spool: status | retry | discard | recover | reset.
-  whoami         Show the resolved hosts / tenant / license (masks the key).
+  whoami         Show the resolved hosts / tenant / license, and the key (masked) or the login.
+
+LOGIN
+  queuey login [--profile <name>] [--scope operate|read] [--wait] [--no-browser] [--api-base <uri>] [--json]
+                 Logs in the way `stripe login` does: it prints a link and a code, you open the
+                 link, check that the page shows the same code, and approve it in the Queuey
+                 console. In a terminal it opens the browser and waits.
+                 Without a terminal, as when an agent runs it, it prints the link and exits 5
+                 (waiting for a person); with --json as one line, { ""status"":
+                 ""waiting_for_person"", ""link"", ""userCode"", ""expiresAt"", ""action"" }. The
+                 code is kept for ten minutes, so `queuey login --wait` (or `queuey login` again)
+                 finishes once it is approved. --wait waits in any case.
+                 Already logged in? It says so and exits 0, so it is safe to run first.
+                 The login is a connection for one person, one license and a scope: operate (the
+                 default) acts as the person may, read only looks. It never approves anything:
+                 what needs a person in prod still goes to the inbox. Every command that has no API
+                 key uses it, for the API host it was made for.
+                 --profile <name> writes the profile in ~/.queuey/config.json: the license, the
+                 hosts and the workspace marked with the profile's environment (dev, test,
+                 staging or prod), or --tenant's. Other profiles, and the profile's other fields,
+                 stay as they were. A profile with an apiKey keeps it, and the key wins.
+                 The tokens are in ~/.queuey/credentials.json, next to config.json, readable only
+                 by you and checked as config.json is. They renew themselves; two commands at
+                 once take turns, so a refresh token is never spent twice.
+                 Publishing to the ingress still needs a key: the ingress does not take a login.
+  queuey logout [--profile <name>] [--license <lic_…>] [--api-base <uri>] [--json]
+                 Ends the login with Queuey (it disappears from Connected apps) and removes it
+                 from this machine: every login for the API host, or only --license's. When Queuey
+                 cannot be told, it is still removed here, and the command exits 1 and says so.
 
 ADVISE
   queuey advise [<path>] [--queue <name>] [--write-files [--force]] [--apply] [--json]
@@ -585,8 +615,9 @@ EDGE
 
 WHOAMI
   queuey whoami [--profile <name>] [--json]
-                 The connection the CLI resolves, with the key masked; with a profile, that
-                 profile's and the file it came from. Hosts (""hosts"" in --json) is Production for Queuey's
+                 The connection the CLI resolves, with the key masked, or the login it uses
+                 (""login"" in --json, never a token); with a profile, that profile's and the file
+                 it came from. It does not connect. Hosts (""hosts"" in --json) is Production for Queuey's
                  own hosts, Local when both hosts are on this machine, and Custom otherwise.
 
 PROFILES
@@ -595,15 +626,17 @@ PROFILES
   which is missing:
                  1. The connection, which lives with you and never in the repository:
                     ~/.queuey/config.json (or the file QUEUEY_USER_CONFIG names), as
-                    { ""profiles"": { ""dev"": { ""apiKey"": ""qak_…"", ""license"": ""lic_…"",
-                    ""tenant"": ""ten_…"", ""apiBase"": ""https://…"", ""ingressBase"": ""https://…"" } } }.
+                    { ""profiles"": { ""dev"": { ""license"": ""lic_…"", ""tenant"": ""ten_…"",
+                    ""apiBase"": ""https://…"", ""ingressBase"": ""https://…"" } } }. `queuey login
+                    --profile dev` writes it. A profile without ""apiKey"" uses the login; one with
+                    ""apiKey"": ""qak_…"" uses the key, as before.
                     It holds keys, so it is read only when nobody else can reach it, as
                     ssh checks ~/.ssh: it belongs to you, chmod 600; a link is followed to
                     the file it points to; and each folder above it, up to your home folder,
                     belongs to you or root and is not writable by others (unless sticky,
                     like /tmp). ACLs are not read, so put none on them. On Windows your
-                    profile's ACL protects it. `queuey login` will write it; until then,
-                    write it by hand.
+                    profile's ACL protects it. In CI, write it from the pipeline's secrets,
+                    with an apiKey.
                  2. The deployment file's values for that environment, committed with it:
                     ""profiles"": { ""dev"": { ""variables"": { ""QUEUEY_BASE_URL"": ""https://…"",
                     ""QUEUEY_STRIPE_DELIVERY_KIND"": ""localForward"" } } }. They fill the file's
@@ -626,7 +659,7 @@ GLOBAL OPTIONS (all commands)
   --api-base <uri>                Control-plane (API) host (default: https://api.queuey.ai).
                                   Set it to point at a locally-running instance, e.g. for testing.
   --ingress-base <uri>            Ingress (publish) host (default: https://ingress.queuey.ai).
-  --api-key <qak_...>             License-wide API key
+  --api-key <qak_...>             License-wide API key. Without one, the login (queuey login) is used
   --tenant <ten_...>              Producer tenant public id
   --license <lic id>              License public id (required for sync)
   --source <s>                    X-Queuey-Source trace value
@@ -638,9 +671,12 @@ CONFIG PRECEDENCE
            queuey.json  >  default
   With --profile:  flag  >  the profile in ~/.queuey/config.json  >  default
            (see PROFILES: queuey.json is not read, and a disagreeing QUEUEY_ variable fails)
+  Without an API key from any of them, the login for the API host (queuey login) is used, with
+  its license unless one is named.
 
 EXIT CODES
   0 success   1 runtime failure   2 usage   3 config   4 assembly load
-  5 a configuration plan waits for a person's approval in Queuey's inbox (plan --submit, apply)
+  5 waits for a person: a configuration plan's approval in Queuey's inbox (plan --submit, apply),
+    or a login code to approve (login)
 ";
 }

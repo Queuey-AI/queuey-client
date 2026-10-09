@@ -47,6 +47,8 @@ internal static class CliEntry
             return command switch
             {
                 "advise" => await AdviseCommand.RunAsync(rest),
+                "login" => await LoginCommand.RunAsync(rest),
+                "logout" => await LogoutCommand.RunAsync(rest),
                 "whoami" => WhoAmICommand.Run(rest),
                 "sync" => await SyncCommand.RunAsync(rest),
                 "queue" => await QueueCommand.RunAsync(rest),

@@ -45,10 +45,23 @@ errors included, as JSON on stdout — so the tool composes into scripts rather
 than only into human eyes. An option a command does not take fails it with
 exit 2 and the list of options it does take, instead of being ignored.
 
+## Log in
+
+```bash
+queuey login --profile dev
+```
+
+It prints a link and a code: open the link, check the code, and approve it in
+the Queuey console. No key to copy. In a terminal it opens the browser and
+waits; without one (an agent) it prints the link and exits `5`, and
+`queuey login --wait` finishes once the link is approved. Every command without
+an API key then uses the login. `queuey logout` ends it. Publishing to the
+ingress still needs a key.
+
 ## Configuration
 
 Connection settings resolve with the precedence **CLI flag > environment
-variable > `queuey.json` > default**:
+variable > `queuey.json` > default**, and without an API key the login is used:
 
 | Setting | Flag | Environment |
 | --- | --- | --- |
@@ -68,9 +81,10 @@ naming credentials by reference, and is meant to be committed.
 
 A run that did not fully converge exits non-zero, so a pipeline fails loudly
 rather than reporting a green deploy over a half-applied workspace. Applying is
-idempotent, so a fixed re-run converges. Exit `5` means a configuration plan
-waits for a person's approval in Queuey's inbox and nothing was applied:
-`queuey apply --plan plan_…` applies it once approved, and `--wait` waits.
+idempotent, so a fixed re-run converges. Exit `5` means a person is needed:
+a configuration plan waits for approval in Queuey's inbox and nothing was
+applied (`queuey apply --plan plan_…` applies it once approved, and `--wait`
+waits), or a login link waits to be approved (`queuey login --wait`).
 
 ## More
 

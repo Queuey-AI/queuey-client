@@ -61,8 +61,30 @@ public sealed class QueueyClient : IDisposable
         if (!string.IsNullOrWhiteSpace(options.SigningKeyId) && !string.IsNullOrWhiteSpace(options.SigningSecret))
             return new HmacRequestSigner(options.SigningKeyId!, options.SigningSecret!);
 
+        // En klient med bare et access-token (queuey login) kan styre kontrollplanet, men ikke publisere: ingressen tar ikke
+        // tokenet. Den lages likevel, og publiseringen sier hvorfor den ikke går.
+        if (options.AccessTokenProvider is not null)
+            return new NoIngressCredential();
+
         throw new QueueyConfigurationException(
-            "No ingress credential configured. Set QueueyOptions.ApiKey, or both SigningKeyId and SigningSecret.");
+            "No ingress credential configured. Set QueueyOptions.ApiKey, or both SigningKeyId and SigningSecret.")
+        {
+            SuggestedAction = "For the API host alone, AccessTokenProvider is enough. In the queuey CLI: run `queuey login`, or set " +
+                              "--api-key, QUEUEY_API_KEY, or apiKey in queuey.json or the profile.",
+        };
+    }
+
+    /// <summary>The ingress authenticator of a client that has only an access token, which the ingress does not take.</summary>
+    private sealed class NoIngressCredential : IQueueyAuthenticator
+    {
+        public System.Threading.Tasks.Task AuthenticateAsync(
+            HttpRequestMessage request, byte[] body, System.Threading.CancellationToken cancellationToken = default)
+            => throw new QueueyConfigurationException(
+                "Publishing needs an API key or a signing key: the ingress does not take a login's access token. Nothing was published.")
+            {
+                SuggestedAction = "Set QueueyOptions.ApiKey, or SigningKeyId and SigningSecret. In the CLI: --api-key, QUEUEY_API_KEY or " +
+                                  "apiKey in the profile, with a key from the Queuey console that may publish to the queue.",
+            };
     }
 
     private static HttpClient CreateDefaultHttpClient(QueueyOptions options)

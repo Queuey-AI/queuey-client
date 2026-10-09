@@ -1,4 +1,6 @@
 using System;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace Queuey.Client;
 
@@ -40,6 +42,13 @@ public sealed class QueueyOptions
     /// A license-wide FullAccess key is the primary credential for the whole SDK.
     /// </summary>
     public string? ApiKey { get; set; }
+
+    /// <summary>
+    /// Returns an OAuth access token for the API host, sent as <c>Authorization: Bearer</c> on control-plane calls when no
+    /// <see cref="ApiKey"/> is set. It is called before each request, so it can renew the token. The <c>queuey</c> CLI sets
+    /// it from <c>queuey login</c>. The ingress never takes the token: publishing needs <see cref="ApiKey"/> or signing.
+    /// </summary>
+    public Func<CancellationToken, Task<string>>? AccessTokenProvider { get; set; }
 
     /// <summary>HMAC signing key id (sent as <c>X-Queuey-Key-Id</c>). Alternative ingress auth to <see cref="ApiKey"/>.</summary>
     public string? SigningKeyId { get; set; }

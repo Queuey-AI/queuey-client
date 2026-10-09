@@ -849,19 +849,21 @@ A profile gives values to whatever names the file uses, including the ones `pull
   is picked.
 
 **The connection, with you.** It never goes in the repository. It lives in `~/.queuey/config.json`, or in
-the file `QUEUEY_USER_CONFIG` names:
+the file `QUEUEY_USER_CONFIG` names. `queuey login --profile dev` writes it (see [Log in](#log-in)):
 
 ```json
 {
   "profiles": {
-    "dev":  { "apiKey": "qak_…", "license": "lic_…", "tenant": "ten_…",
+    "dev":  { "license": "lic_…", "tenant": "ten_…",
               "apiBase": "https://api.queuey.ai", "ingressBase": "https://ingress.queuey.ai" },
     "prod": { "apiKey": "qak_…", "license": "lic_…", "tenant": "ten_…" }
   }
 }
 ```
 
-`apiBase` and `ingressBase` default to Queuey's hosts. A profile may also set `source`.
+A profile without `apiKey` connects with the login for its API host and license. One with `apiKey`
+connects with the key, as before. `apiBase` and `ingressBase` default to Queuey's hosts. A profile may
+also set `source`.
 
 The file holds keys, so the CLI reads it only when nobody else can reach it, checked as ssh checks
 `~/.ssh`:
@@ -875,8 +877,8 @@ The file holds keys, so the CLI reads it only when nobody else can reach it, che
 
 A file others could write could point the CLI at another host and catch the key, and a warning is easy
 to miss in CI. On Windows, the CLI does not check: your user profile's ACL protects the file.
-`queuey login` will write the file; until then, write it by hand. In CI, write it from the pipeline's
-secrets to a file only the job can read, and point `QUEUEY_USER_CONFIG` at it.
+In CI there is no person to log in: write the file from the pipeline's secrets, with an `apiKey`, to a
+file only the job can read, and point `QUEUEY_USER_CONFIG` at it.
 
 ```bash
 queuey plan --profile prod           # CI, in the pull request that promotes a change: stores no plan
@@ -970,6 +972,39 @@ All commands share the same configuration resolution and exit codes, so they com
 Run `queuey` with no arguments — or `--help` after any command — for the full usage text, which
 carries the per-flag detail this table leaves out.
 
+### Log in
+
+```bash
+queuey login --profile dev
+```
+
+It prints a link and a code. Open the link, check that the page shows the same code, and approve it in
+the Queuey console. There is no key to copy. New to Queuey? The link lets you sign up first.
+
+- **In a terminal** it opens the browser and waits.
+- **Without one**, as when an agent runs it, it prints the link and exits `5`: waiting for a person.
+  With `--json` that is one line, `{"status":"waiting_for_person","link":…,"userCode":…,"expiresAt":…}`.
+  The code is kept for ten minutes, and `queuey login --wait` (or `queuey login` again) finishes once
+  it is approved. An agent shows the person the link, then runs `--wait`.
+- **Already logged in?** It says so and exits `0`, so it is safe to run first.
+
+The login is a connection for one person, one license and a scope: `operate` (the default) acts as the
+person may, and `--scope read` only looks. It never approves anything: what needs a person in prod
+still goes to the inbox. Every command without an API key uses it for the API host it was made for.
+
+- `--profile <name>` writes that profile in `~/.queuey/config.json`: the license, the hosts, and the
+  workspace marked with the profile's environment (`dev`, `test`, `staging` or `prod`), or the one
+  `--tenant` names. Other profiles, and the profile's other fields, stay as they were. When the license
+  has no workspace for the environment yet, it says how to make one. Comments in the file are not kept.
+- The tokens are in `~/.queuey/credentials.json`, next to `config.json`, readable only by you and checked
+  the same way. They renew themselves. Two commands at once take turns, so a refresh token is never
+  spent twice, which would end the login.
+- `queuey logout` ends the login with Queuey and removes it from this machine. `queuey whoami` shows
+  it, never a token.
+- A profile or `queuey.json` with an `apiKey` works as before, and the key wins over a login.
+- Publishing to the ingress (`queuey publish`, your producer) still needs a key. The ingress does not
+  take a login.
+
 ### Commands
 
 **Declare and converge** — what a deploy runs:
@@ -1009,7 +1044,8 @@ carries the per-flag detail this table leaves out.
 | `issues <ten_…>` | A workspace's issues |
 | `edge` | Operate an Edge spool: `run`, `publish`, `status`, `drain`, `retry`, `discard`, `recover`, `reset` |
 | `create-tenant` / `create-queue` | Provision imperatively (prefer `apply`); `create-tenant --environment dev` makes a dev workspace |
-| `whoami` | The resolved hosts (Production, Local or Custom), tenant and license (key masked) |
+| `login` / `logout` | Log in with your Queuey account (open the link, approve the code), or end the login |
+| `whoami` | The resolved hosts (Production, Local or Custom), tenant and license, and the key (masked) or the login |
 
 ### Exit codes
 
@@ -1022,7 +1058,7 @@ A stable contract, so CI can branch on them:
 | `2` | Bad arguments — among them an option the command does not take |
 | `3` | Missing or invalid credentials / configuration (including an unset `${VAR}`) |
 | `4` | The target assembly could not be loaded |
-| `5` | A configuration plan waits for a person's approval in Queuey's inbox (`plan --submit`, `apply`); nothing was applied |
+| `5` | Waits for a person: a configuration plan's approval in Queuey's inbox (`plan --submit`, `apply`), nothing applied; or a login code to approve (`login`) |
 
 ### Recipes
 
@@ -1310,7 +1346,9 @@ Every command resolves settings as **flag → environment variable → `queuey.j
 one exception is the workspace of `apply` and `verify`: a deployment file that names a `tenant`
 decides it, and a `--tenant` or `QUEUEY_TENANT` that names another one fails the command. With
 `--profile`, the connection is **flag → the profile in `~/.queuey/config.json` → default** instead;
-see [Profiles](#profiles-one-flag-for-an-environment).
+see [Profiles](#profiles-one-flag-for-an-environment). When none of them gives an API key, the
+command uses the login for its API host ([Log in](#log-in)), with the login's license unless one is
+named.
 
 | Setting | Flag | Env var |
 | --- | --- | --- |
@@ -1329,7 +1367,8 @@ Two files, and the difference matters:
 | --- | --- | --- |
 | `queuey.json` | `apiBase` / `apiKey` / `tenant` / `license` — so you don't repeat flags | **No.** It holds your key, and it is already in `.gitignore` |
 | `queuey.deploy.json` | What your workspace and queues should look like, and each environment's values under `profiles` | **Yes.** It carries no secrets by construction |
-| `~/.queuey/config.json` | Each profile's connection: `apiKey` / `license` / `tenant` / `apiBase` / `ingressBase` | **Never.** It lives in your home folder, readable only by you |
+| `~/.queuey/config.json` | Each profile's connection: `license` / `tenant` / `apiBase` / `ingressBase`, and `apiKey` unless you log in | **Never.** It lives in your home folder, readable only by you |
+| `~/.queuey/credentials.json` | The login's tokens, written by `queuey login` | **Never.** Only the CLI writes it, readable only by you |
 
 ## License
 
