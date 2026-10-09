@@ -37,6 +37,9 @@ internal static class Operator
         public required string QueueId { get; init; }
         public string? QueueName { get; init; }
 
+        /// <summary>Where the workspace came from, when it was the deployment file (security-review av #71, K4); null otherwise.</summary>
+        public string? WorkspaceFrom { get; init; }
+
         /// <summary>The queue as the answer names it: its name and id, or its id.</summary>
         public string Shown => QueueName is null ? QueueId : $"{QueueName} ({QueueId})";
 
@@ -90,7 +93,7 @@ internal static class Operator
         }
 
         if (queue.StartsWith("que_", StringComparison.Ordinal))
-            return (new Session { Config = config, Provider = provider, Management = management, QueueId = queue }, ExitCodes.Success);
+            return (new Session { Config = config, Provider = provider, Management = management, QueueId = queue, WorkspaceFrom = workspaceFrom }, ExitCodes.Success);
 
         // Et navn, som i deploy-fila: Queuey leser køer ved id, så navnet slås opp i workspacet.
         if (string.IsNullOrWhiteSpace(config.TenantPublicId))
@@ -112,7 +115,7 @@ internal static class Operator
                 status: 404, ExitCodes.RuntimeError, "Queuey error"));
         }
 
-        return (new Session { Config = config, Provider = provider, Management = management, QueueId = id, QueueName = queue }, ExitCodes.Success);
+        return (new Session { Config = config, Provider = provider, Management = management, QueueId = id, QueueName = queue, WorkspaceFrom = workspaceFrom }, ExitCodes.Success);
     }
 
     /// <summary>
@@ -228,6 +231,16 @@ internal static class Operator
             }
             : null;
 
+    /// <summary>A whole-number property, or null when it is missing or not a number (security-review av #71, B4).</summary>
+    internal static long? Number(JsonElement? e, string name)
+        => e is { ValueKind: JsonValueKind.Object } o && o.TryGetProperty(name, out JsonElement v) && v.ValueKind == JsonValueKind.Number
+           && v.TryGetInt64(out long n)
+            ? n
+            : null;
+
+    /// <summary>A count as the answer shows it: the number, or <c>?</c> when Queuey gave none.</summary>
+    internal static string Count(JsonElement? e, string name) => Number(e, name)?.ToString(CultureInfo.InvariantCulture) ?? "?";
+
     /// <summary>An event status as its name, whether Queuey answered with the number or the name.</summary>
     internal static string? Status(JsonElement e, string name = "status")
     {
@@ -298,7 +311,7 @@ internal static class QueueHealthCommand
             {
                 Console.WriteLine(JsonSerializer.Serialize(new
                 {
-                    schemaVersion = Operator.JsonSchemaVersion,
+                    schemaVersion = Operator.JsonSchemaVersion, workspaceFrom = session.WorkspaceFrom,
                     queuePublicId = session.QueueId,
                     queueName = session.QueueName,
                     snapshot,
@@ -328,8 +341,8 @@ internal static class QueueHealthCommand
             if (lanes is { ValueKind: JsonValueKind.Object } l)
             {
                 if (l.TryGetProperty("counts", out JsonElement counts))
-                    Console.WriteLine(TerminalText.Line($"  lanes: {Operator.Text(counts, "total") ?? "?"} ({Operator.Text(counts, "active") ?? "0"} active, " +
-                                                       $"{Operator.Text(counts, "blocked") ?? "0"} blocked, {Operator.Text(counts, "held") ?? "0"} held)"));
+                    Console.WriteLine($"  lanes: {Operator.Count(counts, "total")} ({Operator.Count(counts, "active")} active, " +
+                                      $"{Operator.Count(counts, "blocked")} blocked, {Operator.Count(counts, "held")} held)");
                 if (l.TryGetProperty("problemLanes", out JsonElement problems))
                 {
                     foreach (JsonElement lane in Operator.Items(problems, "items").Take(10))
@@ -406,7 +419,7 @@ internal static class DiagnoseCommand
             {
                 Console.WriteLine(JsonSerializer.Serialize(new
                 {
-                    schemaVersion = Operator.JsonSchemaVersion,
+                    schemaVersion = Operator.JsonSchemaVersion, workspaceFrom = session.WorkspaceFrom,
                     queuePublicId = session.QueueId,
                     queueName = session.QueueName,
                     report,
@@ -497,25 +510,25 @@ internal static class EventsSearchCommand
         {
             JsonElement? result = await session.GetAsync(query, "events", session.QueueId);
             JsonElement[] items = Operator.Items(result, "items").ToArray();
-            string? total = result is { } r ? Operator.Text(r, "totalCount") : null;
+            long? total = Operator.Number(result, "totalCount");
 
             if (map.Has("json"))
             {
                 Console.WriteLine(JsonSerializer.Serialize(new
                 {
-                    schemaVersion = Operator.JsonSchemaVersion,
+                    schemaVersion = Operator.JsonSchemaVersion, workspaceFrom = session.WorkspaceFrom,
                     queuePublicId = session.QueueId,
                     queueName = session.QueueName,
                     page,
                     pageSize,
-                    totalCount = total is null ? (long?)null : long.Parse(total, CultureInfo.InvariantCulture),
+                    totalCount = total,
                     items = items.Select(i => new
                     {
                         publicId = Operator.Text(i, "publicId"),
                         status = Operator.Status(i),
                         createdAtUtc = Operator.Text(i, "createdAtUtc"),
                         lastAttemptAtUtc = Operator.Text(i, "lastAttemptAtUtc"),
-                        attemptCount = Operator.Text(i, "attemptCount") is { } n ? int.Parse(n, CultureInfo.InvariantCulture) : (int?)null,
+                        attemptCount = Operator.Number(i, "attemptCount"),
                         hasFailures = Operator.Text(i, "hasFailures") == "true",
                         idempotencyKey = Operator.Text(i, "deliveryKey"),
                         eventTypeKey = Operator.Text(i, "eventTypeKey"),
@@ -527,11 +540,11 @@ internal static class EventsSearchCommand
                 return ExitCodes.Success;
             }
 
-            Console.WriteLine($"{items.Length} of {total ?? "?"} event(s) in {TerminalText.Line(session.Shown)}, newest first (page {page}):");
+            Console.WriteLine($"{items.Length} of {Operator.Count(result, "totalCount")} event(s) in {TerminalText.Line(session.Shown)}, newest first (page {page}):");
             foreach (JsonElement i in items)
             {
                 string line = $"  {Operator.Text(i, "publicId")}  {Operator.Status(i) ?? "?"}  {Operator.Text(i, "createdAtUtc")}  " +
-                              $"{Operator.Text(i, "attemptCount") ?? "0"} attempt(s)";
+                              $"{Operator.Count(i, "attemptCount")} attempt(s)";
                 if (Operator.Text(i, "deliveryKey") is { } key) line += $"  key {key}";
                 if (Operator.Text(i, "eventTypeKey") is { } type) line += $"  {type}";
                 Console.WriteLine(TerminalText.Line(line));
@@ -608,7 +621,7 @@ internal static class ResumeCommand
             {
                 Console.WriteLine(JsonSerializer.Serialize(new
                 {
-                    schemaVersion = Operator.JsonSchemaVersion, queuePublicId = session.QueueId, targetId = target, dryRun, result = answer,
+                    schemaVersion = Operator.JsonSchemaVersion, workspaceFrom = session.WorkspaceFrom, queuePublicId = session.QueueId, targetId = target, dryRun, result = answer,
                 }, CliHost.JsonOut));
                 return ok ? ExitCodes.Success : ExitCodes.RuntimeError;
             }
@@ -671,7 +684,7 @@ internal static class UnlockCommand
             if (json)
                 Console.WriteLine(JsonSerializer.Serialize(new
                 {
-                    schemaVersion = Operator.JsonSchemaVersion, queuePublicId = session.QueueId, status = "unlocked",
+                    schemaVersion = Operator.JsonSchemaVersion, workspaceFrom = session.WorkspaceFrom, queuePublicId = session.QueueId, status = "unlocked",
                 }, CliHost.JsonOut));
             else
                 Console.WriteLine($"Unlocked {TerminalText.Line(session.Shown)}: delivery continues. queuey queue health shows whether it stays so.");
@@ -737,7 +750,7 @@ internal static class Redeliver
             {
                 Console.WriteLine(JsonSerializer.Serialize(new
                 {
-                    schemaVersion = Operator.JsonSchemaVersion, queuePublicId = session.QueueId, dryRun = map.Has("dry-run"), result = answer,
+                    schemaVersion = Operator.JsonSchemaVersion, workspaceFrom = session.WorkspaceFrom, queuePublicId = session.QueueId, dryRun = map.Has("dry-run"), result = answer,
                 }, CliHost.JsonOut));
                 return ok ? ExitCodes.Success : ExitCodes.RuntimeError;
             }
@@ -752,17 +765,19 @@ internal static class Redeliver
 
             if (map.Has("dry-run"))
             {
-                Console.WriteLine($"Dry run: {Operator.Text(result, "matched") ?? "?"} event(s) match, {Operator.Text(result, "wouldAct") ?? "?"} would be sent again " +
+                Console.WriteLine($"Dry run: {Operator.Count(result, "matched")} event(s) match, {Operator.Count(result, "wouldAct")} would be sent again " +
                                   $"(at most {max}). Nothing was sent.");
                 foreach (JsonElement w in Operator.Items(result, "warnings"))
                     Console.WriteLine("  warning: " + TerminalText.Line(w.ValueKind == JsonValueKind.String ? w.GetString()! : w.GetRawText()));
                 return ExitCodes.Success;
             }
 
-            Console.WriteLine($"Sending {Operator.Text(result, "updated") ?? "0"} of {Operator.Text(result, "requested") ?? "?"} event(s) again; " +
-                              $"{Operator.Text(result, "skipped") ?? "0"} skipped.");
-            if (Operator.Text(result, "nextOlderThanEvent") is { } next)
-                Console.WriteLine($"  More match: run it again to send the next {max} (older than {TerminalText.Line(next)}).");
+            Console.WriteLine($"Sending {Operator.Count(result, "updated")} of {Operator.Count(result, "requested")} event(s) again; " +
+                              $"{Operator.Count(result, "skipped")} skipped.");
+            // Security-review av #71 (K3): ingen oppfordring til å kjøre i løkke. Queuey har et døgnbudsjett for nye sendinger.
+            if (Operator.Text(result, "nextOlderThanEvent") is not null)
+                Console.WriteLine($"  More events match than --max {max}. Queuey limits how many a key or a login sends again per day; " +
+                                  "check what this sent with queuey queue health before you send more.");
             return ExitCodes.Success;
         }
     }

@@ -405,4 +405,74 @@ public sealed class OperateCommandsTests
         Assert.Equal(JsonValueKind.Null, JsonDocument.Parse(run.Stdout).RootElement.GetProperty("consoleUrl").ValueKind);
         Assert.DoesNotContain("evil.test", run.Stdout + run.Stderr);
     }
+
+    // ── B4, K3, K4 ──────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Counts_that_are_not_numbers_show_as_a_question_mark_and_never_crash_or_reach_the_terminal()
+    {
+        var api = new RecordingHandler(req => req.Key switch
+        {
+            "GET /events/que_1" => Ok(new { items = new[] { new { publicId = "evt_1", status = 4, attemptCount = "\u001b[2J" } }, totalCount = "\u001b]0;x\u0007" }),
+            "POST /events/que_1/replay" => Ok(new { requested = "\u001b[2J", updated = 2, skipped = "x", nextOlderThanEvent = "evt_0" }),
+            _ => throw new InvalidOperationException(req.Key),
+        });
+
+        CliRun search = await Run(api, "events", "search", "que_1");
+        CliRun searchJson = await Run(api, "events", "search", "que_1", "--json");
+        CliRun replay = await Run(api, "replay", "--queue", "que_1", "--status", "dlq");
+
+        Assert.True(search.Exit == ExitCodes.Success, search.Stdout + search.Stderr);
+        Assert.True(searchJson.Exit == ExitCodes.Success, searchJson.Stdout + searchJson.Stderr);
+        Assert.Contains("1 of ? event(s)", search.Stdout);
+        Assert.Contains("? attempt(s)", search.Stdout);
+        Assert.Equal(JsonValueKind.Null, JsonDocument.Parse(searchJson.Stdout).RootElement.GetProperty("totalCount").ValueKind);
+        Assert.Contains("Sending 2 of ? event(s) again; ? skipped.", replay.Stdout);
+        Assert.DoesNotContain('\u001b', search.Stdout + replay.Stdout);
+        // K3: et døgnbudsjett, ingen oppfordring til å kjøre igjen i løkke.
+        Assert.Contains("per day", replay.Stdout);
+        Assert.DoesNotContain("run it again", replay.Stdout);
+    }
+
+    [Fact]
+    public async Task The_json_says_where_the_workspace_came_from_for_replay_unlock_and_resume()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "queuey-operate", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "queuey.deploy.json"), """{ "tenant": "ten_abc", "queues": {} }""");
+        string before = Directory.GetCurrentDirectory();
+        Directory.SetCurrentDirectory(dir);
+        try
+        {
+            var api = new RecordingHandler(req => req.Key switch
+            {
+                "GET /tenants/ten_abc/queues" => FlowAnswers.Queues(),
+                "POST /events/que_orders/evt_1/replay" => Ok(new { ok = true }),
+                "POST /queues/que_orders/unlock" => RecordingHandler.NoContent(),
+                "POST /queues/que_orders/targets/tgt_1/verify-and-resume" => Ok(new { ok = true }),
+                _ => throw new InvalidOperationException(req.Key),
+            });
+            string[][] commands =
+            {
+                new[] { "replay", "evt_1", "--queue", "orders", "--redeliver", "--json" },
+                new[] { "unlock", "orders", "--json" },
+                new[] { "resume", "orders", "--target", "tgt_1", "--json" },
+            };
+            foreach (string[] command in commands)
+            {
+                CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(command.Concat(new[]
+                {
+                    "--api-key", "qak_kid.secret", "--license", "lic_1", "--api-base", "https://api.test",
+                    "--config", Path.Combine(dir, "none.json"),
+                }).ToArray()), api);
+                Assert.True(run.Exit == ExitCodes.Success, string.Join(' ', command) + run.Stdout + run.Stderr);
+                Assert.Equal("queuey.deploy.json", JsonDocument.Parse(run.Stdout).RootElement.GetProperty("workspaceFrom").GetString());
+            }
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(before);
+            try { Directory.Delete(dir, recursive: true); } catch { }
+        }
+    }
 }
