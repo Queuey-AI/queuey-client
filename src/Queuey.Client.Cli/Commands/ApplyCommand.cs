@@ -40,6 +40,9 @@ internal static class ApplyCommand
         if (!TryReadDeploymentFile(map, out string path, out DeploymentFile file, out failure, profile)) return failure;
         DeploymentFile target = profile is null ? file : ForProfile(file, profile, path);
         string? fileTenant = profile is null ? file.ResolveTenant() : target.Tenant;
+        // En fil som ikke kan utvides, feiler der den feilet før; advarselen gjelder bare en fil som kan sendes.
+        try { WarnAboutRedactedUrls(profile is null ? file.Expand() : target); }
+        catch (QueueyConfigurationException) { }
         bool dryRun = map.Has("dry-run");
         if (StoredPlanOptions(map, out string? planId, out TimeSpan wait) is { } refused)
             return refused;
@@ -229,6 +232,27 @@ internal static class ApplyCommand
         }
         Console.Error.WriteLine($"  → Name it, or the next apply creates another: {DeploymentWorkspaceRecord.Variable} for profile {profile}, or --tenant {tenant}.");
         return null;
+    }
+
+    /// <summary>
+    /// Says on stderr which URLs in the file are a redacted reading (with <c>…</c>, Queuey #514): Queuey keeps the stored URL
+    /// only when the file has exactly the reading it showed, and refuses any other with 400 <c>redacted_url_written_back</c>.
+    /// The file goes as it is; the server decides.
+    /// </summary>
+    private static void WarnAboutRedactedUrls(DeploymentFile file)
+    {
+        var redacted = new List<(string Field, string Variable)>();
+        if (DeploymentPuller.CarriesRedactionMarker(file.Workspace?.Delivery?.BaseUrl))
+            redacted.Add(("workspace.delivery.baseUrl", DeploymentPuller.WorkspaceUrlVariable));
+        foreach (KeyValuePair<string, DeploymentQueue> queue in file.Queues)
+        {
+            if (DeploymentPuller.CarriesRedactionMarker(queue.Value.Delivery?.Url))
+                redacted.Add(($"queues.{queue.Key}.delivery.url", DeploymentTemplate.QueueUrlVariable(queue.Key)));
+        }
+        foreach ((string field, string variable) in redacted)
+            Console.Error.WriteLine($"Warning: {field} in the file is a redacted reading ('…' stands for a part Queuey does not show to keys " +
+                                    $"and logins). Queuey keeps the stored URL only if it reads exactly so; write the full URL instead, " +
+                                    $"from a variable such as ${{{variable}}}.");
     }
 
     /// <summary>A workspace apply created because nothing named one and the file says its environment.</summary>

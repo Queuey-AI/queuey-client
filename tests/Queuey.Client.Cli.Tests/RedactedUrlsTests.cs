@@ -105,4 +105,42 @@ public sealed class RedactedUrlsTests
         Assert.DoesNotContain("\u2026", sent);
         Assert.DoesNotContain("\\u2026", sent);
     }
+
+    // ── apply: 400 redacted_url_written_back ────────────────────────────────
+
+    private const string WrittenBackMessage =
+        "The URL in delivery.targets[0].url is a redacted reading ('\u2026' stands for a part Queuey does not show to keys and logins), and it " +
+        "matches no URL stored there, so Queuey can't tell which URL is meant. Nothing was changed.";
+
+    private const string WrittenBackAction =
+        "Send the full URL, for example from a variable (${RECEIVER_URL}) in the deployment file, or send the URL exactly as Queuey " +
+        "showed it to keep the stored one.";
+
+    [Fact]
+    public async Task A_redacted_url_queuey_refuses_is_shown_with_what_to_do()
+    {
+        string dir = Directory.CreateTempSubdirectory("queuey-redacted-400-").FullName;
+        string path = Path.Combine(dir, "queuey.deploy.json");
+        File.WriteAllText(path, """{ "tenant": "ten_abc", "queues": { "orders": { "delivery": { "url": "https://warehouse.test/orders/\u2026" } } } }""");
+        var api = new RecordingHandler(req => req.Method.Method switch
+        {
+            "GET" => RecordingHandler.Json(HttpStatusCode.OK, Array.Empty<object>()),
+            "PUT" => RecordingHandler.Error(HttpStatusCode.BadRequest, "redacted_url_written_back", WrittenBackMessage, WrittenBackAction),
+            _ => throw new InvalidOperationException(req.Key),
+        });
+
+        CliRun human = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path, "--no-git")), api);
+        CliRun json = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path, "--no-git", "--json")), api);
+
+        Assert.NotEqual(ExitCodes.Success, human.Exit);
+        string said = human.Stdout + human.Stderr;
+        Assert.Contains("redacted_url_written_back", said);
+        Assert.Contains("matches no URL stored there", said);
+        Assert.Contains("Send the full URL, for example from a variable", said);
+        // Før sendingen: fila har en redigert lesing, og variabelen pull ville skrevet, nevnes.
+        Assert.Contains("queues.orders.delivery.url in the file is a redacted reading", human.Stderr);
+        Assert.Contains("${QUEUEY_ORDERS_URL}", human.Stderr);
+        Assert.Contains("redacted_url_written_back", json.Stdout);
+        Assert.Contains("Send the full URL", json.Stdout);
+    }
 }
