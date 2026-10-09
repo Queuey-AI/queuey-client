@@ -116,13 +116,36 @@ internal static class Operator
     }
 
     /// <summary>
+    /// <paramref name="url"/> when it may be shown as a link: https (or http on this machine), no user info, and the host of
+    /// the console the login names or of the API host. Null otherwise, with <paramref name="withheld"/> true when there was one.
+    /// </summary>
+    // Security-review av #71 (B3): en lenke fra svaret er tekst serveren styrer, og en agent eller person følger den.
+    internal static string? Link(ResolvedConfig config, string? url, out bool withheld)
+    {
+        withheld = false;
+        if (string.IsNullOrWhiteSpace(url)) return null;
+        if (Uri.TryCreate(url, UriKind.Absolute, out Uri? link) && OAuthClient.IsSafe(link) && string.IsNullOrEmpty(link.UserInfo)
+            && (SameHost(link, ConsolePages.Base(config)) || SameHost(link, config.ResolvedApiBase().ToString())))
+            return link.ToString();
+        withheld = true;
+        return null;
+    }
+
+    private static bool SameHost(Uri link, string? origin)
+        => origin is not null && Uri.TryCreate(origin, UriKind.Absolute, out Uri? o)
+           && string.Equals(link.Host, o.Host, StringComparison.OrdinalIgnoreCase);
+
+    internal const string Withheld = "Queuey's answer had a link to another host than the console or the API, so it is not shown.";
+
+    /// <summary>
     /// Whether <paramref name="answer"/> is Queuey giving the action to a person (202 <c>pending_approval</c>). Writes the link
     /// and returns exit 5 when it is; null otherwise.
     /// </summary>
-    internal static int? Pending(bool json, JsonElement? answer, string what)
+    internal static int? Pending(bool json, ResolvedConfig config, JsonElement? answer, string what)
     {
         if (answer is not { ValueKind: JsonValueKind.Object } a || Text(a, "status") != "pending_approval")
             return null;
+        string? approvalUrl = Link(config, Text(a, "approvalUrl"), out bool withheld);
 
         if (json)
         {
@@ -131,7 +154,8 @@ internal static class Operator
                 schemaVersion = JsonSchemaVersion,
                 status = "pending_approval",
                 operation = Text(a, "operation"),
-                approvalUrl = Text(a, "approvalUrl"),
+                approvalUrl,
+                linkWithheld = withheld ? Withheld : null,
                 expiresAt = Text(a, "expiresAt"),
                 policyRule = Text(a, "policyRule"),
             }, CliHost.JsonOut));
@@ -139,8 +163,10 @@ internal static class Operator
         }
 
         Console.WriteLine($"Nothing was done yet: a person approves {what}.");
-        if (Text(a, "approvalUrl") is { } url)
+        if (approvalUrl is { } url)
             Console.WriteLine($"  They approve or reject it here: {TerminalText.Line(url)}");
+        else if (withheld)
+            Console.WriteLine($"  {Withheld} It waits in the Queuey console's inbox.");
         if (Text(a, "expiresAt") is { } expires)
             Console.WriteLine($"  The request expires {TerminalText.Line(expires)}.");
         if (Text(a, "operation") is { } operation)
@@ -149,8 +175,9 @@ internal static class Operator
     }
 
     /// <summary>Queuey refused because a person does this here (403 <c>approval_required</c>): exit 5, with the page.</summary>
-    internal static int ApprovalRequired(bool json, QueueyException refused, string what)
+    internal static int ApprovalRequired(bool json, ResolvedConfig config, QueueyException refused, string what)
     {
+        string? consoleUrl = Link(config, refused.ConsoleUrl, out bool withheld);
         if (json)
         {
             Console.WriteLine(JsonSerializer.Serialize(new
@@ -159,7 +186,8 @@ internal static class Operator
                 status = "approval_required",
                 message = refused.Message,
                 action = refused.SuggestedAction,
-                consoleUrl = refused.ConsoleUrl,
+                consoleUrl,
+                linkWithheld = withheld ? Withheld : null,
             }, CliHost.JsonOut));
             return ExitCodes.PendingApproval;
         }
@@ -168,8 +196,10 @@ internal static class Operator
         Console.WriteLine($"  {TerminalText.Line(refused.Message)}");
         if (refused.SuggestedAction is { } action)
             Console.WriteLine($"  {TerminalText.Line(action)}");
-        if (refused.ConsoleUrl is { } url)
+        if (consoleUrl is { } url)
             Console.WriteLine($"  In the console: {TerminalText.Line(url)}");
+        else if (withheld)
+            Console.WriteLine($"  {Withheld}");
         return ExitCodes.PendingApproval;
     }
 
@@ -566,10 +596,10 @@ internal static class ResumeCommand
             }
             catch (QueueyException ex) when (Operator.IsApprovalRequired(ex))
             {
-                return Operator.ApprovalRequired(json, ex, "resumes delivery");
+                return Operator.ApprovalRequired(json, session.Config, ex, "resumes delivery");
             }
 
-            if (Operator.Pending(json, answer, $"resuming delivery to {session.Shown}") is { } pending)
+            if (Operator.Pending(json, session.Config, answer, $"resuming delivery to {session.Shown}") is { } pending)
                 return pending;
 
             bool dryRun = map.Has("dry-run");
@@ -632,10 +662,10 @@ internal static class UnlockCommand
             }
             catch (QueueyException ex) when (Operator.IsApprovalRequired(ex))
             {
-                return Operator.ApprovalRequired(json, ex, "unlocks a queue");
+                return Operator.ApprovalRequired(json, session.Config, ex, "unlocks a queue");
             }
 
-            if (Operator.Pending(json, answer, $"unlocking {session.Shown}") is { } pending)
+            if (Operator.Pending(json, session.Config, answer, $"unlocking {session.Shown}") is { } pending)
                 return pending;
 
             if (json)
@@ -695,10 +725,10 @@ internal static class Redeliver
             }
             catch (QueueyException ex) when (Operator.IsApprovalRequired(ex))
             {
-                return Operator.ApprovalRequired(json, ex, "sends these events again");
+                return Operator.ApprovalRequired(json, session.Config, ex, "sends these events again");
             }
 
-            if (Operator.Pending(json, answer, $"sending events in {session.Shown} again") is { } pending)
+            if (Operator.Pending(json, session.Config, answer, $"sending events in {session.Shown} again") is { } pending)
                 return pending;
 
             JsonElement result = answer ?? default;

@@ -160,7 +160,7 @@ public sealed class OperateCommandsTests
         {
             "POST /queues/que_1/targets/tgt_1/verify-and-resume" => RecordingHandler.Json(HttpStatusCode.Accepted, new
             {
-                operation = "op_1", status = "pending_approval", approvalUrl = "https://app.test/console/inbox/op_1?license=lic_1",
+                operation = "op_1", status = "pending_approval", approvalUrl = "https://api.test/console/inbox/op_1?license=lic_1",
                 expiresAt = "2026-10-10T10:00:00Z", policyRule = "v1.key.prod.releases.requires_approval",
             }),
             _ => throw new InvalidOperationException(req.Key),
@@ -172,9 +172,9 @@ public sealed class OperateCommandsTests
         Assert.Equal(ExitCodes.PendingApproval, json.Exit);
         JsonElement root = JsonDocument.Parse(json.Stdout).RootElement;
         Assert.Equal("pending_approval", root.GetProperty("status").GetString());
-        Assert.Equal("https://app.test/console/inbox/op_1?license=lic_1", root.GetProperty("approvalUrl").GetString());
+        Assert.Equal("https://api.test/console/inbox/op_1?license=lic_1", root.GetProperty("approvalUrl").GetString());
         Assert.Equal(ExitCodes.PendingApproval, human.Exit);
-        Assert.Contains("They approve or reject it here: https://app.test/console/inbox/op_1?license=lic_1", human.Stdout);
+        Assert.Contains("They approve or reject it here: https://api.test/console/inbox/op_1?license=lic_1", human.Stdout);
     }
 
     [Fact]
@@ -186,7 +186,7 @@ public sealed class OperateCommandsTests
                 error = new
                 {
                     code = "approval_required", message = "A key does not unlock a queue in a prod workspace.",
-                    action = "A person unlocks it in the console.", consoleUrl = "https://app.test/console/t/ten_1/q/que_1",
+                    action = "A person unlocks it in the console.", consoleUrl = "https://api.test/console/t/ten_1/q/que_1",
                 },
             })
             : throw new InvalidOperationException(req.Key));
@@ -195,8 +195,8 @@ public sealed class OperateCommandsTests
         CliRun human = await Run(api, "unlock", "que_1");
 
         Assert.Equal(ExitCodes.PendingApproval, json.Exit);
-        Assert.Equal("https://app.test/console/t/ten_1/q/que_1", JsonDocument.Parse(json.Stdout).RootElement.GetProperty("consoleUrl").GetString());
-        Assert.Contains("In the console: https://app.test/console/t/ten_1/q/que_1", human.Stdout);
+        Assert.Equal("https://api.test/console/t/ten_1/q/que_1", JsonDocument.Parse(json.Stdout).RootElement.GetProperty("consoleUrl").GetString());
+        Assert.Contains("In the console: https://api.test/console/t/ten_1/q/que_1", human.Stdout);
     }
 
     [Fact]
@@ -363,5 +363,46 @@ public sealed class OperateCommandsTests
         Assert.True(json.Exit == ExitCodes.Success, json.Stdout + json.Stderr);
         foreach (string secret in new[] { "hunter2", "s3cr3t", "sig=", "abc123" })
             Assert.DoesNotContain(secret, json.Stdout + human.Stdout + human.Stderr);
+    }
+
+    // ── B3: lenker fra svaret ───────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("https://evil.test/console/inbox/op_1", true)]               // en annen vert
+    [InlineData("http://api.test/console/inbox/op_1", true)]                 // http utenfor maskinen
+    [InlineData("https://api.test/console/inbox/op_1", false)]
+    public async Task An_approval_link_to_another_host_or_over_plain_http_is_withheld(string url, bool withheld)
+    {
+        var api = new RecordingHandler(req => req.Key == "POST /queues/que_1/unlock"
+            ? RecordingHandler.Json(HttpStatusCode.Accepted, new { operation = "op_1", status = "pending_approval", approvalUrl = url })
+            : throw new InvalidOperationException(req.Key));
+
+        CliRun json = await Run(api, "unlock", "que_1", "--json");
+        CliRun human = await Run(api, "unlock", "que_1");
+
+        Assert.Equal(ExitCodes.PendingApproval, json.Exit);
+        JsonElement root = JsonDocument.Parse(json.Stdout).RootElement;
+        Assert.Equal(withheld ? null : url, root.GetProperty("approvalUrl").GetString());
+        Assert.Equal(withheld, root.GetProperty("linkWithheld").ValueKind == JsonValueKind.String);
+        Assert.Equal(withheld, human.Stdout.Contains("a link to another host", StringComparison.Ordinal));
+        if (withheld)
+            Assert.DoesNotContain(url, json.Stdout + human.Stdout);
+    }
+
+    [Fact]
+    public async Task A_console_link_with_user_info_is_dropped_already_in_the_sdk()
+    {
+        var api = new RecordingHandler(req => req.Key == "POST /queues/que_1/unlock"
+            ? RecordingHandler.Json(HttpStatusCode.Forbidden, new
+            {
+                error = new { code = "approval_required", message = "A person unlocks it.", consoleUrl = "https://api.test@evil.test/console" },
+            })
+            : throw new InvalidOperationException(req.Key));
+
+        CliRun run = await Run(api, "unlock", "que_1", "--json");
+
+        Assert.Equal(ExitCodes.PendingApproval, run.Exit);
+        Assert.Equal(JsonValueKind.Null, JsonDocument.Parse(run.Stdout).RootElement.GetProperty("consoleUrl").ValueKind);
+        Assert.DoesNotContain("evil.test", run.Stdout + run.Stderr);
     }
 }

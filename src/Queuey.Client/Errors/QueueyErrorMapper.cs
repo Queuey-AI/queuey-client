@@ -53,7 +53,11 @@ internal static class QueueyErrorMapper
         };
     }
 
-    /// <summary>The <c>error.consoleUrl</c> of the envelope, when it is an absolute http(s) URL; null otherwise.</summary>
+    /// <summary>
+    /// The <c>error.consoleUrl</c> of the envelope, when it is an absolute https URL (or http on this machine) without user
+    /// info; null otherwise. A link with user@host reads as another host than it is.
+    /// </summary>
+    // Security-review av queuey-client #71 (B3): samme regel som konsoll-lenken fra innloggingen (K4 i #69).
     private static string? ConsoleUrlOf(string? body)
     {
         if (string.IsNullOrWhiteSpace(body)) return null;
@@ -64,7 +68,8 @@ internal static class QueueyErrorMapper
                    && doc.RootElement.TryGetProperty("error", out JsonElement error) && error.ValueKind == JsonValueKind.Object
                    && error.TryGetProperty("consoleUrl", out JsonElement url) && url.ValueKind == JsonValueKind.String
                    && Uri.TryCreate(url.GetString(), UriKind.Absolute, out Uri? parsed)
-                   && (parsed.Scheme == Uri.UriSchemeHttps || parsed.Scheme == Uri.UriSchemeHttp)
+                   && (parsed.Scheme == Uri.UriSchemeHttps || (parsed.Scheme == Uri.UriSchemeHttp && parsed.IsLoopback))
+                   && string.IsNullOrEmpty(parsed.UserInfo)
                 ? parsed.ToString()
                 : null;
         }
