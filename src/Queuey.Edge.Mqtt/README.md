@@ -5,7 +5,7 @@ subscribe to topics on a local broker and hand every message to the durable
 Edge spool before acknowledging it.
 
 ```csharp
-builder.Services.AddQueueyEdge(o => { o.ApiKey = "qak_…"; o.TenantPublicId = "ten_…"; });
+builder.Services.AddQueueyEdge(o => o.UseEnvironmentVariables()); // the signing pair from `queuey keys mint --write`, and QUEUEY_TENANT
 
 builder.Services.AddQueueyEdgeMqttSource(m =>
 {

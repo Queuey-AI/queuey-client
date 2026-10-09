@@ -13,17 +13,23 @@ disk and drain, in order, when the world comes back. That is the product.
 
 ## Run it
 
-Create a queue (e.g. `sensor-readings`) and a **publish-only, tenant-scoped**
-API key for the tenant, then:
+Create a queue (e.g. `sensor-readings`) and its signing key, which goes into
+`.env` without ever being shown, then:
 
 ```bash
-export QUEUEY_API_KEY="qak_..."          # publish-only Edge key
+queuey keys mint --queue sensor-readings --write .env   # QUEUEY_SIGNING_KEY_ID + QUEUEY_SIGNING_SECRET
+export DOTNET_ENVIRONMENT=Development     # Edge reads the pair from ./.env only in Development
 export QUEUEY_TENANT="ten_..."
 export QUEUEY_INGRESS_BASE="http://localhost:5084"   # omit for production
 # optional: QUEUEY_DEMO_QUEUE (default sensor-readings), QUEUEY_DEMO_INTERVAL (default 5s)
 
 dotnet run --project samples/Queuey.Edge.Demo
 ```
+
+Edge signs every transfer with that key when it sends, so the workspace may take
+signed requests only. A **publish-only API key** is the alternative:
+`export QUEUEY_API_KEY="qak_..."` instead of the `.env` (it is read only when no
+signing pair is set).
 
 The dashboard shows the same `IQueueyEdgeHealth` snapshot any monitoring
 system would read:
@@ -53,7 +59,8 @@ system would read:
 - **Lost ACK:** hard-kill the demo mid-transfer (`kill -9`); on restart the
   event is re-sent with the same transfer identity and Cloud answers
   `replayed: true` — one logical event, never two.
-- **Wrong credentials:** set a bad `QUEUEY_API_KEY`; the state becomes
+- **Wrong credentials:** revoke the key (`queuey keys revoke hsk_...`) or set a bad
+  `QUEUEY_SIGNING_SECRET`; the state becomes
   `RequiresAction (AuthenticationRejected)` and events are *retained*,
   probing slowly. Fix the key, restart, and everything drains. Nothing was
   lost, nothing hot-looped.
