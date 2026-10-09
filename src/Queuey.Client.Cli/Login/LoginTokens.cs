@@ -94,7 +94,16 @@ internal sealed class LoginTokens
                 errorCode: answer.Error);
         }
 
-        Apply(login, answer);
+        try
+        {
+            Apply(login, answer);
+        }
+        catch (QueueyException ex) when (ex.ErrorCode == "login_scope_broader")
+        {
+            Forget(path, file, login);
+            throw;
+        }
+
         LoginStore.Write(path, file);
         return login;
     }
@@ -102,6 +111,15 @@ internal sealed class LoginTokens
     /// <summary>The tokens and what came with them in <paramref name="answer"/>, onto <paramref name="login"/>.</summary>
     internal static void Apply(StoredLogin login, TokenAnswer answer)
     {
+        // Et svar med bredere scope enn innloggingen har (operate for read), lagres aldri, heller ikke ved en fornyelse
+        // (security-review av #68, K2). Ingenting er endret når dette kastes.
+        if (ScopeOf(answer.Scope) is { } granted && !string.IsNullOrEmpty(login.Scope) && !WithinScope(granted, login.Scope))
+            throw new QueueyException($"Queuey granted scope {granted} where the login has {login.Scope}, so it was not kept.",
+                errorCode: "login_scope_broader")
+            {
+                SuggestedAction = "Disconnect it under Connected apps in the Queuey console, and run queuey login again.",
+            };
+
         login.AccessToken = answer.AccessToken!;
         login.AccessTokenExpiresAt = Now() + TimeSpan.FromSeconds(answer.ExpiresIn is > 0 ? answer.ExpiresIn.Value : 3600);
         // Refresh-tokenet roterer: det nye lagres alltid. Uten et nytt i svaret gjelder det gamle fortsatt (RFC 6749 §6).

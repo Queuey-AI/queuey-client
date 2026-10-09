@@ -49,9 +49,10 @@ internal static class LoginCommand
 
         // Blindtesten 2026-10-09 (funn 6): ingress-verten Queuey ga, var lokalt en gammel tunnel. --ingress-base overstyrer den,
         // også for innloggingen, og sjekkes før noe sendes.
+        // Samme regel som endepunktene (OAuthClient.IsSafe, security-review av #68, K1): https, eller http på denne maskinen.
         if (Clean(map.Get("ingress-base")) is { } ingressFlag
-            && !(Uri.TryCreate(ingressFlag, UriKind.Absolute, out Uri? ingressUri) && (ingressUri.Scheme == Uri.UriSchemeHttp || ingressUri.Scheme == Uri.UriSchemeHttps)))
-            return CliErrors.Usage(map, "invalid_value", $"--ingress-base takes an absolute http or https URL; got '{CliErrors.Shown(ingressFlag)}'.",
+            && !(Uri.TryCreate(ingressFlag, UriKind.Absolute, out Uri? ingressUri) && OAuthClient.IsSafe(ingressUri)))
+            return CliErrors.Usage(map, "invalid_value", $"--ingress-base takes an https URL, or http on this machine; got '{CliErrors.Shown(ingressFlag)}'.",
                 "Such as http://localhost:5084 for a Queuey on this machine.");
 
         string? profile = CliHost.Profile(map);
@@ -417,20 +418,18 @@ internal static class LoginCommand
                 Scope = Scope,
                 LoggedInAt = LoginTokens.Now(),
             };
-            LoginTokens.Apply(login, answer);
-
             // Et svar med bredere scope enn det som ble bedt om (operate for read), lagres ikke: tokenet ville kunne mer enn
-            // personen godkjente at denne maskinen skulle få (security-review KAN 2, 2026-10-09).
-            if (!LoginTokens.WithinScope(login.Scope, Scope))
+            // personen godkjente at denne maskinen skulle få (security-review KAN 2, 2026-10-09). Apply sjekker det, med Scope satt
+            // til det som ble bedt om, og sjekker det samme ved hver fornyelse (#68, K2).
+            try
+            {
+                LoginTokens.Apply(login, answer);
+            }
+            catch (QueueyException ex) when (ex.ErrorCode == "login_scope_broader")
             {
                 file.Pending.RemoveAll(p => p.DeviceCode == pending.DeviceCode);
                 LoginStore.Write(Path, file);
-                throw new QueueyException(
-                    $"{Host} granted scope {login.Scope} when {Scope} was asked for, so the login was not kept.",
-                    errorCode: "login_scope_broader")
-                {
-                    SuggestedAction = "Disconnect it under Connected apps in the Queuey console, and run queuey login again.",
-                };
+                throw;
             }
 
             StoredLogin? replaced = file.Find(Host, login.License);
@@ -538,6 +537,9 @@ internal static class LoginCommand
                 if (login.Scope != Scope)
                     Console.Error.WriteLine($"Note: Queuey granted only scope {login.Scope}, narrower than {Scope}: this login can look, not change.");
                 Console.WriteLine($"{(already ? "Already logged in" : "Logged in")} to {Host}{who}, license {login.License}, scope {login.Scope}.");
+                // Ingress-verten innloggingen bruker, også når den var der fra før (security-review av #68, K1).
+                Console.WriteLine($"Ingress host: {TerminalText.Line(login.IngressBase ?? "Queuey's default")}" +
+                                  (login.IngressBaseFromFlag ? " (from --ingress-base)" : login.IngressBase is null ? "" : " (as Queuey gave it)"));
                 if (Profile is not null)
                     Console.WriteLine(tenant is null
                         ? $"Profile {Profile} ({profileFile}): license and hosts written, no workspace."

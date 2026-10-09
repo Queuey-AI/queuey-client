@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Queuey.Client;
 using Queuey.Client.Cli;
 
 namespace Queuey.Client.Cli.Tests;
@@ -428,6 +429,65 @@ public sealed class LoginCommandTests : IDisposable
         var stored = new StoredLogin { IngressBase = "http://localhost:5084", IngressBaseFromFlag = true };
         LoginTokens.Apply(stored, new TokenAnswer("at", 3600, "rt", "operate", "lic_new", "https://old-tunnel.loca.lt", null, null, null));
         Assert.Equal("http://localhost:5084", stored.IngressBase);
+    }
+
+    [Theory]
+    [InlineData("http://ingress.elsewhere.test")]
+    [InlineData("ftp://localhost:5084")]
+    public async Task Ingress_base_on_login_takes_only_https_or_http_on_this_machine(string value)
+    {
+        // Security-review av #68 (K1): samme regel som endepunktene.
+        var server = new FakeAuthServer();
+
+        CliRun run = await Run(server, "login", "--api-base", FakeAuthServer.Api, "--ingress-base", value);
+
+        Assert.Equal(ExitCodes.Usage, run.Exit);
+        Assert.Contains("--ingress-base takes an https URL, or http on this machine", run.Stderr);
+        Assert.Empty(server.Handler.Requests);
+    }
+
+    [Fact]
+    public async Task The_ingress_host_is_shown_also_when_already_logged_in()
+    {
+        var server = new FakeAuthServer();
+        StoreLogin(server, TimeSpan.FromMinutes(30));
+
+        CliRun run = await Run(server, "login", "--api-base", FakeAuthServer.Api);
+
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        Assert.Contains("Already logged in", run.Stdout);
+        Assert.Contains("Ingress host: https://ingress.test (as Queuey gave it)", run.Stdout);
+    }
+
+    [Fact]
+    public async Task A_renewal_with_a_broader_scope_is_not_kept_and_ends_the_login_here()
+    {
+        // Security-review av #68 (K2): en fornyelse som gir mer enn innloggingen har, lagres ikke.
+        var server = new FakeAuthServer(req => throw new InvalidOperationException(req.Key)) { GrantedScope = "operate" };
+        (string access, string refresh) = server.Issue();
+        Directory.CreateDirectory(_queuey);
+        LoginStore.Write(CredentialsFile, new CredentialsFile
+        {
+            Logins =
+            {
+                new StoredLogin
+                {
+                    ApiBase = FakeAuthServer.Api, License = "lic_new", Scope = "read", AccessToken = access,
+                    AccessTokenExpiresAt = _now, RefreshToken = refresh, LoggedInAt = _now - TimeSpan.FromDays(1),
+                },
+            },
+        });
+
+        QueueyException? ex = null;
+        await CliHarness.RunAsync(async () =>
+        {
+            ex = await Assert.ThrowsAsync<QueueyException>(() =>
+                LoginTokens.RenewAsync(CredentialsFile, new Uri(FakeAuthServer.Api), "lic_new", CancellationToken.None));
+            return 0;
+        }, server.Handler, Env());
+
+        Assert.Equal("login_scope_broader", ex!.ErrorCode);
+        Assert.Empty(Stored().GetProperty("logins").EnumerateArray());
     }
 
     [Fact]
