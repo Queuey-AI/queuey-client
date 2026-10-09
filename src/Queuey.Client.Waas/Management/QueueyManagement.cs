@@ -227,6 +227,10 @@ internal sealed class QueueyManagement : IQueueyManagement
             .MintIngressKeyAsync(queuePublicId, new CreateQueueHmacClientWireRequest { Name = name.Trim() }, cancellationToken)
             .ConfigureAwait(false);
 
+        if (string.Equals(r.Status, CredentialRotationPendingException.PendingApproval, StringComparison.Ordinal))
+            throw new IngressKeyPendingException(r.Message ?? "A person decides on this key in Queuey's inbox; nothing was minted.",
+                r.ApprovalUrl, r.ExpiresAt, r.PolicyRule);
+
         return new IngressSigningKey
         {
             ClientPublicId = r.ClientPublicId,
@@ -236,6 +240,14 @@ internal sealed class QueueyManagement : IQueueyManagement
             QueuePublicId = r.QueuePublicId,
         };
     }
+
+    /// <summary>The signing keys of <paramref name="queuePublicId"/>, active and revoked: metadata, never a secret.</summary>
+    internal async Task<IReadOnlyList<QueueHmacClientWireResponse>> ListIngressKeysAsync(string queuePublicId, CancellationToken cancellationToken = default)
+        => await _controlPlane.ListIngressKeysAsync(queuePublicId, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>Revokes signing key <paramref name="keyId"/>: every producer that signs with it is refused at once.</summary>
+    internal Task RevokeIngressKeyAsync(string keyId, string? reason, CancellationToken cancellationToken = default)
+        => _controlPlane.RevokeIngressKeyAsync(keyId, reason, cancellationToken);
 
     public Task SetWorkspacePolicyAsync(string tenantPublicId, DeploymentWorkspace policy, CancellationToken cancellationToken = default)
     {

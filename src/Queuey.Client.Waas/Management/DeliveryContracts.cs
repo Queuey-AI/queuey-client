@@ -418,4 +418,47 @@ internal sealed class CreateQueueHmacClientWireResponse
     public string? KeyId { get; set; }
     public string? Secret { get; set; }
     public string? QueuePublicId { get; set; }
+
+    // 202 når policyen gir mintingen til en person (som rotate, Queuey #511). Ingen av feltene over er satt da, og ingen nøkkel
+    // er laget. Queuey svarer ikke slik for minting i dag (2026-10-09); CLI-en er klar når den gjør det.
+    public string? Status { get; set; }
+    public string? ApprovalUrl { get; set; }
+    public System.DateTimeOffset? ExpiresAt { get; set; }
+    public string? PolicyRule { get; set; }
+    public string? Message { get; set; }
+}
+
+/// <summary>Wire shape of one key in <c>GET /hmacclients/queues/{que}</c>: metadata only, never the secret.</summary>
+internal sealed class QueueHmacClientWireResponse
+{
+    public string? ClientPublicId { get; set; }
+    public string? ClientName { get; set; }
+    public bool ClientIsActive { get; set; }
+    public string? KeyId { get; set; }
+    public bool KeyIsActive { get; set; }
+    public System.DateTimeOffset? ExpiresAtUtc { get; set; }
+    public System.DateTimeOffset? LastUsedAtUtc { get; set; }
+    public System.DateTimeOffset? RevokedAtUtc { get; set; }
+    public string? RevokedReason { get; set; }
+}
+
+internal sealed class RevokeSigningKeyWireRequest
+{
+    public string? Reason { get; set; }
+}
+
+/// <summary>A mint Queuey gave to a person (202): nothing was minted, and the link is where they decide.</summary>
+internal sealed class IngressKeyPendingException : QueueyException
+{
+    public IngressKeyPendingException(string message, string? approvalUrl, System.DateTimeOffset? expiresAt, string? policyRule)
+        : base(message, 202, CredentialRotationPendingException.PendingApproval)
+    {
+        ApprovalUrl = approvalUrl;
+        ExpiresAt = expiresAt;
+        PolicyRule = policyRule;
+    }
+
+    public string? ApprovalUrl { get; }
+    public System.DateTimeOffset? ExpiresAt { get; }
+    public string? PolicyRule { get; }
 }

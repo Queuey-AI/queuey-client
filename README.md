@@ -940,11 +940,24 @@ what apply skipped is under `skipped`, and what the check found detached under `
 ### Publishing with HMAC instead of an API key
 
 ```bash
-queuey keys mint --queue que_...
+queuey keys mint --queue orders --write .env
 ```
 
-The secret is shown once. This needs a credential with key-management rights — a deploy key
-deliberately has none, since a key that can mint keys turns pipeline access into account access.
+This writes `QUEUEY_SIGNING_KEY_ID` and `QUEUEY_SIGNING_SECRET` into `.env` and never prints the
+secret, not in `--json` either.
+
+- The lines that set them are replaced, and every other line stays. A new file is readable only by you.
+- In a git repository the file must be one git ignores, or nothing is minted.
+- The producer reads them from the environment: `options.UseEnvironmentVariables()` in .NET fills each
+  setting that is not set in code, from `QUEUEY_SIGNING_KEY_ID`, `QUEUEY_SIGNING_SECRET`,
+  `QUEUEY_TENANT`, `QUEUEY_INGRESS_BASE` and `QUEUEY_API_KEY`.
+- Without `--write`, the secret is shown once.
+
+Minting needs a login (`queuey login`) for a person who may manage keys, or a credential with
+key-management rights. A deploy key deliberately has none, since a key that can mint keys turns pipeline
+access into account access. When Queuey gives the mint to a person, the command exits `5` with the link,
+and nothing is minted. `queuey keys list --queue orders` shows a queue's keys, and `queuey keys revoke
+<keyId>` ends one.
 
 ## CLI (`queuey`)
 
@@ -1006,7 +1019,7 @@ still goes to the inbox. Every command without an API key uses it for the API ho
   it, never a token.
 - A profile or `queuey.json` with an `apiKey` works as before, and the key wins over a login.
 - Publishing to the ingress (`queuey publish`, your producer) still needs a key. The ingress does not
-  take a login.
+  take a login. `queuey keys mint --queue <queue> --write .env` makes one for the producer.
 
 ### Commands
 
@@ -1033,7 +1046,8 @@ still goes to the inbox. Every command without an API key uses it for the API ho
 | `credentials set` | Store a delivery secret under a name a deployment file can refer to |
 | `credentials request` | Ask a person to paste a secret in the Queuey console, so it never passes through you |
 | `credentials list` | List stored credentials — names and types, never values |
-| `keys mint` | Mint an ingress signing key so a producer can publish with HMAC |
+| `keys mint` | Mint an ingress signing key so a producer can publish with HMAC; `--write .env` puts it in a git-ignored file and never prints the secret |
+| `keys list` / `keys revoke` | A queue's signing keys (never a secret), or end one |
 
 **Operate and inspect:**
 
@@ -1141,7 +1155,7 @@ exactly that rather than bouncing you with a policy error.
 
 **A deploy key cannot mint keys.** `keys mint` needs a credential with key-management rights, on
 purpose: a pipeline key that could hand out credentials would turn repo access into account access.
-Mint once from an admin credential and put the result in your secret store.
+Mint once while logged in, or from an admin credential, with `--write .env` or into your secret store.
 
 **`credentials set` reads the secret from the environment, never an argument.** Arguments land in
 shell history and CI logs. Setting the value a credential already holds keeps its version, and makes it usable again

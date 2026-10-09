@@ -597,6 +597,29 @@ internal sealed class QueueyControlPlaneClient
             HttpMethod.Post, uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>The signing keys of a queue (<c>GET /hmacclients/queues/{que}</c>): metadata, never a secret.</summary>
+    public async Task<List<QueueHmacClientWireResponse>> ListIngressKeysAsync(string queuePublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = Authenticator();
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "hmacclients", "queues", queuePublicId);
+        return await _connection.SendForJsonAsync<List<QueueHmacClientWireResponse>>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Revokes a signing key (<c>POST /hmacclients/hmac-signing-keys/{keyId}/revoke</c>, 204).</summary>
+    public async Task RevokeIngressKeyAsync(string keyId, string? reason, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = Authenticator();
+        string license = RequireLicense();
+
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "hmacclients", "hmac-signing-keys", keyId, "revoke");
+        byte[] body = JsonSerializer.SerializeToUtf8Bytes(new RevokeSigningKeyWireRequest { Reason = reason }, QueueyJson.Options);
+        await _connection.SendAsync(HttpMethod.Post, uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     // ── Package lifecycle (update / archive / remove stream) ───────────────────
 
     /// <summary>Updates a package's name/description (<c>PUT …/packages/{pkg}</c>).</summary>
