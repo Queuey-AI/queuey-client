@@ -60,6 +60,46 @@ public sealed class CredentialsRotateTests
         Assert.Equal(60, Assert.Single(gracedApi.Requests).Json.GetProperty("graceMinutes").GetInt32());
     }
 
+    // Queuey #511 (2026-10-09): en nøkkels rotasjon uten vindu i prod svarer 202 pending_approval, og en person limer inn verdien.
+    private static HttpResponseMessage Pending() => RecordingHandler.Json(HttpStatusCode.Accepted, new
+    {
+        status = "pending_approval",
+        credentialRequest = "creq_tzFawj0uizKU",
+        approvalUrl = "https://app.queuey.ai/console/t/ten_abc/credential-requests/creq_tzFawj0uizKU",
+        expiresAt = "2026-10-10T08:00:00Z",
+        policyRule = "v1.key.prod.replaces_secret.requires_approval",
+        message = "An API key does not replace the secret of credential 'stripe-whsec' without a grace window in a prod workspace, so a person approves it.",
+    });
+
+    [Fact]
+    public async Task A_rotation_queuey_gives_to_a_person_prints_the_link_and_exits_5_without_the_value()
+    {
+        (CliRun run, _) = await Rotate(Pending);
+
+        Assert.Equal(ExitCodes.PendingApproval, run.Exit);
+        Assert.Contains("Nothing was rotated: a person has to paste the new value, and the value you sent was not kept.", run.Stdout);
+        Assert.Contains("  Give this link to a person who may manage the workspace's credentials: "
+                        + "https://app.queuey.ai/console/t/ten_abc/credential-requests/creq_tzFawj0uizKU", run.Stdout);
+        Assert.Contains("The request expires at 2026-10-10 08:00 UTC.", run.Stdout);
+        Assert.DoesNotContain("Rotated the secret", run.Stdout);
+        Assert.DoesNotContain(Value, run.Stdout + run.Stderr);
+    }
+
+    [Fact]
+    public async Task A_rotation_queuey_gives_to_a_person_is_pending_approval_in_json_with_the_link()
+    {
+        (CliRun run, _) = await Rotate(Pending, "--json");
+
+        Assert.Equal(ExitCodes.PendingApproval, run.Exit);
+        JsonElement root = JsonDocument.Parse(run.Stdout).RootElement;
+        Assert.Equal("pending_approval", root.GetProperty("status").GetString());
+        Assert.Equal("https://app.queuey.ai/console/t/ten_abc/credential-requests/creq_tzFawj0uizKU", root.GetProperty("approvalUrl").GetString());
+        Assert.Equal("creq_tzFawj0uizKU", root.GetProperty("credentialRequest").GetString());
+        Assert.Equal("v1.key.prod.replaces_secret.requires_approval", root.GetProperty("policyRule").GetString());
+        Assert.False(root.TryGetProperty("publicId", out _));
+        Assert.DoesNotContain(Value, run.Stdout + run.Stderr);
+    }
+
     [Fact]
     public async Task A_rotation_with_a_window_says_until_when_the_previous_secret_verifies_and_never_prints_the_value()
     {

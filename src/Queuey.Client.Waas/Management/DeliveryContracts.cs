@@ -261,6 +261,14 @@ internal sealed class CredentialWireResponse
     public List<string>? BoundQueues { get; set; }
     public bool? SecretReplaced { get; set; }
     public bool? GraceWindowClosed { get; set; }
+
+    // 202 fra rotate (Queuey #511, 2026-10-09): en person limer inn verdien. Ingen av feltene over er satt da.
+    public string? Status { get; set; }
+    public string? CredentialRequest { get; set; }
+    public string? ApprovalUrl { get; set; }
+    public System.DateTimeOffset? ExpiresAt { get; set; }
+    public string? PolicyRule { get; set; }
+    public string? Message { get; set; }
 }
 
 /// <summary>Wire shape of <c>GET /tenants/{ten}/config</c> — the workspace's delivery + policy.</summary>

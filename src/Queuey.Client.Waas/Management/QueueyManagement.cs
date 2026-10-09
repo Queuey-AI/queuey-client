@@ -164,6 +164,12 @@ internal sealed class QueueyManagement : IQueueyManagement
             ExpectedVersion = expectedVersion,
         }, cancellationToken).ConfigureAwait(false);
 
+        // Queuey #511 (2026-10-09): en nøkkels rotasjon uten vindu i prod svarer 202, og en person limer inn verdien. Ingenting er
+        // lagret, og verdien som ble sendt, er ikke beholdt.
+        if (string.Equals(r.Status, CredentialRotationPendingException.PendingApproval, StringComparison.Ordinal))
+            throw new CredentialRotationPendingException(r.Message ?? "A person approves this rotation by pasting the new value.",
+                r.CredentialRequest, r.ApprovalUrl, r.ExpiresAt, r.PolicyRule);
+
         return ToResult(r);
     }
 

@@ -294,6 +294,10 @@ internal static class CredentialsCommand
                 $"Replace the secret with queuey credentials set --name {name} --from-env {fromEnv} --replace, which opens no grace window.",
                 status: 404, ExitCodes.RuntimeError, "Queuey error");
         }
+        catch (CredentialRotationPendingException pending)
+        {
+            return RotationPending(map.Has("json"), pending);
+        }
         catch (QueueyConflictException ex) when (ex.ErrorCode == "credential_changed_meanwhile")
         {
             return CliErrors.Write(map.Has("json"), "credential_changed_meanwhile",
@@ -343,6 +347,37 @@ internal static class CredentialsCommand
               + "the same value closes the window."
             : "The previous secret stopped verifying at once.");
         return ExitCodes.Success;
+    }
+
+    /// <summary>
+    /// A rotation Queuey gave to a person (202, Queuey #511): the link where they paste the value, and exit 5. The secret that
+    /// was sent is never printed; Queuey did not keep it.
+    /// </summary>
+    private static int RotationPending(bool json, CredentialRotationPendingException pending)
+    {
+        if (json)
+        {
+            Console.WriteLine(JsonSerializer.Serialize(new
+            {
+                status = CredentialRotationPendingException.PendingApproval,
+                approvalUrl = pending.ApprovalUrl,
+                credentialRequest = pending.CredentialRequest,
+                expiresAt = pending.ExpiresAt,
+                policyRule = pending.PolicyRule,
+                message = pending.Message,
+            }, CliHost.JsonOut));
+            return ExitCodes.PendingApproval;
+        }
+
+        // Teksten og lenken kommer fra serveren, så de går gjennom TerminalText (F2.7-regelen).
+        Console.WriteLine("Nothing was rotated: a person has to paste the new value, and the value you sent was not kept.");
+        Console.WriteLine(pending.ApprovalUrl is { } url
+            ? $"  Give this link to a person who may manage the workspace's credentials: {TerminalText.Line(url)}"
+            : $"  A person pastes it on credential request {TerminalText.Line(pending.CredentialRequest ?? "?")} in the Queuey console.");
+        if (pending.ExpiresAt is { } expires)
+            Console.WriteLine($"  The request expires at {expires.UtcDateTime:yyyy-MM-dd HH:mm} UTC. The rotation runs when they paste the value.");
+        Console.Error.WriteLine(TerminalText.Line(pending.Message));
+        return ExitCodes.PendingApproval;
     }
 
     private static async Task<int> RequestAsync(string[] args)

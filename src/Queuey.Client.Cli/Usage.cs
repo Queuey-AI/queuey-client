@@ -408,6 +408,11 @@ CREDENTIALS
                  version n of its secret (credentials list shows it); another is refused
                  (credential_changed_meanwhile, exit 1) and nothing is stored. A name the
                  workspace has no credential under is refused (credential_not_found, exit 1).
+                 Where Queuey's policy gives the rotation to a person, as an API key's
+                 without a window in a prod workspace, nothing is stored and the value is
+                 not kept: a person pastes the new value on the link rotate prints, and the
+                 rotation runs then. Exit 5; --json prints { ""status"": ""pending_approval"",
+                 ""approvalUrl"", ""credentialRequest"", ""expiresAt"", ""policyRule"", ""message"" }.
   queuey credentials request <name> [--type <type>] [--key-id <id>] [--username <u>]
                 [--profile <name>] [--json]
                  Asks a person for a secret, so it never passes through this terminal or a
