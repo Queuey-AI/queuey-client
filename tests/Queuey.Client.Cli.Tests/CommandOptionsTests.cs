@@ -58,17 +58,18 @@ public sealed class CommandOptionsTests : IDisposable
     }
 
     [Fact]
-    public async Task Apply_plan_fails_as_an_unknown_option_that_points_at_the_plan_verb()
+    public async Task Apply_plan_without_a_plan_id_fails_before_anything_is_sent_and_points_at_the_plan_verb()
     {
-        // En eldre CLI kjører `apply --plan` som en ekte apply; denne sier hvor planen er flyttet.
+        // Queuey F3.11: --plan tar id-en til en plan Queuey lagrer. Uten en er det aldri en apply, og visningen av hva apply ville
+        // gjort, er fortsatt verbet queuey plan (2026-09-24).
         RecordingHandler api = PlanningServer();
 
         CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", DeployFile(), "--plan")), api);
 
         Assert.Equal(ExitCodes.Usage, run.Exit);
         Assert.Empty(api.Requests);
-        Assert.Contains("Unknown option --plan for queuey apply.", run.Stderr);
-        Assert.Contains("`apply --plan` is now `queuey plan`", run.Stderr);
+        Assert.Contains("--plan takes the id of a plan Queuey stores, plan_…", run.Stderr);
+        Assert.Contains("`queuey plan --local`", run.Stderr);
     }
 
     [Fact]
@@ -97,7 +98,8 @@ public sealed class CommandOptionsTests : IDisposable
         string[] valid = error.GetProperty("validOptions").EnumerateArray().Select(v => v.GetString()!).ToArray();
         Assert.Contains("--dry-run", valid);
         Assert.Contains("--tenant", valid);
-        Assert.DoesNotContain("--plan", valid);
+        // apply --plan plan_… applyer en plan Queuey lagrer (F3.11).
+        Assert.Contains("--plan", valid);
     }
 
     [Theory]

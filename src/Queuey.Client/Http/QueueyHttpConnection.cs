@@ -15,9 +15,22 @@ namespace Queuey.Client;
 internal sealed class QueueyHttpConnection
 {
     private readonly HttpClient _client;
+    private readonly Action<HttpResponseMessage>? _observe;
 
     public QueueyHttpConnection(HttpClient client)
-        => _client = client ?? throw new ArgumentNullException(nameof(client));
+        : this(client, observe: null)
+    {
+    }
+
+    /// <summary>
+    /// A connection that shows every response to <paramref name="observe"/> before it is read or mapped to an error: the
+    /// control plane reads Queuey's warning headers there (<c>X-Queuey-Warning</c>), and the step a dry run added to a plan.
+    /// </summary>
+    public QueueyHttpConnection(HttpClient client, Action<HttpResponseMessage>? observe)
+    {
+        _client = client ?? throw new ArgumentNullException(nameof(client));
+        _observe = observe;
+    }
 
     /// <summary>Sends a request and deserializes the (2xx) JSON response into <typeparamref name="T"/>.</summary>
     public async Task<T> SendForJsonAsync<T>(
@@ -47,6 +60,7 @@ internal sealed class QueueyHttpConnection
         using HttpResponseMessage response = await _client
             .SendAsync(request, cancellationToken)
             .ConfigureAwait(false);
+        _observe?.Invoke(response);
 
         if (!response.IsSuccessStatusCode)
             throw await QueueyErrorMapper.CreateAsync(response, cancellationToken).ConfigureAwait(false);
@@ -80,6 +94,7 @@ internal sealed class QueueyHttpConnection
         using HttpResponseMessage response = await _client
             .SendAsync(request, cancellationToken)
             .ConfigureAwait(false);
+        _observe?.Invoke(response);
 
         if (!response.IsSuccessStatusCode)
             throw await QueueyErrorMapper.CreateAsync(response, cancellationToken).ConfigureAwait(false);
@@ -118,6 +133,7 @@ internal sealed class QueueyHttpConnection
         using HttpResponseMessage response = await _client
             .SendAsync(request, cancellationToken)
             .ConfigureAwait(false);
+        _observe?.Invoke(response);
 
         if (!response.IsSuccessStatusCode)
             throw await QueueyErrorMapper.CreateAsync(response, cancellationToken).ConfigureAwait(false);

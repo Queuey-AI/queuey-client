@@ -135,6 +135,7 @@ APPLY
   queuey apply [--file queuey.deploy.json] [--dry-run] [--check] [--continue-on-error] [--json]
                [--repo <url|owner/repo>] [--repo-path <path>] [--commit <sha>] [--no-git]
                [--adopt <queue>|workspace[,…]] [--profile <name>]
+  queuey apply [--file queuey.deploy.json] --plan <plan_…> [--wait [--timeout <seconds>]] [--json]
                  Converges the workspace's delivery defaults, then each declared queue's
                  behaviour and destination. Idempotent; exits non-zero unless it fully
                  converged. --dry-run validates the file locally and sends nothing. To ask
@@ -204,32 +205,68 @@ APPLY
                  it with who detached it, when and why. --adopt takes it back: apply shows what
                  the file changes on it, then writes it. A queue named workspace is taken back
                  with --adopt queue:workspace.
-                 --json prints { ""schemaVersion"": 1, ""file"", ""source"", ""enforcement"",
-                 ""skipped"": […], ""queues"": […], … }; --check --json { ""schemaVersion"": 1,
-                 ""file"", ""inSync"", ""drift"": […], ""detached"": […] }.
+                 Configuration plans: when Queuey applies to the workspace from an API key
+                 only through a plan (plan_required, a production workspace), apply makes
+                 the plan itself, as queuey plan does, and applies it at once when the
+                 policy runs it. When a person approves it, apply prints where, writes
+                 nothing and exits 5; --wait waits for the approval, at most --timeout
+                 seconds (default 1800), then applies it. --plan plan_… applies a plan
+                 Queuey stores once it may be: approved, or run by the policy; a plan sealed
+                 for a person and not sent yet goes to the inbox first. Its source
+                 and what it takes back are the plan's, so --adopt, --repo, --repo-path and
+                 --commit do not go with it. Each write is then one of the plan's steps,
+                 sent once, and Queuey's step_already_applied counts as written. A write
+                 whose answer was lost is looked up in the plan after a short, growing wait,
+                 and sent once more only when the plan does not show it. plan_stale (what the plan rests on
+                 moved) and not_in_plan (the file no longer matches it) exit 1: plan again,
+                 and the new plan shows what is left. Until Queuey enforces plans, an apply
+                 without one goes through, and Queuey's would_require_approval warning is
+                 written to stderr with what to do. Against a Queuey that stores no plans,
+                 apply works as before.
+                 --json prints { ""schemaVersion"": 1, ""file"", ""plan"", ""source"", ""enforcement"",
+                 ""skipped"": […], ""serverWarnings"": […], ""queues"": […], … }, with ""plan"" null
+                 unless the apply wrote a stored plan, and { ""schemaVersion"": 1, ""file"",
+                 ""pendingApproval"": true, ""plan"": { … } } when the plan waits for a person;
+                 --check --json { ""schemaVersion"": 1, ""file"", ""inSync"", ""drift"": […],
+                 ""detached"": […] }.
 
 PLAN
   queuey plan [--file queuey.deploy.json] [--adopt <queue>|workspace[,…]] [--profile <name>] [--json]
+              [--local | --store | --submit] [--repo <url|owner/repo>] [--repo-path <path>] [--commit <sha>] [--no-git]
                  Asks Queuey itself what apply would do: every write apply would send goes as
                  a dry run (?dryRun=true), so it shows each value that would change and each
                  refusal Queuey would give that write — retention caps, queue limits, bad
                  values — with what to do about it. Each write is asked about on its own,
                  against what is stored now: a refusal that depends on a workspace change in
-                 the same file shows only in apply. Writes nothing; exits non-zero if anything
-                 would be refused. Needs the key apply needs. A queue that does not exist yet
-                 shows as one that would be created, with its settings checked locally. The first dry run also proves that Queuey answers
+                 the same file shows only in apply. Changes no configuration; exits non-zero
+                 if anything would be refused. Needs the key apply needs. A queue that does
+                 not exist yet shows as one that would be created, with its settings checked
+                 locally. With --local, the first dry run also proves that Queuey answers
                  dry runs; against an API that does not, planning stops there and says what
                  that one call may have changed — nothing, when a declared queue exists.
                  A verb and not an apply flag on purpose: a CLI too old to know it answers
                  ""Unknown command"" instead of running the apply you meant to plan.
-                 It shows each queue's ingress URL, also for one that would be created, and
-                 the plan's id and hash: sha256 over what apply would change and the server
-                 state it rests on, so the same file against the same state gives the same
-                 hash, whatever the order of its queues or its formatting.
-                 --json prints { ""schemaVersion"": 1, ""file"", ""tenant"", ""planId"", ""planHash"",
-                 ""wouldSucceed"", ""changeCount"", ""queues"": […], ""steps"": […] }; check
-                 schemaVersion first. A change's from and to are JSON values, as Queuey's
-                 config reads them back.
+                 By default the plan is made here and stored nowhere (--local says so):
+                 its hash is sha256 over what apply would change and the server state it
+                 rests on, so the same file against the same state gives the same hash,
+                 whatever the order of its queues or its formatting. Fit for a pull request.
+                 --store stores it in Queuey as a configuration plan (plan_…): its dry runs
+                 are its steps, and Queuey seals it with a hash and the policy's decision.
+                 execute: queuey apply applies it by its id (see APPLY). requires_approval:
+                 apply sends it to Queuey's inbox, and --submit does it at once, prints
+                 where a person approves it and exits 5. denied: nothing applies it, exit 1.
+                 A plan with a refused write is not sealed. Where the file is (--repo,
+                 --repo-path, --commit, git) goes with it, as for apply, and in GitHub
+                 Actions also the branch, workflow and pull request. Against a Queuey that
+                 stores no plans, it plans here, and says so.
+                 It shows each queue's ingress URL, also for one that would be created.
+                 --json prints { ""schemaVersion"": 2, ""file"", ""tenant"", ""planId"", ""planHash"",
+                 ""stored"": true, ""version"", ""status"", ""decision"", ""rule"", ""class"",
+                 ""approvalUrl"", ""expiresAt"", ""wouldSucceed"", ""changeCount"", ""queues"": […],
+                 ""steps"": […], ""skipped"": […], ""warnings"": […] } with --store or --submit,
+                 and { ""schemaVersion"": 1, … ""planId"": null, ""planHash"": ""sha256:…"" … } for a
+                 plan made here; check schemaVersion first. A change's from and to are JSON
+                 values, as Queuey's config reads them back.
                  A queue or workspace a person detached from the file gets no steps, as apply
                  skips it; it is listed under ""skipped"", with who detached it. --adopt plans
                  it as apply --adopt would write it.
@@ -565,5 +602,6 @@ CONFIG PRECEDENCE
 
 EXIT CODES
   0 success   1 runtime failure   2 usage   3 config   4 assembly load
+  5 a configuration plan waits for a person's approval in Queuey's inbox (plan --submit, apply)
 ";
 }

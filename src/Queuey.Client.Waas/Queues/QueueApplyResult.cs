@@ -36,6 +36,13 @@ public sealed class QueueApplyResult
     /// <summary>The typed error when the apply failed; otherwise <c>null</c>.</summary>
     public QueueyException? Error { get; init; }
 
+    /// <summary>
+    /// True when Queuey wanted a configuration plan for a change to this queue (<c>plan_required</c>, Queuey F3.11), so a
+    /// sync from code left that change out and went on with the other queues. <see cref="Error"/> is Queuey's answer, with
+    /// what to do, and <see cref="Warnings"/> says it too. Never set by a deployment apply, which makes the plan instead.
+    /// </summary>
+    public bool NeedsPlan { get; init; }
+
     /// <summary>Whether this result came from a dry run (no API call was made).</summary>
     public bool DryRun { get; init; }
 }

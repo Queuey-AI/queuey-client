@@ -31,6 +31,18 @@ public sealed class DeploymentFileSource
     /// <summary>The commit the file is applied from.</summary>
     public string? Commit { get; init; }
 
+    /// <summary>
+    /// The git ref the file is applied from, such as <c>refs/heads/main</c> or <c>refs/pull/12/merge</c>. Only a plan Queuey
+    /// stores carries it (Queuey F3.11), as claimed, so a person who approves the plan sees where it comes from.
+    /// </summary>
+    public string? Ref { get; init; }
+
+    /// <summary>The workflow that runs it, such as GitHub's <c>GITHUB_WORKFLOW_REF</c>. Only a stored plan carries it.</summary>
+    public string? Workflow { get; init; }
+
+    /// <summary>The pull request it comes from, as its number. Only a stored plan carries it, and Queuey never verifies it.</summary>
+    public string? PullRequest { get; init; }
+
     /// <summary>True when none of the three is known.</summary>
     public bool IsEmpty => Repo is null && Path is null && Commit is null;
 
@@ -351,6 +363,11 @@ internal sealed class StartApplyWireRequest
 {
     public StartApplySourceWire? Source { get; set; }
     public StartApplyAdoptWire? Adopt { get; set; }
+
+    // En apply bundet til en lagret plan (Queuey F3.11) sender bare planId og planHash: kilden og adopt er planens, og
+    // serveren svarer 400 på en forespørsel som har dem i tillegg.
+    public string? PlanId { get; set; }
+    public string? PlanHash { get; set; }
 }
 
 internal sealed class StartApplySourceWire
@@ -373,6 +390,8 @@ internal sealed class StartApplyWireResponse
     public DateTimeOffset? ExpiresAtUtc { get; set; }
     public string? Enforcement { get; set; }
     public DeploymentManagementResponse? Workspace { get; set; }
+    public string? PlanId { get; set; }
+    public List<ApplyWarningWire>? Warnings { get; set; }
 }
 
 /// <summary>Wire response for <c>GET /tenants/{t}</c>, the part a deployment check reads.</summary>

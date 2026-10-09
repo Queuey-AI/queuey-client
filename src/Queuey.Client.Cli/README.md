@@ -68,7 +68,9 @@ naming credentials by reference, and is meant to be committed.
 
 A run that did not fully converge exits non-zero, so a pipeline fails loudly
 rather than reporting a green deploy over a half-applied workspace. Applying is
-idempotent, so a fixed re-run converges.
+idempotent, so a fixed re-run converges. Exit `5` means a configuration plan
+waits for a person's approval in Queuey's inbox and nothing was applied:
+`queuey apply --plan plan_…` applies it once approved, and `--wait` waits.
 
 ## More
 

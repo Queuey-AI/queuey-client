@@ -74,7 +74,9 @@ public sealed class PlanCommandTests : IDisposable
         Assert.True(root.GetProperty("wouldSucceed").GetBoolean());
         Assert.Equal(3, root.GetProperty("changeCount").GetInt32());
         Assert.Matches("^sha256:[0-9a-f]{64}$", root.GetProperty("planHash").GetString());
-        Assert.Equal("plan_" + root.GetProperty("planHash").GetString()!.Substring(7, 24), root.GetProperty("planId").GetString());
+        // Serveren lagrer ingen planer (404 på POST …/deployment/plans), så planen er laget her, og har ingen plan_-id: den skal
+        // ikke tas for en plan Queuey lagrer (F3.11).
+        Assert.Equal(JsonValueKind.Null, root.GetProperty("planId").ValueKind);
 
         JsonElement queue = Assert.Single(root.GetProperty("queues").EnumerateArray());
         Assert.Equal("orders", queue.GetProperty("name").GetString());
@@ -101,7 +103,7 @@ public sealed class PlanCommandTests : IDisposable
 
         // Uten --json står de som en linje hver, med planens id og hash og køens ingress-URL først.
         CliRun human = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("plan", "--file", DeployFile())), PlansEverything());
-        Assert.Contains(root.GetProperty("planId").GetString() + "  " + root.GetProperty("planHash").GetString(), human.Stdout);
+        Assert.Contains("local plan, not stored in Queuey  " + root.GetProperty("planHash").GetString(), human.Stdout);
         Assert.Contains("orders\tingress " + queue.GetProperty("ingressUrl").GetString(), human.Stdout);
         Assert.Contains("~ policy.retentionDays: 7 → 5", human.Stdout);
         Assert.Contains("~ policy.dlqEnabled: true → false", human.Stdout);

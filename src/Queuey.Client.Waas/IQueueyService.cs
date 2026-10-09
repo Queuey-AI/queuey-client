@@ -69,6 +69,14 @@ public interface IQueueyService
     /// Applies every registered queue via <c>PUT /queues</c>, patching the policy of those that
     /// declare one. Safe to run on every deploy — applying is idempotent.
     /// </summary>
+    /// <remarks>
+    /// A failure throws <see cref="QueueySyncException"/>, except one: when Queuey wants a configuration plan for a queue's
+    /// change (<c>plan_required</c>, an API key changing a production workspace, Queuey F3.11), that change is left out, the
+    /// queue is reported with <see cref="QueueApplyResult.NeedsPlan"/>, in <see cref="QueueSyncResult.PlanRequired"/> and as a
+    /// line in <see cref="QueueSyncResult.Warnings"/> that says what to do, and the run goes on with the other queues and
+    /// returns, so an app that syncs when it starts still starts. <see cref="QueueSyncResult.AllSucceeded"/> is then false,
+    /// and when the host has logging, each such queue is logged as a warning. Check the result, not only for an exception.
+    /// </remarks>
     Task<QueueSyncResult> SyncQueuesAsync(SyncOptions? options = null, CancellationToken cancellationToken = default);
 
     /// <summary>Applies a single explicit queue definition (ensure it exists, then patch its policy).</summary>
@@ -218,7 +226,8 @@ public interface IQueueyService
 
     /// <summary>
     /// Applies queues, then streams. Queues go first because a stream is published on top of one, so a
-    /// queue failure stops the run before any stream is touched.
+    /// queue failure stops the run before any stream is touched. A queue whose change waits for a configuration plan is not
+    /// a failure here (see <see cref="SyncQueuesAsync"/>): the streams are applied, and the queues' result says so.
     /// </summary>
     Task<(QueueSyncResult Queues, SyncResult Streams)> SyncAsync(SyncOptions? options = null, CancellationToken cancellationToken = default);
 
