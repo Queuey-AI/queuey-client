@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -305,8 +306,23 @@ public sealed class QueueyService : IQueueyService
     // ---- queues ----
 
     /// <inheritdoc />
-    public Task<QueueSyncResult> SyncQueuesAsync(SyncOptions? options = null, CancellationToken cancellationToken = default)
-        => SyncQueueDefinitionsAsync(Queues.Queues, options, tenantPublicId: null, hooks: null, cancellationToken);
+    public async Task<QueueSyncResult> SyncQueuesAsync(SyncOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        // Advarslene Queuey svarer med, som would_require_approval for en endring en nøkkel snart trenger en plan for.
+        var warnings = new ServerWarnings();
+        using IDisposable collecting = QueueyControlPlaneClient.CollectWarnings(warnings);
+        return await SyncQueueDefinitionsAsync(Queues.Queues, options, tenantPublicId: null, hooks: null, cancellationToken,
+            serverWarnings: warnings).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// What a sync from code says about a queue whose change waits for a configuration plan (Queuey F3.11): Queuey's answer,
+    /// and how to make the change.
+    /// </summary>
+    internal static string NeedsPlanWarning(string name, QueueyException refusal)
+        => $"Queue '{name}': {refusal.Message} The sync left that change out and went on with the other queues. To make it, "
+           + "declare the queue in queuey.deploy.json and run queuey apply, which makes the configuration plan and gives it to a "
+           + "person to approve in Queuey's inbox, or make the change in the Queuey console.";
 
     /// <inheritdoc />
     public async Task<QueueApplyResult> ApplyQueueAsync(QueueDefinition definition, CancellationToken cancellationToken = default)
@@ -329,6 +345,9 @@ public sealed class QueueyService : IQueueyService
         /// needs saying. It is in logOnly either way; what makes it deliver depends on the path.
         /// </summary>
         public Func<QueueDefinition, string?>? CreatedButFailed { get; init; }
+
+        /// <summary>Whether the queue by this name existed before the run.</summary>
+        public Func<string, bool>? Existed { get; init; }
     }
 
     private sealed class QueueApplyOutcome
@@ -361,13 +380,23 @@ public sealed class QueueyService : IQueueyService
         // The tenant is passed in, never re-read from the options here: a deployment file that names
         // its workspace must put its queues in that workspace too. Before 2026-09-23 the workspace
         // went to the file's tenant and the queues to the configured one.
-        QueueApplyResponse response = await _controlPlane.ApplyQueueAsync(
-            new QueueApplyRequest
-            {
-                TenantPublicId = tenantPublicId,
-                DisplayName = definition.Name,
-            },
-            cancellationToken).ConfigureAwait(false);
+        QueueApplyResponse response;
+        try
+        {
+            response = await _controlPlane.ApplyQueueAsync(
+                new QueueApplyRequest
+                {
+                    TenantPublicId = tenantPublicId,
+                    DisplayName = definition.Name,
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (StepAlreadyWrittenException)
+        {
+            // En apply bundet til en plan (Queuey F3.11), der svaret på PUT /queues gikk tapt og steget alt var skrevet: køen
+            // finnes, og den er opprettet av denne applyen når den ikke fantes før den startet.
+            response = await AppliedQueueAsync(definition.Name, tenantPublicId, hooks, cancellationToken).ConfigureAwait(false);
+        }
 
         if (response.PublicId is not { } queueId)
         {
@@ -405,19 +434,25 @@ public sealed class QueueyService : IQueueyService
             // var opprettet, så ingen fikk vite at en ny kø lå igjen i logOnly — og neste apply lar en
             // eksisterende kø beholde modusen sin og ga exit 0. Modussteget er sist, så en kø som ble
             // opprettet her og feilet, har fortsatt modusen en ny kø starter med.
+            // En synk fra kode (uten hooks) som får plan_required (Queuey F3.11), melder det og går videre.
+            bool needsPlan = hooks is null && QueueyPlanRequiredException.Is(ex);
+            var warnings = new List<string>();
+            if (needsPlan)
+                warnings.Add(NeedsPlanWarning(definition.Name, ex));
+            if (response.Created && (hooks?.CreatedButFailed ?? CreatedButFailedInCode)(definition) is { } warning)
+                warnings.Add(warning);
             return new QueueApplyResult
             {
                 ModelType = definition.ModelType?.FullName ?? string.Empty,
                 Name = definition.Name,
                 Succeeded = false,
                 Error = ex,
+                NeedsPlan = needsPlan,
                 PublicId = queueId,
                 Created = response.Created,
                 PolicyApplied = policyApplied,
                 Mode = response.Created ? DeploymentQueueMode.LogOnly.ToFileText() : null,
-                Warnings = response.Created && (hooks?.CreatedButFailed ?? CreatedButFailedInCode)(definition) is { } warning
-                    ? new[] { warning }
-                    : Array.Empty<string>(),
+                Warnings = warnings,
             };
         }
 
@@ -431,6 +466,22 @@ public sealed class QueueyService : IQueueyService
             PolicyApplied = policyApplied,
             Mode = outcome.Mode,
             Warnings = outcome.Warnings,
+        };
+    }
+
+    // Køen slik lista viser den, etter et PUT /queues Queuey sa alt var skrevet i en apply bundet til en plan.
+    private async Task<QueueApplyResponse> AppliedQueueAsync(string name, string tenant, QueueApplyHooks? hooks, CancellationToken cancellationToken)
+    {
+        IReadOnlyList<QueueListItem> rows = await Management.ListQueuesAsync(tenant, cancellationToken).ConfigureAwait(false);
+        QueueListItem row = rows.FirstOrDefault(r => string.Equals(r.DisplayName, name, StringComparison.Ordinal))
+            ?? throw new QueueyException($"Queuey says queue '{name}' was applied in this plan, and the workspace has no queue by that name.",
+                errorCode: "plan_step_missing") { SuggestedAction = "Plan again." };
+        return new QueueApplyResponse
+        {
+            PublicId = row.PublicId,
+            DisplayName = name,
+            Created = !(hooks?.Existed?.Invoke(name) ?? true),
+            HasDeliveryTarget = row.HasDeliveryTarget,
         };
     }
 
@@ -479,7 +530,8 @@ public sealed class QueueyService : IQueueyService
         DeploymentQueuePlan? plan,
         QueueApplyResponse response,
         QueueListItem? existing,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, DeploymentQueueMode>? planModes = null)
     {
         var warnings = new List<string>();
 
@@ -488,6 +540,22 @@ public sealed class QueueyService : IQueueyService
         string? current = response.Created ? "LogOnly" : existing?.Mode;
         DeploymentQueueMode? mode = DeploymentQueueModes.FromBackend(current);
         DeploymentQueueMode? declared = plan?.Mode;
+
+        // En apply bundet til en lagret plan (Queuey F3.11) gir en kø den oppretter modusen planen viste, og sender den også når
+        // den er logOnly: hver del av det planen sender til køen, sendes én gang (kontrakten fra Queuey #503).
+        if (planModes is not null && response.Created)
+        {
+            if (planModes.TryGetValue(name, out DeploymentQueueMode planned))
+            {
+                await _controlPlane.SetQueueModeAsync(queueId, planned.ToWire(), cancellationToken).ConfigureAwait(false);
+                mode = planned;
+            }
+
+            if (mode == DeploymentQueueMode.LogOnly && declared != DeploymentQueueMode.LogOnly)
+                warnings.Add($"Queue '{name}' was created in logOnly mode, as its plan showed: its events are logged, not delivered. " +
+                             "Declare \"mode\": \"deliver\" for it, and plan again, to deliver.");
+            return new QueueApplyOutcome(warnings, mode?.ToFileText());
+        }
 
         if (!response.Created && string.Equals(current, "Paused", StringComparison.OrdinalIgnoreCase))
         {
@@ -662,19 +730,25 @@ public sealed class QueueyService : IQueueyService
         EnsureReachableDestinations(file);
         string tenant = RequireForSync(file.Tenant);
 
+        var warnings = new ServerWarnings();
+        using IDisposable collecting = QueueyControlPlaneClient.CollectWarnings(warnings);
+
         // Planen starter en apply som apply gjør (Queuey F2.4): dry runs mot det fila styrer slippes gjennom bare inne i en, og
-        // planen hopper over det samme som applyen ville hoppet over. En dry run merker ingenting.
-        var existing = new Dictionary<string, QueueListItem>(StringComparer.Ordinal);
-        foreach (QueueListItem row in await Management.ListQueuesAsync(tenant, cancellationToken).ConfigureAwait(false))
-            if (row.DisplayName is { } name)
-                existing[name] = row;
+        // planen hopper over det samme som applyen ville hoppet over. En dry run merker ingenting. Krever Queuey en lagret
+        // plan for en apply her (F3.11), planlegges det uten en apply, og planen sier det.
+        Dictionary<string, QueueListItem> existing = await ExistingQueuesAsync(tenant, cancellationToken).ConfigureAwait(false);
         ManagedApply managed = await StartManagedApplyAsync(
-                tenant, options?.Source, options?.Adopt, existing, plans, file.Workspace is not null, cancellationToken)
+                tenant, options?.Source, options?.Adopt, existing, plans, file.Workspace is not null, cancellationToken,
+                planWithoutApply: true)
             .ConfigureAwait(false);
         using IDisposable inApply = QueueyControlPlaneClient.InApply(managed.Token);
 
         DeploymentPlan plan = await new DeploymentPlanner(_controlPlane, Management, _options.ResolveIngressBaseAddress())
             .PlanAsync(file, plans, tenant, cancellationToken, managed.Skipped).ConfigureAwait(false);
+
+        var notes = new List<string>();
+        if (managed.RequiresPlan)
+            notes.Add(PlanRequiredNote(tenant));
         return new DeploymentPlan
         {
             Tenant = plan.Tenant,
@@ -684,8 +758,191 @@ public sealed class QueueyService : IQueueyService
             Steps = plan.Steps,
             Skipped = plan.Skipped,
             ApplyStarted = managed.Started,
+            ApplyRequiresPlan = managed.RequiresPlan,
+            Warnings = notes.Concat(warnings.Items).ToList(),
         };
     }
+
+    private static string PlanRequiredNote(string tenant)
+        => $"plan_required: Queuey applies to workspace {tenant} from an API key only through a stored configuration plan, so this "
+           + "plan was made outside an apply, and a dry run against what a deployment file manages may be refused for that. "
+           + "queuey plan stores the plan in Queuey, and queuey apply makes and applies it.";
+
+    private async Task<Dictionary<string, QueueListItem>> ExistingQueuesAsync(string tenant, CancellationToken cancellationToken)
+    {
+        var existing = new Dictionary<string, QueueListItem>(StringComparer.Ordinal);
+        foreach (QueueListItem row in await Management.ListQueuesAsync(tenant, cancellationToken).ConfigureAwait(false))
+            if (row.DisplayName is { } name)
+                existing[name] = row;
+        return existing;
+    }
+
+    /// <inheritdoc />
+    public async Task<DeploymentPlan> StorePlanAsync(DeploymentFile file, SyncOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        if (file is null) throw new ArgumentNullException(nameof(file));
+
+        DeploymentFile expanded = file.Expand();
+        IReadOnlyList<DeploymentQueuePlan> plans = expanded.Resolve();
+        EnsureReachableDestinations(expanded);
+        string tenant = RequireForSync(expanded.Tenant);
+
+        var warnings = new ServerWarnings();
+        using IDisposable collecting = QueueyControlPlaneClient.CollectWarnings(warnings);
+        Dictionary<string, QueueListItem> existing = await ExistingQueuesAsync(tenant, cancellationToken).ConfigureAwait(false);
+
+        // 1. En tom plan, med kilden og det den tar tilbake (Queuey F3.11 PR 3). En Queuey uten planer svarer 404, og en uten
+        //    nøkkelen for planer 503 plans_unavailable: da lages planen her, som før, og den sier hvorfor.
+        bool adoptsWorkspace = DeploymentAdopt.AdoptsWorkspace(options?.Adopt);
+        IReadOnlyList<string> adoptQueues = DeploymentAdopt.Queues(options?.Adopt);
+        DeploymentFileSource? source = options?.Source is { } s ? DeploymentFileSource.Clean(s.Repo, s.Path, s.Commit) : null;
+        PlanWireResponse? created;
+        try
+        {
+            created = await _controlPlane.CreatePlanAsync(tenant, new StartPlanWireRequest
+            {
+                Source = source is { IsEmpty: false } ? new PlanSourceWire { Repo = source.Repo, Path = source.Path, Commit = source.Commit } : null,
+                Adopt = adoptsWorkspace || adoptQueues.Count > 0
+                    ? new StartApplyAdoptWire { Workspace = adoptsWorkspace, Queues = adoptQueues.Count > 0 ? adoptQueues.ToList() : null }
+                    : null,
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (QueueyException ex) when (ex.StatusCode == 503 && ex.ErrorCode == "plans_unavailable")
+        {
+            return await LocalInsteadAsync(file, options, cancellationToken,
+                $"plans_unavailable: {ex.Message} This plan was made on this client and is not stored in Queuey.").ConfigureAwait(false);
+        }
+
+        if (created is null)
+            return await LocalInsteadAsync(file, options, cancellationToken,
+                "plans_unsupported: This Queuey stores no configuration plans, so this plan was made on this client, as before, "
+                + "and is not stored. queuey apply applies without one there.").ConfigureAwait(false);
+
+        StoredPlan stored = StoredPlan.From(created, tenant);
+
+        // 2. Det en person har løsrevet, får ingen steg (F2.4). Planen står for apply-tokenet overfor det fila styrer, så det
+        //    planen tar tilbake, planlegges.
+        DeploymentManagementInfo? workspace = expanded.Workspace is not null
+            ? await WorkspaceManagementAsync(tenant, cancellationToken).ConfigureAwait(false)
+            : null;
+        IReadOnlyList<SkippedResource> skipped = Skipped(workspace, adoptsWorkspace,
+            (name, _) => adoptQueues.Contains(name, StringComparer.Ordinal), existing, plans);
+
+        // 3. Hver skriving som dry run i planen, uten apply-tokenet.
+        DeploymentPlan plan;
+        using (QueueyControlPlaneClient.InPlan(stored.PlanId))
+        {
+            plan = await new DeploymentPlanner(_controlPlane, Management, _options.ResolveIngressBaseAddress())
+                .PlanAsync(expanded, plans, tenant, cancellationToken, skipped, stored: true).ConfigureAwait(false);
+        }
+
+        // Et avslag: planen forsegles ikke (Queuey ville svart plan_has_refusals), og stegene sier hvorfor. Den utløper av seg selv.
+        if (!plan.WouldSucceed)
+            return WithStored(plan, stored, skipped, warnings);
+
+        // 4. Det apply sender til hver kø planen oppretter, på opprettelsessteget.
+        foreach (DeploymentPlanStep step in plan.Steps)
+        {
+            if (step.Creates && step.StoredIndex is { } index && step.StoredDesired is { } desired)
+                await _controlPlane.SetPlanDesiredAsync(tenant, stored.PlanId, index, desired, cancellationToken).ConfigureAwait(false);
+        }
+
+        // 5. Forseglingen: hashen og policyens avgjørelse. Trenger planen en person, sendes den til innboksen.
+        SealedPlanWireResponse seal = await _controlPlane.SealPlanAsync(tenant, stored.PlanId, cancellationToken).ConfigureAwait(false);
+        stored = Sealed(stored, seal);
+        if (stored.NeedsSubmitting)
+            stored = await SubmitAsync(stored, cancellationToken).ConfigureAwait(false);
+
+        return WithStored(plan, stored, skipped, warnings);
+    }
+
+    private async Task<DeploymentPlan> LocalInsteadAsync(DeploymentFile file, SyncOptions? options, CancellationToken cancellationToken, string why)
+    {
+        DeploymentPlan local = await PlanDeploymentAsync(file, options, cancellationToken).ConfigureAwait(false);
+        return new DeploymentPlan
+        {
+            Tenant = local.Tenant,
+            PlanId = local.PlanId,
+            PlanHash = local.PlanHash,
+            Queues = local.Queues,
+            Steps = local.Steps,
+            Skipped = local.Skipped,
+            ApplyStarted = local.ApplyStarted,
+            ApplyRequiresPlan = local.ApplyRequiresPlan,
+            Warnings = new[] { why }.Concat(local.Warnings).ToList(),
+        };
+    }
+
+    private static DeploymentPlan WithStored(DeploymentPlan plan, StoredPlan stored, IReadOnlyList<SkippedResource> skipped, ServerWarnings warnings) => new()
+    {
+        Tenant = plan.Tenant,
+        PlanId = plan.PlanId,
+        PlanHash = plan.PlanHash,
+        Queues = plan.Queues,
+        Steps = plan.Steps,
+        Skipped = skipped,
+        ApplyStarted = false,
+        Stored = stored,
+        Warnings = warnings.Items,
+    };
+
+    private static StoredPlan Sealed(StoredPlan built, SealedPlanWireResponse seal) => new()
+    {
+        PlanId = seal.PlanId ?? built.PlanId,
+        Tenant = built.Tenant,
+        Status = seal.Status ?? built.Status,
+        Decision = seal.Decision ?? built.Decision,
+        Rule = seal.Rule,
+        Class = seal.Class,
+        Hash = seal.Hash,
+        Version = seal.Version,
+        ApprovalUrl = seal.InboxUrl,
+        ExpiresAt = built.ExpiresAt,
+        Adopt = built.Adopt,
+        Steps = built.Steps,
+    };
+
+    private async Task<StoredPlan> SubmitAsync(StoredPlan sealedPlan, CancellationToken cancellationToken)
+    {
+        PlanPendingWireResponse pending = await _controlPlane.SubmitPlanAsync(sealedPlan.Tenant, sealedPlan.PlanId, cancellationToken).ConfigureAwait(false);
+        return new StoredPlan
+        {
+            PlanId = sealedPlan.PlanId,
+            Tenant = sealedPlan.Tenant,
+            Status = pending.Status ?? StoredPlan.Statuses.PendingApproval,
+            Decision = sealedPlan.Decision,
+            Rule = pending.PolicyRule ?? sealedPlan.Rule,
+            Class = sealedPlan.Class,
+            Hash = sealedPlan.Hash,
+            Version = sealedPlan.Version,
+            ApprovalUrl = pending.ApprovalUrl ?? sealedPlan.ApprovalUrl,
+            ExpiresAt = pending.ExpiresAt ?? sealedPlan.ExpiresAt,
+            Adopt = sealedPlan.Adopt,
+            Steps = sealedPlan.Steps,
+        };
+    }
+
+    /// <inheritdoc />
+    public async Task<StoredPlan> GetStoredPlanAsync(string planId, string? tenantPublicId = null, CancellationToken cancellationToken = default)
+    {
+        string id = RequirePlanId(planId);
+        string tenant = tenantPublicId ?? RequireTenant();
+        PlanWireResponse wire = await _controlPlane.GetPlanAsync(tenant, id, cancellationToken).ConfigureAwait(false);
+        return StoredPlan.From(wire, tenant);
+    }
+
+    /// <inheritdoc />
+    public async Task<StoredPlan> SubmitStoredPlanAsync(string planId, string? tenantPublicId = null, CancellationToken cancellationToken = default)
+    {
+        StoredPlan plan = await GetStoredPlanAsync(planId, tenantPublicId, cancellationToken).ConfigureAwait(false);
+        StoredPlan submitted = await SubmitAsync(plan, cancellationToken).ConfigureAwait(false);
+        return submitted;
+    }
+
+    private static string RequirePlanId(string? planId)
+        => StoredPlan.IsPlanId(planId?.Trim())
+            ? planId!.Trim()
+            : throw new ArgumentException("A stored plan's id is plan_ and the characters Queuey gave it.", nameof(planId));
 
     private void EnsureReachableDestinations(DeploymentFile expanded)
         => DeploymentDestinations.EnsureReachable(expanded, _options.ResolveApiBaseAddress());
@@ -736,6 +993,9 @@ public sealed class QueueyService : IQueueyService
     {
         if (file is null) throw new ArgumentNullException(nameof(file));
         options ??= new SyncOptions();
+        StoredPlan? bound = options.Plan;
+        if (bound is not null && options.DryRun)
+            throw new ArgumentException("A dry run sends nothing, so it cannot apply a stored plan.", nameof(options));
 
         // Expand ${VAR} first: a file that names an unset variable must fail before a single write,
         // not halfway through one.
@@ -749,6 +1009,28 @@ public sealed class QueueyService : IQueueyService
 
         string tenant = file.Tenant ?? (options.DryRun ? _options.TenantPublicId ?? string.Empty : RequireTenant());
         CredentialStoring storing = CredentialStoring.For(file);
+
+        // Advarslene Queuey svarer med i applyen (X-Queuey-Warning), som would_require_approval, står i resultatet.
+        var serverWarnings = new ServerWarnings();
+        using IDisposable collecting = QueueyControlPlaneClient.CollectWarnings(serverWarnings);
+
+        // En lagret plan (Queuey F3.11) er bygget for ett workspace, og stegene med det apply sender til en kø den oppretter,
+        // leses fra Queuey: modusen der er den applyen setter, også logOnly.
+        IReadOnlyDictionary<string, DeploymentQueueMode>? planModes = null;
+        if (bound is not null)
+        {
+            if (!string.Equals(bound.Tenant, tenant, StringComparison.Ordinal))
+                throw new QueueyConfigurationException(
+                    $"Plan {bound.PlanId} is for workspace {bound.Tenant}, and this file applies to {tenant}. Nothing was sent.");
+            StoredPlan read = await GetStoredPlanAsync(bound.PlanId, tenant, cancellationToken).ConfigureAwait(false);
+            bound = new StoredPlan
+            {
+                PlanId = read.PlanId, Tenant = read.Tenant, Status = read.Status, Decision = read.Decision, Rule = read.Rule,
+                Class = read.Class, Hash = bound.Hash ?? read.Hash, Version = read.Version, ApprovalUrl = bound.ApprovalUrl,
+                ExpiresAt = read.ExpiresAt, Adopt = read.Adopt, Steps = read.Steps,
+            };
+            planModes = PlannedModes(bound);
+        }
         var existing = new Dictionary<string, QueueListItem>(StringComparer.Ordinal);
         ResolvedDeliveries? deliveries = null;
         var workspaceWarnings = new List<string>();
@@ -780,9 +1062,9 @@ public sealed class QueueyService : IQueueyService
         // over, med mindre --adopt tar dem tilbake.
         ManagedApply managed = options.DryRun
             ? ManagedApply.None
-            : await StartManagedApplyAsync(tenant, options.Source, options.Adopt, existing, plans, file.Workspace is not null, cancellationToken)
+            : await StartManagedApplyAsync(tenant, options.Source, options.Adopt, existing, plans, file.Workspace is not null, cancellationToken, bound)
                 .ConfigureAwait(false);
-        using IDisposable inApply = QueueyControlPlaneClient.InApply(managed.Token);
+        using IDisposable inApply = QueueyControlPlaneClient.InApply(managed.Token, boundToPlan: bound is not null);
         var skippedQueues = new HashSet<string>(managed.Skipped.Where(s => s.QueueName is not null).Select(s => s.QueueName!), StringComparer.Ordinal);
 
         // Workspace first: queues inherit from it, so converging it first means a queue that means to
@@ -844,11 +1126,12 @@ public sealed class QueueyService : IQueueyService
 
                     existing.TryGetValue(definition.Name, out QueueListItem? row);
                     QueueApplyOutcome outcome = await ConvergeModeAsync(definition.Name, queuePublicId, tenant, plan, response,
-                        response.Created ? null : row, ct).ConfigureAwait(false);
+                        response.Created ? null : row, ct, planModes).ConfigureAwait(false);
 
                     IReadOnlyList<string> readiness = await ReadinessOfDeclarationsAsync(definition.Name, queuePublicId, plan, storing, ct).ConfigureAwait(false);
                     return readiness.Count == 0 ? outcome : new QueueApplyOutcome(outcome.Warnings.Concat(readiness).ToArray(), outcome.Mode);
                 },
+                Existed = name => existing.ContainsKey(name),
                 CreatedButFailed = definition =>
                 {
                     byName.TryGetValue(definition.Name, out DeploymentQueuePlan? plan);
@@ -870,9 +1153,30 @@ public sealed class QueueyService : IQueueyService
             workspaceWarnings,
             managed.Skipped,
             managed.Enforcement,
-            options.DryRun ? null : managed.Started).ConfigureAwait(false);
+            options.DryRun ? null : managed.Started,
+            serverWarnings,
+            bound?.PlanId).ConfigureAwait(false);
 
         return result;
+    }
+
+    /// <summary>
+    /// The mode an apply bound to <paramref name="plan"/> gives each queue it creates, by name: the <c>mode</c> in what the
+    /// plan sends to it (Queuey F3.11). A queue without one keeps the mode a new queue starts with.
+    /// </summary>
+    private static IReadOnlyDictionary<string, DeploymentQueueMode> PlannedModes(StoredPlan plan)
+    {
+        var modes = new Dictionary<string, DeploymentQueueMode>(StringComparer.Ordinal);
+        foreach (StoredPlanStep step in plan.Steps)
+        {
+            if (!step.Creates || step.Desired is not { ValueKind: JsonValueKind.Object } desired
+                || !desired.TryGetProperty("mode", out JsonElement mode) || mode.ValueKind != JsonValueKind.String)
+                continue;
+            if (DeploymentQueueModes.FromBackend(mode.GetString()) is { } parsed)
+                modes[step.Target] = parsed;
+        }
+
+        return modes;
     }
 
     /// <summary>What an apply learned when it started: its token, what it skips, and what Queuey does outside an apply.</summary>
@@ -884,6 +1188,9 @@ public sealed class QueueyService : IQueueyService
 
         /// <summary>True when Queuey started an apply, so the writes carry its token and mark what they write.</summary>
         public bool Started => Token is not null;
+
+        /// <summary>True when Queuey refused to start an apply without a stored plan (plan_required), for a plan made anyway.</summary>
+        public bool RequiresPlan { get; init; }
     }
 
     /// <summary>
@@ -891,25 +1198,55 @@ public sealed class QueueyService : IQueueyService
     /// person detached, unless <paramref name="adopt"/> names them. A Queuey that predates managed resources answers with
     /// no apply, and then nothing is marked; what a person detached is still skipped, from what the reads say, and adopt
     /// takes nothing back, since only an apply marks it again.
+    /// <para>
+    /// With <c>bound</c>, the stored plan the apply writes (Queuey F3.11): the start sends only its id and hash, what the plan
+    /// adopts is taken back, and Queuey must start the apply. With <c>planWithoutApply</c>, for a plan made on this client:
+    /// when Queuey refuses to start an apply without a stored plan (<c>plan_required</c>), plan outside one instead of failing.
+    /// </para>
     /// </summary>
     private async Task<ManagedApply> StartManagedApplyAsync(
         string tenant, DeploymentFileSource? source, IReadOnlyList<string>? adopt,
         IReadOnlyDictionary<string, QueueListItem> existing, IReadOnlyList<DeploymentQueuePlan> plans, bool declaresWorkspace,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, StoredPlan? bound = null, bool planWithoutApply = false)
     {
-        bool adoptsWorkspace = DeploymentAdopt.AdoptsWorkspace(adopt);
-        IReadOnlyList<string> adoptQueues = DeploymentAdopt.Queues(adopt);
+        bool adoptsWorkspace = bound is null ? DeploymentAdopt.AdoptsWorkspace(adopt) : bound.Adopt.Contains(tenant, StringComparer.Ordinal);
+        IReadOnlyList<string> adoptQueues = bound is null ? DeploymentAdopt.Queues(adopt) : Array.Empty<string>();
         DeploymentFileSource? clean = source is null ? null : DeploymentFileSource.Clean(source.Repo, source.Path, source.Commit);
 
-        StartApplyWireResponse? started = await _controlPlane.StartApplyAsync(tenant, new StartApplyWireRequest
+        // En apply bundet til en plan sender bare id-en og hashen (kontrakten fra Queuey #503): kilden og adopt er planens.
+        StartApplyWireRequest request = bound is not null
+            ? new StartApplyWireRequest { PlanId = bound.PlanId, PlanHash = bound.Hash }
+            : new StartApplyWireRequest
+            {
+                Source = clean is { IsEmpty: false } ? new StartApplySourceWire { Repo = clean.Repo, Path = clean.Path, Commit = clean.Commit } : null,
+                Adopt = adoptsWorkspace || adoptQueues.Count > 0
+                    ? new StartApplyAdoptWire { Workspace = adoptsWorkspace, Queues = adoptQueues.Count > 0 ? adoptQueues.ToList() : null }
+                    : null,
+            };
+
+        StartApplyWireResponse? started;
+        bool requiresPlan = false;
+        try
         {
-            Source = clean is { IsEmpty: false } ? new StartApplySourceWire { Repo = clean.Repo, Path = clean.Path, Commit = clean.Commit } : null,
-            Adopt = adoptsWorkspace || adoptQueues.Count > 0
-                ? new StartApplyAdoptWire { Workspace = adoptsWorkspace, Queues = adoptQueues.Count > 0 ? adoptQueues.ToList() : null }
-                : null,
-        }, cancellationToken).ConfigureAwait(false);
+            started = await _controlPlane.StartApplyAsync(tenant, request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (QueueyException ex) when (bound is null && QueueyPlanRequiredException.Is(ex))
+        {
+            // Queuey F3.11: en nøkkel applyer til dette workspacet bare gjennom en lagret plan. Ingenting er skrevet. Apply
+            // sier det med en egen type, så den som kaller, kan lage planen; en plan herfra går videre uten en apply.
+            if (!planWithoutApply)
+                throw new QueueyPlanRequiredException(ex);
+            started = null;
+            requiresPlan = true;
+        }
 
         string? token = started?.Token is { Length: > 0 } issued ? issued : null;
+        if (bound is not null && token is null)
+            throw new QueueyException(
+                $"Queuey started no apply for plan {bound.PlanId}, so nothing was written.", errorCode: "plan_apply_not_started")
+            {
+                SuggestedAction = "Check that this Queuey stores plans, and plan again.",
+            };
 
         // Det en person har løsrevet, hoppes over også når ingen apply startet (sikkerhetsreviewen 2026-10-06): skrivingene går
         // da uten token, og ville ellers skrevet over det. Uten en apply tar --adopt ikke noe tilbake, for bare en apply merker
@@ -918,18 +1255,36 @@ public sealed class QueueyService : IQueueyService
         if (workspace is null && token is null && declaresWorkspace)
             workspace = await WorkspaceManagementAsync(tenant, cancellationToken).ConfigureAwait(false);
 
+        IReadOnlyList<SkippedResource> skipped = Skipped(
+            workspace, adoptsWorkspace && token is not null,
+            (name, id) => token is not null && (bound is null
+                ? adoptQueues.Contains(name, StringComparer.Ordinal)
+                : id is not null && bound.Adopt.Contains(id, StringComparer.Ordinal)),
+            existing, plans);
+
+        return new ManagedApply(token, skipped, token is null ? null : started!.Enforcement) { RequiresPlan = requiresPlan };
+    }
+
+    /// <summary>
+    /// The workspace and the declared queues a person detached (Queuey F2.4), that an apply or plan leaves alone: all of them
+    /// but those it takes back.
+    /// </summary>
+    private static IReadOnlyList<SkippedResource> Skipped(
+        DeploymentManagementInfo? workspace, bool adoptsWorkspace, Func<string, string?, bool> adoptsQueue,
+        IReadOnlyDictionary<string, QueueListItem> existing, IReadOnlyList<DeploymentQueuePlan> plans)
+    {
         var skipped = new List<SkippedResource>();
-        if (workspace is { IsDetached: true } && !(adoptsWorkspace && token is not null))
+        if (workspace is { IsDetached: true } && !adoptsWorkspace)
             skipped.Add(new SkippedResource { Target = "workspace", Management = workspace });
         foreach (DeploymentQueuePlan plan in plans)
         {
             string name = plan.Definition.Name;
             if (existing.TryGetValue(name, out QueueListItem? row) && row.Deployment is { IsDetached: true } detached
-                && !(adoptQueues.Contains(name, StringComparer.Ordinal) && token is not null))
+                && !adoptsQueue(name, row.PublicId))
                 skipped.Add(new SkippedResource { Target = "queues." + name, QueueName = name, Management = detached });
         }
 
-        return new ManagedApply(token, skipped, token is null ? null : started!.Enforcement);
+        return skipped;
     }
 
     /// <summary>
@@ -1032,7 +1387,9 @@ public sealed class QueueyService : IQueueyService
         IReadOnlyList<string>? workspaceWarnings = null,
         IReadOnlyList<SkippedResource>? skipped = null,
         string? enforcement = null,
-        bool? applyStarted = null)
+        bool? applyStarted = null,
+        ServerWarnings? serverWarnings = null,
+        string? planId = null)
     {
         options ??= new SyncOptions();
 
@@ -1073,17 +1430,22 @@ public sealed class QueueyService : IQueueyService
             catch (QueueyException ex)
             {
                 // Feilet før køen fantes (eller før svaret sa hvilken den er): det er ingen kø å rapportere.
+                bool needsPlan = hooks is null && QueueyPlanRequiredException.Is(ex);
                 outcome = new QueueApplyResult
                 {
                     ModelType = def.ModelType?.FullName ?? string.Empty,
                     Name = def.Name,
                     Succeeded = false,
                     Error = ex,
+                    NeedsPlan = needsPlan,
+                    Warnings = needsPlan ? new[] { NeedsPlanWarning(def.Name, ex) } : Array.Empty<string>(),
                 };
             }
 
             results.Add(outcome);
-            if (outcome.Succeeded)
+            // Queuey F3.11: en endring som krever en lagret plan, er ikke en feil i en synk fra kode. Synken melder den og går
+            // videre, så appen starter.
+            if (outcome.Succeeded || outcome.NeedsPlan)
                 continue;
 
             if (!options.ContinueOnError)
@@ -1100,6 +1462,8 @@ public sealed class QueueyService : IQueueyService
             Skipped = skipped ?? Array.Empty<SkippedResource>(),
             Enforcement = enforcement,
             ApplyStarted = applyStarted,
+            ServerWarnings = serverWarnings?.Items ?? Array.Empty<string>(),
+            PlanId = planId,
         };
         result.ThrowIfAnyFailed();
         return result;

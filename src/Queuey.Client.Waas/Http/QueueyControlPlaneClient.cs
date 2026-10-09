@@ -24,7 +24,7 @@ internal sealed class QueueyControlPlaneClient
     public QueueyControlPlaneClient(HttpClient httpClient, QueueyOptions options)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
-        _connection = new QueueyHttpConnection(httpClient ?? throw new ArgumentNullException(nameof(httpClient)));
+        _connection = new QueueyHttpConnection(httpClient ?? throw new ArgumentNullException(nameof(httpClient)), Observe);
     }
 
     /// <summary>Applies a stream via <c>PUT /waas/streams</c> (declarative, idempotent by producer + name).</summary>
@@ -203,8 +203,13 @@ internal sealed class QueueyControlPlaneClient
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues");
         byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
 
-        return await _connection.SendForJsonAsync<QueueApplyResponse>(
-            HttpMethod.Put, uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+        // I en apply bundet til en plan kan svaret på et nytt forsøk være at steget alt er skrevet. Da finnes ingen kropp å
+        // lese, og den som kalte, slår køen opp selv (StepAlreadyWrittenException).
+        return await SendWriteAsync(
+            () => _connection.SendForJsonAsync<QueueApplyResponse>(
+                HttpMethod.Put, uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken),
+            () => throw new StepAlreadyWrittenException(request.DisplayName),
+            cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -223,8 +228,8 @@ internal sealed class QueueyControlPlaneClient
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues", queuePublicId, "policy");
         byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
 
-        await _connection.SendAsync(
-            new HttpMethod("PATCH"), uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+        await SendWriteAsync(() => _connection.SendAsync(
+            new HttpMethod("PATCH"), uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken), cancellationToken).ConfigureAwait(false);
     }
 
     // ── Delivery + credentials (the destination, and the secrets it uses) ─────
@@ -238,8 +243,8 @@ internal sealed class QueueyControlPlaneClient
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "delivery");
         byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
 
-        await _connection.SendAsync(
-            new HttpMethod("PATCH"), uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+        await SendWriteAsync(() => _connection.SendAsync(
+            new HttpMethod("PATCH"), uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Patches one queue's destination (<c>PATCH /queues/{que}/delivery</c>). Returns 204.</summary>
@@ -251,8 +256,8 @@ internal sealed class QueueyControlPlaneClient
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues", queuePublicId, "delivery");
         byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
 
-        await _connection.SendAsync(
-            new HttpMethod("PATCH"), uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+        await SendWriteAsync(() => _connection.SendAsync(
+            new HttpMethod("PATCH"), uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Stores a delivery credential (<c>POST /tenants/{ten}/credentials</c>). The value is never readable again.</summary>
@@ -471,25 +476,42 @@ internal sealed class QueueyControlPlaneClient
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), "dryRun=true", segments);
         byte[]? body = request is null ? null : JsonSerializer.SerializeToUtf8Bytes(request, request.GetType(), QueueyJson.Options);
 
+        // En dry run i en plan som bygges på serveren (Queuey F3.11), har planens id i X-Queuey-Plan og aldri apply-tokenet:
+        // serveren nekter begge sammen. Svaret sier i X-Queuey-Plan-Step hvilket steg dry run ble.
+        string? plan = CurrentPlan.Value;
+        var step = new StepBox();
+        CurrentStep.Value = step;
+        Action<HttpRequestHeaders> headers = plan is null
+            ? LicenseHeader(license)
+            : h =>
+            {
+                QueueyHttpHeaders.Set(h, QueueyHeaders.LicensePublicId, license);
+                QueueyHttpHeaders.Set(h, PlanHeader, plan);
+            };
+
         // Svaret leses først som JSON av hvilken som helst form, og så som en plan. Før 2026-09-24 ble det
         // lest rett som en plan, så en tom 2xx eller en 204 kastet JsonException ut av CLI-en med stacktrace.
         JsonElement answer;
         try
         {
             answer = await _connection.SendForJsonAsync<JsonElement>(
-                method, uri, body, body is null ? null : JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+                method, uri, body, body is null ? null : JsonContentType, authenticator, headers, cancellationToken).ConfigureAwait(false);
         }
         catch (JsonException)
         {
             throw new DryRunIgnoredException(target, aspect);
         }
+        finally
+        {
+            CurrentStep.Value = null;
+        }
 
-        TPlan? plan = null;
+        TPlan? parsed = null;
         if (answer.ValueKind == JsonValueKind.Object)
         {
             try
             {
-                plan = answer.Deserialize<TPlan>(QueueyJson.Options);
+                parsed = answer.Deserialize<TPlan>(QueueyJson.Options);
             }
             catch (JsonException)
             {
@@ -497,7 +519,13 @@ internal sealed class QueueyControlPlaneClient
             }
         }
 
-        return plan is { DryRun: true } ? plan : throw new DryRunIgnoredException(target, aspect);
+        if (parsed is { DryRun: true })
+        {
+            parsed.PlanStep = step.Index;
+            return parsed;
+        }
+
+        throw new DryRunIgnoredException(target, aspect);
     }
 
     /// <summary>One PATCH shape for the control plane: JSON body, API key + license header, 204 back.</summary>
@@ -511,8 +539,8 @@ internal sealed class QueueyControlPlaneClient
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, segments);
         byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, request.GetType(), QueueyJson.Options);
 
-        await _connection.SendAsync(
-            new HttpMethod("PATCH"), uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+        await SendWriteAsync(() => _connection.SendAsync(
+            new HttpMethod("PATCH"), uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Reads the workspace's delivery + policy config (<c>GET /tenants/{ten}/config</c>).</summary>
@@ -663,22 +691,138 @@ internal sealed class QueueyControlPlaneClient
 
     /// <summary>
     /// Makes every call in the current async flow part of the apply <paramref name="token"/> names, until the returned
-    /// scope is disposed. A null or blank token changes nothing.
+    /// scope is disposed. A null or blank token changes nothing. <paramref name="boundToPlan"/> says the apply writes a
+    /// stored plan (Queuey F3.11): then a write whose answer was lost is sent once more, and a write Queuey says is already
+    /// written counts as written.
     /// </summary>
-    internal static IDisposable InApply(string? token)
+    internal static IDisposable InApply(string? token, bool boundToPlan = false)
     {
         string? before = CurrentApply.Value;
+        bool boundBefore = CurrentApplyBound.Value;
         if (!string.IsNullOrWhiteSpace(token))
+        {
             CurrentApply.Value = token;
-        return new ApplyScope(before);
+            CurrentApplyBound.Value = boundToPlan;
+        }
+
+        return new Scope(() =>
+        {
+            CurrentApply.Value = before;
+            CurrentApplyBound.Value = boundBefore;
+        });
     }
 
-    private sealed class ApplyScope : IDisposable
+    /// <summary>
+    /// Makes every dry run in the current async flow a step of the stored plan <paramref name="planId"/> (Queuey F3.11,
+    /// <c>X-Queuey-Plan</c>), until the returned scope is disposed. Its dry runs carry no apply token: Queuey refuses the two
+    /// together, and the plan stands for the token on what a deployment file manages.
+    /// </summary>
+    internal static IDisposable InPlan(string planId)
     {
-        private readonly string? _before;
-        public ApplyScope(string? before) => _before = before;
-        public void Dispose() => CurrentApply.Value = _before;
+        string? before = CurrentPlan.Value;
+        string? applyBefore = CurrentApply.Value;
+        CurrentPlan.Value = planId;
+        CurrentApply.Value = null;
+        return new Scope(() =>
+        {
+            CurrentPlan.Value = before;
+            CurrentApply.Value = applyBefore;
+        });
     }
+
+    /// <summary>
+    /// Collects every <c>X-Queuey-Warning</c> Queuey answers in the current async flow into <paramref name="collector"/>, and
+    /// passes each on to the collector around it, until the returned scope is disposed.
+    /// </summary>
+    internal static IDisposable CollectWarnings(ServerWarnings collector)
+    {
+        if (collector is null) throw new ArgumentNullException(nameof(collector));
+        ServerWarnings? before = CurrentWarnings.Value;
+        collector.Outer = before;
+        CurrentWarnings.Value = collector;
+        return new Scope(() => CurrentWarnings.Value = before);
+    }
+
+    private sealed class Scope : IDisposable
+    {
+        private readonly Action _restore;
+        public Scope(Action restore) => _restore = restore;
+        public void Dispose() => _restore();
+    }
+
+    // Planen dry runs bygger (X-Queuey-Plan), og om applyen er bundet til en plan. AsyncLocal, som tokenet.
+    private static readonly AsyncLocal<string?> CurrentPlan = new();
+    private static readonly AsyncLocal<bool> CurrentApplyBound = new();
+    private static readonly AsyncLocal<ServerWarnings?> CurrentWarnings = new();
+    private static readonly AsyncLocal<StepBox?> CurrentStep = new();
+
+    /// <summary>The header that makes a dry run a step of a stored plan (Queuey F3.11).</summary>
+    internal const string PlanHeader = "X-Queuey-Plan";
+
+    /// <summary>The header that says which step of the plan a dry run became.</summary>
+    internal const string PlanStepHeader = "X-Queuey-Plan-Step";
+
+    /// <summary>The header Queuey warns in, one per warning: <c>code: message</c>.</summary>
+    internal const string WarningHeader = "X-Queuey-Warning";
+
+    private sealed class StepBox
+    {
+        public int? Index { get; set; }
+    }
+
+    // Hvert svar, før det leses: advarslene til den som samler dem, og steget en dry run i en plan ble.
+    private static void Observe(HttpResponseMessage response)
+    {
+        if (CurrentWarnings.Value is { } warnings && response.Headers.TryGetValues(WarningHeader, out IEnumerable<string>? values))
+            foreach (string value in values)
+                warnings.Add(value);
+
+        if (CurrentStep.Value is { } step && response.Headers.TryGetValues(PlanStepHeader, out IEnumerable<string>? indexes)
+            && int.TryParse(indexes.FirstOrDefault(), NumberStyles.None, CultureInfo.InvariantCulture, out int index))
+            step.Index = index;
+    }
+
+    // En skriving i en apply bundet til en plan (Queuey F3.11): hvert steg skrives én gang, og serveren svarer 409
+    // step_already_applied på det samme steget igjen. Et svar som gikk tapt (nettet eller en timeout), sendes derfor én gang
+    // til, og «alt skrevet» regnes som skrevet. Utenfor en slik apply sendes skrivingen én gang, som før.
+    private static Task SendWriteAsync(Func<Task> send, CancellationToken cancellationToken)
+        => SendWriteAsync(async () =>
+        {
+            await send().ConfigureAwait(false);
+            return true;
+        }, () => true, cancellationToken);
+
+    private static async Task<T> SendWriteAsync<T>(Func<Task<T>> send, Func<T> alreadyWritten, CancellationToken cancellationToken)
+    {
+        if (!CurrentApplyBound.Value)
+            return await send().ConfigureAwait(false);
+
+        try
+        {
+            return await send().ConfigureAwait(false);
+        }
+        catch (QueueyException ex) when (ex.ErrorCode == StepAlreadyAppliedCode)
+        {
+            return alreadyWritten();
+        }
+        catch (Exception ex) when (AnswerLost(ex, cancellationToken))
+        {
+            try
+            {
+                return await send().ConfigureAwait(false);
+            }
+            catch (QueueyException again) when (again.ErrorCode == StepAlreadyAppliedCode)
+            {
+                return alreadyWritten();
+            }
+        }
+    }
+
+    /// <summary>The code Queuey answers a step of a plan that is already written with.</summary>
+    internal const string StepAlreadyAppliedCode = "step_already_applied";
+
+    private static bool AnswerLost(Exception ex, CancellationToken cancellationToken)
+        => ex is HttpRequestException || (ex is TaskCanceledException && !cancellationToken.IsCancellationRequested);
 
     private static Action<HttpRequestHeaders> LicenseHeader(string license)
         => headers =>
@@ -706,16 +850,89 @@ internal sealed class QueueyControlPlaneClient
             return await _connection.SendForJsonAsync<StartApplyWireResponse>(
                 HttpMethod.Post, uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
         }
-        catch (QueueyException ex) when (ex.StatusCode == 404 || ex.StatusCode == 405)
+        catch (QueueyException ex) when ((ex.StatusCode == 404 || ex.StatusCode == 405) && request.PlanId is null)
         {
             return null;
         }
-        catch (JsonException)
+        catch (JsonException) when (request.PlanId is null)
         {
             // Et svar uten en apply er det samme som ingen apply: skrivingene sendes uten token, og en styrt ressurs nekter
             // dem med Queuey sin egen nektelse.
             return null;
         }
+    }
+
+    // ── Lagrede planer (Queuey F3.11) ──────────────────────────────────────────
+
+    /// <summary>
+    /// Makes an empty plan for the workspace (<c>POST /tenants/{ten}/deployment/plans</c>), with where the file lives and what
+    /// it takes back from a detach. Null from a Queuey that stores no plans (404 or 405 without one of Queuey's codes).
+    /// </summary>
+    public async Task<PlanWireResponse?> CreatePlanAsync(string tenantPublicId, StartPlanWireRequest request, CancellationToken cancellationToken)
+    {
+        if (request is null) throw new ArgumentNullException(nameof(request));
+
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "deployment", "plans");
+        byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
+        try
+        {
+            return await _connection.SendForJsonAsync<PlanWireResponse>(
+                HttpMethod.Post, uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+        }
+        catch (QueueyException ex) when ((ex.StatusCode == 404 || ex.StatusCode == 405) && ex.ErrorCode is null)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Sets what apply sends to the queue step <paramref name="step"/> of the plan creates, once it exists
+    /// (<c>PUT …/plans/{plan}/steps/{step}/desired</c>).
+    /// </summary>
+    public async Task SetPlanDesiredAsync(string tenantPublicId, string planPublicId, int step, JsonElement desired, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "deployment", "plans", planPublicId,
+            "steps", step.ToString(CultureInfo.InvariantCulture), "desired");
+        byte[] body = JsonSerializer.SerializeToUtf8Bytes(desired, QueueyJson.Options);
+        await _connection.SendForJsonAsync<JsonElement>(
+            HttpMethod.Put, uri, body, JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Seals the plan (<c>POST …/plans/{plan}/seal</c>): its hash, and the policy's decision with the rule.</summary>
+    public async Task<SealedPlanWireResponse> SealPlanAsync(string tenantPublicId, string planPublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "deployment", "plans", planPublicId, "seal");
+        return await _connection.SendForJsonAsync<SealedPlanWireResponse>(
+            HttpMethod.Post, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Sends a sealed plan the policy gave to a person to the approval inbox (<c>POST …/plans/{plan}/submit</c>, 202). A plan
+    /// already waiting answers the same again.
+    /// </summary>
+    public async Task<PlanPendingWireResponse> SubmitPlanAsync(string tenantPublicId, string planPublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "deployment", "plans", planPublicId, "submit");
+        return await _connection.SendForJsonAsync<PlanPendingWireResponse>(
+            HttpMethod.Post, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Reads a plan with its steps (<c>GET /tenants/{ten}/deployment/plans/{plan}</c>).</summary>
+    public async Task<PlanWireResponse> GetPlanAsync(string tenantPublicId, string planPublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "deployment", "plans", planPublicId);
+        return await _connection.SendForJsonAsync<PlanWireResponse>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Reads how the workspace's own settings are managed (<c>GET /tenants/{ten}</c>, the <c>deployment</c> field).</summary>

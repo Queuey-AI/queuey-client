@@ -31,10 +31,17 @@ public sealed class QueueSyncResult : ISyncRunResult
     public int Succeeded => Applied.Count(r => r.Succeeded);
 
     /// <inheritdoc />
-    public int Failed => Applied.Count - Succeeded;
+    /// <remarks>A queue whose change waits for a configuration plan (<see cref="QueueApplyResult.NeedsPlan"/>) is not counted.</remarks>
+    public int Failed => Applied.Count(r => !r.Succeeded && !r.NeedsPlan);
+
+    /// <summary>
+    /// The queues a sync from code left a change out on, because Queuey wants a configuration plan for it
+    /// (<c>plan_required</c>, Queuey F3.11). The sync went on with the others and does not throw for them.
+    /// </summary>
+    public IReadOnlyList<QueueApplyResult> PlanRequired => Applied.Where(r => r.NeedsPlan).ToArray();
 
     /// <inheritdoc />
-    public bool AllSucceeded => Failed == 0 && NotAttempted.Count == 0;
+    public bool AllSucceeded => Failed == 0 && NotAttempted.Count == 0 && !Applied.Any(r => r.NeedsPlan);
 
     /// <summary>Queues this run created, as opposed to found already there.</summary>
     public int Created => Applied.Count(r => r.Created);
@@ -67,13 +74,25 @@ public sealed class QueueSyncResult : ISyncRunResult
     /// </summary>
     public bool? ApplyStarted { get; init; }
 
-    /// <summary>Throws a <see cref="QueueySyncException"/> aggregating every failure, if anything failed.</summary>
+    /// <summary>
+    /// What Queuey warned about during the run, one line per warning as <c>code: message</c> (<c>X-Queuey-Warning</c>), such
+    /// as <c>would_require_approval</c>: an apply without a configuration plan that Queuey will refuse once it enforces plans.
+    /// </summary>
+    public IReadOnlyList<string> ServerWarnings { get; init; } = Array.Empty<string>();
+
+    /// <summary>The stored plan (<c>plan_…</c>) a deployment apply wrote, when it was bound to one (Queuey F3.11).</summary>
+    public string? PlanId { get; init; }
+
+    /// <summary>
+    /// Throws a <see cref="QueueySyncException"/> aggregating every failure, if anything failed. A queue that only waits for a
+    /// configuration plan (<see cref="PlanRequired"/>) is not a failure here, so an app that syncs on start still starts.
+    /// </summary>
     public void ThrowIfAnyFailed()
     {
-        if (AllSucceeded)
+        if (Failed == 0 && NotAttempted.Count == 0)
             return;
 
-        var failed = Applied.Where(r => !r.Succeeded).Select(r => r.Name).ToArray();
+        var failed = Applied.Where(r => !r.Succeeded && !r.NeedsPlan).Select(r => r.Name).ToArray();
 
         var parts = new List<string>();
         if (failed.Length > 0) parts.Add(FormattableString.Invariant($"{failed.Length} queue(s) failed: {string.Join(", ", failed)}"));

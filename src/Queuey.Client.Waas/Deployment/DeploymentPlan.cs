@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -48,6 +49,25 @@ public sealed class DeploymentPlan
     /// resources; then a dry run against a resource a file manages is answered as it would be outside an apply.
     /// </summary>
     public bool ApplyStarted { get; init; }
+
+    /// <summary>
+    /// The plan as Queuey stored it (Queuey F3.11): its id, hash, the policy's decision and where it stands. Null for a plan
+    /// only this client made (<see cref="IQueueyService.PlanDeploymentAsync(DeploymentFile, SyncOptions?, CancellationToken)"/>,
+    /// <c>queuey plan --local</c>), and against a Queuey that stores no plans; <see cref="Warnings"/> says why.
+    /// </summary>
+    public StoredPlan? Stored { get; init; }
+
+    /// <summary>
+    /// What Queuey warned about while the plan was made (<c>X-Queuey-Warning</c>), and why a plan that was to be stored was
+    /// not: a Queuey that stores no plans. Each is one line.
+    /// </summary>
+    public IReadOnlyList<string> Warnings { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// True when Queuey refused to start an apply without a plan for this workspace (<c>plan_required</c>): the plan was made
+    /// from dry runs outside an apply, and an apply needs a stored plan (<see cref="IQueueyService.StorePlanAsync"/>).
+    /// </summary>
+    public bool ApplyRequiresPlan { get; init; }
 
     /// <summary>True when Queuey would accept every write.</summary>
     public bool WouldSucceed => Steps.All(s => s.Error is null);
@@ -104,6 +124,16 @@ public sealed class DeploymentPlanStep
 
     /// <summary>For a queue apply would create: what it would send once the queue exists, which no dry run can answer for.</summary>
     public JsonElement? Desired { get; init; }
+
+    /// <summary>The step's index in the plan Queuey stores, when its dry run was one of that plan's (Queuey F3.11).</summary>
+    internal int? StoredIndex { get; init; }
+
+    /// <summary>
+    /// For a queue apply would create, in a plan Queuey stores: what an apply bound to the plan sends once the queue exists,
+    /// each part once. As <see cref="Desired"/>, with the mode apply gives a new queue that has a destination when the file
+    /// declares none, and without the parts that are null.
+    /// </summary>
+    internal JsonElement? StoredDesired { get; init; }
 }
 
 /// <summary>One value that would change: a path into the config read-back, and the JSON on each side.</summary>
@@ -168,6 +198,10 @@ public sealed class DryRunIgnoredException : QueueyException
 internal abstract class DryRunAnswer
 {
     public bool DryRun { get; set; }
+
+    // Steget dry run ble i en lagret plan (X-Queuey-Plan-Step, Queuey F3.11). Fra headeren, aldri fra kroppen.
+    [JsonIgnore]
+    public int? PlanStep { get; set; }
 }
 
 internal sealed class ConfigPlanResponse : DryRunAnswer
@@ -221,7 +255,7 @@ internal sealed class DeploymentPlanner
 
     public async Task<DeploymentPlan> PlanAsync(
         DeploymentFile file, IReadOnlyList<DeploymentQueuePlan> plans, string tenant, CancellationToken ct,
-        IReadOnlyList<SkippedResource>? skipped = null)
+        IReadOnlyList<SkippedResource>? skipped = null, bool stored = false)
     {
         // Det en person har løsrevet (Queuey F2.4), planlegges ikke: apply hopper over det. Køene står likevel i lista med
         // ingress-URL-en, så planen sier hva fila nevner.
@@ -248,8 +282,10 @@ internal sealed class DeploymentPlanner
 
         // Beviset på at serveren planlegger, før noe annet sendes. Svaret gjelder også som svaret på
         // den skrivingen, så den sendes ikke to ganger.
+        // En plan Queuey lagrer (F3.11), har ingen probe: serveren som laget planen, svarer dry runs, og hver dry run i den blir
+        // et steg, også en tom policy-patch som apply aldri sender.
         var answered = new Dictionary<string, DryRunAnswer>(StringComparer.Ordinal);
-        if (ChooseProbe(workspaceWrites, planned, existing, tenant) is { } probe)
+        if (!stored && ChooseProbe(workspaceWrites, planned, existing, tenant) is { } probe)
             answered[probe.Key] = await ProbeAsync(probe, ct).ConfigureAwait(false);
 
         var steps = new List<DeploymentPlanStep>();
@@ -472,6 +508,11 @@ internal sealed class DeploymentPlanner
             {
                 Target = target, Aspect = "queue", Creates = true, Notes = notes,
                 Desired = DesiredForNewQueue(plan, deliveries),
+                StoredIndex = applied.PlanStep,
+                // Apply gir en ny kø uten deklarert modus deliver når den har et sted å levere (ConvergeModeAsync). I en
+                // lagret plan er det en skriving som alle andre, så den står i desired.
+                StoredDesired = StoredDesiredForNewQueue(plan, deliveries,
+                    plan.Mode ?? (hasDestination ? DeploymentQueueMode.Deliver : null)),
                 Error = forwards && listenerEnvironment is { IsUnread: false, AllowsLocalForward: false } environment
                     ? LocalForwardNeedsDevWorkspace(name, tenant, environment)
                     : plan.Mode == DeploymentQueueMode.Deliver && !hasDestination ? DeliverWithoutDestination(name) : null,
@@ -534,6 +575,31 @@ internal sealed class DeploymentPlanner
         };
 
         if (desired.Values.All(v => v is null))
+            return null;
+
+        using JsonDocument doc = JsonDocument.Parse(JsonSerializer.Serialize(desired, QueueyJson.Options));
+        return doc.RootElement.Clone();
+    }
+
+    /// <summary>
+    /// What an apply bound to a stored plan sends to a queue it creates (Queuey F3.11): the parts that are not null, with
+    /// <paramref name="mode"/> as apply sets it. Queuey binds each part to one write, in the form <c>request_hash</c> has.
+    /// </summary>
+    private static JsonElement? StoredDesiredForNewQueue(DeploymentQueuePlan plan, ResolvedDeliveries deliveries, DeploymentQueueMode? mode)
+    {
+        var desired = new Dictionary<string, object>(StringComparer.Ordinal);
+        if (plan.Ingress is { } ingress)
+            desired["ingress"] = QueueyManagement.WireOf(ingress);
+        if (!plan.Definition.Policy.IsEmpty)
+            desired["policy"] = QueueyService.ToPatch(plan.Definition.Policy);
+        if (deliveries.Queues.TryGetValue(plan.Definition.Name, out QueueDelivery? delivery))
+            desired["delivery"] = QueueyManagement.WireOf(delivery);
+        if (plan.Kind is { } kind)
+            desired["kind"] = kind.ToFileText();
+        if (mode is { } m)
+            desired["mode"] = m.ToFileText();
+
+        if (desired.Count == 0)
             return null;
 
         using JsonDocument doc = JsonDocument.Parse(JsonSerializer.Serialize(desired, QueueyJson.Options));

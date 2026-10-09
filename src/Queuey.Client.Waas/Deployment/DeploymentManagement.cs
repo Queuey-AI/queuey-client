@@ -351,6 +351,11 @@ internal sealed class StartApplyWireRequest
 {
     public StartApplySourceWire? Source { get; set; }
     public StartApplyAdoptWire? Adopt { get; set; }
+
+    // En apply bundet til en lagret plan (Queuey F3.11) sender bare planId og planHash: kilden og adopt er planens, og
+    // serveren svarer 400 på en forespørsel som har dem i tillegg.
+    public string? PlanId { get; set; }
+    public string? PlanHash { get; set; }
 }
 
 internal sealed class StartApplySourceWire
@@ -373,6 +378,8 @@ internal sealed class StartApplyWireResponse
     public DateTimeOffset? ExpiresAtUtc { get; set; }
     public string? Enforcement { get; set; }
     public DeploymentManagementResponse? Workspace { get; set; }
+    public string? PlanId { get; set; }
+    public List<ApplyWarningWire>? Warnings { get; set; }
 }
 
 /// <summary>Wire response for <c>GET /tenants/{t}</c>, the part a deployment check reads.</summary>

@@ -134,6 +134,30 @@ public interface IQueueyService
     Task<DeploymentPlan> PlanDeploymentAsync(DeploymentFile file, SyncOptions? options, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Builds a configuration plan Queuey stores (Queuey F3.11): an empty plan with where the file lives
+    /// (<see cref="SyncOptions.Source"/>) and what it takes back (<see cref="SyncOptions.Adopt"/>), every write apply would
+    /// send as a dry run in it (<c>X-Queuey-Plan</c>), what apply sends to each queue it creates, then the seal: the hash and
+    /// the policy's decision. When the policy gives the plan to a person, it goes to Queuey's inbox, and
+    /// <see cref="StoredPlan.ApprovalUrl"/> says where. Apply it with <see cref="SyncOptions.Plan"/> once
+    /// <see cref="StoredPlan.CanBeApplied"/>.
+    /// </summary>
+    /// <returns>
+    /// The plan with <see cref="DeploymentPlan.Stored"/> set. A plan with a refused write is not sealed, and its steps say
+    /// why. Against a Queuey that stores no plans, the plan this client makes, without <see cref="DeploymentPlan.Stored"/>,
+    /// and a line in <see cref="DeploymentPlan.Warnings"/> that says so.
+    /// </returns>
+    Task<DeploymentPlan> StorePlanAsync(DeploymentFile file, SyncOptions? options = null, CancellationToken cancellationToken = default);
+
+    /// <summary>Reads a stored plan, with its steps (<c>GET /tenants/{t}/deployment/plans/{plan}</c>).</summary>
+    Task<StoredPlan> GetStoredPlanAsync(string planId, string? tenantPublicId = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Sends a sealed plan the policy gave to a person to Queuey's inbox, where it waits 24 hours for one. A plan already
+    /// waiting answers the same again.
+    /// </summary>
+    Task<StoredPlan> SubmitStoredPlanAsync(string planId, string? tenantPublicId = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Proves a queue delivers: publishes <paramref name="payload"/> to <paramref name="queueName"/>
     /// and follows that event until it is delivered, logged, filtered or failed, or the timeout
     /// passes. A failure is reported on its first attempt, with the receiver's answer and what to

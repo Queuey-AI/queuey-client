@@ -35,6 +35,15 @@ internal sealed class StubHttpMessageHandler : HttpMessageHandler
     /// <summary>The managed-resource calls the stub answered itself.</summary>
     public List<HttpRequestMessage> ManagementRequests { get; } = new();
 
+    /// <summary>
+    /// Whether the test answers <c>POST /tenants/{t}/deployment/plans</c> itself (Queuey F3.11). Without it, the stub is a
+    /// Queuey from before stored plans: 404, recorded in <see cref="ManagementRequests"/>.
+    /// </summary>
+    public bool AnswersPlans { get; init; }
+
+    public static bool IsNewPlanCall(HttpRequestMessage req)
+        => req.Method == HttpMethod.Post && req.RequestUri!.AbsolutePath.EndsWith("/deployment/plans", StringComparison.Ordinal);
+
     /// <summary>The token <see cref="ApplyStarted"/> answers with.</summary>
     public const string ApplyToken = "apply-token-1";
 
@@ -66,7 +75,7 @@ internal sealed class StubHttpMessageHandler : HttpMessageHandler
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         byte[]? body = request.Content is null ? null : await request.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
-        if (!AnswersManagement && IsManagementCall(request))
+        if ((!AnswersManagement && IsManagementCall(request)) || (!AnswersPlans && IsNewPlanCall(request)))
         {
             ManagementRequests.Add(request);
             return new HttpResponseMessage(HttpStatusCode.NotFound);
