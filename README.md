@@ -29,7 +29,7 @@ to a person, who mints it in the console; give it to an app only when the app ma
 variable. In Development (`DOTNET_ENVIRONMENT` or `ASPNETCORE_ENVIRONMENT`), when the environment does not hold
 both, `QUEUEY_SIGNING_KEY_ID` and `QUEUEY_SIGNING_SECRET` are read as a pair from `.env` in the working folder, and
 nothing else is: hosts, tenant and API key never come from a file. Only from a regular file of your own (on Windows,
-under your profile folder) that git does not track. The environment always wins. Outside Development `.env` is never read: production takes
+under your profile folder, with no link or junction on the way) that git does not track. The environment always wins. Outside Development `.env` is never read: production takes
 its secrets from the platform, and a file in the working folder read silently there would be a surprise.
 
 - Tiny and dependency-light: `System.Text.Json` + `HttpClient`, no Newtonsoft.

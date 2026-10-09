@@ -225,3 +225,52 @@ public sealed class DotEnvFileTests : IDisposable
     public void A_line_is_read_as_dotenv_files_write_it(string line, string name, string value)
         => Assert.Equal((name, value), DotEnvFile.Parse(line));
 }
+
+/// <summary>
+/// Windows-sjekken for .env (security-review av #68 runde 2, R2-K3): under profilmappa, uten lenke eller junction på veien.
+/// Logikken er den samme på alle plattformer, så den testes her med symbolske lenker; mappene ligger under testens egen mappe,
+/// siden /var på macOS selv er en lenke.
+/// </summary>
+public sealed class DotEnvFolderTests : IDisposable
+{
+    private readonly string _dir = System.IO.Path.Combine(AppContext.BaseDirectory, "dotenv-folder-tests", Guid.NewGuid().ToString("N"));
+
+    public DotEnvFolderTests() => System.IO.Directory.CreateDirectory(System.IO.Path.Combine(_dir, "profile", "app"));
+
+    public void Dispose()
+    {
+        try { System.IO.Directory.Delete(_dir, recursive: true); } catch { }
+    }
+
+    [Fact]
+    public void A_plain_file_under_the_profile_is_accepted_and_one_outside_it_is_not()
+    {
+        string profile = System.IO.Path.Combine(_dir, "profile");
+        string env = System.IO.Path.Combine(profile, "app", ".env");
+        System.IO.File.WriteAllText(env, "QUEUEY_SIGNING_KEY_ID=hsk_01A\n");
+        string outside = System.IO.Path.Combine(_dir, ".env");
+        System.IO.File.WriteAllText(outside, "x");
+
+        Assert.True(DotEnvFile.UnderFolderWithoutLinks(env, profile));
+        Assert.False(DotEnvFile.UnderFolderWithoutLinks(outside, profile));
+        Assert.False(DotEnvFile.UnderFolderWithoutLinks(env, null));
+        // En mappe med samme begynnelse er ikke profilmappa.
+        Assert.False(DotEnvFile.UnderFolderWithoutLinks(env, profile.Substring(0, profile.Length - 2)));
+    }
+
+    [Fact]
+    public void A_link_on_the_way_is_refused_not_resolved()
+    {
+        if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows))
+            return; // symbolske lenker krever rettigheter på Windows; der er det junctions, med samme attributt
+        string profile = System.IO.Path.Combine(_dir, "profile");
+        string elsewhere = System.IO.Path.Combine(_dir, "elsewhere");
+        System.IO.Directory.CreateDirectory(elsewhere);
+        System.IO.File.WriteAllText(System.IO.Path.Combine(elsewhere, ".env"), "x");
+        System.IO.Directory.CreateSymbolicLink(System.IO.Path.Combine(profile, "linked"), elsewhere);
+        System.IO.File.CreateSymbolicLink(System.IO.Path.Combine(profile, "app", ".env"), System.IO.Path.Combine(elsewhere, ".env"));
+
+        Assert.False(DotEnvFile.UnderFolderWithoutLinks(System.IO.Path.Combine(profile, "linked", ".env"), profile));
+        Assert.False(DotEnvFile.UnderFolderWithoutLinks(System.IO.Path.Combine(profile, "app", ".env"), profile));
+    }
+}

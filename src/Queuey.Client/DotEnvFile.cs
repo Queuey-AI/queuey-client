@@ -118,10 +118,43 @@ internal static class DotEnvFile
         // Windows har ingen eier å sjekke her uten ACL-er. Fail-closed (security-review av #68, R1): bare under brukerens egen
         // profilmappe, som bare brukeren kan skrive i.
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            return UserProfileFolder() is { Length: > 0 } profile
-                   && info.FullName.StartsWith(profile.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+            return UnderFolderWithoutLinks(info.FullName, UserProfileFolder());
         uint? owner = OwnerOf(path), me = CurrentUser();
         return owner is not null && me is not null && owner == me;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="path"/> lies under <paramref name="folder"/> as written, with no link or junction anywhere on
+    /// it: not the file, not a folder between it and the root. A path with one is not resolved but refused, since a junction
+    /// in the profile could point anywhere and still look like a path under it.
+    /// </summary>
+    // Security-review av #68 runde 2 (R2-K3): sammenligningen av strenger slapp gjennom en junction i profilmappa som pekte et
+    // annet sted. Lenker løses ikke opp her: det som ikke kan avgjøres uten, leses ikke.
+    internal static bool UnderFolderWithoutLinks(string path, string? folder)
+    {
+        if (string.IsNullOrEmpty(folder))
+            return false;
+        string full = Path.GetFullPath(path);
+        string root = Path.GetFullPath(folder!).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        try
+        {
+            if ((File.GetAttributes(full) & FileAttributes.ReparsePoint) != 0)
+                return false;
+            for (string? at = Path.GetDirectoryName(full); !string.IsNullOrEmpty(at); at = Path.GetDirectoryName(at))
+            {
+                if ((new DirectoryInfo(at).Attributes & FileAttributes.ReparsePoint) != 0)
+                    return false;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            return false;
+        }
+
+        return true;
     }
 
     /// <summary>The user's profile folder, as Windows names it. A seam for tests.</summary>
