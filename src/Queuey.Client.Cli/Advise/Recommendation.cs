@@ -80,7 +80,12 @@ public static class Recommendation
     /// <summary>Where the self-contained CLI binaries are, for a machine with no .NET.</summary>
     public const string ReleasesUrl = "https://github.com/Queuey-AI/queuey-client/releases/latest";
 
-    public static Advice For(RepoFacts facts)
+    /// <param name="facts">What the scan found.</param>
+    /// <param name="write">
+    /// Where <c>keys mint</c> and <c>credentials generate</c> put a secret for this repository: <c>user-secrets</c> for a .NET
+    /// project with a <c>UserSecretsId</c>, else <c>.env</c> (<see cref="SecretTarget.SuggestedFor"/>).
+    /// </param>
+    public static Advice For(RepoFacts facts, string write = ".env")
     {
         if (facts is null) throw new ArgumentNullException(nameof(facts));
 
@@ -95,9 +100,9 @@ public static class Recommendation
             Send = send,
             Headline = Headline(send, receives),
             Reasons = Reasons(facts, send).ToArray(),
-            NextSteps = NextSteps(facts, send).ToArray(),
+            NextSteps = NextSteps(facts, send, write).ToArray(),
             Questions = Questions(facts, send).ToArray(),
-            ReceivingSteps = receives ? ReceivingRecipe(facts).ToArray() : Array.Empty<string>(),
+            ReceivingSteps = receives ? ReceivingRecipe(facts, write).ToArray() : Array.Empty<string>(),
         };
     }
 
@@ -180,7 +185,7 @@ public static class Recommendation
             yield return $"Something here takes webhooks in: {Join(facts.Receiving)}.";
     }
 
-    private static IEnumerable<string> NextSteps(RepoFacts facts, SendPath send)
+    private static IEnumerable<string> NextSteps(RepoFacts facts, SendPath send, string write)
     {
         switch (send)
         {
@@ -228,8 +233,8 @@ public static class Recommendation
         if (send != SendPath.None)
         {
             yield return "Log in (queuey login --profile dev), apply the deployment file (queuey apply --profile dev), and make the app's " +
-                         "signing key for its queue: queuey keys mint --queue <queue> --profile dev --write .env. It needs a login that " +
-                         "may manage keys, and the secret never passes through the terminal.";
+                         $"signing key for its queue: queuey keys mint --queue <queue> --profile dev --write {write}. It needs a login that " +
+                         "may manage keys, and the secret never passes through the terminal: the app reads the same value Queuey verifies.";
         }
     }
 
@@ -295,11 +300,16 @@ public static class Recommendation
     /// else — naming a class the project cannot install sends the agent off to
     /// write the HMAC by hand, which is the thing the recipe exists to prevent.
     /// </summary>
-    private static IEnumerable<string> ReceivingRecipe(RepoFacts facts)
+    private static IEnumerable<string> ReceivingRecipe(RepoFacts facts, string write)
     {
+        // Mottakerens hemmelighet lages én gang, og samme verdi står i Queuey og der mottakeren leser den (Kenneth 2026-10-09).
+        yield return $"Make the delivery secret: queuey credentials generate <queue>-signing --profile dev --write {write}. It stores the " +
+                     "value in Queuey and as QUEUEY_DELIVERY_SECRET here, never shown; point the queue's delivery at it with " +
+                     "\"delivery\": { \"signing\": { \"enabled\": true, \"credentialRef\": \"<queue>-signing\" } }.";
         if (facts.IsDotNet)
         {
-            yield return "Verify the signature over the RAW body, before anything deserializes it. Queuey.Client ships QueueyDeliveryVerifier; do not write the HMAC by hand.";
+            yield return "Verify the signature over the RAW body, before anything deserializes it, with QueueyDeliveryVerifier.FromEnvironment() " +
+                         "from Queuey.Client; do not write the HMAC by hand.";
         }
         else
         {

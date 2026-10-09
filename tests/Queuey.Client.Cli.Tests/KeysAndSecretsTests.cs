@@ -261,4 +261,30 @@ public sealed class KeysAndSecretsTests : IDisposable
         Assert.Equal(secret, JsonDocument.Parse(File.ReadAllText(stdin)).RootElement.GetProperty("QUEUEY_DELIVERY_SECRET").GetString());
         Assert.Contains("credentialRef", run.Stdout);
     }
+
+    // ── advise ──────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Advise_names_keys_mint_for_the_sender_and_credentials_generate_for_the_receiver_with_the_target_that_fits()
+    {
+        string repo = Path.Combine(_dir, "shop");
+        Directory.CreateDirectory(repo);
+        File.WriteAllText(Path.Combine(repo, "Shop.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk.Web\"><PropertyGroup><UserSecretsId>shop-1</UserSecretsId></PropertyGroup></Project>");
+        File.WriteAllText(Path.Combine(repo, "Program.cs"), "app.MapPost(\"/webhooks/orders\", () => Results.Ok());");
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "advise", repo, "--json" }));
+
+        JsonElement json = JsonDocument.Parse(run.Stdout).RootElement;
+        string next = string.Join("\n", json.GetProperty("nextSteps").EnumerateArray().Select(s => s.GetString()));
+        string receiving = string.Join("\n", json.GetProperty("receivingSteps").EnumerateArray().Select(s => s.GetString()));
+        Assert.Contains("queuey keys mint --queue <queue> --profile dev --write user-secrets", next);
+        Assert.Contains("queuey credentials generate <queue>-signing --profile dev --write user-secrets", receiving);
+        Assert.Contains("QueueyDeliveryVerifier.FromEnvironment()", receiving);
+
+        // Uten UserSecretsId: .env.
+        File.WriteAllText(Path.Combine(repo, "Shop.csproj"), "<Project Sdk=\"Microsoft.NET.Sdk.Web\"></Project>");
+        CliRun plain = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "advise", repo, "--json" }));
+        Assert.Contains("--write .env", JsonDocument.Parse(plain.Stdout).RootElement.GetProperty("nextSteps").ToString());
+    }
 }

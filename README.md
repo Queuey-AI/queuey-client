@@ -8,7 +8,8 @@ platform. **Decorate, sync, publish.**
 
 ```bash
 dotnet add package Queuey.Client --prerelease
-queuey keys mint --queue orders --write .env   # the app's signing key, for its queue only; the secret is never shown
+queuey keys mint --write .env              # the app's signing key, for its workspace; the secret is never shown
+queuey keys mint --write user-secrets      # or into the .NET project's user secrets
 ```
 
 ```csharp
@@ -21,9 +22,19 @@ var queuey = new QueueyClient(new QueueyOptions
 await queuey.Ingress.PublishAsync("orders", order);
 ```
 
-**Which key.** An app signs what it publishes with a signing key that reaches only its queue: that is the app's
-primary way in, and `queuey keys mint --write .env` makes one. A license-wide API key (`ApiKey = "qak_…"`) belongs
+**Which key.** An app signs what it publishes with a signing key that reaches only its workspace (or, with
+`--queue`, one queue): that is the app's primary way in, and `queuey keys mint --write .env` makes one. A license-wide API key (`ApiKey = "qak_…"`) belongs
 to a person, who mints it in the console; give it to an app only when the app manages Queuey, not to publish.
+
+**From .NET configuration.** With `--write user-secrets` the values are in the project's user secrets, which
+`builder.Configuration` reads in Development, with appsettings and environment variables. Bind the options from it
+by the same names; no other package is needed:
+
+```csharp
+var options = new QueueyOptions { TenantPublicId = "ten_…" }
+    .UseSettings(key => builder.Configuration[key]);   // QUEUEY_SIGNING_KEY_ID, QUEUEY_SIGNING_SECRET, QUEUEY_DELIVERY_SECRET, …
+builder.Services.AddSingleton(new QueueyClient(options));
+```
 
 **`.env` in Development.** `UseEnvironmentVariables()` fills each setting not set in code from its `QUEUEY_*`
 variable. In Development (`DOTNET_ENVIRONMENT` or `ASPNETCORE_ENVIRONMENT`), when the environment does not hold
@@ -249,8 +260,18 @@ Queuey signs every delivery it makes. Verifying that signature is what separates
 "my endpoint is public" from "my endpoint accepts events from Queuey", so do it
 before you look at the body.
 
+Make the secret once, so Queuey and the receiver hold the same value and neither ever shows it:
+
+```bash
+queuey credentials generate orders-signing --write .env   # or --write user-secrets
+```
+
+It stores a random 32-byte value in Queuey as the credential deliveries are signed with, and writes it as
+`QUEUEY_DELIVERY_SECRET`. Point the queue's delivery at it in `queuey.deploy.json`, then apply:
+`"delivery": { "signing": { "enabled": true, "credentialRef": "orders-signing" } }`.
+
 ```csharp
-var verifier = new QueueyDeliveryVerifier(signingSecret);
+var verifier = QueueyDeliveryVerifier.FromEnvironment();   // QUEUEY_DELIVERY_SECRET; or new QueueyDeliveryVerifier(secret)
 
 app.MapPost("/webhooks/queuey", async (HttpRequest request) =>
 {
@@ -958,11 +979,20 @@ what apply skipped is under `skipped`, and what the check found detached under `
 ### Publishing with HMAC instead of an API key
 
 ```bash
-queuey keys mint --queue orders --write .env
+queuey keys mint --write .env                    # for every queue in the workspace
+queuey keys mint --queue orders --write .env     # for one queue
+queuey keys mint --type api-key --write .env     # a QUEUEY_API_KEY that can only publish there
+queuey keys mint --write user-secrets            # into the .NET project's user secrets
 ```
 
-This writes `QUEUEY_SIGNING_KEY_ID` and `QUEUEY_SIGNING_SECRET` into `.env` and never prints the
-secret, not in `--json` either.
+This writes `QUEUEY_SIGNING_KEY_ID` and `QUEUEY_SIGNING_SECRET` (or `QUEUEY_API_KEY`) where the app reads
+them, and never prints the secret, not in `--json` either. Without `--write` nothing is minted: the command
+says which variables the app needs, the `--write` that fits the folder, and the console page where a person
+makes or looks at the key. `--show-secret` prints it instead, once, and warns.
+
+- `user-secrets` runs `dotnet user-secrets set` for the project in the working folder, with the values on its
+  stdin and never as arguments, which other users can see in the process list. The project needs a
+  `UserSecretsId`; `dotnet user-secrets init` adds one.
 
 - The lines that set them are replaced, and every other line stays. Afterwards the file is readable and
   writable only by you (0600). A file others could read is tightened, and the command says from what.
@@ -975,13 +1005,13 @@ secret, not in `--json` either.
 - `queuey publish` reads them too, from the environment or else from `./.env`, when no API key is set,
   as with a login. Only those two names are read from `.env`, only when it is a plain file of your own,
   and a key that is set wins. `--json` says where the key came from (`signingKeyFrom`).
-- Without `--write`, the secret is shown once.
 
 Minting needs a login (`queuey login`) for a person who may manage keys, or a credential with
 key-management rights. A deploy key deliberately has none, since a key that can mint keys turns pipeline
-access into account access. When Queuey gives the mint to a person, the command exits `5` with the link,
-and nothing is minted. `queuey keys list --queue orders` shows a queue's keys, and `queuey keys revoke
-<keyId>` ends one.
+access into account access. In a prod workspace a login gets `approval_required`: the command exits `5`
+with the link where a person makes the key, and nothing is minted or written. `queuey keys list` shows the
+workspace's keys (`--queue orders` a queue's), with who minted each, and `queuey keys revoke <keyId>` ends
+one.
 
 ## CLI (`queuey`)
 
