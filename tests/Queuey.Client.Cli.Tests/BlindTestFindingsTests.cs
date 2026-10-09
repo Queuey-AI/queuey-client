@@ -107,6 +107,28 @@ public sealed class BlindTestFindingsTests : IDisposable
     }
 
     [Fact]
+    public async Task With_a_known_workspace_advise_takes_the_retention_from_its_plan_limits()
+    {
+        // Queuey #513: GET /tenants/{t} gir planLimits uten faktureringsdata, og innloggingen når det alltid.
+        StoreLogin();
+        string repo = Repo();
+        var api = new RecordingHandler(req => req.Key == "GET /tenants/ten_dev"
+            ? RecordingHandler.Json(HttpStatusCode.OK, new { publicId = "ten_dev", planLimits = new { retentionDays = 7, deliveriesAtOncePerQueue = 2 } })
+            : throw new InvalidOperationException(req.Key)) { AnswersManagement = true };
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[]
+        {
+            "advise", repo, "--json", "--api-base", "https://api.test", "--tenant", "ten_dev", "--config", Path.Combine(_dir, "none.json"),
+        }), api, Env());
+
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        JsonElement json = JsonDocument.Parse(run.Stdout).RootElement;
+        Assert.Equal(7, json.GetProperty("retentionDays").GetInt32());
+        Assert.Contains("workspace ten_dev", json.GetProperty("retentionFrom").GetString());
+        Assert.Equal("Bearer at-opaque", Assert.Single(api.Headers)["Authorization"]);
+    }
+
+    [Fact]
     public void The_scaffold_carries_the_retention_it_is_given()
     {
         string repo = Repo();
