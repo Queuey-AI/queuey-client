@@ -92,8 +92,11 @@ internal static class ApplyCommand
             {
                 if (WorkspaceCreation.Refusal(environment, expanded, path, CliHost.Env) is { } notCreated)
                     throw notCreated;
-                created = await CreateWorkspaceAsync(config, path, environment);
+                created = await CreateWorkspaceAsync(config, path, environment, nameItHint: profile is null);
                 config = config.WithTenant(created.PublicId);
+                // Blindtest 2 (Kenneth 2026-10-09): workspacet skrives inn i profilen i fila, så neste kommando finner det.
+                if (profile is not null)
+                    created = created with { FileUpdated = RecordWorkspace(path, profile, created.PublicId) };
             }
         }
 
@@ -205,23 +208,56 @@ internal static class ApplyCommand
         return null;
     }
 
+    /// <summary>
+    /// Writes the workspace apply created into <paramref name="profile"/> in the file, and says so on stderr; or says why it
+    /// did not. Never fails the apply: the workspace is made, and the answer names it either way.
+    /// </summary>
+    private static DeploymentWorkspaceRecord.Written? RecordWorkspace(string path, string profile, string tenant)
+    {
+        try
+        {
+            if (DeploymentWorkspaceRecord.Record(path, profile, tenant, out string? notWritten) is { } written)
+            {
+                Console.Error.WriteLine(written.Said);
+                return written;
+            }
+            Console.Error.WriteLine($"Did not write {tenant} to {path}: {notWritten}.");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Console.Error.WriteLine($"Could not write {tenant} to {path}: {ex.Message}");
+        }
+        Console.Error.WriteLine($"  → Name it, or the next apply creates another: {DeploymentWorkspaceRecord.Variable} for profile {profile}, or --tenant {tenant}.");
+        return null;
+    }
+
     /// <summary>A workspace apply created because nothing named one and the file says its environment.</summary>
     private sealed record CreatedWorkspace(string PublicId, string? DisplayName, string Environment)
     {
         /// <summary>The option that names it, ready to use.</summary>
         public string TenantOption => $"--tenant {PublicId}";
 
-        /// <summary>What to do so the next apply reaches it.</summary>
-        public string NameIt => $"This apply created workspace {PublicId}: name it with {TenantOption}, or the next apply creates another.";
+        /// <summary>The change apply made to the deployment file to record it, or null when it made none.</summary>
+        public DeploymentWorkspaceRecord.Written? FileUpdated { get; init; }
 
-        public object ToJson() => new { publicId = PublicId, displayName = DisplayName, environment = Environment, tenantOption = TenantOption };
+        /// <summary>What to do so the next apply reaches it.</summary>
+        public string NameIt => FileUpdated is { } written
+            ? $"This apply created workspace {PublicId} and wrote it to profiles.{written.Profile} in {written.Path}: the next command " +
+              $"with --profile {written.Profile} reaches it."
+            : $"This apply created workspace {PublicId}: name it with {TenantOption}, or the next apply creates another.";
+
+        public object ToJson() => new
+        {
+            publicId = PublicId, displayName = DisplayName, environment = Environment, tenantOption = TenantOption,
+            fileUpdated = FileUpdated?.ToJson(),
+        };
     }
 
     /// <summary>
     /// Creates the workspace the file describes, marked with its environment, and says on stderr how to name it, so the next
     /// apply reaches it instead of creating another.
     /// </summary>
-    private static async Task<CreatedWorkspace> CreateWorkspaceAsync(ResolvedConfig config, string path, string environment)
+    private static async Task<CreatedWorkspace> CreateWorkspaceAsync(ResolvedConfig config, string path, string environment, bool nameItHint)
     {
         using ServiceProvider provider = CliHost.BuildProvider(config);
         if (provider.GetRequiredService<IQueueyService>().Management is not QueueyManagement management)
@@ -234,7 +270,8 @@ internal static class ApplyCommand
 
         Console.Error.WriteLine($"No workspace is named, and {path} says environment {environment}: created workspace {id} "
                                 + $"({TerminalText.Line(tenant.DisplayName ?? name)}, {environment}).");
-        Console.Error.WriteLine($"  → Name it, or the next apply creates another: \"tenant\": \"{id}\" in {path}, tenant in the profile, or --tenant {id}.");
+        if (nameItHint)
+            Console.Error.WriteLine($"  → Name it, or the next apply creates another: \"tenant\": \"{id}\" in {path}, tenant in the profile, or --tenant {id}.");
         return new CreatedWorkspace(id, tenant.DisplayName, environment);
     }
 
@@ -274,6 +311,7 @@ internal static class ApplyCommand
 
             var node = (System.Text.Json.Nodes.JsonObject)JsonSerializer.SerializeToNode(json, CliHost.JsonOut)!;
             node["createdWorkspace"] = JsonSerializer.SerializeToNode(_created.ToJson(), CliHost.JsonOut);
+            node["fileUpdated"] = _created.FileUpdated is { } updated ? JsonSerializer.SerializeToNode(updated.ToJson(), CliHost.JsonOut) : null;
             return node.ToJsonString(CliHost.JsonOut);
         }
 
@@ -833,6 +871,8 @@ internal static class ApplyCommand
         // Workspacet apply laget fordi ingenting navnga et, og fila sa miljøet; null ellers. Navngi det, ellers lager neste
         // apply et til.
         createdWorkspace = created?.ToJson(),
+        // Endringen apply gjorde i fila for å huske workspacet (blindtest 2); null når den ikke gjorde noen.
+        fileUpdated = created?.FileUpdated?.ToJson(),
         // Planen Queuey lagrer, som applyen skrev (F3.11); null for en apply uten plan.
         plan = plan is null ? null : StoredPlanText.ToJson(plan),
         // Fila slik Queuey merker det applyen styrer med (F2.4): uten userinfo, query og fragment.

@@ -234,4 +234,89 @@ public sealed class BlindTest2Tests : IDisposable
         var advice = Queuey.Client.Cli.Advise.Recommendation.For(Queuey.Client.Cli.Advise.RepoScan.Scan(repo));
         Assert.Contains(advice.ReceivingSteps, s => s.Contains("\"templateKey\": \"queuey\"", StringComparison.Ordinal));
     }
+
+    // ── apply skriver workspacet det lager, inn i profilen i fila ───────────
+
+    private static RecordingHandler CreatesWorkspace() => new(req => req.Key switch
+    {
+        "POST /tenants" => RecordingHandler.Json(HttpStatusCode.OK, new
+        {
+            publicId = "ten_new", displayName = req.Json.GetProperty("displayName").GetString(), status = "Active", kind = "Standard",
+            queues = Array.Empty<object>(), environment = req.Json.TryGetProperty("environment", out JsonElement e) ? e.GetString() : null,
+        }),
+        "GET /tenants/ten_new/queues" => RecordingHandler.Json(HttpStatusCode.OK, Array.Empty<object>()),
+        "PATCH /tenants/ten_new" or "PATCH /tenants/ten_new/ingress" => RecordingHandler.NoContent(),
+        _ => throw new InvalidOperationException(req.Key),
+    });
+
+    private const string Scaffolded = """
+        // The scaffold, with a comment a person added.
+        {
+          "workspace": {
+            "environment": "${QUEUEY_WORKSPACE_ENVIRONMENT}"
+          },
+          "queues": {},
+          "profiles": {
+            "dev": {
+              "variables": {
+                // dev only
+                "QUEUEY_WORKSPACE_ENVIRONMENT": "dev"
+              }
+            }
+          }
+        }
+
+        """;
+
+    [Fact]
+    public async Task Apply_writes_the_workspace_it_created_into_the_profile_and_changes_nothing_else()
+    {
+        DeployFile(Scaffolded);
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "apply", "--profile", "dev", "--no-git", "--json" }), CreatesWorkspace(), Env());
+
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        Assert.Equal("""
+            // The scaffold, with a comment a person added.
+            {
+              "tenant": "${QUEUEY_TENANT}",
+              "workspace": {
+                "environment": "${QUEUEY_WORKSPACE_ENVIRONMENT}"
+              },
+              "queues": {},
+              "profiles": {
+                "dev": {
+                  "variables": {
+                    // dev only
+                    "QUEUEY_WORKSPACE_ENVIRONMENT": "dev",
+                    "QUEUEY_TENANT": "ten_new"
+                  }
+                }
+              }
+            }
+
+            """, File.ReadAllText(Path.Combine(_dir, "queuey.deploy.json")));
+        Assert.Contains("Wrote ten_new to profiles.dev in queuey.deploy.json", run.Stderr);
+        Assert.DoesNotContain("Name it", run.Stderr);
+        JsonElement updated = JsonDocument.Parse(run.Stdout).RootElement.GetProperty("fileUpdated");
+        Assert.Equal("dev", updated.GetProperty("profile").GetString());
+        Assert.Equal("ten_new", updated.GetProperty("tenant").GetString());
+
+        // Neste kommando med profilen finner workspacet.
+        Assert.Equal("ten_new", DeploymentTenant.ReadFromFile(File.ReadAllText(Path.Combine(_dir, "queuey.deploy.json")), "queuey.deploy.json", "dev"));
+    }
+
+    [Fact]
+    public async Task Apply_never_touches_a_value_the_profile_has()
+    {
+        string json = Scaffolded.Replace("\"QUEUEY_WORKSPACE_ENVIRONMENT\": \"dev\"", "\"QUEUEY_WORKSPACE_ENVIRONMENT\": \"dev\", \"QUEUEY_TENANT\": \"ten_mine\"");
+        DeployFile(json);
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "apply", "--profile", "dev", "--no-git", "--json" }), CreatesWorkspace(), Env());
+
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        Assert.Equal(json, File.ReadAllText(Path.Combine(_dir, "queuey.deploy.json")));
+        Assert.Contains("Did not write ten_new to queuey.deploy.json: profiles.dev.variables has QUEUEY_TENANT already.", run.Stderr);
+        Assert.Equal(JsonValueKind.Null, JsonDocument.Parse(run.Stdout).RootElement.GetProperty("fileUpdated").ValueKind);
+    }
 }
