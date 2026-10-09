@@ -53,6 +53,10 @@ internal static class DotEnvFile
             : null;
     }
 
+    /// <summary>The receiver's delivery secret from <c>.env</c> in <paramref name="folder"/>, or null.</summary>
+    internal static string? ReadDeliverySecret(string folder)
+        => Read(folder).TryGetValue(QueueyEnvironmentVariables.DeliverySecret, out string? secret) ? secret.Trim() : null;
+
     internal static IReadOnlyDictionary<string, string> Read(string folder)
     {
         var values = new Dictionary<string, string>(StringComparer.Ordinal);

@@ -181,4 +181,84 @@ public sealed class KeysAndSecretsTests : IDisposable
         Assert.Contains("queuey keys revoke hsk_01WS", run.Stderr);
         Assert.DoesNotContain(Secret, run.Stdout + run.Stderr);
     }
+
+    // ── credentials generate ────────────────────────────────────────────────
+
+    private static RecordingHandler CredentialServer(bool exists = false) => new(req => req.Key switch
+    {
+        "POST /tenants/ten_1/credentials" when exists => RecordingHandler.Json(HttpStatusCode.Conflict,
+            new { error = new { code = "credential_exists", message = "orders-signing holds another secret." } }),
+        "POST /tenants/ten_1/credentials" => RecordingHandler.Json(HttpStatusCode.OK, new
+        {
+            publicId = "cred_1", name = "orders-signing", type = "HmacSigning", keyId = "orders-signing", version = 1, created = true,
+        }),
+        _ => throw new InvalidOperationException(req.Key),
+    });
+
+    [Fact]
+    public async Task Credentials_generate_stores_the_same_value_in_queuey_and_locally_and_never_shows_it()
+    {
+        RecordingHandler api = CredentialServer();
+        string env = Path.Combine(_dir, ".env");
+
+        CliRun run = await Run(api, "credentials", "generate", "orders-signing", "--tenant", "ten_1", "--write", env, "--json");
+
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        JsonElement sent = Assert.Single(api.Requests).Json;
+        Assert.Equal("orders-signing", sent.GetProperty("name").GetString());
+        Assert.Equal("HmacSigning", sent.GetProperty("type").GetString());
+        Assert.Equal("orders-signing", sent.GetProperty("keyId").GetString());
+        string secret = sent.GetProperty("secret").GetString()!;
+        Assert.Matches("^[A-Za-z0-9_-]{43}$", secret); // 32 byte, base64url uten utfylling
+        Assert.Equal($"QUEUEY_DELIVERY_SECRET={secret}\n", File.ReadAllText(env));
+        Assert.DoesNotContain(secret, run.Stdout + run.Stderr);
+        JsonElement json = JsonDocument.Parse(run.Stdout).RootElement;
+        Assert.Equal("orders-signing", json.GetProperty("deliverySigning").GetProperty("credentialRef").GetString());
+        Assert.Equal("QUEUEY_DELIVERY_SECRET", json.GetProperty("variable").GetString());
+
+        // To kjøringer gir to ulike verdier.
+        Assert.NotEqual(CredentialsCommand.NewSecret(), CredentialsCommand.NewSecret());
+    }
+
+    [Fact]
+    public async Task Credentials_generate_without_write_makes_nothing()
+    {
+        var api = new RecordingHandler(req => throw new InvalidOperationException("Nothing is stored: " + req.Key));
+
+        CliRun run = await Run(api, "credentials", "generate", "orders-signing", "--tenant", "ten_1");
+
+        Assert.Equal(ExitCodes.Usage, run.Exit);
+        Assert.Contains("requires --write", run.Stderr);
+        Assert.Empty(api.Requests);
+    }
+
+    [Fact]
+    public async Task A_name_queuey_already_holds_writes_nothing_here()
+    {
+        string env = Path.Combine(_dir, ".env");
+
+        CliRun run = await Run(CredentialServer(exists: true), "credentials", "generate", "orders-signing", "--tenant", "ten_1", "--write", env);
+
+        Assert.Equal(ExitCodes.RuntimeError, run.Exit);
+        Assert.Contains("--replace", run.Stderr);
+        Assert.False(File.Exists(env));
+    }
+
+    [Fact]
+    public async Task Credentials_generate_writes_user_secrets_on_stdin()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+        (string args, string stdin) = FakeDotnet();
+        Project();
+        RecordingHandler api = CredentialServer();
+
+        CliRun run = await Run(api, "credentials", "generate", "orders-signing", "--tenant", "ten_1", "--write", "user-secrets");
+
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        string secret = Assert.Single(api.Requests).Json.GetProperty("secret").GetString()!;
+        Assert.DoesNotContain(secret, File.ReadAllText(args));
+        Assert.Equal(secret, JsonDocument.Parse(File.ReadAllText(stdin)).RootElement.GetProperty("QUEUEY_DELIVERY_SECRET").GetString());
+        Assert.Contains("credentialRef", run.Stdout);
+    }
 }

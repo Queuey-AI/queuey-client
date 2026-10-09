@@ -52,6 +52,22 @@ public sealed class QueueyDeliveryVerifier
     }
 
     /// <summary>
+    /// A verifier for the secret <see cref="QueueyOptions.UseEnvironmentVariables(Func{string, string?}?)"/> finds:
+    /// <c>QUEUEY_DELIVERY_SECRET</c> from the environment, or in Development from <c>.env</c>, as
+    /// <c>queuey credentials generate --write</c> writes it. For .NET configuration (user secrets), build it from
+    /// <c>new QueueyOptions().UseSettings(key =&gt; configuration[key]).DeliverySecret</c>.
+    /// </summary>
+    /// <exception cref="QueueyConfigurationException">No delivery secret is set.</exception>
+    public static QueueyDeliveryVerifier FromEnvironment(QueueyDeliveryVerifierOptions? options = null)
+        => new(new QueueyOptions().UseEnvironmentVariables().DeliverySecret is { Length: > 0 } secret
+            ? secret
+            : throw new QueueyConfigurationException(
+                $"No delivery secret is set: {QueueyEnvironmentVariables.DeliverySecret} is not in the environment, nor in .env in Development.")
+            {
+                SuggestedAction = "Make one with `queuey credentials generate <name> --write .env` (or --write user-secrets), which also stores it in Queuey.",
+            }, options);
+
+    /// <summary>
     /// Reads the key id off a request without verifying anything. Use it to look
     /// up which secret to construct the verifier with when a receiver accepts
     /// deliveries signed by more than one key (during a key rotation, say).

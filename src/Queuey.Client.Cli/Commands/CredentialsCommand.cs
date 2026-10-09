@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
@@ -23,6 +24,15 @@ internal static class CredentialsCommand
         "credentials set", flags: new[] { "json", "replace" }, values: new[] { "name", "from-env", "type", "key-id", "username", "profile" });
 
     internal static readonly CommandOptions ListOptions = new("credentials list", flags: new[] { "json" }, values: new[] { "profile" });
+
+    internal static readonly CommandOptions GenerateOptions = new(
+        "credentials generate", flags: new[] { "json", "replace" }, values: new[] { "write", "profile" }, positionals: 1);
+
+    /// <summary>The variable <c>credentials generate</c> writes, the name the SDK reads for <c>QueueyDeliveryVerifier</c>.</summary>
+    internal const string DeliverySecretVariable = QueueyEnvironmentVariables.DeliverySecret;
+
+    /// <summary>How many random bytes a generated delivery secret has.</summary>
+    internal const int GeneratedSecretBytes = 32;
 
     // Queuey F3.7 (besluttet 2026-10-07): rotasjonen er en operasjon (rotate_credential). Navnet og verdien som for `set`, og
     // et vindu bare når --grace er gitt. Typen er credentialens egen, så --type, --key-id og --username hører til `set`.
@@ -73,6 +83,7 @@ internal static class CredentialsCommand
         return sub switch
         {
             "set" => await SetAsync(rest),
+            "generate" => await GenerateAsync(rest),
             "request" => await RequestAsync(rest),
             "rotate" => await RotateAsync(rest),
             "list" => await ListAsync(rest),
@@ -85,7 +96,7 @@ internal static class CredentialsCommand
 
     private static int Unknown(string sub, string[] rest)
         => CliErrors.Write(CliErrors.WantsJson(rest), "unknown_subcommand",
-            $"Unknown credentials subcommand '{CliErrors.Shown(sub)}'. Expected 'set', 'rotate', 'request' or 'list'.", action: null, status: null, ExitCodes.Usage);
+            $"Unknown credentials subcommand '{CliErrors.Shown(sub)}'. Expected 'set', 'generate', 'rotate', 'request' or 'list'.", action: null, status: null, ExitCodes.Usage);
 
     private static async Task<int> SetAsync(string[] args)
     {
@@ -208,6 +219,101 @@ internal static class CredentialsCommand
 
         return ExitCodes.Success;
     }
+
+    /// <summary>
+    /// <c>credentials generate &lt;name&gt; --write &lt;target&gt;</c>: the receiver's secret for <c>QueueyDeliveryVerifier</c>, made here,
+    /// stored in Queuey as the credential Queuey signs deliveries with, and written where the receiver reads it as
+    /// <c>QUEUEY_DELIVERY_SECRET</c>. The same value in both places, never shown.
+    /// </summary>
+    // Kenneth 2026-10-09: den lokale verdien skal alltid være den samme som i Queuey, for mottakeren som for avsenderen.
+    private static async Task<int> GenerateAsync(string[] args)
+    {
+        if (!GenerateOptions.TryParse(args, out ArgMap map, out int failure)) return failure;
+        if (map.Has("help") || map.Has("h")) return Help();
+        bool json = map.Has("json");
+
+        string? name = map.FirstPositional?.Trim();
+        if (string.IsNullOrWhiteSpace(name))
+            return CliErrors.Usage(map, "missing_argument", "credentials generate requires a name: queuey credentials generate <name> --write <target>.",
+                "Give the name the queue's delivery signing will refer to, such as orders-signing.");
+        if (DeploymentCredentialNames.LooksLikeASecret(name!))
+            return CliErrors.Usage(map, "invalid_value", "The name looks like a secret, not the name of a credential. Its value is not shown.",
+                "Name the credential with letters, digits and . _ : @ / -, such as orders-signing.");
+        if (!DeploymentCredentialNames.FitsShape(name))
+            return CliErrors.Usage(map, "invalid_value",
+                $"'{CliErrors.Shown(name!)}' can't name a credential: letters, digits and . _ : @ / -, starting with a letter or digit, " +
+                $"at most {DeploymentCredentialNames.MaxLength} characters.", "Choose a name of that shape, such as orders-signing.");
+
+        // Uten et sted å skrive den, lages ingen hemmelighet: verdien vises aldri, så en som ikke er lagret lokalt, er tapt.
+        if (string.IsNullOrWhiteSpace(map.Get("write")))
+            return CliErrors.Usage(map, "missing_argument",
+                "credentials generate requires --write <target>: where the receiver reads the secret. It is never shown.",
+                $"--write {SecretTarget.SuggestedFor(Directory.GetCurrentDirectory())} fits this folder; --write takes .env (or another file git ignores) or user-secrets.");
+        SecretTarget target = SecretTarget.Parse(map.Get("write")!);
+
+        ResolvedConfig config = ListenCommand.Connection(map);
+        string? tenant = config.TenantPublicId;
+        if (string.IsNullOrWhiteSpace(tenant))
+            return CliErrors.Configuration(map, "config_error", "A workspace is required. Set --tenant, QUEUEY_TENANT, the profile's tenant, or tenant in queuey.json.");
+
+        string secret = NewSecret();
+        using ServiceProvider provider = CliHost.BuildProvider(config);
+        var service = provider.GetRequiredService<IQueueyService>();
+
+        // Som `credentials set` med HmacSigning, og navnet som key id: det Queuey signerer leveringene med.
+        CredentialResult stored;
+        try
+        {
+            stored = await service.Management.CreateCredentialAsync(tenant!, name!, "HmacSigning", secret, keyId: name, username: null,
+                replace: map.Has("replace"));
+        }
+        catch (QueueyConflictException ex) when (ex.ErrorCode == "credential_exists")
+        {
+            string holder = CredentialNameRules.Showable(name) is { } shown ? $"'{shown}'" : "The name";
+            return CliErrors.Write(json, "credential_exists",
+                $"{holder} already holds a different secret in Queuey, and nothing was written here.",
+                "Replacing it is a decision for a person: run again with --replace to make a new secret for both sides, or choose "
+                + "another name.", status: 409, ExitCodes.RuntimeError, "Queuey error");
+        }
+
+        try
+        {
+            target.Write(new[] { (DeliverySecretVariable, secret) });
+        }
+        catch (CliFileException ex)
+        {
+            // Lagret i Queuey, men ikke her: verdien er tapt, siden den aldri vises. En ny generate med --replace lager en ny for begge.
+            return CliErrors.Write(json, ex.Code,
+                $"Stored '{stored.Name}' in Queuey, but could not write it to {target.Shown}: {ex.Message} The secret is not shown.",
+                $"Fix where it goes, and run queuey credentials generate {name} --replace --write {map.Get("write")}, which makes a new " +
+                "secret for both.", status: null, ExitCodes.Configuration, "Error");
+        }
+
+        string reference = $"\"delivery\": {{ \"signing\": {{ \"enabled\": true, \"credentialRef\": \"{stored.Name}\" }} }}";
+        if (json)
+        {
+            Console.WriteLine(JsonSerializer.Serialize(new
+            {
+                stored.PublicId, stored.Name, stored.Type, stored.KeyId, stored.Version, stored.Created, stored.SecretReplaced,
+                target = target.Kind,
+                written = target.Shown,
+                variable = DeliverySecretVariable,
+                deliverySigning = new { enabled = true, credentialRef = stored.Name },
+            }, CliHost.JsonOut));
+            return ExitCodes.Success;
+        }
+
+        Console.WriteLine(TerminalText.Line($"Generated the delivery secret '{stored.Name}', stored it in Queuey (HmacSigning) and wrote it to "
+                                            + $"{target.Shown} as {DeliverySecretVariable}. The value is not shown."));
+        Console.WriteLine(TerminalText.Line($"Point the queue's (or the workspace's) delivery at it in queuey.deploy.json, then apply: {reference}"));
+        Console.WriteLine("The receiver verifies each delivery with QueueyDeliveryVerifier.FromEnvironment() in .NET.");
+        return ExitCodes.Success;
+    }
+
+    /// <summary>A new delivery secret: <see cref="GeneratedSecretBytes"/> random bytes, base64url without padding.</summary>
+    internal static string NewSecret()
+        => Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(GeneratedSecretBytes))
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
 
     private static async Task<int> RotateAsync(string[] args)
     {

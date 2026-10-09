@@ -450,6 +450,16 @@ KEYS
                  a prod workspace an API key gets 403 approval_required, and a person revokes.
 
 CREDENTIALS
+  queuey credentials generate <name> --write <target> [--replace] [--profile <name>] [--json]
+                 The receiver's secret: a random value (32 bytes, base64url) made here, stored
+                 in Queuey as the HmacSigning credential <name> that deliveries are signed with,
+                 and written where the receiver reads it as QUEUEY_DELIVERY_SECRET. The same
+                 value in both places, never shown. --write takes .env (or another file git
+                 ignores) or user-secrets, as for keys mint. The answer says how the queue's
+                 delivery points at it: ""delivery"": { ""signing"": { ""enabled"": true,
+                 ""credentialRef"": ""<name>"" } } in queuey.deploy.json, then apply. In .NET the
+                 receiver verifies with QueueyDeliveryVerifier.FromEnvironment(). A name Queuey
+                 already holds is refused unless --replace, which makes a new value for both.
   queuey credentials set --name <name> --from-env <ENV_VAR> [--type <type>]
                 [--key-id <id>] [--username <u>] [--replace] [--profile <name>] [--json]
                  Stores a delivery secret under the workspace and names it, so a deployment
