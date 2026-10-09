@@ -2,7 +2,9 @@ using System;
 using System.IO;
 using System.Net.Http;
 using System.Text.Json;
+using System.Collections.Generic;
 using Microsoft.Extensions.DependencyInjection;
+using Queuey.Client;
 using Queuey.Client.Waas;
 
 namespace Queuey.Client.Cli;
@@ -87,6 +89,65 @@ internal static class CliHost
     /// </summary>
     public static ResolvedConfig ResolveForDeployment(ArgMap args, string? fileTenant, string filePath)
         => DeploymentTenant.Resolve(Resolve(args, profiles: true), args, Env, fileTenant, filePath);
+
+    /// <summary>
+    /// <paramref name="config"/> with the ingress signing key a publish signs with, when it has no API key: from
+    /// <c>QUEUEY_SIGNING_KEY_ID</c> and <c>QUEUEY_SIGNING_SECRET</c> in the environment, else from <c>.env</c> in the working
+    /// folder, which <c>queuey keys mint --write .env</c> writes. Only those two names are read from <c>.env</c>, and a pair is
+    /// taken from one place, never half from each. An API key that is set (a flag, the profile) wins, and nothing is read.
+    /// </summary>
+    // Gullflyten med innlogging (2026-10-09): innloggingen kan ikke publisere, for ingressen tar ikke tokenet. Nøkkelen keys mint
+    // skrev i .env, gjør at `queuey publish` virker uten at agenten noen gang ser hemmeligheten.
+    internal static ResolvedConfig WithIngressSigning(ResolvedConfig config)
+    {
+        if (!string.IsNullOrWhiteSpace(config.ApiKey))
+            return config;
+
+        string? keyId = Clean(Env(QueueyEnvironmentVariables.SigningKeyId)), secret = Clean(Env(QueueyEnvironmentVariables.SigningSecret));
+        if (keyId is not null && secret is not null)
+            return config.WithSigning(keyId, secret, "the environment");
+        if (keyId is not null || secret is not null)
+            throw new QueueyConfigurationException(
+                $"{(keyId is null ? QueueyEnvironmentVariables.SigningSecret : QueueyEnvironmentVariables.SigningKeyId)} is set without " +
+                $"{(keyId is null ? QueueyEnvironmentVariables.SigningKeyId : QueueyEnvironmentVariables.SigningSecret)}, so nothing was signed or sent.")
+            {
+                SuggestedAction = "Set both, or unset the one that is set to use .env or another credential.",
+            };
+
+        string dotEnv = Path.Combine(Directory.GetCurrentDirectory(), ".env");
+        if (!IsOwnPlainFile(dotEnv))
+            return config;
+        IReadOnlyDictionary<string, string> read = EnvFile.Read(dotEnv, QueueyEnvironmentVariables.SigningKeyId, QueueyEnvironmentVariables.SigningSecret);
+        return read.TryGetValue(QueueyEnvironmentVariables.SigningKeyId, out string? fileKey)
+               && read.TryGetValue(QueueyEnvironmentVariables.SigningSecret, out string? fileSecret)
+            ? config.WithSigning(fileKey, fileSecret, ".env")
+            : config;
+
+        static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    }
+
+    /// <summary>
+    /// Whether <paramref name="path"/> is a regular file, not a link, that belongs to the user running the CLI. A <c>.env</c> that
+    /// is anything else is not read: it would let another user, or a repository the command runs in, choose the key a publish
+    /// signs with.
+    /// </summary>
+    // Security-review av #67 (KAN F).
+    internal static bool IsOwnPlainFile(string path)
+    {
+        var info = new FileInfo(path);
+        if (!info.Exists || info.LinkTarget is not null)
+            return false;
+        if (OperatingSystem.IsWindows())
+            return true;
+        try
+        {
+            return UserProfiles.Inspect(path).Owner == UserProfiles.CurrentUser();
+        }
+        catch (QueueyConfigurationException)
+        {
+            return false;
+        }
+    }
 
     // Miljøet konfigurasjonen leses fra. En søm av samme grunn som TestHandler: en test skal ikke måtte
     // endre prosessens miljø for å styre QUEUEY_TENANT.

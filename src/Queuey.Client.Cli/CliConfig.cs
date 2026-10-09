@@ -31,6 +31,12 @@ internal sealed class ResolvedConfig
     /// </summary>
     public LoginTokens? Login { get; init; }
 
+    /// <summary>The ingress signing key a publish signs with when no API key is set (<see cref="CliHost.WithIngressSigning"/>), or null.</summary>
+    public string? SigningKeyId { get; init; }
+
+    /// <summary>The secret of <see cref="SigningKeyId"/>. Never shown.</summary>
+    public string? SigningSecret { get; init; }
+
     /// <summary>Applies the resolved values onto a <see cref="QueueyOptions"/>.</summary>
     public void Apply(QueueyOptions options)
     {
@@ -39,6 +45,8 @@ internal sealed class ResolvedConfig
         if (IngressBaseOverride != null) options.IngressBaseAddress = IngressBaseOverride;
         options.ApiKey = ApiKey;
         options.AccessTokenProvider = string.IsNullOrWhiteSpace(ApiKey) && Login is { } login ? login.AccessTokenAsync : null;
+        options.SigningKeyId = SigningKeyId;
+        options.SigningSecret = SigningSecret;
         options.TenantPublicId = TenantPublicId;
         options.LicensePublicId = LicensePublicId;
         options.Source = Source;
@@ -48,6 +56,27 @@ internal sealed class ResolvedConfig
     /// The same config connecting with <paramref name="login"/>: its license when none is named, and the ingress host Queuey
     /// gave with it when none is set.
     /// </summary>
+    public ResolvedConfig WithSigning(string keyId, string secret, string from) => new()
+    {
+        Environment = Environment,
+        ApiBaseOverride = ApiBaseOverride,
+        IngressBaseOverride = IngressBaseOverride,
+        ApiKey = ApiKey,
+        TenantPublicId = TenantPublicId,
+        LicensePublicId = LicensePublicId,
+        Source = Source,
+        Profile = Profile,
+        ProfileFile = ProfileFile,
+        ProfileTenant = ProfileTenant,
+        Login = Login,
+        SigningKeyId = keyId,
+        SigningSecret = secret,
+        SigningFrom = from,
+    };
+
+    /// <summary>Where <see cref="SigningKeyId"/> came from: the environment or <c>.env</c>. Null without one.</summary>
+    public string? SigningFrom { get; init; }
+
     public ResolvedConfig WithLogin(LoginTokens login) => new()
     {
         Environment = Environment,
@@ -62,6 +91,9 @@ internal sealed class ResolvedConfig
         ProfileFile = ProfileFile,
         ProfileTenant = ProfileTenant,
         Login = login,
+        SigningKeyId = SigningKeyId,
+        SigningSecret = SigningSecret,
+        SigningFrom = SigningFrom,
     };
 
     /// <summary>The same config pointed at another tenant — the one a deployment file names.</summary>
@@ -78,6 +110,9 @@ internal sealed class ResolvedConfig
         ProfileFile = ProfileFile,
         ProfileTenant = ProfileTenant,
         Login = Login,
+        SigningKeyId = SigningKeyId,
+        SigningSecret = SigningSecret,
+        SigningFrom = SigningFrom,
     };
 
     /// <summary>

@@ -86,6 +86,13 @@ internal static class GitSource
     }
 
     private static string? RunGit(string directory, params string[] arguments)
+        => RunGitWithExit(directory, arguments) is { Exit: 0 } run ? run.Output : null;
+
+    /// <summary>
+    /// Runs git as <see cref="Git"/> does, and returns its exit code with what it printed, for a command whose exit code is the
+    /// answer (<c>check-ignore</c>). Null when git is not found, does not start, or takes too long.
+    /// </summary>
+    internal static (int Exit, string Output)? RunGitWithExit(string directory, params string[] arguments)
     {
         try
         {
@@ -120,7 +127,7 @@ internal static class GitSource
                 return null;
             }
 
-            return process.ExitCode == 0 && output.Wait(1000) ? output.Result : null;
+            return output.Wait(1000) ? (process.ExitCode, output.Result) : null;
         }
         catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException or IOException)
         {

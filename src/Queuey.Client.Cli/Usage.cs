@@ -402,11 +402,25 @@ PULL
                  behaviour only; destinations stay in the deployment file.
 
 KEYS
-  queuey keys mint --queue <que_...> [--name <label>] [--json]
+  queuey keys mint --queue <name|que_...> [--write <file>] [--name <label>] [--profile <name>] [--json]
                  Mints an ingress signing key so producers can publish with HMAC instead of
-                 an API key. The secret is shown ONCE. Needs a credential with key-management
-                 rights — a deploy key deliberately has none, since a key that can mint keys
-                 turns pipeline access into account access.
+                 an API key. Needs a login (queuey login) for a person who may manage keys, or
+                 a credential with key-management rights — a deploy key deliberately has
+                 none, since a key that can mint keys turns pipeline access into account access.
+                 --write .env puts QUEUEY_SIGNING_KEY_ID and QUEUEY_SIGNING_SECRET in that file
+                 and never prints the secret, in --json neither. The lines that set them are
+                 replaced and every other line stays, and the file is 0600 afterwards (one others
+                 could read is tightened, and the answer says from what). In a git repository the
+                 file must be one git ignores, and it may not be a link, or nothing is minted.
+                 The SDK reads them with QueueyOptions.UseEnvironmentVariables().
+                 Without --write the secret is shown ONCE.
+                 When Queuey gives the mint to a person, it exits 5 with the link, and
+                 nothing is minted.
+  queuey keys list --queue <name|que_...> [--profile <name>] [--json]
+                 The queue's signing keys: id, name, active or revoked, last use. Never a secret.
+  queuey keys revoke <keyId> [--reason <text>] [--profile <name>] [--json]
+                 Every producer that signs with the key is refused at the ingress at once. In
+                 a prod workspace an API key gets 403 approval_required, and a person revokes.
 
 CREDENTIALS
   queuey credentials set --name <name> --from-env <ENV_VAR> [--type <type>]
@@ -481,6 +495,11 @@ PUBLISH
                  event type and the group key for a queue that reads them, as a stream does.
                  The answer has the event's id: follow it with
                  `queuey verify <queue> --event <evt_…>`.
+                 Without an API key (as with a login, which the ingress does not take), it
+                 signs with QUEUEY_SIGNING_KEY_ID and QUEUEY_SIGNING_SECRET from the
+                 environment, else from ./.env, where `queuey keys mint` writes them (see
+                 KEYS). Only those two are read from .env, only from a plain file of your own,
+                 and a key that is set wins. --json says where (signingKeyFrom).
                  When the key may read the queue, what its ingress requires is read first.
                  An ingress that verifies a provider's signature (such as Stripe's) or
                  Queuey's own, or wants a key and a signature together, is refused before

@@ -257,12 +257,16 @@ internal static class QueuePublisher
                 return new QueueyException(
                     queueyTemplate
                         ? "The queue's ingress checks Queuey's signature on each event (a signed request with the queuey template), " +
-                          "made with an ingress signing key, and this publish would carry the API key instead, so nothing was published."
+                          "made with an ingress signing key, and this publish " +
+                          (hasApiKey ? "would carry the API key instead" : "has no signing key") + ", so nothing was published."
                         : $"The queue's ingress verifies {template ?? "a provider's"} signatures, which only the provider's own " +
                           "webhook carries, so nothing was published.",
                     errorCode: "ingress_requires_signature")
                 {
-                    SuggestedAction = SignedEventAction(queue, queueyTemplate ? null : template),
+                    SuggestedAction = queueyTemplate && !hasApiKey
+                        ? $"Make a signing key: `queuey keys mint --queue {CommandWords.Word(queue) ?? "<queue>"} --write .env`. publish reads it " +
+                          "from .env, and a producer from QUEUEY_SIGNING_KEY_ID and QUEUEY_SIGNING_SECRET."
+                        : SignedEventAction(queue, queueyTemplate ? null : template),
                 };
 
             case "apikeyandsignedrequest":

@@ -71,6 +71,33 @@ public sealed class QueueyOptions
     /// <summary>Request timeout applied when the SDK owns the <see cref="System.Net.Http.HttpClient"/>.</summary>
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(100);
 
+    /// <summary>
+    /// Fills each setting that is not set yet from its environment variable (<see cref="QueueyEnvironmentVariables"/>), such
+    /// as the signing key <c>queuey keys mint --write .env</c> writes. A value set in code wins. When the signing key and its
+    /// secret are both set, <c>QUEUEY_API_KEY</c> is not read: the producer signs with the key that reaches only its queue,
+    /// not a license-wide one. Returns these options.
+    /// </summary>
+    /// <param name="read">Reads a variable; <see cref="System.Environment.GetEnvironmentVariable(string)"/> when null.</param>
+    public QueueyOptions UseEnvironmentVariables(Func<string, string?>? read = null)
+    {
+        read ??= System.Environment.GetEnvironmentVariable;
+        string? Read(string name) => read(name) is { } value && !string.IsNullOrWhiteSpace(value) ? value.Trim() : null;
+
+        SigningKeyId ??= Read(QueueyEnvironmentVariables.SigningKeyId);
+        SigningSecret ??= Read(QueueyEnvironmentVariables.SigningSecret);
+        // Minste privilegium (security-review av #67, KAN G): med et signeringspar leses ikke QUEUEY_API_KEY, for en satt nøkkel
+        // ville vunnet over signeringen ved publisering. En nøkkel satt i koden vinner fortsatt.
+        if (string.IsNullOrWhiteSpace(SigningKeyId) || string.IsNullOrWhiteSpace(SigningSecret))
+            ApiKey ??= Read(QueueyEnvironmentVariables.ApiKey);
+        TenantPublicId ??= Read(QueueyEnvironmentVariables.Tenant);
+        LicensePublicId ??= Read(QueueyEnvironmentVariables.License);
+        if (ApiBaseAddress is null && Read(QueueyEnvironmentVariables.ApiBase) is { } api)
+            ApiBaseAddress = new Uri(api, UriKind.Absolute);
+        if (IngressBaseAddress is null && Read(QueueyEnvironmentVariables.IngressBase) is { } ingress)
+            IngressBaseAddress = new Uri(ingress, UriKind.Absolute);
+        return this;
+    }
+
     /// <summary>The effective ingress (publish) base address: <see cref="IngressBaseAddress"/> or the environment default.</summary>
     public Uri ResolveIngressBaseAddress() =>
         IngressBaseAddress is null ? QueueyHosts.Ingress(Environment) : ValidateOverride(IngressBaseAddress, nameof(IngressBaseAddress));
@@ -95,4 +122,29 @@ public sealed class QueueyOptions
 
         return value;
     }
+}
+
+/// <summary>The environment variables <see cref="QueueyOptions.UseEnvironmentVariables"/> reads, and the <c>queuey</c> CLI uses.</summary>
+public static class QueueyEnvironmentVariables
+{
+    /// <summary><c>QUEUEY_API_KEY</c>: <see cref="QueueyOptions.ApiKey"/>.</summary>
+    public const string ApiKey = "QUEUEY_API_KEY";
+
+    /// <summary><c>QUEUEY_SIGNING_KEY_ID</c>: <see cref="QueueyOptions.SigningKeyId"/>, as <c>queuey keys mint --write</c> writes it.</summary>
+    public const string SigningKeyId = "QUEUEY_SIGNING_KEY_ID";
+
+    /// <summary><c>QUEUEY_SIGNING_SECRET</c>: <see cref="QueueyOptions.SigningSecret"/>, as <c>queuey keys mint --write</c> writes it.</summary>
+    public const string SigningSecret = "QUEUEY_SIGNING_SECRET";
+
+    /// <summary><c>QUEUEY_TENANT</c>: <see cref="QueueyOptions.TenantPublicId"/>.</summary>
+    public const string Tenant = "QUEUEY_TENANT";
+
+    /// <summary><c>QUEUEY_LICENSE</c>: <see cref="QueueyOptions.LicensePublicId"/>.</summary>
+    public const string License = "QUEUEY_LICENSE";
+
+    /// <summary><c>QUEUEY_API_BASE</c>: <see cref="QueueyOptions.ApiBaseAddress"/>.</summary>
+    public const string ApiBase = "QUEUEY_API_BASE";
+
+    /// <summary><c>QUEUEY_INGRESS_BASE</c>: <see cref="QueueyOptions.IngressBaseAddress"/>.</summary>
+    public const string IngressBase = "QUEUEY_INGRESS_BASE";
 }

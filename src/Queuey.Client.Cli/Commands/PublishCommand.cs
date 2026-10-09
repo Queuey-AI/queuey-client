@@ -69,7 +69,8 @@ internal static class PublishCommand
         // eller QUEUEY_TENANT navngir et annet enn fila. Ellers kunne verify lete etter køen i et annet workspace.
         (string? fileTenant, string filePath) = DeploymentTenant.FromDeploymentOption(map, CliHost.Profile(map));
         ResolvedConfig configured = CliHost.Resolve(map, profiles: true);
-        ResolvedConfig config = DeploymentTenant.Resolve(configured, map, CliHost.Env, fileTenant, filePath);
+        // Uten API-nøkkel signerer publish med nøkkelen keys mint --write .env skrev, fra miljøet eller ./.env (2026-10-09).
+        ResolvedConfig config = CliHost.WithIngressSigning(DeploymentTenant.Resolve(configured, map, CliHost.Env, fileTenant, filePath));
 
         // En publisering er en skriving på dataplanet (F2.7-review): bestemmer deploy-fila workspacet, sies det før noe sendes,
         // og hvilket workspace konfigurasjonen ellers ville gitt. Ellers kunne en testevent havne et annet sted enn ventet.
@@ -82,6 +83,9 @@ internal static class PublishCommand
             Console.Error.WriteLine(TerminalText.Line(
                 $"Publishing to {config.TenantPublicId}, the workspace {tenantFrom} names" +
                 (passedOver is null ? "." : $", not {passedOver}, which the configuration names.")));
+
+        if (config.SigningFrom is { } from && !json)
+            Console.Error.WriteLine($"Signing with key {TerminalText.Line(config.SigningKeyId)} from {from}.");
 
         using ServiceProvider provider = CliHost.BuildProvider(config);
         var service = provider.GetRequiredService<IQueueyService>();
@@ -96,7 +100,7 @@ internal static class PublishCommand
         });
 
         if (json)
-            Console.WriteLine(JsonSerializer.Serialize(ToJson(result, tenantFrom), CliHost.JsonOut));
+            Console.WriteLine(JsonSerializer.Serialize(ToJson(result, tenantFrom, config.SigningFrom), CliHost.JsonOut));
         else
             WriteHuman(result);
 
@@ -116,7 +120,7 @@ internal static class PublishCommand
         return $"queuey verify {queue} --event {eventId}";
     }
 
-    private static object ToJson(QueuePublishResult r, string? tenantFrom) => new
+    private static object ToJson(QueuePublishResult r, string? tenantFrom, string? signingKeyFrom) => new
     {
         schemaVersion = JsonSchemaVersion,
         tenant = r.TenantPublicId,
@@ -128,6 +132,8 @@ internal static class PublishCommand
         mode = r.Mode,
         replayed = r.Replayed,
         verify = VerifyCommandFor(r),
+        // Hvor signeringsnøkkelen kom fra (security-review av #67, KAN F): "the environment", ".env", eller null med en API-nøkkel.
+        signingKeyFrom,
     };
 
     // Navn og id-er kommer fra serveren eller kommandolinjen, så hver linje går gjennom TerminalText.
