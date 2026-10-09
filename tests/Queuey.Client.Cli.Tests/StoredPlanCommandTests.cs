@@ -492,9 +492,12 @@ public sealed class StoredPlanCommandTests : IDisposable
         Assert.Equal(ExitCodes.Success, run.Exit);
         Assert.Contains("Warning from Queuey: " + warning, run.Stderr);
         Assert.Contains("`queuey plan` stores one in Queuey", run.Stderr);
-        // stdout er bare JSON, og advarselen står i den også.
+        // stdout er bare JSON, og advarselen står i den også, én gang: i serverWarnings, ikke i warnings i tillegg (gullflyten
+        // 2026-10-09).
         JsonElement root = JsonDocument.Parse(run.Stdout).RootElement;
         Assert.Equal(warning, Assert.Single(root.GetProperty("serverWarnings").EnumerateArray()).GetString());
+        Assert.DoesNotContain(root.GetProperty("warnings").EnumerateArray(), w => w.GetString() == warning);
+        Assert.Equal(1, run.Stdout.Split("would_require_approval").Length - 1);
         Assert.Equal(2, RealWrites(server.Handler).Count());
     }
 

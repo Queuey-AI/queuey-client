@@ -96,7 +96,9 @@ internal static class CliErrors
                 foreach (KeyValuePair<string, object?> detail in details)
                     error[detail.Key] = detail.Value;
 
-            Console.WriteLine(JsonSerializer.Serialize(new { error }, CliHost.JsonOut));
+            // Én linje (gullflyten 2026-10-09): en feil kan komme midt i en strøm som leses linje for linje, som verify --json etter
+            // waiting-linjen, og er fortsatt ett JSON-objekt for den som leser hele stdout.
+            Console.WriteLine(JsonSerializer.Serialize(new { error }, CliHost.JsonLine));
             return exitCode;
         }
 

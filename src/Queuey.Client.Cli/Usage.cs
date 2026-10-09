@@ -140,6 +140,11 @@ APPLY
                  behaviour and destination. Idempotent; exits non-zero unless it fully
                  converged. --dry-run validates the file locally and sends nothing. To ask
                  Queuey what it would change first, run `queuey plan`.
+                 When no workspace is named anywhere (the file's tenant, --tenant,
+                 QUEUEY_TENANT, queuey.json or the profile) and the file says
+                 workspace.environment, apply creates a workspace marked with it first, and
+                 applies to that. It says the new id on stderr and in --json's
+                 ""createdWorkspace"": name it after that, or the next apply creates another.
                  --dry-run --json prints { ""schemaVersion"": 2, ""workspace"": …, ""queues"": […] }:
                  the workspace's declaration (null when the file has none) and each queue's,
                  with what the dry run notes about them. Each carries every field the file
@@ -189,6 +194,10 @@ APPLY
                  credentials request, where a person pastes the value, unless the file's
                  workspace.environment is dev, where credentials set stores a value you hold.
                  Without --profile, the command names the file's tenant with --tenant.
+                 A delivery's credentialRef is different: the delivery cannot be sent
+                 without the credential, so a name the workspace has no credential under is
+                 refused before anything is written (credential_not_found, exit 1), in plan
+                 too, with the command that stores it.
                  The workspace is the file's ""tenant"" when it names one, else --tenant /
                  QUEUEY_TENANT / queuey.json. When --tenant or QUEUEY_TENANT names another
                  workspace than the file, apply fails and names both. plan and verify use the
@@ -275,7 +284,8 @@ VERIFY
   queuey verify <queue> --event <evt_…>
   queuey verify <queue> --event-type <type> [--ingress-auth <template>]
   queuey verify <queue> --send (--data <json> | --file <path> | --stdin) [--event-type <type>]
-                [--timeout <seconds>] [--deployment queuey.deploy.json] [--profile <name>] [--json]
+                [--timeout <seconds>] [--background] [--deployment queuey.deploy.json] [--profile <name>] [--json]
+  queuey verify <queue> --wait <ver_…> [--json]
                  Verifies the queue's flow with Queuey's flow verification, and reads it
                  until Queuey has settled it: each step from the ingress to the final state
                  (ingress_reached, ingress_auth, persisted, routed, delivery_attempted,
@@ -299,11 +309,20 @@ VERIFY
                  provider.
                  --timeout (or --wait) is how long Queuey follows the event, in seconds: a
                  minute when left out, at most 900.
+                 --background starts the verification and returns at once with its id and
+                 the command that reads the outcome: queuey verify <que_…> --wait <ver_…>,
+                 which reads it until Queuey has settled it. Queuey follows the event either
+                 way, so trigger it once --background has returned.
                  Exits 0 only when the verification passed. failed, timed_out and not_tried
                  exit 1 with Queuey's summary, and a refusal exits 1 with Queuey's message.
-                 --json prints { ""schemaVersion"": 2, ""tenant"", ""queue"", ""queuePublicId"",
-                 ""verification"": { … } }: the verification in Queuey's own shape, with its
-                 own schemaVersion; check schemaVersion first. Neither output shows a payload
+                 --json prints one JSON object per line (NDJSON), each with ""schemaVersion"": 3
+                 and a ""status"". The first, once Queuey follows the event and before verify
+                 waits, is { ""status"": ""waiting"", ""verificationId"", ""queuePublicId"", ""mode"",
+                 ""eventType"", ""observeUntil"", ""message"", ""next"" }: trigger the event then.
+                 None comes when Queuey settled it at once. The last is { ""status"": ""done"",
+                 ""tenant"", ""queue"", ""queuePublicId"", ""verification"": { … } }: the verification
+                 in Queuey's own shape, with its own schemaVersion; check schemaVersion first.
+                 --background --json prints only the waiting line, with ""next"" set. Neither output shows a payload
                  value or a secret: the evidence is ids, statuses, times and header names.
                  <queue> is the queue's name or its id (que_…). --queue <queue> is another
                  name for it, as in queuey verify --queue orders --event <evt_…>: give one
@@ -456,7 +475,13 @@ EVENTS
                  in the workspace by apply's rule, as for publish.
 
 CREATE-TENANT
-  queuey create-tenant --name <display> [--as-producer] [--with-default-queue] [--json]
+  queuey create-tenant --name <display> [--environment dev|test|staging|prod] [--as-producer]
+                       [--with-default-queue] [--json]
+                 --environment marks the new workspace. An API key sets it only here, when
+                 it creates the workspace: lowering it later takes a person. Without it, the
+                 workspace has none, which Queuey counts as prod. A Queuey that does not take
+                 an environment when it creates a workspace fails it (environment_not_set),
+                 with the id of the workspace it made.
 
 CREATE-QUEUE
   queuey create-queue --tenant <ten_...> --name <display> [--json]
@@ -489,8 +514,9 @@ LISTEN
                  --json prints one JSON object per line on stdout, each with ""schemaVersion"": 1
                  and a ""type"": listening, then delivery per forward (eventId, path, localUrl,
                  status, durationMs, signatureHeaders; path and localUrl without the query or a
-                 part that may be a secret), lost when a workspace session loses a queue, and
-                 one last line: refused (also for an error before the session), superseded, or
+                 part that may be a secret), lost when a workspace session loses a queue,
+                 reconnecting and reconnected (scopeKey) when the connection drops and comes
+                 back, and one last line: refused (also for an error before the session), superseded, or
                  closed. Output nobody reads any more (a closed pipe) stops the session too.
                  Exit 0 after Ctrl-C, 1 when refused, taken over, the connection is lost for good
                  or the output is gone, 2 on a usage error, 3 on a key error, 143 after SIGTERM.
@@ -548,7 +574,8 @@ EDGE
 WHOAMI
   queuey whoami [--profile <name>] [--json]
                  The connection the CLI resolves, with the key masked; with a profile, that
-                 profile's and the file it came from.
+                 profile's and the file it came from. Environment is Production for Queuey's
+                 own hosts, Local when both hosts are on this machine, and Custom otherwise.
 
 PROFILES
   --profile <name> (or QUEUEY_PROFILE) picks one environment, such as dev or prod, and

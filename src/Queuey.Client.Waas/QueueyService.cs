@@ -1024,6 +1024,25 @@ public sealed class QueueyService : IQueueyService, IQueueyPlans
         return FlowVerifier.RunAsync(_controlPlane, Management, _options.TenantPublicId, queue, request, progress, cancellationToken);
     }
 
+    // Gullflyten 2026-10-09: `queuey verify --background` starter og returnerer, og `queuey verify --wait ver_…` leser videre. Bare
+    // interne hjelpere, som QueueyManagement.RotateCredentialAsync: IQueueyService er offentlig i en tagget versjon.
+    internal Task<FlowVerification> StartFlowVerificationAsync(string queue, FlowVerificationRequest request, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(queue)) throw new ArgumentException("A queue, its id or its name, is required.", nameof(queue));
+        if (request is null) throw new ArgumentNullException(nameof(request));
+
+        return FlowVerifier.StartAsync(_controlPlane, Management, _options.TenantPublicId, queue, request, cancellationToken);
+    }
+
+    internal Task<FlowVerification> ResumeFlowVerificationAsync(
+        string queue, string verificationId, IProgress<FlowVerification>? progress = null, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(queue)) throw new ArgumentException("A queue, its id or its name, is required.", nameof(queue));
+        if (string.IsNullOrWhiteSpace(verificationId)) throw new ArgumentException("A verification id (ver_…) is required.", nameof(verificationId));
+
+        return FlowVerifier.ResumeAsync(_controlPlane, Management, _options.TenantPublicId, queue, verificationId, progress, cancellationToken);
+    }
+
     /// <inheritdoc />
     public Task<QueuePublishResult> PublishToQueueAsync(
         string queue, byte[] payload, QueuePublishOptions? options = null, CancellationToken cancellationToken = default)
@@ -1130,10 +1149,20 @@ public sealed class QueueyService : IQueueyService, IQueueyPlans
         if (!options.DryRun && !managed.SkipsWorkspace && file.Workspace is { } workspace)
         {
             // Miljø-merket før alt annet (Queuey F2.2): bare en person senker det, så en nøkkel som ville senket det, nektes
-            // med 403, og da er ingenting annet skrevet. Feilen går ut som Queuey sa den, med hva en person gjør.
+            // med 403, og da er ingenting annet skrevet. Feilen går ut med Queueys melding, og med veien ut fra kommandolinjen: et
+            // nytt workspace med miljøet (gullflyten 2026-10-09).
             if (workspace.EnvironmentToSend is { } environment)
-                await _controlPlane.PatchTenantAsync(tenant, QueueyManagement.WireOfEnvironment(environment), cancellationToken)
-                    .ConfigureAwait(false);
+            {
+                try
+                {
+                    await _controlPlane.PatchTenantAsync(tenant, QueueyManagement.WireOfEnvironment(environment), cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (QueueyException ex) when (ex.ErrorCode == EnvironmentWayOut.LoweringCode)
+                {
+                    throw EnvironmentWayOut.Rewrite(ex, environment);
+                }
+            }
 
             // Ingress FIRST, and not for tidiness: "ordering: bykey" is rejected unless a group-key
             // source already exists, so a policy patch that arrives before the ingress one fails

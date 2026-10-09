@@ -22,7 +22,36 @@ internal sealed class QueueyManagement : IQueueyManagement
             .CreateTenantAsync(displayName.Trim(), asProducer, withDefaultQueue, cancellationToken)
             .ConfigureAwait(false);
 
-        return new TenantResult { PublicId = r.PublicId, DisplayName = r.DisplayName, Status = r.Status, Kind = r.Kind };
+        return new TenantResult { PublicId = r.PublicId, DisplayName = r.DisplayName, Status = r.Status, Kind = r.Kind, Environment = r.Environment };
+    }
+
+    // Gullflyten 2026-10-09: et dev-workspace kunne bare lages med POST /tenants direkte, og create-tenant laget prod. En nøkkel
+    // setter miljøet når den lager workspacet (Queuey F2.2), men senker det aldri etterpå. Bare en intern hjelper, som
+    // RotateCredentialAsync: IQueueyManagement er offentlig i en tagget versjon. `queuey create-tenant` og `queuey apply` kaller
+    // den.
+    internal async Task<TenantResult> CreateWorkspaceAsync(
+        string displayName, string environment, bool asProducer = false, bool withDefaultQueue = false, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(displayName)) throw new ArgumentException("A display name is required.", nameof(displayName));
+        if (string.IsNullOrWhiteSpace(environment)) throw new ArgumentException("An environment is required.", nameof(environment));
+
+        string wanted = environment.Trim().ToLowerInvariant();
+        TenantSummaryResponse r = await _controlPlane
+            .CreateTenantAsync(displayName.Trim(), asProducer, withDefaultQueue, cancellationToken, wanted)
+            .ConfigureAwait(false);
+
+        // En Queuey fra før F2.2 tar ikke imot feltet, og lager et workspace uten merke, som regnes som prod. Det sies, med id-en,
+        // i stedet for at kalleren tror den har et dev-workspace.
+        if (!string.Equals(r.Environment?.Trim(), wanted, StringComparison.OrdinalIgnoreCase))
+            throw new QueueyException(
+                $"Queuey created workspace {r.PublicId} but did not mark it {wanted}: it is "
+                + (string.IsNullOrWhiteSpace(r.Environment) ? "unmarked, which counts as prod" : $"marked {r.Environment!.Trim().ToLowerInvariant()}")
+                + ". This Queuey does not take an environment when it creates a workspace.", errorCode: "environment_not_set")
+            {
+                SuggestedAction = $"Ask a person to mark workspace {r.PublicId} {wanted} in the Queuey console, or delete it there.",
+            };
+
+        return new TenantResult { PublicId = r.PublicId, DisplayName = r.DisplayName, Status = r.Status, Kind = r.Kind, Environment = r.Environment };
     }
 
     public async Task<QueueResult> CreateQueueAsync(string tenantPublicId, string displayName, CancellationToken cancellationToken = default)

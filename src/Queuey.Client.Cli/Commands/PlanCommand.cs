@@ -4,6 +4,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
+using Queuey.Client;
 using Queuey.Client.Waas;
 
 namespace Queuey.Client.Cli;
@@ -66,6 +67,18 @@ internal static class PlanCommand
 
         // Samme workspace som apply ville skrevet til, etter samme regel.
         ResolvedConfig config = CliHost.ResolveForDeployment(map, profile is null ? file.ResolveTenant() : file.Tenant, path);
+
+        // Uten et workspace er det ingenting i Queuey å planlegge mot. Sier fila miljøet, lager apply workspacet først
+        // (gullflyten 2026-10-09), og det sies her i stedet for at et workspace mangler.
+        if (string.IsNullOrWhiteSpace(config.TenantPublicId)
+            && (profile is null ? file.Expand() : file).Workspace?.EnvironmentToSend is { } environment)
+            throw new QueueyConfigurationException(
+                $"No workspace is named, so there is nothing in Queuey to plan against yet. {path} says environment {environment}, so "
+                + $"`queuey apply` creates a workspace marked {environment} first, and then applies the file to it.")
+            {
+                SuggestedAction = $"Run `queuey apply`. Or make the workspace with `queuey create-tenant --name <name> --environment {environment}`, "
+                                  + "name it with --tenant, in the file's tenant or in the profile, and plan again.",
+            };
         using ServiceProvider provider = CliHost.BuildProvider(config);
         var service = provider.GetRequiredService<IQueueyService>();
 

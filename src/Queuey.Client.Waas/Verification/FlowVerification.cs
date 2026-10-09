@@ -462,30 +462,77 @@ internal static class FlowVerifier
         IProgress<FlowVerification>? progress,
         CancellationToken cancellationToken)
     {
-        FlowVerificationWireRequest wire = ToWire(request);
-        string queuePublicId = await QueuePublicIdAsync(management, tenantPublicId, queue, cancellationToken).ConfigureAwait(false);
-
         var clock = Stopwatch.StartNew();
-        FlowVerification verification = await StartAsync(controlPlane, queuePublicId, wire, cancellationToken).ConfigureAwait(false);
+        (string queuePublicId, FlowVerification verification) =
+            await StartAndQueueAsync(controlPlane, management, tenantPublicId, queue, request, cancellationToken).ConfigureAwait(false);
         progress?.Report(verification);
 
-        TimeSpan giveUpAfter = (request.Timeout ?? LongestFollow) + Grace;
+        return await FollowAsync(controlPlane, queuePublicId, verification, (request.Timeout ?? LongestFollow) + Grace - clock.Elapsed,
+            progress, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Starts the verification and returns it as Queuey answered the start, without reading it again: Queuey follows the event
+    /// on its own until its time is up, and <see cref="ResumeAsync"/> reads it later by its id.
+    /// </summary>
+    // Gullflyten 2026-10-09: `queuey verify --background` gir id-en med en gang, så agenten kan trigge eventen uten å gjette.
+    public static async Task<FlowVerification> StartAsync(
+        QueueyControlPlaneClient controlPlane,
+        IQueueyManagement management,
+        string? tenantPublicId,
+        string queue,
+        FlowVerificationRequest request,
+        CancellationToken cancellationToken)
+        => (await StartAndQueueAsync(controlPlane, management, tenantPublicId, queue, request, cancellationToken).ConfigureAwait(false)).Verification;
+
+    private static async Task<(string QueuePublicId, FlowVerification Verification)> StartAndQueueAsync(
+        QueueyControlPlaneClient controlPlane,
+        IQueueyManagement management,
+        string? tenantPublicId,
+        string queue,
+        FlowVerificationRequest request,
+        CancellationToken cancellationToken)
+    {
+        FlowVerificationWireRequest wire = ToWire(request);
+        string queuePublicId = await QueuePublicIdAsync(management, tenantPublicId, queue, cancellationToken).ConfigureAwait(false);
+        return (queuePublicId, await StartAsync(controlPlane, queuePublicId, wire, cancellationToken).ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// Reads a verification that was started earlier (<c>ver_…</c>) until Queuey has settled it. Queuey keeps it under its
+    /// queue, so the queue is needed too.
+    /// </summary>
+    public static async Task<FlowVerification> ResumeAsync(
+        QueueyControlPlaneClient controlPlane,
+        IQueueyManagement management,
+        string? tenantPublicId,
+        string queue,
+        string verificationId,
+        IProgress<FlowVerification>? progress,
+        CancellationToken cancellationToken)
+    {
+        string queuePublicId = await QueuePublicIdAsync(management, tenantPublicId, queue, cancellationToken).ConfigureAwait(false);
+        var clock = Stopwatch.StartNew();
+        FlowVerification verification = await ReadAsync(controlPlane, queuePublicId, verificationId, cancellationToken).ConfigureAwait(false);
+        progress?.Report(verification);
+
+        return await FollowAsync(controlPlane, queuePublicId, verification, LongestFollow + Grace - clock.Elapsed, progress, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task<FlowVerification> FollowAsync(
+        QueueyControlPlaneClient controlPlane,
+        string queuePublicId,
+        FlowVerification verification,
+        TimeSpan giveUpAfter,
+        IProgress<FlowVerification>? progress,
+        CancellationToken cancellationToken)
+    {
+        var clock = Stopwatch.StartNew();
         while (!verification.Settled && clock.Elapsed < giveUpAfter)
         {
             var read = Stopwatch.StartNew();
-            string call = $"GET /queues/{queuePublicId}/verifications/{verification.VerificationId}";
-            try
-            {
-                verification = Checked(
-                    await controlPlane.GetVerificationAsync(queuePublicId, verification.VerificationId, WaitSecondsPerRead, cancellationToken)
-                        .ConfigureAwait(false),
-                    call);
-            }
-            catch (JsonException)
-            {
-                throw NotAVerification(call);
-            }
-
+            verification = await ReadAsync(controlPlane, queuePublicId, verification.VerificationId, cancellationToken).ConfigureAwait(false);
             progress?.Report(verification);
 
             if (!verification.Settled && read.Elapsed < MinReadInterval)
@@ -493,6 +540,22 @@ internal static class FlowVerifier
         }
 
         return verification;
+    }
+
+    private static async Task<FlowVerification> ReadAsync(
+        QueueyControlPlaneClient controlPlane, string queuePublicId, string verificationId, CancellationToken cancellationToken)
+    {
+        string call = $"GET /queues/{queuePublicId}/verifications/{verificationId}";
+        try
+        {
+            return Checked(
+                await controlPlane.GetVerificationAsync(queuePublicId, verificationId, WaitSecondsPerRead, cancellationToken).ConfigureAwait(false),
+                call);
+        }
+        catch (JsonException)
+        {
+            throw NotAVerification(call);
+        }
     }
 
     /// <summary>The request as Queuey takes it. The factories of <see cref="FlowVerificationRequest"/> have checked it.</summary>
