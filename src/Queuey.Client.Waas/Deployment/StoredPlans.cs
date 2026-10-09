@@ -170,7 +170,7 @@ public sealed class StoredPlanStep
 /// <summary>
 /// Queuey refused to start an apply without a configuration plan (<c>plan_required</c>, Queuey F3.11): an API key applies to
 /// this workspace only through a plan, which the policy runs or a person approves. Nothing was written. Build the plan with
-/// <see cref="IQueueyService.StorePlanAsync"/>, and apply it with <see cref="SyncOptions.Plan"/>; <c>queuey apply</c> does both.
+/// <see cref="IQueueyPlans.StorePlanAsync"/>, and apply it with <see cref="SyncOptions.Plan"/>; <c>queuey apply</c> does both.
 /// </summary>
 public sealed class QueueyPlanRequiredException : QueueyException
 {
@@ -283,6 +283,34 @@ internal sealed class PlanWireResponse
     public DateTimeOffset? ExpiresAt { get; set; }
     public DateTimeOffset? SealedAt { get; set; }
     public List<PlanStepWire>? Steps { get; set; }
+    public List<PlanAppliedStepWire>? AppliedSteps { get; set; }
+}
+
+/// <summary>One write an apply bound to the plan made: the step, the part of what it sends to a queue it created, and when.</summary>
+internal sealed class PlanAppliedStepWire
+{
+    public int Step { get; set; }
+    public string? Part { get; set; }
+    public DateTimeOffset? At { get; set; }
+}
+
+/// <summary>
+/// The stored plan an apply writes (Queuey F3.11), and how many of its writes Queuey has answered: the apply's writes go one at
+/// a time, so after a lost answer a step more in the plan's <c>appliedSteps</c> is that write.
+/// </summary>
+internal sealed class PlanApplyProgress
+{
+    public PlanApplyProgress(string tenant, string planId)
+    {
+        Tenant = tenant;
+        PlanId = planId;
+    }
+
+    public string Tenant { get; }
+    public string PlanId { get; }
+
+    /// <summary>The writes Queuey has answered as written, or as already written.</summary>
+    public int Confirmed { get; set; }
 }
 
 internal sealed class PlanStepWire

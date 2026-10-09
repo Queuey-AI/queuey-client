@@ -53,7 +53,12 @@ public sealed class QueueSyncResult : ISyncRunResult
     public IReadOnlyList<string> WorkspaceWarnings { get; init; } = Array.Empty<string>();
 
     /// <inheritdoc />
-    public IReadOnlyList<string> Warnings => WorkspaceWarnings.Concat(Applied.SelectMany(r => r.Warnings)).ToArray();
+    /// <remarks>
+    /// With <see cref="ServerWarnings"/> last (BØR 3 fra reviewen av #64), so a caller that logs the warnings also logs Queuey's,
+    /// such as <c>would_require_approval</c>.
+    /// </remarks>
+    public IReadOnlyList<string> Warnings
+        => WorkspaceWarnings.Concat(Applied.SelectMany(r => r.Warnings)).Concat(ServerWarnings).Distinct(StringComparer.Ordinal).ToArray();
 
     /// <summary>
     /// The queues, and the workspace, a deployment apply left alone because a person detached them from deployment
@@ -85,7 +90,8 @@ public sealed class QueueSyncResult : ISyncRunResult
 
     /// <summary>
     /// Throws a <see cref="QueueySyncException"/> aggregating every failure, if anything failed. A queue that only waits for a
-    /// configuration plan (<see cref="PlanRequired"/>) is not a failure here, so an app that syncs on start still starts.
+    /// configuration plan (<see cref="PlanRequired"/>) is not a failure here, so an app that syncs on start still starts: it
+    /// is in <see cref="Warnings"/>, and <see cref="AllSucceeded"/> is false.
     /// </summary>
     public void ThrowIfAnyFailed()
     {

@@ -31,6 +31,18 @@ public sealed class DeploymentFileSource
     /// <summary>The commit the file is applied from.</summary>
     public string? Commit { get; init; }
 
+    /// <summary>
+    /// The git ref the file is applied from, such as <c>refs/heads/main</c> or <c>refs/pull/12/merge</c>. Only a plan Queuey
+    /// stores carries it (Queuey F3.11), as claimed, so a person who approves the plan sees where it comes from.
+    /// </summary>
+    public string? Ref { get; init; }
+
+    /// <summary>The workflow that runs it, such as GitHub's <c>GITHUB_WORKFLOW_REF</c>. Only a stored plan carries it.</summary>
+    public string? Workflow { get; init; }
+
+    /// <summary>The pull request it comes from, as its number. Only a stored plan carries it, and Queuey never verifies it.</summary>
+    public string? PullRequest { get; init; }
+
     /// <summary>True when none of the three is known.</summary>
     public bool IsEmpty => Repo is null && Path is null && Commit is null;
 

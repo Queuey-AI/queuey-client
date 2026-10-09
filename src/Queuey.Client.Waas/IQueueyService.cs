@@ -69,6 +69,14 @@ public interface IQueueyService
     /// Applies every registered queue via <c>PUT /queues</c>, patching the policy of those that
     /// declare one. Safe to run on every deploy — applying is idempotent.
     /// </summary>
+    /// <remarks>
+    /// A failure throws <see cref="QueueySyncException"/>, except one: when Queuey wants a configuration plan for a queue's
+    /// change (<c>plan_required</c>, an API key changing a production workspace, Queuey F3.11), that change is left out, the
+    /// queue is reported with <see cref="QueueApplyResult.NeedsPlan"/>, in <see cref="QueueSyncResult.PlanRequired"/> and as a
+    /// line in <see cref="QueueSyncResult.Warnings"/> that says what to do, and the run goes on with the other queues and
+    /// returns, so an app that syncs when it starts still starts. <see cref="QueueSyncResult.AllSucceeded"/> is then false,
+    /// and when the host has logging, each such queue is logged as a warning. Check the result, not only for an exception.
+    /// </remarks>
     Task<QueueSyncResult> SyncQueuesAsync(SyncOptions? options = null, CancellationToken cancellationToken = default);
 
     /// <summary>Applies a single explicit queue definition (ensure it exists, then patch its policy).</summary>
@@ -132,30 +140,6 @@ public interface IQueueyService
     /// queue or workspace is left out of the plan and listed in <see cref="DeploymentPlan.Skipped"/>.
     /// </summary>
     Task<DeploymentPlan> PlanDeploymentAsync(DeploymentFile file, SyncOptions? options, CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// Builds a configuration plan Queuey stores (Queuey F3.11): an empty plan with where the file lives
-    /// (<see cref="SyncOptions.Source"/>) and what it takes back (<see cref="SyncOptions.Adopt"/>), every write apply would
-    /// send as a dry run in it (<c>X-Queuey-Plan</c>), what apply sends to each queue it creates, then the seal: the hash and
-    /// the policy's decision. When the policy gives the plan to a person, it goes to Queuey's inbox, and
-    /// <see cref="StoredPlan.ApprovalUrl"/> says where. Apply it with <see cref="SyncOptions.Plan"/> once
-    /// <see cref="StoredPlan.CanBeApplied"/>.
-    /// </summary>
-    /// <returns>
-    /// The plan with <see cref="DeploymentPlan.Stored"/> set. A plan with a refused write is not sealed, and its steps say
-    /// why. Against a Queuey that stores no plans, the plan this client makes, without <see cref="DeploymentPlan.Stored"/>,
-    /// and a line in <see cref="DeploymentPlan.Warnings"/> that says so.
-    /// </returns>
-    Task<DeploymentPlan> StorePlanAsync(DeploymentFile file, SyncOptions? options = null, CancellationToken cancellationToken = default);
-
-    /// <summary>Reads a stored plan, with its steps (<c>GET /tenants/{t}/deployment/plans/{plan}</c>).</summary>
-    Task<StoredPlan> GetStoredPlanAsync(string planId, string? tenantPublicId = null, CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// Sends a sealed plan the policy gave to a person to Queuey's inbox, where it waits 24 hours for one. A plan already
-    /// waiting answers the same again.
-    /// </summary>
-    Task<StoredPlan> SubmitStoredPlanAsync(string planId, string? tenantPublicId = null, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Proves a queue delivers: publishes <paramref name="payload"/> to <paramref name="queueName"/>
@@ -242,7 +226,8 @@ public interface IQueueyService
 
     /// <summary>
     /// Applies queues, then streams. Queues go first because a stream is published on top of one, so a
-    /// queue failure stops the run before any stream is touched.
+    /// queue failure stops the run before any stream is touched. A queue whose change waits for a configuration plan is not
+    /// a failure here (see <see cref="SyncQueuesAsync"/>): the streams are applied, and the queues' result says so.
     /// </summary>
     Task<(QueueSyncResult Queues, SyncResult Streams)> SyncAsync(SyncOptions? options = null, CancellationToken cancellationToken = default);
 

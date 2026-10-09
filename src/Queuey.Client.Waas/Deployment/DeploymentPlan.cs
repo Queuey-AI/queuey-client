@@ -20,15 +20,17 @@ public sealed class DeploymentPlan
     public string Tenant { get; init; } = default!;
 
     /// <summary>
-    /// The plan's id: <c>plan_</c> and the start of <see cref="PlanHash"/>, so the same file against the same state gives
-    /// the same id. Opaque: compare it, never parse it.
+    /// The plan's id. For a plan Queuey stores, Queuey's (<see cref="StoredPlan.PlanId"/>), the one to apply and look up. For
+    /// a plan only this client made, <c>plan_</c> and the start of <see cref="PlanHash"/>, so the same file against the same
+    /// state gives the same id; Queuey knows no plan by it. Opaque: compare it, never parse it.
     /// </summary>
     public string PlanId { get; init; } = default!;
 
     /// <summary>
     /// <c>sha256:…</c> over what apply would change and the server state it rests on, normalized so that the order of the
     /// queues and the file's formatting do not count (<see cref="DeploymentPlanHash"/>). A plan made again after the state
-    /// moved, or after the file changed what apply does, has another hash.
+    /// moved, or after the file changed what apply does, has another hash. Always this client's; the hash a person's approval
+    /// binds is <see cref="StoredPlan.Hash"/>.
     /// </summary>
     public string PlanHash { get; init; } = default!;
 
@@ -65,7 +67,7 @@ public sealed class DeploymentPlan
 
     /// <summary>
     /// True when Queuey refused to start an apply without a plan for this workspace (<c>plan_required</c>): the plan was made
-    /// from dry runs outside an apply, and an apply needs a stored plan (<see cref="IQueueyService.StorePlanAsync"/>).
+    /// from dry runs outside an apply, and an apply needs a stored plan (<see cref="IQueueyPlans.StorePlanAsync"/>).
     /// </summary>
     public bool ApplyRequiresPlan { get; init; }
 

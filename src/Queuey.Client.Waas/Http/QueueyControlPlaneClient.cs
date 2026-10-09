@@ -691,24 +691,24 @@ internal sealed class QueueyControlPlaneClient
 
     /// <summary>
     /// Makes every call in the current async flow part of the apply <paramref name="token"/> names, until the returned
-    /// scope is disposed. A null or blank token changes nothing. <paramref name="boundToPlan"/> says the apply writes a
-    /// stored plan (Queuey F3.11): then a write whose answer was lost is sent once more, and a write Queuey says is already
-    /// written counts as written.
+    /// scope is disposed. A null or blank token changes nothing. <paramref name="plan"/> is the stored plan the apply writes
+    /// (Queuey F3.11): then a write Queuey says is already written counts as written, and a write whose answer was lost is
+    /// looked up in the plan before it is sent again (<see cref="SendWriteAsync{T}"/>).
     /// </summary>
-    internal static IDisposable InApply(string? token, bool boundToPlan = false)
+    internal static IDisposable InApply(string? token, PlanApplyProgress? plan = null)
     {
         string? before = CurrentApply.Value;
-        bool boundBefore = CurrentApplyBound.Value;
+        PlanApplyProgress? planBefore = CurrentPlanApply.Value;
         if (!string.IsNullOrWhiteSpace(token))
         {
             CurrentApply.Value = token;
-            CurrentApplyBound.Value = boundToPlan;
+            CurrentPlanApply.Value = plan;
         }
 
         return new Scope(() =>
         {
             CurrentApply.Value = before;
-            CurrentApplyBound.Value = boundBefore;
+            CurrentPlanApply.Value = planBefore;
         });
     }
 
@@ -752,7 +752,7 @@ internal sealed class QueueyControlPlaneClient
 
     // Planen dry runs bygger (X-Queuey-Plan), og om applyen er bundet til en plan. AsyncLocal, som tokenet.
     private static readonly AsyncLocal<string?> CurrentPlan = new();
-    private static readonly AsyncLocal<bool> CurrentApplyBound = new();
+    private static readonly AsyncLocal<PlanApplyProgress?> CurrentPlanApply = new();
     private static readonly AsyncLocal<ServerWarnings?> CurrentWarnings = new();
     private static readonly AsyncLocal<StepBox?> CurrentStep = new();
 
@@ -783,39 +783,96 @@ internal sealed class QueueyControlPlaneClient
     }
 
     // En skriving i en apply bundet til en plan (Queuey F3.11): hvert steg skrives én gang, og serveren svarer 409
-    // step_already_applied på det samme steget igjen. Et svar som gikk tapt (nettet eller en timeout), sendes derfor én gang
-    // til, og «alt skrevet» regnes som skrevet. Utenfor en slik apply sendes skrivingen én gang, som før.
-    private static Task SendWriteAsync(Func<Task> send, CancellationToken cancellationToken)
+    // step_already_applied på det samme steget igjen, som regnes som skrevet. Et svar som gikk tapt (nettet eller en timeout),
+    // sendes ikke på nytt med en gang (BØR 1 fra reviewen av #64): etter en timeout kan den første forespørselen fortsatt kjøre,
+    // og to samtidige skrivinger på samme steg gjør planen plan_stale for godt. Klienten venter først en kort, økende tid og
+    // leser planens appliedSteps. Skrivingene går én om gangen, så et steg mer enn applyen har fått svar på, er denne
+    // skrivingen: den regnes som skrevet. Står planen ikke lenger som executing, stopper applyen med statusen. Er steget fortsatt
+    // ikke skrevet, sendes det én gang til. Utenfor en slik apply sendes skrivingen én gang, som før.
+    private Task SendWriteAsync(Func<Task> send, CancellationToken cancellationToken)
         => SendWriteAsync(async () =>
         {
             await send().ConfigureAwait(false);
             return true;
         }, () => true, cancellationToken);
 
-    private static async Task<T> SendWriteAsync<T>(Func<Task<T>> send, Func<T> alreadyWritten, CancellationToken cancellationToken)
+    private async Task<T> SendWriteAsync<T>(Func<Task<T>> send, Func<T> alreadyWritten, CancellationToken cancellationToken)
     {
-        if (!CurrentApplyBound.Value)
+        if (CurrentPlanApply.Value is not { } plan)
             return await send().ConfigureAwait(false);
 
         try
         {
-            return await send().ConfigureAwait(false);
+            T answer = await send().ConfigureAwait(false);
+            plan.Confirmed++;
+            return answer;
         }
         catch (QueueyException ex) when (ex.ErrorCode == StepAlreadyAppliedCode)
         {
+            plan.Confirmed++;
             return alreadyWritten();
         }
         catch (Exception ex) when (AnswerLost(ex, cancellationToken))
         {
+            if (await WrittenMeanwhileAsync(plan, cancellationToken).ConfigureAwait(false))
+                return alreadyWritten();
+
             try
             {
-                return await send().ConfigureAwait(false);
+                T answer = await send().ConfigureAwait(false);
+                plan.Confirmed++;
+                return answer;
             }
             catch (QueueyException again) when (again.ErrorCode == StepAlreadyAppliedCode)
             {
+                plan.Confirmed++;
                 return alreadyWritten();
             }
         }
+    }
+
+    /// <summary>
+    /// How long to wait before each look at the plan after a lost answer, growing. The first request may still be running on
+    /// Queuey meanwhile. A setting for the tests.
+    /// </summary>
+    internal static TimeSpan[] LostAnswerWaits { get; set; } = { TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(4) };
+
+    // Om skrivingen som mistet svaret, står i planens appliedSteps. Kaster når planen ikke kjører lenger.
+    private async Task<bool> WrittenMeanwhileAsync(PlanApplyProgress plan, CancellationToken cancellationToken)
+    {
+        foreach (TimeSpan wait in LostAnswerWaits)
+        {
+            if (wait > TimeSpan.Zero)
+                await Task.Delay(wait, cancellationToken).ConfigureAwait(false);
+
+            PlanWireResponse now;
+            try
+            {
+                now = await GetPlanAsync(plan.Tenant, plan.PlanId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (AnswerLost(ex, cancellationToken))
+            {
+                continue;
+            }
+
+            int applied = now.AppliedSteps?.Count ?? 0;
+            if (applied > plan.Confirmed)
+            {
+                plan.Confirmed = applied;
+                return true;
+            }
+
+            if (!string.Equals(now.Status, StoredPlan.Statuses.Executing, StringComparison.Ordinal))
+                throw new QueueyException(
+                    $"An answer from Queuey was lost during the apply of plan {plan.PlanId}, and the plan is {now.Status ?? "gone"} now, "
+                    + "so nothing more is sent. What this apply wrote before stands.",
+                    409, now.Status == StoredPlan.Statuses.PlanStale ? StoredPlan.Statuses.PlanStale : "plan_not_executing")
+                {
+                    SuggestedAction = "Plan again: a new plan shows what is left to change.",
+                };
+        }
+
+        return false;
     }
 
     /// <summary>The code Queuey answers a step of a plan that is already written with.</summary>

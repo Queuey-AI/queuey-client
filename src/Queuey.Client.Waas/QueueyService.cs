@@ -2,24 +2,28 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using System.Threading;
 using System.Threading.Tasks;
 
 namespace Queuey.Client.Waas;
 
 /// <summary>Default <see cref="IQueueyService"/> — composes publish (over <see cref="QueueyClient"/>) and sync (over the control-plane).</summary>
-public sealed class QueueyService : IQueueyService
+public sealed class QueueyService : IQueueyService, IQueueyPlans
 {
     private readonly QueueyControlPlaneClient _controlPlane;
     private readonly QueueyOptions _options;
+    private readonly ILogger? _logger;
 
     internal QueueyService(
         QueueyClient client,
         QueueyControlPlaneClient controlPlane,
         StreamRegistry registry,
         QueueyOptions options,
-        QueueRegistry? queues = null)
+        QueueRegistry? queues = null,
+        ILogger? logger = null)
     {
+        _logger = logger;
         Client = client ?? throw new ArgumentNullException(nameof(client));
         _controlPlane = controlPlane ?? throw new ArgumentNullException(nameof(controlPlane));
         Registry = registry ?? throw new ArgumentNullException(nameof(registry));
@@ -311,8 +315,31 @@ public sealed class QueueyService : IQueueyService
         // Advarslene Queuey svarer med, som would_require_approval for en endring en nøkkel snart trenger en plan for.
         var warnings = new ServerWarnings();
         using IDisposable collecting = QueueyControlPlaneClient.CollectWarnings(warnings);
-        return await SyncQueueDefinitionsAsync(Queues.Queues, options, tenantPublicId: null, hooks: null, cancellationToken,
-            serverWarnings: warnings).ConfigureAwait(false);
+        QueueSyncResult result;
+        try
+        {
+            result = await SyncQueueDefinitionsAsync(Queues.Queues, options, tenantPublicId: null, hooks: null, cancellationToken,
+                serverWarnings: warnings).ConfigureAwait(false);
+        }
+        catch (QueueySyncException ex) when (ex.Queues is { } failed)
+        {
+            LogNeedsPlan(failed);
+            throw;
+        }
+
+        LogNeedsPlan(result);
+        return result;
+    }
+
+    // En endring synken lot ligge fordi Queuey vil ha en plan (F3.11), i appens logg når verten har en (BØR 3 fra reviewen av
+    // #64): synken kaster ikke for den, så uten loggen merkes den bare av den som leser resultatet.
+    private void LogNeedsPlan(QueueSyncResult result)
+    {
+        if (_logger is null)
+            return;
+        foreach (QueueApplyResult queue in result.PlanRequired)
+            _logger.LogWarning("Queuey queue sync left a change to queue {Queue} out: Queuey wants a configuration plan for it ({Code}). {Message} {Action}",
+                queue.Name, queue.Error?.ErrorCode, queue.Error?.Message, queue.Error?.SuggestedAction);
     }
 
     /// <summary>
@@ -778,7 +805,8 @@ public sealed class QueueyService : IQueueyService
     }
 
     /// <inheritdoc />
-    public async Task<DeploymentPlan> StorePlanAsync(DeploymentFile file, SyncOptions? options = null, CancellationToken cancellationToken = default)
+    public async Task<DeploymentPlan> StorePlanAsync(
+        DeploymentFile file, SyncOptions? options = null, bool submit = false, CancellationToken cancellationToken = default)
     {
         if (file is null) throw new ArgumentNullException(nameof(file));
 
@@ -801,7 +829,7 @@ public sealed class QueueyService : IQueueyService
         {
             created = await _controlPlane.CreatePlanAsync(tenant, new StartPlanWireRequest
             {
-                Source = source is { IsEmpty: false } ? new PlanSourceWire { Repo = source.Repo, Path = source.Path, Commit = source.Commit } : null,
+                Source = PlanSourceOf(source, options?.Source),
                 Adopt = adoptsWorkspace || adoptQueues.Count > 0
                     ? new StartApplyAdoptWire { Workspace = adoptsWorkspace, Queues = adoptQueues.Count > 0 ? adoptQueues.ToList() : null }
                     : null,
@@ -847,13 +875,40 @@ public sealed class QueueyService : IQueueyService
                 await _controlPlane.SetPlanDesiredAsync(tenant, stored.PlanId, index, desired, cancellationToken).ConfigureAwait(false);
         }
 
-        // 5. Forseglingen: hashen og policyens avgjørelse. Trenger planen en person, sendes den til innboksen.
+        // 5. Forseglingen: hashen og policyens avgjørelse. Trenger planen en person, sendes den til innboksen bare når den som
+        //    kaller, ber om det (BØR 2 fra reviewen av #64): en plan fra en PR-jobb skal ikke vente i innboksen.
         SealedPlanWireResponse seal = await _controlPlane.SealPlanAsync(tenant, stored.PlanId, cancellationToken).ConfigureAwait(false);
         stored = Sealed(stored, seal);
-        if (stored.NeedsSubmitting)
+        if (submit && stored.NeedsSubmitting)
             stored = await SubmitAsync(stored, cancellationToken).ConfigureAwait(false);
 
         return WithStored(plan, stored, skipped, warnings);
+    }
+
+    // Kilden en plan oppgir (Queuey F3.11): repo, sti og commit renset som for en apply, og ref, workflow og PR som oppgitt,
+    // så den som godkjenner, ser om planen kommer fra en PR eller fra main. Queuey tar høyst 512 tegn og ingen kontrolltegn
+    // per felt (PlanSource.Claimed); en verdi som ikke passer, utelates.
+    private static PlanSourceWire? PlanSourceOf(DeploymentFileSource? clean, DeploymentFileSource? given)
+    {
+        var wire = new PlanSourceWire
+        {
+            Repo = clean?.Repo,
+            Path = clean?.Path,
+            Commit = clean?.Commit,
+            Ref = SourceField(given?.Ref),
+            Workflow = SourceField(given?.Workflow),
+            PullRequest = SourceField(given?.PullRequest),
+        };
+        return wire.Repo is null && wire.Path is null && wire.Commit is null && wire.Ref is null && wire.Workflow is null
+               && wire.PullRequest is null
+            ? null
+            : wire;
+    }
+
+    private static string? SourceField(string? value)
+    {
+        string? trimmed = value?.Trim();
+        return string.IsNullOrEmpty(trimmed) || trimmed!.Length > 512 || trimmed.Any(char.IsControl) ? null : trimmed;
     }
 
     private async Task<DeploymentPlan> LocalInsteadAsync(DeploymentFile file, SyncOptions? options, CancellationToken cancellationToken, string why)
@@ -873,10 +928,11 @@ public sealed class QueueyService : IQueueyService
         };
     }
 
+    // En lagret plan har én id, Queueys (KAN 2 fra reviewen av #64). Hashen er fortsatt klientens v1; Queueys står på Stored.
     private static DeploymentPlan WithStored(DeploymentPlan plan, StoredPlan stored, IReadOnlyList<SkippedResource> skipped, ServerWarnings warnings) => new()
     {
         Tenant = plan.Tenant,
-        PlanId = plan.PlanId,
+        PlanId = stored.PlanId,
         PlanHash = plan.PlanHash,
         Queues = plan.Queues,
         Steps = plan.Steps,
@@ -1064,7 +1120,8 @@ public sealed class QueueyService : IQueueyService
             ? ManagedApply.None
             : await StartManagedApplyAsync(tenant, options.Source, options.Adopt, existing, plans, file.Workspace is not null, cancellationToken, bound)
                 .ConfigureAwait(false);
-        using IDisposable inApply = QueueyControlPlaneClient.InApply(managed.Token, boundToPlan: bound is not null);
+        using IDisposable inApply = QueueyControlPlaneClient.InApply(managed.Token,
+            bound is null ? null : new PlanApplyProgress(tenant, bound.PlanId));
         var skippedQueues = new HashSet<string>(managed.Skipped.Where(s => s.QueueName is not null).Select(s => s.QueueName!), StringComparer.Ordinal);
 
         // Workspace first: queues inherit from it, so converging it first means a queue that means to

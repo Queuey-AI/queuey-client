@@ -17,8 +17,15 @@ namespace Queuey.Client.Waas.Tests;
 /// desired som ikke er null én gang, og stegene på ett mål ett om gangen. Formene speiler Queueys
 /// PlanBuildingEndToEndTests og PlanApplyBindingEndToEndTests (integration/agents @ 87604ed0).
 /// </summary>
-public class StoredPlanTests
+public class StoredPlanTests : IDisposable
 {
+    private readonly TimeSpan[] _waits = QueueyControlPlaneClient.LostAnswerWaits;
+
+    // Ventetidene før planen leses etter et tapt svar, uten selve ventingen.
+    public StoredPlanTests() => QueueyControlPlaneClient.LostAnswerWaits = new[] { TimeSpan.Zero, TimeSpan.Zero, TimeSpan.Zero };
+
+    public void Dispose() => QueueyControlPlaneClient.LostAnswerWaits = _waits;
+
     private const string PlanId = "plan_7Hk2mQ9xLr4Ts1Va";
     private static readonly string Hash = string.Concat(Enumerable.Repeat("ab", 32));
 
@@ -42,6 +49,7 @@ public class StoredPlanTests
         public List<object> ReadSteps { get; } = new();
         public Dictionary<string, Func<HttpRequestMessage, HttpResponseMessage>> Routes { get; } = new(StringComparer.Ordinal);
         public List<string> ApplyWarnings { get; } = new();
+        public List<object> AppliedSteps { get; } = new();
         public StubHttpMessageHandler Stub { get; }
 
         public IEnumerable<(HttpRequestMessage Request, string? Body)> Sent
@@ -101,7 +109,7 @@ public class StoredPlanTests
                         planId = PlanId, workspace = "ten_abc", status = ReadStatus, version = 1, decision = "requires_approval",
                         rule = "v1.key.prod.changes.requires_approval", @class = "changes", hash = Hash, executes = "client",
                         adopt = Array.Empty<string>(), stepCount = ReadSteps.Count, expiresAt = DateTimeOffset.UtcNow.AddHours(24),
-                        steps = ReadSteps,
+                        steps = ReadSteps, appliedSteps = AppliedSteps,
                     });
                 case "POST /tenants/ten_abc/deployment/applies":
                 {
@@ -151,8 +159,8 @@ public class StoredPlanTests
     private static string? Header(HttpRequestMessage request, string name)
         => request.Headers.TryGetValues(name, out IEnumerable<string>? values) ? string.Join(",", values) : null;
 
-    private static Task<DeploymentPlan> StoreAsync(PlansServer server, string json, SyncOptions? options = null)
-        => WaasTestHost.Build(apiStub: server.Stub).StorePlanAsync(DeploymentFile.Parse(json), options);
+    private static Task<DeploymentPlan> StoreAsync(PlansServer server, string json, SyncOptions? options = null, bool submit = false)
+        => ((IQueueyPlans)WaasTestHost.Build(apiStub: server.Stub)).StorePlanAsync(DeploymentFile.Parse(json), options, submit);
 
     private const string ExistingOrders = """{ "tenant": "ten_abc", "queues": { "orders": { "retentionDays": 5 } } }""";
 
@@ -165,7 +173,12 @@ public class StoredPlanTests
 
         DeploymentPlan plan = await StoreAsync(server, ExistingOrders, new SyncOptions
         {
-            Source = new DeploymentFileSource { Repo = "https://ghp_secret@github.com/acme/app.git?x=1", Path = "./queuey.deploy.json", Commit = "ABC1234" },
+            Source = new DeploymentFileSource
+            {
+                Repo = "https://ghp_secret@github.com/acme/app.git?x=1", Path = "./queuey.deploy.json", Commit = "ABC1234",
+                Ref = "refs/heads/feature/retention", Workflow = "acme/app/.github/workflows/deploy.yml@refs/heads/feature/retention",
+                PullRequest = "12",
+            },
             Adopt = new[] { "orders" },
         });
 
@@ -174,6 +187,10 @@ public class StoredPlanTests
         Assert.Equal("https://github.com/acme/app", created.GetProperty("source").GetProperty("repo").GetString());
         Assert.Equal("queuey.deploy.json", created.GetProperty("source").GetProperty("path").GetString());
         Assert.Equal("abc1234", created.GetProperty("source").GetProperty("commit").GetString());
+        // Ref, workflow og PR går med som oppgitt (BØR 2 fra reviewen av #64), så den som godkjenner, ser hvor planen kommer fra.
+        Assert.Equal("refs/heads/feature/retention", created.GetProperty("source").GetProperty("ref").GetString());
+        Assert.Equal("acme/app/.github/workflows/deploy.yml@refs/heads/feature/retention", created.GetProperty("source").GetProperty("workflow").GetString());
+        Assert.Equal("12", created.GetProperty("source").GetProperty("pullRequest").GetString());
         Assert.Equal("orders", Assert.Single(created.GetProperty("adopt").GetProperty("queues").EnumerateArray()).GetString());
         Assert.DoesNotContain(server.Sent, s => s.Request.RequestUri!.AbsolutePath.EndsWith("/deployment/applies", StringComparison.Ordinal));
         Assert.DoesNotContain("ghp_secret", string.Join("\n", server.Sent.Select(s => s.Body)));
@@ -193,6 +210,8 @@ public class StoredPlanTests
         Assert.DoesNotContain(server.Sent, s => s.Request.RequestUri!.AbsolutePath.EndsWith("/submit", StringComparison.Ordinal));
         StoredPlan stored = Assert.IsType<StoredPlan>(plan.Stored);
         Assert.Equal(PlanId, stored.PlanId);
+        // Én id: Queueys (KAN 2 fra reviewen av #64).
+        Assert.Equal(PlanId, plan.PlanId);
         Assert.Equal(Hash, stored.Hash);
         Assert.Equal("execute", stored.Decision);
         Assert.True(stored.CanBeApplied);
@@ -230,11 +249,25 @@ public class StoredPlanTests
     }
 
     [Fact]
-    public async Task A_plan_the_policy_gives_to_a_person_is_sent_to_the_inbox_and_says_where_it_is_approved()
+    public async Task A_plan_the_policy_gives_to_a_person_is_sealed_and_waits_to_be_submitted_unless_asked()
     {
+        // BØR 2 fra reviewen av #64: en plan fra en PR-jobb skal ikke vente i innboksen, så den sendes inn bare på uttrykkelig valg.
         var server = new PlansServer("orders") { Decision = "requires_approval" };
 
         DeploymentPlan plan = await StoreAsync(server, ExistingOrders);
+
+        Assert.DoesNotContain(server.Sent, s => s.Request.RequestUri!.AbsolutePath.EndsWith("/submit", StringComparison.Ordinal));
+        Assert.True(plan.Stored!.NeedsSubmitting);
+        Assert.False(plan.Stored.IsPendingApproval);
+        Assert.False(plan.Stored.CanBeApplied);
+    }
+
+    [Fact]
+    public async Task A_plan_the_policy_gives_to_a_person_is_sent_to_the_inbox_when_asked_and_says_where_it_is_approved()
+    {
+        var server = new PlansServer("orders") { Decision = "requires_approval" };
+
+        DeploymentPlan plan = await StoreAsync(server, ExistingOrders, submit: true);
 
         server.One("POST", $"/tenants/ten_abc/deployment/plans/{PlanId}/submit");
         StoredPlan stored = plan.Stored!;
@@ -352,9 +385,9 @@ public class StoredPlanTests
     }
 
     [Fact]
-    public async Task A_write_whose_answer_was_lost_is_sent_once_more_and_already_written_counts_as_written()
+    public async Task A_write_whose_answer_was_lost_and_that_the_plan_does_not_show_is_sent_once_more_and_already_written_counts()
     {
-        var server = new PlansServer("orders");
+        var server = new PlansServer("orders") { ReadStatus = "executing" };
         int attempts = 0;
         server.Routes["PATCH /queues/que_orders/policy"] = _ => ++attempts == 1
             ? throw new HttpRequestException("The connection was reset.")
@@ -364,6 +397,49 @@ public class StoredPlanTests
 
         Assert.True(result.AllSucceeded);
         Assert.Equal(2, attempts);
+    }
+
+    [Fact]
+    public async Task A_write_whose_answer_was_lost_is_looked_up_in_the_plan_and_not_sent_again_when_it_is_written()
+    {
+        // BØR 1 fra reviewen av #64: etter en timeout kan den første forespørselen fortsatt kjøre. Står steget i appliedSteps, er
+        // skrivingen gjort, og et nytt forsøk ville gjort planen plan_stale.
+        var server = new PlansServer("orders") { ReadStatus = "executing" };
+        int attempts = 0;
+        server.Routes["PATCH /queues/que_orders/policy"] = _ =>
+        {
+            attempts++;
+            // Det første forsøket lagres på serveren, men svaret når aldri fram.
+            server.AppliedSteps.Add(new { step = 0, part = (string?)null, at = DateTimeOffset.UtcNow });
+            server.AppliedSteps.Add(new { step = 1, part = (string?)null, at = DateTimeOffset.UtcNow });
+            throw new TaskCanceledException("The request was canceled due to the configured HttpClient.Timeout.");
+        };
+
+        QueueSyncResult result = await ApplyBoundAsync(server, ExistingOrders);
+
+        Assert.True(result.AllSucceeded);
+        Assert.Equal(1, attempts);
+        Assert.Contains(server.Sent, s => s.Request.Method == HttpMethod.Get
+                                          && s.Request.RequestUri!.AbsolutePath == "/tenants/ten_abc/deployment/plans/" + PlanId);
+    }
+
+    [Fact]
+    public async Task A_write_whose_answer_was_lost_stops_the_apply_when_the_plan_went_stale_meanwhile()
+    {
+        var server = new PlansServer("orders") { ReadStatus = "plan_stale" };
+        int attempts = 0;
+        server.Routes["PATCH /queues/que_orders/policy"] = _ =>
+        {
+            attempts++;
+            throw new HttpRequestException("The connection was reset.");
+        };
+
+        QueueySyncException ex = await Assert.ThrowsAsync<QueueySyncException>(() => ApplyBoundAsync(server, ExistingOrders));
+
+        Assert.Equal(1, attempts);
+        QueueyException error = Assert.Single(ex.Queues!.Applied).Error!;
+        Assert.Equal("plan_stale", error.ErrorCode);
+        Assert.Contains("Plan again", error.SuggestedAction);
     }
 
     [Fact]
@@ -479,6 +555,8 @@ public class StoredPlanTests
 
         Assert.True(result.AllSucceeded);
         Assert.Equal("would_require_approval: Workspace ten_abc is prod. This apply runs as before.", Assert.Single(result.ServerWarnings));
+        // Også i Warnings (BØR 3 fra reviewen av #64), så den som logger advarslene, får Queueys med.
+        Assert.Contains("would_require_approval: Workspace ten_abc is prod. This apply runs as before.", result.Warnings);
         Assert.Contains(server.Writes, w => w.Request.RequestUri!.AbsolutePath == "/queues/que_orders/policy");
     }
 
@@ -519,6 +597,44 @@ public class StoredPlanTests
         Assert.Equal(0, result.Failed);
         Assert.Equal("orders", Assert.Single(result.PlanRequired).Name);
         Assert.False(result.AllSucceeded);
+        Assert.Contains(result.Warnings, w => w.StartsWith("Queue 'orders':", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task A_queue_a_sync_from_code_left_for_a_plan_is_logged_as_a_warning_when_the_host_has_logging()
+    {
+        var server = new PlansServer("orders");
+        server.Routes["PATCH /queues/que_orders/policy"] = _ => StubHttpMessageHandler.Json(HttpStatusCode.Forbidden,
+            new { error = new { code = "plan_required", message = "Needs a plan.", action = "queuey apply does it for you." } });
+        var logger = new ListLogger();
+        var options = WaasTestHost.Options();
+        var service = new QueueyService(
+            new QueueyClient(options, new HttpClient(new StubHttpMessageHandler(_ => StubHttpMessageHandler.Accepted(WaasTestHost.DefaultPublishBody())))),
+            new QueueyControlPlaneClient(new HttpClient(server.Stub), options),
+            new StreamRegistry(Array.Empty<StreamDefinition>()), options,
+            new QueueRegistry(new[] { new QueueDefinition { Name = "orders", Policy = new QueuePolicy { RetentionDays = 5 } } }),
+            logger);
+
+        await service.SyncQueuesAsync();
+
+        (Microsoft.Extensions.Logging.LogLevel level, string message) = Assert.Single(logger.Entries);
+        Assert.Equal(Microsoft.Extensions.Logging.LogLevel.Warning, level);
+        Assert.Contains("queue orders", message);
+        Assert.Contains("plan_required", message);
+        Assert.Contains("queuey apply does it for you.", message);
+    }
+
+    private sealed class ListLogger : Microsoft.Extensions.Logging.ILogger
+    {
+        public List<(Microsoft.Extensions.Logging.LogLevel Level, string Message)> Entries { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state,
+            Exception? exception, Func<TState, Exception?, string> formatter)
+            => Entries.Add((logLevel, formatter(state, exception)));
     }
 
     [Fact]

@@ -30,6 +30,20 @@ public class AddQueueyTests
     }
 
     [Fact]
+    public void AddQueuey_registers_the_stored_plans_as_their_own_interface_on_the_same_service()
+    {
+        // KAN 1 fra reviewen av #64: planene (Queuey F3.11) er et eget grensesnitt, som IQueueyManagement, så IQueueyService
+        // ikke får nye medlemmer.
+        var services = new ServiceCollection();
+        services.AddQueuey(o => o.ApiKey = "qak_kid.secret");
+
+        using ServiceProvider sp = services.BuildServiceProvider();
+
+        Assert.Same(sp.GetRequiredService<IQueueyService>(), sp.GetRequiredService<IQueueyPlans>());
+        Assert.DoesNotContain(typeof(IQueueyService).GetMethods(), m => m.Name.Contains("StoredPlan") || m.Name == "StorePlanAsync");
+    }
+
+    [Fact]
     public void AddQueuey_with_duplicate_stream_names_throws()
     {
         var services = new ServiceCollection();

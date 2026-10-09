@@ -1,6 +1,7 @@
 using System;
 using System.Net.Http;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace Queuey.Client.Waas;
 
@@ -37,8 +38,14 @@ public static class QueueyServiceCollectionExtensions
             var factory = sp.GetRequiredService<IHttpClientFactory>();
             HttpClient http = factory.CreateClient(QueueyClientDefaults.HttpClientName);
             var controlPlane = new QueueyControlPlaneClient(http, options);
-            return new QueueyService(client, controlPlane, registry, options, queues);
+            // En logger fra vertens DI når den finnes (BØR 3 fra reviewen av #64): en endring synken fra kode lar ligge fordi
+            // Queuey vil ha en plan, skal synes i appens logg også.
+            return new QueueyService(client, controlPlane, registry, options, queues, sp.GetService<ILogger<QueueyService>>());
         });
+
+        // Planene Queuey lagrer (F3.11), som et eget grensesnitt: IQueueyService får ikke nye medlemmer.
+        services.AddSingleton<IQueueyPlans>(sp => sp.GetRequiredService<IQueueyService>() as IQueueyPlans
+            ?? throw new InvalidOperationException("IQueueyService is not Queuey's own, so it has no plans: register IQueueyPlans too."));
 
         return services;
     }

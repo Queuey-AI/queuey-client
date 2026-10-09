@@ -44,8 +44,8 @@ public sealed class SyncOptions
     public IReadOnlyList<string>? Adopt { get; set; }
 
     /// <summary>
-    /// The stored plan a deployment apply writes (Queuey F3.11), from <see cref="IQueueyService.StorePlanAsync"/> or
-    /// <see cref="IQueueyService.GetStoredPlanAsync"/>: the apply starts with its id and hash, takes its source and what it
+    /// The stored plan a deployment apply writes (Queuey F3.11), from <see cref="IQueueyPlans.StorePlanAsync"/> or
+    /// <see cref="IQueueyPlans.GetStoredPlanAsync"/>: the apply starts with its id and hash, takes its source and what it
     /// adopts from it (so <see cref="Source"/> and <see cref="Adopt"/> are not sent), and each write in it is one of the plan's
     /// steps, sent once. Null writes the file as before.
     /// </summary>
