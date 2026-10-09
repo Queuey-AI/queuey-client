@@ -29,7 +29,7 @@ COMMANDS
   listen         Receive webhooks locally over a secure push session (Stripe-listen style).
   replay         Replay one existing event to your connected listener (read-only DLQ debugging).
   edge           Operate a Queuey Edge spool: status | retry | discard | recover | reset.
-  whoami         Show the resolved host / environment / tenant / license (masks the key).
+  whoami         Show the resolved hosts / tenant / license (masks the key).
 
 ADVISE
   queuey advise [<path>] [--queue <name>] [--write-files [--force]] [--apply] [--json]
@@ -142,9 +142,14 @@ APPLY
                  Queuey what it would change first, run `queuey plan`.
                  When no workspace is named anywhere (the file's tenant, --tenant,
                  QUEUEY_TENANT, queuey.json or the profile) and the file says
-                 workspace.environment, apply creates a workspace marked with it first, and
-                 applies to that. It says the new id on stderr and in --json's
-                 ""createdWorkspace"": name it after that, or the next apply creates another.
+                 workspace.environment dev or test, apply creates a workspace marked with it,
+                 named queuey-<environment>, and applies to that. Never in CI (CI,
+                 GITHUB_ACTIONS and the like are set), and never for a file whose delivery
+                 names a credentialRef, which a new workspace does not have: those fail as
+                 a missing workspace, with queuey create-tenant as the way out. Once
+                 created, every output says it, errors too: ""createdWorkspace"" in --json,
+                 with ""tenantOption"": ""--tenant ten_…"". Name it, or the next apply creates
+                 another.
                  --dry-run --json prints { ""schemaVersion"": 2, ""workspace"": …, ""queues"": […] }:
                  the workspace's declaration (null when the file has none) and each queue's,
                  with what the dry run notes about them. Each carries every field the file
@@ -315,6 +320,8 @@ VERIFY
                  way, so trigger it once --background has returned.
                  Exits 0 only when the verification passed. failed, timed_out and not_tried
                  exit 1 with Queuey's summary, and a refusal exits 1 with Queuey's message.
+                 --background is the exception: it exits 0 once the verification is started,
+                 whatever comes of it, so it is no gate. The gate is --wait <ver_…>.
                  --json prints one JSON object per line (NDJSON), each with ""schemaVersion"": 3
                  and a ""status"". The first, once Queuey follows the event and before verify
                  waits, is { ""status"": ""waiting"", ""verificationId"", ""queuePublicId"", ""mode"",
@@ -574,7 +581,7 @@ EDGE
 WHOAMI
   queuey whoami [--profile <name>] [--json]
                  The connection the CLI resolves, with the key masked; with a profile, that
-                 profile's and the file it came from. Environment is Production for Queuey's
+                 profile's and the file it came from. Hosts (""hosts"" in --json) is Production for Queuey's
                  own hosts, Local when both hosts are on this machine, and Custom otherwise.
 
 PROFILES

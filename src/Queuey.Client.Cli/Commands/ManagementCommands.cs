@@ -11,7 +11,12 @@ namespace Queuey.Client.Cli;
 internal static class CreateTenantCommand
 {
     internal static readonly CommandOptions Options = new(
-        "create-tenant", flags: new[] { "as-producer", "with-default-queue", "json" }, values: new[] { "name", "environment" }, positionals: 1);
+        "create-tenant", flags: new[] { "as-producer", "with-default-queue", "json" }, values: new[] { "name", "environment" }, positionals: 1,
+        hints: new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            // Det globale hintet for --env handler om vertene, ikke workspacets miljø (review av #65, K4).
+            ["env"] = "--env is not an option: the new workspace's environment is --environment dev|test|staging|prod.",
+        });
 
     public static async Task<int> RunAsync(string[] args)
     {

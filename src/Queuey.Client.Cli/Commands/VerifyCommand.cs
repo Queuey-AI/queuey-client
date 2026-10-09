@@ -277,8 +277,12 @@ internal static class VerifyCommand
         string? raw = map.Get(name);
         if (!int.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out int seconds) || seconds < 1)
             return CliErrors.Usage(map, "invalid_value",
-                $"--{name} takes whole seconds, at least 1; got '{(raw is null ? "" : CliErrors.Shown(raw))}'.",
-                "Queuey follows an event for at most 15 minutes (900 seconds), and for a minute when --timeout is left out.");
+                name == "wait"
+                    // --wait tar også en verifiserings id; en id som er skrevet feil, var før bare «not seconds» (review av #65, K4).
+                    ? $"--wait takes whole seconds, at least 1, or a verification id (ver_…, lower case); got '{(raw is null ? "" : CliErrors.Shown(raw))}'."
+                    : $"--{name} takes whole seconds, at least 1; got '{(raw is null ? "" : CliErrors.Shown(raw))}'.",
+                "Queuey follows an event for at most 15 minutes (900 seconds), and for a minute when --timeout is left out. "
+                + "--background says the id of the verification it started.");
 
         timeout = TimeSpan.FromSeconds(seconds);
         return null;

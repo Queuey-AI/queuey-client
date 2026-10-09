@@ -17,7 +17,8 @@ internal static class EnvironmentWayOut
         string wanted = environment.Trim().ToLowerInvariant();
         return $"An API key sets a workspace's environment only when it creates one. Make a workspace marked {wanted} with "
                + $"`queuey create-tenant --name <name> --environment {wanted}`, and name it with --tenant, in the file's tenant or "
-               + $"in the profile. With no workspace named anywhere, `queuey apply` creates one marked {wanted} itself.";
+               + "in the profile."
+               + (wanted is "dev" or "test" ? $" With no workspace named anywhere, `queuey apply` creates one marked {wanted} itself, outside CI." : "");
     }
 
     /// <summary>

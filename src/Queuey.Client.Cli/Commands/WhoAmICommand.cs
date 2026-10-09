@@ -19,7 +19,8 @@ internal static class WhoAmICommand
         {
             var payload = new
             {
-                environment = config.HostsLabel(),
+                // «hosts», ikke «environment» (review av #65, K1): det er vertene, og et workspace har sitt eget miljø.
+                hosts = config.HostsLabel(),
                 apiHost = config.ResolvedApiBase().ToString(),
                 ingressHost = config.ResolvedIngressBase().ToString(),
                 tenant = config.TenantPublicId,
@@ -36,7 +37,7 @@ internal static class WhoAmICommand
         Console.WriteLine("Queuey CLI");
         if (config.Profile is { } profile)
             Console.WriteLine($"  Profile     : {profile} ({config.ProfileFile})");
-        Console.WriteLine($"  Environment : {config.HostsLabel()}");
+        Console.WriteLine($"  Hosts       : {config.HostsLabel()}");
         Console.WriteLine($"  API host    : {config.ResolvedApiBase()}");
         Console.WriteLine($"  Ingress host: {config.ResolvedIngressBase()}");
         Console.WriteLine($"  Tenant      : {config.TenantPublicId ?? "(not set)"}");

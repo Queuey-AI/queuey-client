@@ -470,8 +470,11 @@ anything but `prod` on a workspace that has none, is refused with `environment_l
 before anything else is written. A key sets the environment when it creates a workspace, so the error
 says how to make one marked with it: `queuey create-tenant --name <name> --environment dev`. And when no
 workspace is named anywhere (the file's `tenant`, `--tenant`, `QUEUEY_TENANT`, `queuey.json` or the
-profile), `apply` creates one marked with the file's environment itself, says its id, and applies to it:
-name it after that, or the next `apply` creates another.
+profile) and the file says `dev` or `test`, `apply` creates one marked so itself, named `queuey-dev` or
+`queuey-test`, says its id, and applies to it. Every output after that names it, errors too
+(`createdWorkspace` in `--json`, with `"tenantOption": "--tenant ten_…"`): name it, or the next `apply`
+creates another. It never does so in CI, and never for a file whose delivery names a `credentialRef`, which
+a new workspace does not have yet; those fail as a missing workspace, with `create-tenant` as the way out.
 A file applied to several workspaces takes it from a variable: `"environment": "${QUEUEY_WORKSPACE_ENVIRONMENT}"`,
 which `pull --as` writes for you.
 
@@ -716,7 +719,8 @@ and before verify waits, the first line is `{ "status": "waiting", "verification
 secret: the evidence is ids, statuses, times and header names.
 
 `--background` starts the verification and returns at once with its id and the command that reads the
-outcome later, so the same shell can trigger the event:
+outcome later, so the same shell can trigger the event. It exits 0 once the verification is started,
+whatever comes of it, so it is no gate in CI: `--wait ver_…` is, with the exit codes above.
 
 ```bash
 queuey verify stripe --event-type checkout.session.completed --ingress-auth stripe --background
@@ -1005,7 +1009,7 @@ carries the per-flag detail this table leaves out.
 | `issues <ten_…>` | A workspace's issues |
 | `edge` | Operate an Edge spool: `run`, `publish`, `status`, `drain`, `retry`, `discard`, `recover`, `reset` |
 | `create-tenant` / `create-queue` | Provision imperatively (prefer `apply`); `create-tenant --environment dev` makes a dev workspace |
-| `whoami` | The resolved host, environment, tenant and license (key masked) |
+| `whoami` | The resolved hosts (Production, Local or Custom), tenant and license (key masked) |
 
 ### Exit codes
 

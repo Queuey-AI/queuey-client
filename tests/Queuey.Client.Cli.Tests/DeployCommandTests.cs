@@ -521,7 +521,7 @@ public sealed class DeployCommandTests : IDisposable
         Assert.Contains("Queuey error: Only a person can lower a workspace's environment, and this would lower workspace ten_abc from prod to dev.", human.Stderr);
         Assert.Contains("→ An API key sets a workspace's environment only when it creates one. Make a workspace marked dev with "
                         + "`queuey create-tenant --name <name> --environment dev`, and name it with --tenant, in the file's tenant or in "
-                        + "the profile. With no workspace named anywhere, `queuey apply` creates one marked dev itself.", human.Stderr);
+                        + "the profile. With no workspace named anywhere, `queuey apply` creates one marked dev itself, outside CI.", human.Stderr);
         Assert.Equal(new[] { "PATCH /tenants/ten_abc" }, api.Writes.Select(w => w.Key).ToArray());
         Assert.Equal("dev", api.Writes.Single().Json.GetProperty("environment").GetString());
 
