@@ -18,6 +18,8 @@ public class QueueySettingsTests
     private static readonly string[] FileVariables =
     {
         "QUEUEY_TENANT", DeploymentTemplate.EnvironmentVariable, DeploymentTemplate.BaseUrlVariable,
+        // pull skriver den for workspacets endepunkt når Queuey viser det redigert (Queuey #514).
+        DeploymentPuller.WorkspaceUrlVariable,
     };
 
     [Fact]
