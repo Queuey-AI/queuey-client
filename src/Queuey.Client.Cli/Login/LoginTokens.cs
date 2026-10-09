@@ -109,7 +109,8 @@ internal sealed class LoginTokens
         login.Scope = ScopeOf(answer.Scope) ?? login.Scope;
         // Serveren styrer verdiene (security-review av #66, KAN 6): en ingress som ikke er https eller lokal http, og en person
         // som ikke er en kort tekst, lagres ikke.
-        login.IngressBase = SafeIngress(answer.IngressBase) ?? login.IngressBase;
+        if (!login.IngressBaseFromFlag)
+            login.IngressBase = SafeIngress(answer.IngressBase) ?? login.IngressBase;
         login.User = answer.User is { Length: <= 200 } user ? TerminalText.Line(user) : login.User;
     }
 
@@ -117,6 +118,10 @@ internal sealed class LoginTokens
     /// <c>operate</c> or <c>read</c> from a granted scope list such as <c>operate offline_access</c>, or null when it names
     /// neither. The login is matched on this, so a server that adds a scope of its own does not make every run a new login.
     /// </summary>
+    /// <summary>Whether <paramref name="granted"/> reaches no further than <paramref name="asked"/>: the same, or read for operate.</summary>
+    internal static bool WithinScope(string granted, string asked)
+        => granted == asked || (granted == "read" && asked == "operate");
+
     internal static string? ScopeOf(string? granted)
     {
         string[] scopes = (granted ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries);

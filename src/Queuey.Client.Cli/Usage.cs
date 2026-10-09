@@ -34,7 +34,8 @@ COMMANDS
   whoami         Show the resolved hosts / tenant / license, and the key (masked) or the login.
 
 LOGIN
-  queuey login [--profile <name>] [--scope operate|read] [--wait] [--no-browser] [--api-base <uri>] [--json]
+  queuey login [--profile <name>] [--scope operate|read] [--wait] [--no-browser] [--api-base <uri>]
+               [--ingress-base <uri>] [--json]
                  Logs in the way `stripe login` does: it prints a link and a code, you open the
                  link, check that the page shows the same code, and approve it in the Queuey
                  console. In a terminal it opens the browser and waits.
@@ -58,6 +59,10 @@ LOGIN
                  by you and checked as config.json is. They renew themselves; two commands at
                  once take turns, so a refresh token is never spent twice.
                  Publishing to the ingress still needs a key: the ingress does not take a login.
+                 The login keeps the ingress host Queuey gives with it; --ingress-base sets it
+                 instead, and renewals keep that. Against a Queuey on this machine whose
+                 ingress host is elsewhere, login warns. plan says where the ingress host came
+                 from (the flag, a variable, queuey.json, the profile, or the login).
   queuey logout [--profile <name>] [--license <lic_…>] [--api-base <uri>] [--json]
                  Ends the login with Queuey (it disappears from Connected apps) and removes it
                  from this machine: every login for the API host, or only --license's. When Queuey
@@ -68,8 +73,8 @@ ADVISE
   queuey advise [<path>] --intent <flow.json> [--queue <name>] [--profile <name>] [--json]
                  Reads the repository (default: the current directory) and recommends how to
                  publish from it — and, when it finds an endpoint that takes webhooks, how to
-                 receive safely. Every conclusion names the file it came from, so you can
-                 disagree with it.
+                 receive safely. Every conclusion names the file it came from, and it lists
+                 every file it read (filesRead in --json), so you can disagree with it.
                  It decides in three steps. Does this send, receive or both. Then, for sending:
                  is there ALREADY durability here (an outbox, a bus, a job queue) — if so,
                  publish from that consumer rather than rebuilding it. Otherwise, does local
@@ -79,13 +84,18 @@ ADVISE
                  With NO flags it changes nothing and needs no credentials — it prints the
                  advice and the files it WOULD write. That is the default on purpose: an agent
                  runs a command before it reads this text.
-                 --write-files writes them: queuey.deploy.json (the committable one) and a
-                 .gitignore line for queuey.json (the one holding the API key, which must not
-                 be committed). An existing deployment file is kept unless --force.
+                 --write-files writes them: queuey.deploy.json (the committable one) and
+                 .gitignore lines for .env and queuey.json, which hold keys and must not be
+                 committed. The deployment file secures the workspace (signed requests with
+                 Queuey's own template, which every queue inherits), keeps events no longer
+                 than the license's plan allows (read with your login, else 7 days), and has
+                 a dev profile: `queuey apply --profile dev` makes a dev workspace from it. An
+                 existing deployment file is kept unless --force.
                  --apply converges the workspace down the same path `queuey apply` takes, and
-                 needs credentials. It creates the queue; the API key itself is always minted
-                 in the console, because a key that can mint keys turns repo access into
-                 account access.
+                 needs a login (queuey login). It creates the queue. The app's signing key
+                 comes from `queuey keys mint --queue <queue>` with .env as its file (see KEYS),
+                 which needs a login that may manage keys and never shows the secret; a license-wide API
+                 key is a person's, minted in the console.
                  The two flags are separate on purpose: a file lands in git diff and is undone
                  with git, while a workspace change is invisible from the repo and is undone in
                  the console. In a .NET project, adding the package stays a step you run
@@ -221,8 +231,10 @@ APPLY
                  workspace marked dev: Queuey refuses it elsewhere, and plan says so first,
                  also for a queue it would create. The listener's
                  address belongs to the session, never to the file. A delivery URL on this
-                 machine or a private network is refused before anything is sent: Queuey's
-                 delivery never reaches it, and localForward is the way to your machine.
+                 machine or a private network is refused before anything is sent to
+                 Queuey's own hosts, whose delivery never reaches it; localForward is the
+                 way to your machine. A Queuey on this machine or a private network decides
+                 for itself, and a dry run, which does not connect, only warns.
                  ingress.signedRequest { template, credentialRef } verifies a provider's
                  signature, such as Stripe's. A credential that is not stored yet is
                  accepted: the ingress refuses every event until it is stored, and storing it

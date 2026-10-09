@@ -127,26 +127,32 @@ internal static class CliHost
     }
 
     /// <summary>
-    /// Whether <paramref name="path"/> is a regular file, not a link, that belongs to the user running the CLI. A <c>.env</c> that
-    /// is anything else is not read: it would let another user, or a repository the command runs in, choose the key a publish
-    /// signs with.
+    /// Whether <paramref name="path"/> may be read as the user's own <c>.env</c>: a regular file, not a link, that belongs to
+    /// the user running the CLI (not checked on Windows, where the profile's ACL protects it), and that git does not track.
+    /// A tracked <c>.env</c> came with the repository, so whoever wrote the repository would choose the key a publish signs
+    /// with; when git cannot say, a <c>.env</c> inside a repository folder is not read either.
     /// </summary>
-    // Security-review av #67 (KAN F).
+    // Security-review av #67 (KAN F), og KAN 1 (2026-10-09): kommentaren lovet at et repo ikke kunne velge nøkkelen, men en
+    // sporet .env ble lest. Nå hoppes den over.
     internal static bool IsOwnPlainFile(string path)
     {
         var info = new FileInfo(path);
         if (!info.Exists || info.LinkTarget is not null)
             return false;
-        if (OperatingSystem.IsWindows())
-            return true;
-        try
+        if (!OperatingSystem.IsWindows())
         {
-            return UserProfiles.Inspect(path).Owner == UserProfiles.CurrentUser();
+            try
+            {
+                if (UserProfiles.Inspect(path).Owner != UserProfiles.CurrentUser())
+                    return false;
+            }
+            catch (QueueyConfigurationException)
+            {
+                return false;
+            }
         }
-        catch (QueueyConfigurationException)
-        {
-            return false;
-        }
+
+        return !EnvFile.TrackedByGit(info.FullName);
     }
 
     // Miljøet konfigurasjonen leses fra. En søm av samme grunn som TestHandler: en test skal ikke måtte

@@ -122,6 +122,9 @@ public sealed class FlowFacts
     /// <summary>What the scan left out because of a limit, in words. Empty when it read everything it wanted.</summary>
     public IReadOnlyList<string> Limits { get; init; } = Array.Empty<string>();
 
+    /// <summary>Every file the scan read, repository-relative.</summary>
+    public IReadOnlyList<string> FilesRead { get; init; } = Array.Empty<string>();
+
     /// <summary>The project each file belongs to: the nearest folder above it with a manifest, repository-relative.</summary>
     internal Func<string, string> ProjectOf { get; init; } = _ => "";
 
@@ -329,6 +332,7 @@ public static class FlowScan
             Queuey = _queuey.ToArray(),
             DeployFile = _deployFile,
             Limits = Limits(),
+            FilesRead = _walk.FilesRead,
             ProjectOf = ProjectOf,
             FrameworkOf = FrameworkOf,
         };

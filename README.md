@@ -3,18 +3,33 @@
 The official .NET SDK for [Queuey](https://queuey.ai) — a webhooks / event-distribution
 platform. **Decorate, sync, publish.**
 
-> Status: early preview — the API surface may still change, and nothing is on NuGet yet.
+> Status: early preview. The packages are on NuGet as previews, so add them with `--prerelease`, and the API
+> surface may still change.
+
+```bash
+dotnet add package Queuey.Client --prerelease
+queuey keys mint --queue orders --write .env   # the app's signing key, for its queue only; the secret is never shown
+```
 
 ```csharp
 var queuey = new QueueyClient(new QueueyOptions
 {
     // Environment defaults to Production (api.queuey.ai + ingress.queuey.ai).
     TenantPublicId = "ten_…",
-    ApiKey         = "qak_…",   // license-wide FullAccess key
-});
+}.UseEnvironmentVariables());   // QUEUEY_SIGNING_KEY_ID and QUEUEY_SIGNING_SECRET, from the environment or, in Development, .env
 
 await queuey.Ingress.PublishAsync("orders", order);
 ```
+
+**Which key.** An app signs what it publishes with a signing key that reaches only its queue: that is the app's
+primary way in, and `queuey keys mint --write .env` makes one. A license-wide API key (`ApiKey = "qak_…"`) belongs
+to a person, who mints it in the console; give it to an app only when the app manages Queuey, not to publish.
+
+**`.env` in Development.** `UseEnvironmentVariables()` fills each setting not set in code from its `QUEUEY_*`
+variable. In Development (`DOTNET_ENVIRONMENT` or `ASPNETCORE_ENVIRONMENT`), a name the environment does not set
+is also read from `.env` in the working folder: only `QUEUEY_*` names, and only from a regular file of your own
+that git does not track. The environment always wins. Outside Development `.env` is never read: production takes
+its secrets from the platform, and a file in the working folder read silently there would be a surprise.
 
 - Tiny and dependency-light: `System.Text.Json` + `HttpClient`, no Newtonsoft.
 - Multi-targets `netstandard2.0` and `net8.0`; `IHttpClientFactory`-friendly.
@@ -129,7 +144,8 @@ var queuey = new QueueyClient(new QueueyOptions
     IngressBaseAddress = new Uri("http://localhost:5084"), // Queuey.Ingress
 
     TenantPublicId = "ten_…",
-    ApiKey         = "qak_…",
+    SigningKeyId   = "hsk_…",   // or .UseEnvironmentVariables(), as above
+    SigningSecret  = "…",
 });
 ```
 
@@ -652,10 +668,11 @@ already forward are left as they are. Raising a workspace's environment above `d
 refused too (`local_forward_blocks_environment_raise`), with the queues to set to `http` first.
 
 **A delivery URL on your machine is refused.** Queuey's delivery never reaches `localhost`, `*.localhost`,
-a loopback address or a private one, so `plan`, `apply` and `apply --dry-run` refuse such a `url` or
+a loopback address or a private one, so `plan` and `apply` against Queuey's hosts refuse such a `url` or
 `baseUrl` before anything is sent, and point to `"kind": "localForward"` instead. Queuey refuses the write
 too. Against a Queuey that itself runs on your machine or a private network, only the server knows what its
-delivery may reach, so the CLI leaves the check to it.
+delivery may reach, so the CLI leaves the check to it. `apply --dry-run` does not connect, so it only warns:
+the answer comes from Queuey when you plan or apply.
 
 ### Prove it delivers: `queuey verify`
 

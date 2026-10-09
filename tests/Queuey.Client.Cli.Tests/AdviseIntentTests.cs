@@ -1389,7 +1389,7 @@ public sealed class AdviseIntentTests : IDisposable
 
         Assert.Equal(ExitCodes.Success, run.Exit);
         JsonElement root = JsonDocument.Parse(run.Stdout).RootElement;
-        Assert.Equal(new[] { "schemaVersion", "path", "intent", "outcome", "flow", "existing", "scanLimited", "infrastructure", "code", "nextSteps" },
+        Assert.Equal(new[] { "schemaVersion", "path", "intent", "outcome", "flow", "existing", "scanLimited", "infrastructure", "code", "nextSteps", "filesRead" },
             root.EnumerateObject().Select(p => p.Name).ToArray());
         Assert.Equal(1, root.GetProperty("schemaVersion").GetInt32());
         Assert.Equal("proposed", root.GetProperty("outcome").GetString());

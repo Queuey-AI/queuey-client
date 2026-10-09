@@ -68,21 +68,33 @@ internal sealed class ResolvedConfig
         Profile = Profile,
         ProfileFile = ProfileFile,
         ProfileTenant = ProfileTenant,
+        IngressBaseFrom = IngressBaseFrom,
         Login = Login,
         SigningKeyId = keyId,
         SigningSecret = secret,
         SigningFrom = from,
     };
 
+    /// <summary>
+    /// Where the ingress host came from, as a person reads it: a flag, a variable, <c>queuey.json</c>, a profile, or the login.
+    /// Null means Queuey's own default.
+    /// </summary>
+    public string? IngressBaseFrom { get; init; }
+
+    /// <summary><see cref="IngressBaseFrom"/>, or Queuey's default when nothing set it.</summary>
+    public string IngressSource() => IngressBaseFrom ?? "Queuey's default ingress host";
+
     /// <summary>Where <see cref="SigningKeyId"/> came from: the environment or <c>.env</c>. Null without one.</summary>
     public string? SigningFrom { get; init; }
+
+    private static Uri? LoginIngress(LoginTokens login)
+        => Uri.TryCreate(login.Login.IngressBase, UriKind.Absolute, out Uri? ingress) ? ingress : null;
 
     public ResolvedConfig WithLogin(LoginTokens login) => new()
     {
         Environment = Environment,
         ApiBaseOverride = ApiBaseOverride,
-        IngressBaseOverride = IngressBaseOverride
-                              ?? (Uri.TryCreate(login.Login.IngressBase, UriKind.Absolute, out Uri? ingress) ? ingress : null),
+        IngressBaseOverride = IngressBaseOverride ?? LoginIngress(login),
         ApiKey = ApiKey,
         TenantPublicId = TenantPublicId,
         LicensePublicId = LicensePublicId ?? login.Login.License,
@@ -90,6 +102,9 @@ internal sealed class ResolvedConfig
         Profile = Profile,
         ProfileFile = ProfileFile,
         ProfileTenant = ProfileTenant,
+        IngressBaseFrom = IngressBaseOverride is null && LoginIngress(login) is not null
+            ? (login.Login.IngressBaseFromFlag ? "the login (--ingress-base when logging in)" : "the login (the ingress host Queuey gave)")
+            : IngressBaseFrom,
         Login = login,
         SigningKeyId = SigningKeyId,
         SigningSecret = SigningSecret,
@@ -109,6 +124,7 @@ internal sealed class ResolvedConfig
         Profile = Profile,
         ProfileFile = ProfileFile,
         ProfileTenant = ProfileTenant,
+        IngressBaseFrom = IngressBaseFrom,
         Login = Login,
         SigningKeyId = SigningKeyId,
         SigningSecret = SigningSecret,
@@ -153,6 +169,10 @@ internal static class CliConfig
             Environment = ParseEnvironment(First(args.Get("env"), getEnv("QUEUEY_ENV"), file.Environment)),
             ApiBaseOverride = ParseUri(First(args.Get("api-base"), getEnv("QUEUEY_API_BASE"), file.ApiBase)),
             IngressBaseOverride = ParseUri(First(args.Get("ingress-base"), getEnv("QUEUEY_INGRESS_BASE"), file.IngressBase)),
+            IngressBaseFrom = !string.IsNullOrWhiteSpace(args.Get("ingress-base")) ? "--ingress-base"
+                : !string.IsNullOrWhiteSpace(getEnv("QUEUEY_INGRESS_BASE")) ? "QUEUEY_INGRESS_BASE"
+                : !string.IsNullOrWhiteSpace(file.IngressBase) ? $"ingressBase in {args.Get("config") ?? "queuey.json"}"
+                : null,
             ApiKey = First(args.Get("api-key"), getEnv("QUEUEY_API_KEY"), file.ApiKey),
             TenantPublicId = Workspace(
                 (args.Get("tenant"), "--tenant"),
@@ -198,6 +218,9 @@ internal static class CliConfig
             Environment = QueueyEnvironment.Production,
             ApiBaseOverride = ParseUri(Pick("api-base", "QUEUEY_API_BASE", values.ApiBase, "API host")),
             IngressBaseOverride = ParseUri(Pick("ingress-base", "QUEUEY_INGRESS_BASE", values.IngressBase, "ingress host")),
+            IngressBaseFrom = !string.IsNullOrWhiteSpace(args.Get("ingress-base")) ? "--ingress-base"
+                : !string.IsNullOrWhiteSpace(values.IngressBase) ? $"profile {profile} in {path}"
+                : null,
             ApiKey = Pick("api-key", "QUEUEY_API_KEY", values.ApiKey, "API key"),
             TenantPublicId = tenant is null ? null : WorkspaceId(tenant, args.Get("tenant") is null ? $"tenant of profile {profile}" : "--tenant"),
             LicensePublicId = Pick("license", "QUEUEY_LICENSE", values.License, "license"),

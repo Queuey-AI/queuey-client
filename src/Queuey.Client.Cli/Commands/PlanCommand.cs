@@ -98,12 +98,12 @@ internal static class PlanCommand
 
         if (map.Has("json"))
         {
-            Console.WriteLine(JsonSerializer.Serialize(ToJson(plan, path), CliHost.JsonOut));
+            Console.WriteLine(JsonSerializer.Serialize(ToJson(plan, path, config.IngressSource()), CliHost.JsonOut));
             return ExitCode(plan);
         }
 
         Console.WriteLine($"Queuey plan — {path} → {config.ResolvedApiBase()}  (tenant {plan.Tenant})");
-        WriteBody(plan);
+        WriteBody(plan, config);
         return ExitCode(plan);
     }
 
@@ -123,7 +123,7 @@ internal static class PlanCommand
     }
 
     /// <summary>The plan under the command's header line: its id, queues, steps and what comes next.</summary>
-    internal static void WriteBody(DeploymentPlan plan)
+    internal static void WriteBody(DeploymentPlan plan, ResolvedConfig config)
     {
         // En plan Queuey lagrer, har Queueys id og hash. En plan bare herfra (--local, eller en Queuey uten planer) har ingen id
         // (F3.11), så den ikke tas for en lagret plan, og hashen er klientens (v1).
@@ -134,6 +134,10 @@ internal static class PlanCommand
         foreach (string warning in plan.Warnings.Where(w => ServerWarnings.CodeOf(w) is "plans_unsupported" or "plans_unavailable" or "plan_required"))
             Console.WriteLine($"  ! {TerminalText.Line(warning)}");
 
+        // Blindtesten 2026-10-09 (funn 6): ingress-URL-en lokalt var en gammel tunnel fra innloggingen, og ingenting sa hvor den
+        // kom fra. Kilden står nå over køene.
+        if (plan.Queues.Count > 0)
+            Console.WriteLine($"  ingress host {config.ResolvedIngressBase()}  (from {config.IngressSource()})");
         foreach (DeploymentPlanQueue queue in plan.Queues)
             Console.WriteLine($"  {queue.Name}\tingress {queue.IngressUrl}{(queue.PublicId is null ? "  (would be created)" : "")}");
         foreach (DeploymentPlanStep step in plan.Steps)
@@ -163,7 +167,7 @@ internal static class PlanCommand
             StoredPlanText.WriteNext(next);
     }
 
-    internal static object ToJson(DeploymentPlan plan, string path)
+    internal static object ToJson(DeploymentPlan plan, string path, string ingressFrom)
     {
         var steps = plan.Steps.Select(s => new
         {
@@ -174,9 +178,13 @@ internal static class PlanCommand
             notes = s.Notes,
             state = s.State,
             desired = s.Desired,
-            error = s.Error is null ? null : new { code = s.Error.ErrorCode, message = s.Error.Message, action = s.Error.SuggestedAction, status = s.Error.StatusCode },
+            error = s.Error is null ? null : new
+            {
+                code = s.Error.ErrorCode, message = s.Error.Message,
+                action = s.Error.SuggestedAction ?? Advise.PlanRetention.CapHint(s.Error.ErrorCode), status = s.Error.StatusCode,
+            },
         });
-        var queues = plan.Queues.Select(q => new { name = q.Name, ingressUrl = q.IngressUrl, publicId = q.PublicId });
+        var queues = plan.Queues.Select(q => new { name = q.Name, ingressUrl = q.IngressUrl, ingressFrom, publicId = q.PublicId });
 
         if (plan.Stored is not { } stored)
             return new

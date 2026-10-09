@@ -71,6 +71,7 @@ internal sealed class RepoWalk
     private readonly Func<string, bool> _interesting;
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private readonly List<string> _stops = new();
+    private readonly SortedSet<string> _read = new(StringComparer.Ordinal);
 
     private long _bytes;
     private int _directories;
@@ -270,12 +271,26 @@ internal sealed class RepoWalk
                 return string.Empty;
             }
 
+            _read.Add(RelativeOf(path));
             return new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetString(buffer, 0, read).TrimStart('﻿');
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
         {
             return string.Empty;
         }
+    }
+
+    /// <summary>
+    /// Every file the walk read, repository-relative with '/', in order: what advise's conclusions can come from (blind test
+    /// 2026-10-09, finding 8: advise said each conclusion names its file, and listed none it read).
+    /// </summary>
+    public IReadOnlyList<string> FilesRead => _read.ToArray();
+
+    private string RelativeOf(string path)
+    {
+        string full = Path.GetFullPath(path);
+        string prefix = _root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        return full.StartsWith(prefix, StringComparison.Ordinal) ? full[prefix.Length..].Replace('\\', '/') : full;
     }
 
     /// <summary>
@@ -445,6 +460,10 @@ internal sealed class RepoWalk
     /// The limits two scans of the same repository reached, each once. The two skip different folders, so a count can
     /// differ ("3 symbolic links" and "4 symbolic links"): the larger one is kept.
     /// </summary>
+    /// <summary>The files read by several walks, once each, in order.</summary>
+    internal static IReadOnlyList<string> FilesUnion(params IReadOnlyList<string>[] read)
+        => read.SelectMany(r => r).Distinct(StringComparer.Ordinal).OrderBy(f => f, StringComparer.Ordinal).ToArray();
+
     internal static IReadOnlyList<string> Union(params IReadOnlyList<string>[] limits)
     {
         var kept = new List<(string Key, int Count, string Text)>();

@@ -394,6 +394,57 @@ public sealed class LoginCommandTests : IDisposable
         Assert.Equal(JsonValueKind.Null, login.GetProperty("ingressBase").ValueKind);
     }
 
+    [Fact]
+    public async Task A_grant_broader_than_asked_is_not_kept()
+    {
+        // Security-review KAN 2 (2026-10-09): et token som kan mer enn personen godkjente for denne maskinen, lagres ikke.
+        var server = new FakeAuthServer { GrantedScope = "operate" };
+        server.PollAnswers.Enqueue("approve");
+
+        CliRun run = await Run(server, "login", "--api-base", FakeAuthServer.Api, "--scope", "read", "--wait", "--json");
+
+        Assert.Equal(ExitCodes.RuntimeError, run.Exit);
+        Assert.Equal("login_scope_broader", Line(run.Stdout, 1).GetProperty("error").GetProperty("code").GetString());
+        Assert.Empty(Stored().GetProperty("logins").EnumerateArray());
+        Assert.Empty(Stored().GetProperty("pending").EnumerateArray());
+    }
+
+    [Fact]
+    public async Task Ingress_base_on_login_overrides_queueys_and_survives_a_renewal()
+    {
+        // Blindtesten 2026-10-09 (funn 6): Queuey ga en gammel tunnel som ingress-vert lokalt.
+        var server = new FakeAuthServer { IngressBase = "https://old-tunnel.loca.lt" };
+        server.PollAnswers.Enqueue("approve");
+
+        CliRun run = await Run(server, "login", "--api-base", "http://localhost:5223", "--ingress-base", "http://localhost:5084", "--wait", "--json");
+
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        Assert.Equal("http://localhost:5084", Line(run.Stdout, 1).GetProperty("ingressBase").GetString());
+        Assert.DoesNotContain("Warning:", run.Stderr);
+        JsonElement login = Assert.Single(Stored().GetProperty("logins").EnumerateArray());
+        Assert.True(login.GetProperty("ingressBaseFromFlag").GetBoolean());
+
+        // En fornyelse beholder verdien fra flagget, ikke den Queuey gir.
+        var stored = new StoredLogin { IngressBase = "http://localhost:5084", IngressBaseFromFlag = true };
+        LoginTokens.Apply(stored, new TokenAnswer("at", 3600, "rt", "operate", "lic_new", "https://old-tunnel.loca.lt", null, null, null));
+        Assert.Equal("http://localhost:5084", stored.IngressBase);
+    }
+
+    [Fact]
+    public async Task Against_a_queuey_on_this_machine_an_ingress_host_elsewhere_is_warned_about()
+    {
+        var server = new FakeAuthServer { IngressBase = "https://old-tunnel.loca.lt" };
+        server.PollAnswers.Enqueue("approve");
+
+        CliRun run = await Run(server, "login", "--api-base", "http://localhost:5223", "--wait");
+
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        Assert.Contains("Warning: Queuey is on this machine", run.Stderr);
+        Assert.Contains("https://old-tunnel.loca.lt", run.Stderr);
+        Assert.Contains("--ingress-base", run.Stderr);
+        Assert.Null(LoginCommand.IngressElsewhere(new Uri("https://api.test"), "https://ingress.test"));
+    }
+
     // ── profilen ─────────────────────────────────────────────────────────────
 
     [Fact]
@@ -523,7 +574,7 @@ public sealed class LoginCommandTests : IDisposable
 
         Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
         Assert.Contains("scope read.", run.Stdout);
-        Assert.Contains("Queuey granted scope read, not operate.", run.Stderr);
+        Assert.Contains("Queuey granted only scope read, narrower than operate", run.Stderr);
     }
 
     [Fact]
@@ -539,8 +590,8 @@ public sealed class LoginCommandTests : IDisposable
             },
         };
 
-        Assert.Equal("lic_new", LoginCommand.FinishedMeanwhile(file, FakeAuthServer.Api, since)?.License);
-        Assert.Null(LoginCommand.FinishedMeanwhile(file, FakeAuthServer.Api, since + TimeSpan.FromMinutes(1)));
+        Assert.Equal("lic_new", LoginCommand.FinishedMeanwhile(file, FakeAuthServer.Api, "operate", since)?.License);
+        Assert.Null(LoginCommand.FinishedMeanwhile(file, FakeAuthServer.Api, "operate", since + TimeSpan.FromMinutes(1)));
     }
 
     [Fact]
