@@ -226,6 +226,41 @@ internal static class CredentialsCommand
     }
 
     /// <summary>
+    /// The target already holds a delivery secret, and no <c>--replace</c>: nothing is stored or written. The answer says what
+    /// <c>--replace</c> would hit, from whether Queuey holds a credential of that name. The list gives only names, which is enough.
+    /// </summary>
+    // Security-review av #69 (R2-1): uten dette sendte nektelsen agenten rett til --replace, uten å si hva det rammer i Queuey.
+    private static async Task<int> LocalSecretExists(bool json, IQueueyService service, string tenant, string name, string holder, SecretTarget target)
+    {
+        bool? inQueuey;
+        try
+        {
+            IReadOnlyList<CredentialResult> credentials = await service.Management.ListCredentialsAsync(tenant);
+            inQueuey = credentials.Any(c => string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            inQueuey = null;
+        }
+
+        const string Another = "the value here may belong to another credential whose deliveries then fail.";
+        string replace = inQueuey switch
+        {
+            true => $"Queuey holds {holder}. --replace also replaces it in Queuey, for every queue and ingress that names it, and " + Another,
+            false => $"Queuey holds no credential named {holder}, so --replace replaces only the value here, and stores the new one in "
+                     + "Queuey under that name; " + Another,
+            null => $"Could not check whether Queuey holds {holder}. If it does, --replace also replaces it in Queuey, for every queue "
+                    + "and ingress that names it; either way, " + Another,
+        };
+        return CliErrors.Write(json, "secret_exists_locally",
+            $"{target.Shown} already holds {DeliverySecretVariable}, the secret a receiver here verifies deliveries with. Nothing was " +
+            "stored or written.",
+            replace + " Replacing it is a decision for a person; to keep it, write to another target.",
+            status: null, ExitCodes.Configuration, "Error",
+            new Dictionary<string, object?> { ["inQueuey"] = inQueuey });
+    }
+
+    /// <summary>
     /// <c>credentials generate &lt;name&gt; --write &lt;target&gt;</c>: the receiver's secret for <c>QueueyDeliveryVerifier</c>, made here,
     /// stored in Queuey as the credential Queuey signs deliveries with, and written where the receiver reads it as
     /// <c>QUEUEY_DELIVERY_SECRET</c>. The same value in both places, never shown.
@@ -259,25 +294,22 @@ internal static class CredentialsCommand
         // Security-review av #69 (B1): målet leses før noe lagres i Queuey. En annen verdi der er hemmeligheten en mottaker her
         // verifiserer med; å bytte den er et valg, som --replace gjør uttrykkelig, for Queuey og for målet.
         bool localExists = target.Current(DeliverySecretVariable).ContainsKey(DeliverySecretVariable);
-        if (localExists && !map.Has("replace"))
-            return CliErrors.Write(json, "secret_exists_locally",
-                $"{target.Shown} already holds {DeliverySecretVariable}, the secret a receiver here verifies deliveries with. Nothing was " +
-                "stored or written.",
-                $"To give that receiver a new secret, run again with --replace: it stores a new value under '{CredentialNameRules.Showable(name) ?? "the name"}' " +
-                "in Queuey and writes the same value here. Or write to another target.",
-                status: null, ExitCodes.Configuration, "Error");
 
         ResolvedConfig config = ListenCommand.Connection(map);
         string? tenant = config.TenantPublicId;
         if (string.IsNullOrWhiteSpace(tenant))
             return CliErrors.Configuration(map, "config_error", "A workspace is required. Set --tenant, QUEUEY_TENANT, the profile's tenant, or tenant in queuey.json.");
 
-        string secret = NewSecret();
         using ServiceProvider provider = CliHost.BuildProvider(config);
         var service = provider.GetRequiredService<IQueueyService>();
+        string holder = CredentialNameRules.Showable(name) is { } shownName ? $"'{shownName}'" : "The credential";
+
+        if (localExists && !map.Has("replace"))
+            return await LocalSecretExists(json, service, tenant!, name!, holder, target);
+
+        string secret = NewSecret();
 
         // Som `credentials set` med HmacSigning, og navnet som key id: det Queuey signerer leveringene med.
-        string holder = CredentialNameRules.Showable(name) is { } shownName ? $"'{shownName}'" : "The credential";
         CredentialResult stored;
         try
         {
@@ -298,6 +330,16 @@ internal static class CredentialsCommand
                 + "Queuey and for the receiver; to keep it, choose another name.",
                 status: 409, ExitCodes.RuntimeError, "Queuey error");
         }
+
+        // Security-review av #69 (R2-4): uten en id i svaret har Queuey ikke bekreftet at den er lagret, og da skrives
+        // ingenting her. Ellers kunne mottakeren fått en verdi Queuey aldri signerer med.
+        if (string.IsNullOrWhiteSpace(stored.PublicId))
+            return CliErrors.Write(json, "credential_unconfirmed",
+                $"Queuey's answer did not confirm that it stored {holder}: it carried no id. Nothing was written to {target.Shown}, " +
+                "and the secret is not shown.",
+                $"Check with queuey credentials list. If {holder} is there, run queuey credentials generate {name} --replace --write " +
+                $"{map.Get("write")}, which makes a new secret for both.",
+                status: null, ExitCodes.RuntimeError, "Queuey error");
 
         bool replacedInQueuey = stored.Created == false && stored.SecretReplaced != false;
         string? tightenedFrom;

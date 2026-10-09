@@ -224,7 +224,9 @@ internal static class KeysCommand
         }
 
         string[] names = values.Select(v => v.Name).ToArray();
+        // Bare en verdi med formen til en signerings-id vises (security-review av #69, R2-3): noe annet kan være en hemmelighet.
         string? replaced = key.Type != IngressKeyTypes.ApiKey && previous.TryGetValue(names[0], out string? old) && old is not null && old != key.KeyId
+                           && IsSigningKeyId(old)
             ? old
             : null;
         // Security-review av #69 (K2): en API-nøkkel som sto der, publiserer fortsatt til den trekkes tilbake. Den vises maskert.
@@ -266,8 +268,8 @@ internal static class KeysCommand
             Console.Error.WriteLine($"Note: {target.Shown} held key {TerminalText.Line(replaced)} before. It still verifies until it is revoked: " +
                                     $"queuey keys revoke {TerminalText.Line(replaced)}");
         if (replacedApiKey is not null)
-            Console.Error.WriteLine($"Note: {target.Shown} held another QUEUEY_API_KEY ({TerminalText.Line(replacedApiKey)}) before. It still publishes " +
-                                    "until it is revoked, in the Queuey console.");
+            Console.Error.WriteLine($"Note: {target.Shown} held another QUEUEY_API_KEY ({TerminalText.Line(replacedApiKey)}) before. It may still " +
+                                    "work, and it may reach the whole license, not one queue: revoke it in the Queuey console if nothing needs it.");
         if (tightenedFrom is not null)
             Console.Error.WriteLine($"Note: {target.Shown} had mode {tightenedFrom}; it is 0600 now, readable and writable only by you.");
         return ExitCodes.Success;

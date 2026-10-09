@@ -99,13 +99,41 @@ public sealed class KeysAndSecretsTests : IDisposable
         CliRun json = await Run(api, "keys", "mint", "--queue", "que_1", "--type", "api-key", "--write", env, "--json");
 
         Assert.True(human.Exit == ExitCodes.Success, human.Stdout + human.Stderr);
-        Assert.Contains("held another QUEUEY_API_KEY (qak_old.**** (set)) before. It still publishes until it is revoked", human.Stderr);
+        Assert.Contains("held another QUEUEY_API_KEY (qak_old.**** (set)) before. It may still work, and it may reach the whole license", human.Stderr);
         Assert.Contains("reads QUEUEY_API_KEY from the environment, not from a file", human.Stdout);
         Assert.DoesNotContain("UseEnvironmentVariables", human.Stdout);
         Assert.Equal("qak_old.**** (set)", JsonDocument.Parse(json.Stdout).RootElement.GetProperty("replacedApiKey").GetString());
         Assert.DoesNotContain("oldsecretvalue", human.Stdout + human.Stderr + json.Stdout + json.Stderr);
         Assert.DoesNotContain("publishonly", human.Stdout + human.Stderr + json.Stdout + json.Stderr);
     }
+
+    [Theory]
+    [InlineData("hsk_01OLD", true)]
+    [InlineData("not-a-key-id-maybe-a-secret", false)]
+    public async Task Only_an_old_value_shaped_as_a_signing_key_id_is_named(string old, bool named)
+    {
+        // Security-review av #69 (R2-3).
+        string env = Path.Combine(_dir, ".env");
+        File.WriteAllText(env, $"QUEUEY_SIGNING_KEY_ID={old}\n");
+
+        CliRun run = await Run(Server(), "keys", "mint", "--tenant", "ten_1", "--write", env, "--json");
+
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        Assert.Equal(named, run.Stderr.Contains("held key hsk_01OLD"));
+        Assert.Equal(named ? old : null, JsonDocument.Parse(run.Stdout).RootElement.GetProperty("replacedKeyId").GetString());
+        if (!named)
+            Assert.DoesNotContain(old, run.Stdout + run.Stderr);
+    }
+
+    [Theory]
+    [InlineData("qak_kid.secret", "qak_kid.**** (set)")]
+    [InlineData("all-of-it-may-be-secret", "(set)")]
+    [InlineData("secretpart.rest", "(set)")]
+    [InlineData("qak_\u001b[2J.rest", "(set)")]
+    [InlineData("qak_123456789012345678901234567890123.rest", "(set)")]
+    [InlineData(null, "(not set)")]
+    public void A_masked_key_shows_its_prefix_only_when_it_is_shaped_as_a_key_id(string? key, string shown)
+        => Assert.Equal(shown, CliHost.MaskKey(key)); // security-review av #69 (R2-2), også for whoami
 
     [Fact]
     public async Task A_signing_pair_in_a_file_is_read_from_the_environment_or_from_env_in_development()
@@ -380,16 +408,64 @@ public sealed class KeysAndSecretsTests : IDisposable
     {
         string env = Path.Combine(_dir, ".env");
         File.WriteAllText(env, "QUEUEY_DELIVERY_SECRET=the-old-one\n");
-        var api = new RecordingHandler(req => throw new InvalidOperationException("Nothing is stored: " + req.Key));
+        RecordingHandler api = Listing("another-one");
 
         CliRun run = await Run(api, "credentials", "generate", "orders-signing", "--tenant", "ten_1", "--write", env);
 
         Assert.Equal(ExitCodes.Configuration, run.Exit);
         Assert.Contains("already holds QUEUEY_DELIVERY_SECRET", run.Stderr);
-        Assert.Contains("--replace", run.Stderr);
-        Assert.Empty(api.Requests);
+        // Security-review av #69 (R2-1): Queuey har ikke navnet, så --replace bytter bare verdien her.
+        Assert.Contains("Queuey holds no credential named 'orders-signing', so --replace replaces only the value here", run.Stderr);
+        Assert.Contains("the value here may belong to another credential whose deliveries then fail.", run.Stderr);
+        Assert.Equal("GET /tenants/ten_1/credentials", Assert.Single(api.Requests).Key);
         Assert.Equal("QUEUEY_DELIVERY_SECRET=the-old-one\n", File.ReadAllText(env));
         Assert.DoesNotContain("the-old-one", run.Stdout + run.Stderr);
+    }
+
+    /// <summary>A Queuey that lists credentials of <paramref name="names"/> and stores nothing.</summary>
+    private static RecordingHandler Listing(params string[] names) => new(req => req.Key switch
+    {
+        "GET /tenants/ten_1/credentials" => RecordingHandler.Json(HttpStatusCode.OK,
+            names.Select(n => new { publicId = "cred_" + n, name = n, type = "HmacSigning", keyId = n, version = 1 }).ToArray()),
+        _ => throw new InvalidOperationException("Nothing is stored: " + req.Key),
+    });
+
+    [Fact]
+    public async Task A_delivery_secret_here_for_a_name_queuey_holds_says_replace_also_hits_every_queue_that_names_it()
+    {
+        string env = Path.Combine(_dir, ".env");
+        File.WriteAllText(env, "QUEUEY_DELIVERY_SECRET=the-old-one\n");
+        RecordingHandler api = Listing("orders-signing");
+
+        CliRun run = await Run(api, "credentials", "generate", "orders-signing", "--tenant", "ten_1", "--write", env, "--json");
+
+        Assert.Equal(ExitCodes.Configuration, run.Exit);
+        string answer = run.Stdout + run.Stderr;
+        JsonElement error = JsonDocument.Parse(run.Stdout).RootElement.GetProperty("error");
+        Assert.Contains("--replace also replaces it in Queuey, for every queue and ingress that names it, and the value here may belong "
+                        + "to another credential whose deliveries then fail.", error.GetProperty("action").GetString());
+        Assert.True(error.GetProperty("inQueuey").GetBoolean());
+        Assert.Equal("GET /tenants/ten_1/credentials", Assert.Single(api.Requests).Key);
+        Assert.Equal("QUEUEY_DELIVERY_SECRET=the-old-one\n", File.ReadAllText(env));
+        Assert.DoesNotContain("the-old-one", answer);
+    }
+
+    [Fact]
+    public async Task An_answer_without_an_id_writes_nothing_here()
+    {
+        // Security-review av #69 (R2-4): Queuey har ikke bekreftet at den lagret noe.
+        string env = Path.Combine(_dir, ".env");
+        var api = new RecordingHandler(req => req.Key switch
+        {
+            "POST /tenants/ten_1/credentials" => RecordingHandler.Json(HttpStatusCode.OK, new { name = "orders-signing", created = true }),
+            _ => throw new InvalidOperationException(req.Key),
+        });
+
+        CliRun run = await Run(api, "credentials", "generate", "orders-signing", "--tenant", "ten_1", "--write", env);
+
+        Assert.Equal(ExitCodes.RuntimeError, run.Exit);
+        Assert.Contains("did not confirm that it stored 'orders-signing'", run.Stderr);
+        Assert.False(File.Exists(env));
     }
 
     [Fact]
@@ -458,13 +534,13 @@ public sealed class KeysAndSecretsTests : IDisposable
             return;
         FakeDotnet(existing: "QUEUEY_DELIVERY_SECRET = the-old-one\n");
         Project();
-        var api = new RecordingHandler(req => throw new InvalidOperationException("Nothing is stored: " + req.Key));
+        RecordingHandler api = Listing();
 
         CliRun run = await Run(api, "credentials", "generate", "orders-signing", "--tenant", "ten_1", "--write", "user-secrets");
 
         Assert.Equal(ExitCodes.Configuration, run.Exit);
         Assert.Contains("already holds QUEUEY_DELIVERY_SECRET", run.Stderr);
-        Assert.Empty(api.Requests);
+        Assert.Equal("GET /tenants/ten_1/credentials", Assert.Single(api.Requests).Key); // bare oppslaget, ingenting lagres
     }
 
     [Fact]
