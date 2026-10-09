@@ -585,8 +585,11 @@ EVENTS
                  in the workspace by apply's rule, as for publish.
 
 CREATE-TENANT
-  queuey create-tenant --name <display> [--environment dev|test|staging|prod] [--as-producer]
-                       [--with-default-queue] [--json]
+  queuey create-tenant --name <display> [--environment dev|test|staging|prod] [--profile <name>]
+                       [--as-producer] [--with-default-queue] [--json]
+                 With --profile it uses the profile's API host and its login, as queuey login
+                 --profile wrote them. Without a key or a login for the host it would reach,
+                 it sends nothing and names the hosts you are logged in to.
                  --environment marks the new workspace. An API key sets it only here, when
                  it creates the workspace: lowering it later takes a person. Without it, the
                  workspace has none, which Queuey counts as prod. A Queuey that does not take

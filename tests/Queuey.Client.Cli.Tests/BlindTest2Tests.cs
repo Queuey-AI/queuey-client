@@ -153,4 +153,61 @@ public sealed class BlindTest2Tests : IDisposable
         Assert.Equal(Queuey.Client.Cli.Advise.SendPath.Edge, advice.Send);
         Assert.Contains(advice.NextSteps, s => s.Contains("queuey keys mint --profile dev --write .env", StringComparison.Ordinal));
     }
+
+    // ── #8: create-tenant med profilen ──────────────────────────────────────
+
+    /// <summary>Profilen dev og en innlogging for en lokal Queuey, som queuey login --profile dev --api-base … lager dem.</summary>
+    private Dictionary<string, string> LocalLogin()
+    {
+        string home = Path.Combine(_dir, "home");
+        Directory.CreateDirectory(home);
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(home, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        string config = UserProfilesTests.WriteUserConfig(home, """
+            { "profiles": { "dev": { "license": "lic_dev", "apiBase": "http://localhost:5223", "ingressBase": "http://localhost:5084" } } }
+            """);
+        LoginStore.Write(Path.Combine(home, "credentials.json"), new CredentialsFile
+        {
+            Logins =
+            {
+                new StoredLogin
+                {
+                    ApiBase = "http://localhost:5223", License = "lic_dev", Scope = "operate", AccessToken = "at-local",
+                    AccessTokenExpiresAt = DateTimeOffset.UtcNow + TimeSpan.FromMinutes(30), RefreshToken = "rt-local",
+                },
+            },
+        });
+        return new Dictionary<string, string>(StringComparer.Ordinal) { [UserProfiles.PathVariable] = config };
+    }
+
+    [Fact]
+    public async Task Create_tenant_with_a_profile_goes_to_the_profiles_host_with_its_login()
+    {
+        var api = new RecordingHandler(req => req.Key == "POST /tenants"
+            ? RecordingHandler.Json(HttpStatusCode.OK, new { publicId = "ten_new", displayName = "shop", kind = "Standard" })
+            : throw new InvalidOperationException(req.Key));
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "create-tenant", "--name", "shop", "--profile", "dev", "--json" }), api, LocalLogin());
+
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        RecordedRequest sent = Assert.Single(api.Requests);
+        Assert.Equal("localhost", sent.Uri.Host);
+        Assert.Equal(5223, sent.Uri.Port);
+        Assert.Equal("Bearer at-local", api.Headers[0]["Authorization"]);
+    }
+
+    [Fact]
+    public async Task Create_tenant_without_the_profile_sends_nothing_to_prod_and_names_the_local_login()
+    {
+        var api = new RecordingHandler(req => throw new InvalidOperationException("Nothing is sent: " + req.Key));
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "create-tenant", "--name", "shop" }), api, LocalLogin());
+
+        Assert.Equal(ExitCodes.Configuration, run.Exit);
+        Assert.Empty(api.Requests);
+        Assert.Contains("create-tenant needs a login or an API key for https://api.queuey.ai", run.Stderr);
+        Assert.Contains("You are logged in to http://localhost:5223.", run.Stderr);
+        Assert.Contains("Add the --profile you logged in with", run.Stderr);
+        Assert.DoesNotContain("No ingress credential", run.Stderr);
+    }
 }

@@ -220,6 +220,38 @@ internal static class Logins
 
         return login is null ? config : config.WithLogin(new LoginTokens(path, apiBase, login));
     }
+
+    /// <summary>
+    /// Why <paramref name="command"/> cannot reach the API host <paramref name="config"/> points at: no API key and no login for
+    /// that host. Names the hosts the user is logged in to, when there are others, since that is the usual cause: a login for a
+    /// local Queuey, and a command without its profile. Null when there is a key or a login.
+    /// </summary>
+    // Blindtest 2 (2026-10-09, funn 8): «No ingress credential configured … run queuey login» til en som var innlogget lokalt.
+    internal static (string Message, string Action)? Missing(ResolvedConfig config, Func<string, string?> env, string command)
+    {
+        if (!string.IsNullOrWhiteSpace(config.ApiKey) || config.Login is not null)
+            return null;
+
+        string host = LoginStore.HostKey(config.ResolvedApiBase());
+        string[] others = Array.Empty<string>();
+        try
+        {
+            string path = LoginStore.PathOf(env);
+            if (System.IO.File.Exists(path))
+                others = LoginStore.Read(path).Logins.Select(l => l.ApiBase).Where(b => !string.IsNullOrWhiteSpace(b) && b != host)
+                    .Distinct(StringComparer.Ordinal).ToArray()!;
+        }
+        catch (QueueyConfigurationException)
+        {
+        }
+
+        string message = $"{command} needs a login or an API key for {host}, and there is neither. Nothing was sent.";
+        return others.Length > 0
+            ? (message + $" You are logged in to {string.Join(", ", others)}.",
+               "Add the --profile you logged in with (queuey login --profile dev keeps its hosts), or --api-base " +
+               $"{others[0]}, so the command goes where the login is.")
+            : (message, $"Log in to it: queuey login --profile dev{(host == LoginStore.HostKey(new QueueyOptions().ResolveApiBaseAddress()) ? "" : $" --api-base {host}")}.");
+    }
 }
 
 /// <summary>What a license id looks like: <c>lic_</c> and an opaque id, no more than 64 characters in all.</summary>
