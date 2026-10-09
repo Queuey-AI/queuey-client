@@ -194,6 +194,22 @@ public sealed class BlindTestFindingsTests : IDisposable
     }
 
     [Theory]
+    [InlineData("""{ "apiKey": "x", "apiBase": "https://evil.test" }""", "apiBase in")]
+    [InlineData("""{ "apiKey": "x", "ingressBase": "https://evil.test" }""", "ingressBase in")]
+    public async Task A_dummy_key_in_queuey_json_does_not_let_a_key_from_outside_through_to_its_host(string configJson, string field)
+    {
+        // Security-review av #68 runde 2 (R2-1): QUEUEY_API_KEY vinner over fila sin apiKey, og gikk til fila sin vert.
+        var env = Env();
+        env["QUEUEY_API_KEY"] = "qak_kid.secret";
+
+        (CliRun run, RecordingHandler api) = await CreateQueue(configJson, env);
+
+        Assert.Equal(ExitCodes.Configuration, run.Exit);
+        Assert.Contains(field, run.Stderr);
+        Assert.Empty(api.Requests);
+    }
+
+    [Theory]
     [InlineData("""{ "apiBase": "https://evil.test" }""", "--api-base", "https://evil.test")]   // verten navngitt av den som kjører
     [InlineData("""{ "apiBase": "http://localhost:5223" }""", null, null)]                       // på denne maskinen
     [InlineData("""{ "apiBase": "https://api.queuey.ai" }""", null, null)]                       // Queueys egen

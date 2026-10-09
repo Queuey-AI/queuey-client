@@ -102,6 +102,20 @@ internal static class CliHost
     {
         if (!string.IsNullOrWhiteSpace(config.ApiKey))
             return config;
+        ResolvedConfig signed = SigningFromOutside(config);
+
+        // Security-review av #68 runde 2 (R2-K1): et signeringspar fra miljøet eller .env er en nøkkel utenfra, som en API-nøkkel.
+        // En ingress-vert queuey.json valgte, får den ikke.
+        if (signed.SigningFrom is { } from && config.IngressBaseFrom is { } ingressFrom
+            && ingressFrom.StartsWith(CliConfig.IngressFromFilePrefix, StringComparison.Ordinal)
+            && CliConfig.FileChoseHost(config.ResolvedIngressBase().ToString(), new QueueyOptions().ResolveIngressBaseAddress()) is { } host)
+            throw CliConfig.FileChoseHostRefusal("ingressBase", ingressFrom.Substring(CliConfig.IngressFromFilePrefix.Length), host,
+                "ingress-base", "QUEUEY_INGRESS_BASE", $"the signing key comes from {from}");
+        return signed;
+    }
+
+    private static ResolvedConfig SigningFromOutside(ResolvedConfig config)
+    {
 
         string? keyId = Clean(Env(QueueyEnvironmentVariables.SigningKeyId)), secret = Clean(Env(QueueyEnvironmentVariables.SigningSecret));
         if (keyId is not null && secret is not null)

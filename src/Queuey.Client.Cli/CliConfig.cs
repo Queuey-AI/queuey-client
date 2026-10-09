@@ -172,7 +172,7 @@ internal static class CliConfig
             IngressBaseOverride = ParseUri(First(args.Get("ingress-base"), getEnv("QUEUEY_INGRESS_BASE"), file.IngressBase)),
             IngressBaseFrom = !string.IsNullOrWhiteSpace(args.Get("ingress-base")) ? "--ingress-base"
                 : !string.IsNullOrWhiteSpace(getEnv("QUEUEY_INGRESS_BASE")) ? "QUEUEY_INGRESS_BASE"
-                : !string.IsNullOrWhiteSpace(file.IngressBase) ? $"ingressBase in {args.Get("config") ?? "queuey.json"}"
+                : !string.IsNullOrWhiteSpace(file.IngressBase) ? $"{IngressFromFilePrefix}{args.Get("config") ?? "queuey.json"}"
                 : null,
             ApiKey = First(args.Get("api-key"), getEnv("QUEUEY_API_KEY"), file.ApiKey),
             TenantPublicId = Workspace(
@@ -193,8 +193,9 @@ internal static class CliConfig
     // Security-review av #68 (B1, 2026-10-09): en nøkkel i miljøet gikk til verten queuey.json i et klonet repo pekte på.
     private static void EnsureTheFileDoesNotChooseWhereAKeyGoes(ArgMap args, Func<string, string?> getEnv, FileConfig file)
     {
-        bool keyFromOutside = string.IsNullOrWhiteSpace(file.ApiKey)
-                              && (!string.IsNullOrWhiteSpace(args.Get("api-key")) || !string.IsNullOrWhiteSpace(getEnv("QUEUEY_API_KEY")));
+        // Security-review av #68 runde 2 (R2-1): en apiKey i fila ga ikke unntak før, for flagget og miljøet vinner over den, og
+        // en dummy-nøkkel i fila slapp nøkkelen fra miljøet gjennom til fila sin vert.
+        bool keyFromOutside = !string.IsNullOrWhiteSpace(args.Get("api-key")) || !string.IsNullOrWhiteSpace(getEnv("QUEUEY_API_KEY"));
         if (!keyFromOutside)
             return;
 
@@ -206,20 +207,34 @@ internal static class CliConfig
         {
             if (string.IsNullOrWhiteSpace(fromFile) || !string.IsNullOrWhiteSpace(args.Get(flag)) || !string.IsNullOrWhiteSpace(getEnv(variable)))
                 continue;
-            if (!Uri.TryCreate(fromFile!.Trim(), UriKind.Absolute, out Uri? host) || host.IsLoopback
-                || string.Equals(host.GetLeftPart(UriPartial.Authority), own.GetLeftPart(UriPartial.Authority), StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            throw new QueueyConfigurationException(
-                $"{field} in {args.Get("config") ?? "queuey.json"} names {host.GetLeftPart(UriPartial.Authority)}, and the API key comes from " +
-                "--api-key or QUEUEY_API_KEY, not from that file. A file in the repository does not choose where your key is sent, " +
-                "so nothing was sent.")
-            {
-                SuggestedAction = $"If that host is yours, name it yourself: --{flag} {host.GetLeftPart(UriPartial.Authority)} (or {variable}). " +
-                                  "Or log in with queuey login, which sends a login only to the host it was made for.",
-            };
+            if (FileChoseHost(fromFile, own) is { } host)
+                throw FileChoseHostRefusal(field, args.Get("config") ?? "queuey.json", host, flag, variable,
+                    "the API key comes from --api-key or QUEUEY_API_KEY");
         }
     }
+
+    /// <summary>The prefix of <see cref="ResolvedConfig.IngressBaseFrom"/> when the ingress host came from <c>queuey.json</c>.</summary>
+    internal const string IngressFromFilePrefix = "ingressBase in ";
+
+    /// <summary>
+    /// The host <paramref name="fromFile"/> names when a file should not choose it for a key: an absolute URL that is neither
+    /// on this machine nor Queuey's own <paramref name="own"/>. Null otherwise.
+    /// </summary>
+    internal static string? FileChoseHost(string? fromFile, Uri own)
+    {
+        if (string.IsNullOrWhiteSpace(fromFile) || !Uri.TryCreate(fromFile!.Trim(), UriKind.Absolute, out Uri? host) || host.IsLoopback
+            || string.Equals(host.GetLeftPart(UriPartial.Authority), own.GetLeftPart(UriPartial.Authority), StringComparison.OrdinalIgnoreCase))
+            return null;
+        return host.GetLeftPart(UriPartial.Authority);
+    }
+
+    internal static QueueyConfigurationException FileChoseHostRefusal(string field, string file, string host, string flag, string variable, string keyFrom)
+        => new($"{field} in {file} names {host}, and {keyFrom}, not from that file. A file in the repository does not choose " +
+               "where your key is sent, so nothing was sent.")
+        {
+            SuggestedAction = $"If that host is yours, name it yourself: --{flag} {host} (or {variable}). " +
+                              "Or log in with queuey login, which sends a login only to the host it was made for.",
+        };
 
     /// <summary>
     /// The connection of profile <paramref name="profile"/> (F2.7): a flag first, then the profile, never <c>queuey.json</c>.

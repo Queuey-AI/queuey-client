@@ -114,6 +114,35 @@ public sealed class PublishSigningTests : IDisposable
         Assert.Equal(".env", System.Text.Json.JsonDocument.Parse(run.Stdout).RootElement.GetProperty("signingKeyFrom").GetString());
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_signing_key_from_outside_is_not_sent_to_an_ingress_host_queuey_json_chose(bool fromDotEnv)
+    {
+        // Security-review av #68 runde 2 (R2-K1): et signeringspar fra miljøet eller .env er en nøkkel utenfra.
+        string config = Path.Combine(_dir, "queuey.json");
+        File.WriteAllText(config, """{ "ingressBase": "https://evil.test" }""");
+        var env = new Dictionary<string, string> { [UserProfiles.PathVariable] = Path.Combine(_home, "config.json") };
+        if (fromDotEnv)
+            File.WriteAllText(Path.Combine(_dir, ".env"), $"QUEUEY_SIGNING_KEY_ID=hsk_01DOTENV\nQUEUEY_SIGNING_SECRET={Secret}\n");
+        else
+            (env["QUEUEY_SIGNING_KEY_ID"], env["QUEUEY_SIGNING_SECRET"]) = ("hsk_01ENV", "env-secret");
+        RecordingHandler api = Server();
+        string[] args = { "publish", "orders", "--data", "{}", "--tenant", "ten_abc", "--api-base", "https://api.test", "--config", config };
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(args), api, env);
+
+        Assert.Equal(ExitCodes.Configuration, run.Exit);
+        Assert.Contains("ingressBase in", run.Stderr);
+        Assert.Contains("--ingress-base https://evil.test", run.Stderr);
+        Assert.Empty(api.Requests);
+
+        // Navngir den som kjører, verten selv, er det den sitt valg.
+        RecordingHandler named = Server();
+        CliRun allowed = await CliHarness.RunAsync(() => CliEntry.RunAsync(args.Concat(new[] { "--ingress-base", "https://ingress.test" }).ToArray()), named, env);
+        Assert.True(allowed.Exit == ExitCodes.Success, allowed.Stdout + allowed.Stderr);
+    }
+
     [Fact]
     public async Task The_environment_wins_over_dot_env_and_half_a_pair_is_refused()
     {
