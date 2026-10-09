@@ -10,6 +10,12 @@ internal sealed class ResolvedConfig
 {
     public QueueyEnvironment Environment { get; init; } = QueueyEnvironment.Production;
     public Uri? ApiBaseOverride { get; init; }
+
+    /// <summary>
+    /// Whether the API host came from <c>queuey.json</c>, which sits in the repository: a link on that host is the file's
+    /// choice, not the user's (security-review av #71 runde 2, K-b).
+    /// </summary>
+    public bool ApiBaseFromFile { get; init; }
     public Uri? IngressBaseOverride { get; init; }
     public string? ApiKey { get; init; }
     public string? TenantPublicId { get; init; }
@@ -60,6 +66,7 @@ internal sealed class ResolvedConfig
     {
         Environment = Environment,
         ApiBaseOverride = ApiBaseOverride,
+        ApiBaseFromFile = ApiBaseFromFile,
         IngressBaseOverride = IngressBaseOverride,
         ApiKey = ApiKey,
         TenantPublicId = TenantPublicId,
@@ -94,6 +101,7 @@ internal sealed class ResolvedConfig
     {
         Environment = Environment,
         ApiBaseOverride = ApiBaseOverride,
+        ApiBaseFromFile = ApiBaseFromFile,
         IngressBaseOverride = IngressBaseOverride ?? LoginIngress(login),
         ApiKey = ApiKey,
         TenantPublicId = TenantPublicId,
@@ -116,6 +124,7 @@ internal sealed class ResolvedConfig
     {
         Environment = Environment,
         ApiBaseOverride = ApiBaseOverride,
+        ApiBaseFromFile = ApiBaseFromFile,
         IngressBaseOverride = IngressBaseOverride,
         ApiKey = ApiKey,
         TenantPublicId = string.IsNullOrWhiteSpace(tenantPublicId) ? TenantPublicId : tenantPublicId,
@@ -169,6 +178,8 @@ internal static class CliConfig
         {
             Environment = ParseEnvironment(First(args.Get("env"), getEnv("QUEUEY_ENV"), file.Environment)),
             ApiBaseOverride = ParseUri(First(args.Get("api-base"), getEnv("QUEUEY_API_BASE"), file.ApiBase)),
+            ApiBaseFromFile = string.IsNullOrWhiteSpace(args.Get("api-base")) && string.IsNullOrWhiteSpace(getEnv("QUEUEY_API_BASE"))
+                              && !string.IsNullOrWhiteSpace(file.ApiBase),
             IngressBaseOverride = ParseUri(First(args.Get("ingress-base"), getEnv("QUEUEY_INGRESS_BASE"), file.IngressBase)),
             IngressBaseFrom = !string.IsNullOrWhiteSpace(args.Get("ingress-base")) ? "--ingress-base"
                 : !string.IsNullOrWhiteSpace(getEnv("QUEUEY_INGRESS_BASE")) ? "QUEUEY_INGRESS_BASE"

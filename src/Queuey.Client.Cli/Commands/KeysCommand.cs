@@ -67,13 +67,16 @@ internal static class KeysCommand
         // Målet sjekkes før noe mintes: en hemmelighet som ikke kan skrives, er en nøkkel som må trekkes tilbake.
         SecretTarget? target = map.Get("write") is { } write ? SecretTarget.Parse(write) : null;
 
-        ResolvedConfig config = CliHost.Resolve(map, profiles: true);
+        (ResolvedConfig config, string? workspaceFrom) = DeploymentTenant.OrFromDeploymentFile(CliHost.Resolve(map, profiles: true), map);
+        if (workspaceFrom is not null)
+            Console.Error.WriteLine($"Workspace {config.TenantPublicId} from {workspaceFrom}.");
         string? queue = string.IsNullOrWhiteSpace(map.Get("queue")) ? null : await QueueIdAsync(map, config);
         string? tenant = config.TenantPublicId;
         if (queue is null && string.IsNullOrWhiteSpace(tenant))
             return CliErrors.Configuration(map, "config_error",
                 "keys mint without --queue mints for the workspace, and none is named.",
-                "Name it with --tenant, the profile's tenant, or QUEUEY_TENANT; or mint for one queue with --queue <name|que_…>.");
+                "Name it with --tenant, the profile's tenant, QUEUEY_TENANT, or tenant in queuey.deploy.json; or mint for one queue " +
+                "with --queue <name|que_…>.");
 
         // Uten --write mintes ingenting (Kenneth 2026-10-09): en nøkkel ingen kan se, er til ingen nytte, og hemmeligheten skal ikke
         // stå i terminalen. Svaret sier hvilke variabler appen trenger, hvor --write legger dem, og hvor en person ser nøkkelen.
@@ -91,7 +94,7 @@ internal static class KeysCommand
         }
         catch (IngressKeyPendingException pending)
         {
-            return Pending(json, pending);
+            return Pending(json, config, pending);
         }
         catch (QueueyForbiddenException refused) when (refused.ErrorCode == "approval_required")
         {
@@ -111,7 +114,8 @@ internal static class KeysCommand
                     $"Queuey answered the mint with a key id or secret that has characters {target.Shown} cannot hold safely, so nothing was " +
                     "written. Neither is shown.",
                     "Revoke the new key in the Queuey console, and report this.", status: null, ExitCodes.RuntimeError, "Queuey error");
-            return Written(map, key, target, apiKey ? new[] { (variables[0], key.Secret!) } : new[] { (variables[0], key.KeyId!), (variables[1], key.Secret!) });
+            return Written(map, key, target, apiKey ? new[] { (variables[0], key.Secret!) } : new[] { (variables[0], key.KeyId!), (variables[1], key.Secret!) },
+                workspaceFrom);
         }
 
         // --show-secret: den eneste veien til hemmeligheten i terminalen, valgt med vilje.
@@ -204,7 +208,8 @@ internal static class KeysCommand
     }
 
     /// <summary>The key in the target, and what was written, without the secret.</summary>
-    private static int Written(ArgMap map, IngressSigningKey key, SecretTarget target, IReadOnlyList<(string Name, string Value)> values)
+    private static int Written(ArgMap map, IngressSigningKey key, SecretTarget target, IReadOnlyList<(string Name, string Value)> values,
+        string? workspaceFrom = null)
     {
         IReadOnlyDictionary<string, string?> previous;
         string? tightenedFrom;
@@ -240,6 +245,7 @@ internal static class KeysCommand
             Console.WriteLine(JsonSerializer.Serialize(new
             {
                 key.ClientPublicId, key.ClientName, key.KeyId, key.QueuePublicId, key.Type, key.Scope, key.TenantPublicId, key.Origin,
+                workspaceFrom,
                 file = target.Kind == "file" ? map.Get("write") : null,
                 target = target.Kind,
                 written = target.Shown,
@@ -278,14 +284,17 @@ internal static class KeysCommand
     /// <summary>
     /// A mint Queuey gave to a person (202): the link where they decide, and exit 5. Nothing was minted, so there is no secret.
     /// </summary>
-    private static int Pending(bool json, IngressKeyPendingException pending)
+    private static int Pending(bool json, ResolvedConfig config, IngressKeyPendingException pending)
     {
+        // Security-review av #71 runde 2 (K-c): lenken går gjennom samme sjekk som operatørkommandoene.
+        string? approvalUrl = Operator.Link(config, pending.ApprovalUrl, out bool withheld);
         if (json)
         {
             Console.WriteLine(JsonSerializer.Serialize(new
             {
                 status = CredentialRotationPendingException.PendingApproval,
-                approvalUrl = pending.ApprovalUrl,
+                approvalUrl,
+                linkWithheld = withheld ? Operator.Withheld : null,
                 expiresAt = pending.ExpiresAt,
                 policyRule = pending.PolicyRule,
                 message = pending.Message,
@@ -295,8 +304,10 @@ internal static class KeysCommand
 
         // Teksten og lenken kommer fra serveren, så de går gjennom TerminalText (F2.7-regelen).
         Console.WriteLine("Nothing was minted: a person decides on this key in Queuey's inbox.");
-        if (pending.ApprovalUrl is { } url)
+        if (approvalUrl is { } url)
             Console.WriteLine($"  Give this link to a person who may manage the workspace's keys: {TerminalText.Line(url)}");
+        else if (withheld)
+            Console.WriteLine($"  {Operator.Withheld} It waits in the Queuey console's inbox.");
         if (pending.ExpiresAt is { } expires)
             Console.WriteLine($"  The request expires at {expires.UtcDateTime:yyyy-MM-dd HH:mm} UTC.");
         Console.Error.WriteLine(TerminalText.Line(pending.Message));

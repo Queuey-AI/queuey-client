@@ -42,7 +42,15 @@ public sealed record EdgeHealth(
     long QuarantinedCount,
     bool StorageDurabilityWarning,
     DateTimeOffset? NextTransferAttemptUtc = null,
-    HealthReportRejection? HealthReportRejection = null);
+    HealthReportRejection? HealthReportRejection = null,
+    AcceptedTransfer? LastAcceptedTransfer = null);
+
+/// <summary>
+/// The last transfer Queuey Cloud accepted: the event id it gave the event, which <c>queuey events get &lt;id&gt; --queue
+/// &lt;queue&gt;</c> looks up, and the transfer id the event was sent under as its <c>Idempotency-Key</c> (the caller's
+/// <c>PublishOptions.IdempotencyKey</c> when it set one). <see cref="EventId"/> is null for a queue that answers 204.
+/// </summary>
+public sealed record AcceptedTransfer(string Queue, string TransferId, string? EventId, bool Replayed, DateTimeOffset AtUtc);
 
 /// <summary>
 /// Cloud refused the node's health report. <see cref="Advice"/> says what to

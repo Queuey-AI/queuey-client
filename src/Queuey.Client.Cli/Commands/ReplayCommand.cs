@@ -17,7 +17,8 @@ namespace Queuey.Client.Cli;
 /// </summary>
 internal static class ReplayCommand
 {
-    internal static readonly CommandOptions Options = new("replay", flags: new[] { "json" }, values: new[] { "queue" }, positionals: 1);
+    internal static readonly CommandOptions Options = new(
+        "replay", flags: new[] { "json", "redeliver", "dry-run" }, values: new[] { "queue", "status", "max", "profile" }, positionals: 1);
 
     /// <summary>
     /// The codes the server refuses a replay to a listener with (409): the queue doesn't forward its deliveries
@@ -40,12 +41,23 @@ internal static class ReplayCommand
 
         string? eventId = map.FirstPositional;
         string? queue = map.Get("queue");
+
+        // Blindtest 2 (2026-10-09, funn 3): replay til mottakeren, som MCP kan. Uten --redeliver eller --status er det som før:
+        // én hendelse til lytteren (queuey listen), som aldri når den ekte mottakeren.
+        // Security-review av #71 (B1): mottakeren nås bare med --redeliver eller --status. --max og --dry-run alene ga en ekte
+        // sending til mottakeren, med dryRun: true i svaret.
+        if (map.Has("redeliver") || map.Has("status"))
+            return await Redeliver.RunAsync(map, string.IsNullOrWhiteSpace(eventId) ? null : eventId!.Trim(), queue);
+        if (map.Has("max") || map.Has("dry-run"))
+            return CliErrors.Usage(map, "invalid_value",
+                "--max and --dry-run go with --status: queuey replay --queue <q> --status dlq --dry-run. Nothing was sent.",
+                "Without --redeliver or --status, replay sends one event to your listener (queuey listen), never to the receiver.");
         if (string.IsNullOrWhiteSpace(eventId))
             return CliErrors.Usage(map, "missing_argument", "replay requires an event id: queuey replay <event-id> --queue <que_...>");
         if (string.IsNullOrWhiteSpace(queue))
             return CliErrors.Usage(map, "missing_argument", "replay requires --queue <que_...> (the queue the event belongs to).");
 
-        using ServiceProvider sp = CliHost.BuildProvider(CliHost.Resolve(map));
+        using ServiceProvider sp = CliHost.BuildProvider(CliHost.Resolve(map, profiles: true));
         var svc = sp.GetRequiredService<IQueueyService>();
 
         ReplayResult r;

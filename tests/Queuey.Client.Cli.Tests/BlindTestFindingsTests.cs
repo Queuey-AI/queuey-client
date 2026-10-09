@@ -304,14 +304,15 @@ public sealed class BlindTestFindingsTests : IDisposable
         Assert.Contains("Program.cs", read);
         Assert.Contains(root.GetProperty("reasons").EnumerateArray(), r => r.GetString()!.Contains("Shop.csproj"));
         string next = string.Join("\n", root.GetProperty("nextSteps").EnumerateArray().Select(s => s.GetString()));
-        Assert.Contains("queuey keys mint --queue <queue> --profile dev --write .env", next);
+        Assert.Contains("queuey keys mint --profile dev --write .env", next); // workspace-nøkkelen (blindtest 2, funn 7)
+        Assert.DoesNotContain("keys mint --queue <queue>", next);
         Assert.Contains("needs a login that may manage keys", next);
         Assert.Contains("--prerelease", next);
         Assert.DoesNotContain("minted in the console", next);
 
         CliRun human = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "advise", repo }), env: Env());
         Assert.Contains("Read 2 file(s): Program.cs, Shop.csproj", human.Stdout);
-        Assert.Contains("keys mint --queue shop --write .env", human.Stdout);
+        Assert.Contains("queuey keys mint --write .env (add --queue shop only to", human.Stdout);
         Assert.DoesNotContain("always minted in the console", human.Stdout);
     }
 

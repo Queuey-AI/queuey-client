@@ -113,12 +113,26 @@ internal sealed class EdgeTransferLoop : BackgroundService
         {
             case TransferClass.Accepted:
                 await _spool.SettleAsync(claim.SpoolId, attempt.Ack!, ct).ConfigureAwait(false);
-                _state.RecordSuccess(attempt.Ack!.AtUtc, attempt.Ack.Replayed);
+                _state.RecordAccepted(new AcceptedTransfer(claim.Envelope.Queue, claim.Envelope.TransferId, attempt.Ack!.CloudEventId,
+                    attempt.Ack.Replayed, attempt.Ack.AtUtc));
+                // Blindtest 2 (2026-10-09, funn 13): event-id-en Cloud ga, så hendelsen kan slås opp med events get.
+                // Security-review av queuey-client #71: Idempotency-Key-en er produsentens tekst og kan bære personopplysninger
+                // (en e-post, et ordrenummer), så den logges bare på Debug. Event-id-en er Queuey sin.
+                if (attempt.Ack.CloudEventId is { } eventId)
+                    _logger.LogInformation(EdgeLogEvents.Accepted,
+                        "Event {EventId} accepted in {Queue}; look it up with queuey events get {EventId} --queue {Queue}.",
+                        eventId, claim.Envelope.Queue, eventId, claim.Envelope.Queue);
+                else
+                    _logger.LogInformation(EdgeLogEvents.Accepted,
+                        "An event was accepted in {Queue}; the queue answers without a body, so there is no event id.", claim.Envelope.Queue);
+                _logger.LogDebug(EdgeLogEvents.Accepted, "Transfer {TransferId} (Idempotency-Key) was accepted as event {EventId}.",
+                    claim.Envelope.TransferId, attempt.Ack.CloudEventId ?? "(none)");
                 if (attempt.Ack.Replayed)
                 {
+                    // Security-review av queuey-client #71 runde 2: Idempotency-Key-en bare på Debug, overalt.
                     _logger.LogInformation(EdgeLogEvents.SettledAsReplay,
-                        "Transfer {TransferId} settled as a replay — Cloud already held custody (a lost ACK, resolved).",
-                        claim.Envelope.TransferId);
+                        "Event {EventId} in {Queue} settled as a replay — Cloud already held custody (a lost ACK, resolved).",
+                        attempt.Ack.CloudEventId ?? "(no id)", claim.Envelope.Queue);
                 }
                 break;
 
@@ -127,10 +141,13 @@ internal sealed class EdgeTransferLoop : BackgroundService
                 // (step-aside). Exits are explicit operator retry/discard.
                 await _spool.QuarantineAsync(claim.SpoolId, outcome, ct).ConfigureAwait(false);
                 _state.RecordFailure(outcome);
+                // Cloud tok ikke imot eventet, så det har ingen event-id; spool-id-en er det edge retry og discard tar.
                 _logger.LogWarning(EdgeLogEvents.Quarantined,
-                    "Transfer {TransferId} quarantined ({Reason}, HTTP {Status}); its lane continues. " +
-                    "Use 'queuey-edge retry/discard' after remediation.",
-                    claim.Envelope.TransferId, outcome.Reason, outcome.Evidence?.StatusCode);
+                    "Spooled event #{SpoolId} in {Queue} quarantined ({Reason}, HTTP {Status}); its lane continues. " +
+                    "After remediation: queuey edge retry --spool <path> --id {SpoolId}, or queuey edge discard --spool <path> --id {SpoolId}.",
+                    claim.SpoolId, claim.Envelope.Queue, outcome.Reason, outcome.Evidence?.StatusCode, claim.SpoolId, claim.SpoolId);
+                _logger.LogDebug(EdgeLogEvents.Quarantined, "Spooled event #{SpoolId} is transfer {TransferId} (Idempotency-Key).",
+                    claim.SpoolId, claim.Envelope.TransferId);
                 break;
 
             default:
@@ -198,4 +215,5 @@ internal static class EdgeLogEvents
     public static readonly EventId LocalEndpointError = new(7312, "queuey.edge.local_endpoint_error");
     public static readonly EventId HealthReportStarted = new(7313, "queuey.edge.health_report_started");
     public static readonly EventId HealthReportFailed = new(7314, "queuey.edge.health_report_failed");
+    public static readonly EventId Accepted = new(7315, "queuey.edge.accepted");
 }

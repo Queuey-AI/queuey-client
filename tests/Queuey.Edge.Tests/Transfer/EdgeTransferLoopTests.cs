@@ -114,6 +114,59 @@ public class EdgeTransferLoopTests
 
     // ── fixture ─────────────────────────────────────────────────────────
 
+    [Fact]
+    public async Task An_accepted_transfer_logs_its_event_id_and_idempotency_key_and_the_health_shows_them()
+    {
+        // Blindtest 2 (2026-10-09, funn 13): uten event-id-en kunne hendelsen ikke slås opp med events get.
+        var logger = new CapturingLogger();
+        using var fx = new LoopFixture(_ => Accept(), logger: logger);
+        await fx.Publish("order-10042");
+
+        await fx.RunUntilAsync(async () =>
+            (await fx.Spool.Spool.GetStatsAsync(CancellationToken.None)).PendingCount == 0);
+
+        Assert.Contains(logger.Lines, l => l.Level == Microsoft.Extensions.Logging.LogLevel.Information
+                                           && l.Text.Contains("Event evt_fresh accepted in orders", StringComparison.Ordinal)
+                                           && l.Text.Contains("queuey events get evt_fresh --queue orders", StringComparison.Ordinal));
+        // Idempotency-Key-en kan bære personopplysninger: bare på Debug (security-review av #71).
+        Assert.DoesNotContain(logger.Lines, l => l.Level >= Microsoft.Extensions.Logging.LogLevel.Information && l.Text.Contains("order-10042", StringComparison.Ordinal));
+        Assert.Contains(logger.Lines, l => l.Level == Microsoft.Extensions.Logging.LogLevel.Debug
+                                           && l.Text.Contains("Transfer order-10042 (Idempotency-Key) was accepted as event evt_fresh", StringComparison.Ordinal));
+        AcceptedTransfer last = fx.State.LastAcceptedTransfer!;
+        Assert.Equal(("orders", "order-10042", "evt_fresh", false), (last.Queue, last.TransferId, last.EventId, last.Replayed));
+    }
+
+    [Fact]
+    public async Task No_log_above_debug_carries_the_idempotency_key_also_for_a_replay_or_a_quarantine()
+    {
+        // Security-review av #71 runde 2: Idempotency-Key-en kan bære personopplysninger, så den står bare på Debug.
+        var logger = new CapturingLogger();
+        using var fx = new LoopFixture(seen => seen == 1
+            ? Fail(TransferClass.EventRejected, TransferReason.PayloadTooLarge, 413)
+            : Accept(replayed: true), logger: logger);
+        await fx.Publish("ada@example.com-order-1", groupKey: "lane");
+        await fx.Publish("ada@example.com-order-2", groupKey: "lane");
+
+        await fx.RunUntilAsync(async () =>
+        {
+            var stats = await fx.Spool.Spool.GetStatsAsync(CancellationToken.None);
+            return stats.PendingCount == 0 && stats.QuarantinedCount == 1;
+        });
+
+        Assert.Contains(logger.Lines, l => l.Text.Contains("quarantined", StringComparison.Ordinal) && l.Text.Contains("queuey edge retry --spool <path> --id", StringComparison.Ordinal));
+        Assert.Contains(logger.Lines, l => l.Text.Contains("Event evt_original in orders settled as a replay", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Lines, l => l.Level > Microsoft.Extensions.Logging.LogLevel.Debug && l.Text.Contains("ada@example.com", StringComparison.Ordinal));
+    }
+
+    private sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger<EdgeTransferLoop>
+    {
+        public System.Collections.Concurrent.ConcurrentQueue<(Microsoft.Extensions.Logging.LogLevel Level, string Text)> Lines { get; } = new();
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state,
+            Exception? exception, Func<TState, Exception?, string> formatter) => Lines.Enqueue((logLevel, formatter(state, exception)));
+    }
+
     private sealed class LoopFixture : IDisposable
     {
         public SpoolFixture Spool { get; }
@@ -125,7 +178,8 @@ public class EdgeTransferLoopTests
 
         public LoopFixture(
             Func<int, TransferAttempt> script,
-            Action<QueueyEdgeOptions>? configure = null)
+            Action<QueueyEdgeOptions>? configure = null,
+            Microsoft.Extensions.Logging.ILogger<EdgeTransferLoop>? logger = null)
         {
             Spool = new SpoolFixture();
             // Loop tests run on the REAL clock with tight timings — the
@@ -146,7 +200,7 @@ public class EdgeTransferLoopTests
             _publisher = new QueueyEdgePublisher(_options, spool, clock, wake);
             _loop = new EdgeTransferLoop(
                 spool, Channel, new BackoffPolicy(_options.Transfer), State, wake,
-                _options, clock, NullLogger<EdgeTransferLoop>.Instance);
+                _options, clock, logger ?? NullLogger<EdgeTransferLoop>.Instance);
         }
 
         public Task Publish(string idempotencyKey, string? groupKey = null)

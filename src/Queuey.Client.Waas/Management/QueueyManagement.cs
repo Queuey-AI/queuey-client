@@ -11,6 +11,12 @@ internal sealed class QueueyManagement : IQueueyManagement
 {
     private readonly QueueyControlPlaneClient _controlPlane;
 
+    /// <summary>An operator call for the <c>queuey</c> CLI (<see cref="QueueyControlPlaneClient.OperateAsync"/>).</summary>
+    internal Task<System.Text.Json.JsonElement?> OperateAsync(
+        System.Net.Http.HttpMethod method, IReadOnlyList<KeyValuePair<string, string?>>? query, object? body, string[] segments,
+        CancellationToken cancellationToken = default)
+        => _controlPlane.OperateAsync(method, query, body, segments, cancellationToken);
+
     public QueueyManagement(QueueyControlPlaneClient controlPlane)
         => _controlPlane = controlPlane ?? throw new ArgumentNullException(nameof(controlPlane));
 

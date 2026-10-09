@@ -31,7 +31,7 @@ public sealed class KeysCommandTests : IDisposable
         "POST /hmacclients/queues/que_1" when status == 202 => RecordingHandler.Json(HttpStatusCode.Accepted, new
         {
             status = "pending_approval",
-            approvalUrl = "https://app.test/inbox/op_1",
+            approvalUrl = "https://api.test/inbox/op_1",
             expiresAt = "2026-10-10T12:00:00Z",
             policyRule = "keys.prod",
             message = "A person approves new signing keys for a prod workspace.",
@@ -160,7 +160,7 @@ public sealed class KeysCommandTests : IDisposable
         Assert.Equal(ExitCodes.PendingApproval, run.Exit);
         JsonElement json = JsonDocument.Parse(run.Stdout).RootElement;
         Assert.Equal("pending_approval", json.GetProperty("status").GetString());
-        Assert.Equal("https://app.test/inbox/op_1", json.GetProperty("approvalUrl").GetString());
+        Assert.Equal("https://api.test/inbox/op_1", json.GetProperty("approvalUrl").GetString());
         Assert.False(File.Exists(env));
     }
 

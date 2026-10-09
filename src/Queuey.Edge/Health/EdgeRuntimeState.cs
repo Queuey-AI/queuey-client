@@ -62,6 +62,17 @@ internal sealed class EdgeRuntimeState
     public void RecordHealthReport(int? rejectedStatus, DateTimeOffset atUtc)
         => _healthReportRejection = rejectedStatus is { } s ? new HealthReportRejection(s, atUtc) : null;
 
+    private volatile AcceptedTransfer? _lastAccepted;
+
+    /// <summary>The last transfer Cloud accepted, with its event id (blindtest 2, funn 13).</summary>
+    public AcceptedTransfer? LastAcceptedTransfer => _lastAccepted;
+
+    public void RecordAccepted(AcceptedTransfer accepted)
+    {
+        _lastAccepted = accepted;
+        RecordSuccess(accepted.AtUtc, accepted.Replayed);
+    }
+
     public void RecordSuccess(DateTimeOffset atUtc, bool replayed)
     {
         Interlocked.Exchange(ref _lastContactTicks, atUtc.UtcTicks);

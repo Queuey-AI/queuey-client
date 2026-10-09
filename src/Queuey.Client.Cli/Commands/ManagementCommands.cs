@@ -11,7 +11,7 @@ namespace Queuey.Client.Cli;
 internal static class CreateTenantCommand
 {
     internal static readonly CommandOptions Options = new(
-        "create-tenant", flags: new[] { "as-producer", "with-default-queue", "json" }, values: new[] { "name", "environment" }, positionals: 1,
+        "create-tenant", flags: new[] { "as-producer", "with-default-queue", "json" }, values: new[] { "name", "environment", "profile" }, positionals: 1,
         hints: new Dictionary<string, string>(StringComparer.Ordinal)
         {
             // Det globale hintet for --env handler om vertene, ikke workspacets miljø (review av #65, K4).
@@ -32,7 +32,13 @@ internal static class CreateTenantCommand
         if (map.Has("environment") && EnvironmentOption(map, out environment) is { } refused)
             return refused;
 
-        using ServiceProvider sp = CliHost.BuildProvider(CliHost.Resolve(map));
+        // Blindtest 2 (2026-10-09, funn 8): uten --profile gikk create-tenant mot prod med en innlogging for en lokal Queuey, og
+        // feilen ba en innlogget person logge inn. Nå tar den profilen, og uten nøkkel eller innlogging for verten sendes ingenting.
+        ResolvedConfig config = CliHost.Resolve(map, profiles: true);
+        if (Logins.Missing(config, CliHost.Env, "create-tenant") is { } missing)
+            return CliErrors.Configuration(map, "not_logged_in", missing.Message, missing.Action);
+
+        using ServiceProvider sp = CliHost.BuildProvider(config);
         var svc = sp.GetRequiredService<IQueueyService>();
         TenantResult t;
         if (environment is null)

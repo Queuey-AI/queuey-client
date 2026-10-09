@@ -677,6 +677,32 @@ internal sealed class QueueyControlPlaneClient
         await _connection.SendAsync(HttpMethod.Delete, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
     }
 
+    // ── Operator calls (queuey queue health, diagnose, events search, resume, unlock, replay) ──
+
+    /// <summary>
+    /// One operator call on the API host, with the configured key or login: <paramref name="method"/> on the path
+    /// <paramref name="segments"/> make (each escaped), with <paramref name="query"/> (pairs, escaped here) and
+    /// <paramref name="body"/> as JSON. The answer is Queuey's JSON as it is, or null for an answer without a body.
+    /// </summary>
+    // Blindtest 2 (2026-10-09, funn 3): CLI-en skal kunne det MCP kan. Svarene vises som de er, så en ny verdi fra Queuey
+    // når fram uten en ny klient.
+    internal async Task<JsonElement?> OperateAsync(
+        HttpMethod method, IReadOnlyList<KeyValuePair<string, string?>>? query, object? body, string[] segments, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = Authenticator();
+        string license = RequireLicense();
+
+        string? queryText = query is null ? null : string.Join("&", query
+            .Where(p => !string.IsNullOrEmpty(p.Value))
+            .Select(p => Uri.EscapeDataString(p.Key) + "=" + Uri.EscapeDataString(p.Value!)));
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), string.IsNullOrEmpty(queryText) ? null : queryText, segments);
+        byte[]? payload = body is null ? null : JsonSerializer.SerializeToUtf8Bytes(body, QueueyJson.Options);
+
+        using JsonDocument? document = await _connection.SendForOptionalJsonAsync<JsonDocument>(
+            method, uri, payload, payload is null ? null : JsonContentType, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+        return document?.RootElement.Clone();
+    }
+
     // ── Observability reads (metrics + issues) ─────────────────────────────────
 
     /// <summary>Reads a queue traffic snapshot (<c>GET /queues/{q}/metrics/snapshot</c>).</summary>

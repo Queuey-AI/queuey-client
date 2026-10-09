@@ -70,6 +70,14 @@ public static class Recommendation
         "Is the network where this runs one you can trust? A factory, kiosk, vehicle or on-prem box " +
         "usually is not. The repository cannot tell me this, and it is the one thing that decides Edge.";
 
+    /// <summary>What decides Edge where the repository does not show it: whether the disk outlives a restart.</summary>
+    public const string DiskQuestion =
+        "Does the disk where this runs survive a restart — a server or VM, or a container with a volume? Then Queuey.Edge fits, " +
+        "and holds events through an outage; a container without a volume or a serverless function cannot keep a spool.";
+
+    /// <summary>The page that shows how to sign a request by hand.</summary>
+    public const string SignedRequestsDocs = "https://queuey.ai/docs/md/how-to/signed-requests";
+
     public const string DoNotRebuild =
         "Do not hand-write a local queue, retry loop, backoff or offline buffer. That is what Queuey.Edge " +
         "is, already built and maintained — reach for it instead, unless you have been asked for your own.";
@@ -180,7 +188,12 @@ public static class Recommendation
                     yield return $"Local disk does not survive here: {Join(facts.EphemeralHosting)}. " +
                                  "Edge needs a spool that outlives a restart, so it is not an option — regardless of the network.";
                 else
-                    yield return $"Nothing in the {facts.FilesRead.Count} file(s) read (filesRead) suggests an unreliable network or a spool to hold events, so publish directly.";
+                    // Blindtest 2 (2026-10-09, funn 7): et lite web-API fikk Client uten at svaret sa hvorfor ikke Edge. Grunnen er disken:
+                    // ingenting her viser at den overlever en omstart, og uten det kan ingen spool holde events.
+                    yield return $"Nothing in the {facts.FilesRead.Count} file(s) read (filesRead) shows disk that survives a restart — " +
+                                 "no volume, systemd unit or server install — so a spool cannot be counted on, and Queuey.Edge needs one. " +
+                                 "Nothing suggests an unreliable network either, so publish directly. If this runs where the disk survives " +
+                                 "a restart (a server or VM, or a container with a volume), Queuey.Edge fits instead: see the questions.";
                 break;
         }
 
@@ -204,9 +217,9 @@ public static class Recommendation
                 yield return "Publish with PublishAsync — it commits locally before it returns, and transfer, retries and backlog draining are Edge's job.";
                 // Edge-signering (Kenneth 2026-10-09): Edge signerer med samme nøkkel som klienten, lest etter de samme reglene.
                 yield return write == SecretTarget.UserSecretsWord
-                    ? "Configure it with options.UseSettings(builder.Configuration): Edge reads the queue's signing key from the user " +
+                    ? "Configure it with options.UseSettings(builder.Configuration): Edge reads the workspace's signing key from the user " +
                       "secrets and signs every transfer when it sends it, so a backlog never goes out with a stale signature."
-                    : "Configure it with options.UseEnvironmentVariables(): Edge reads the queue's signing key from the environment, " +
+                    : "Configure it with options.UseEnvironmentVariables(): Edge reads the workspace's signing key from the environment, " +
                       "and in Development from .env, and signs every transfer when it sends it, so a backlog never goes out with a stale signature.";
                 // Security-review av #70 (B1): helse-nøkkelen fra miljøet eller konfigurasjonen, aldri en literal.
                 yield return "Turn on Health.ReportToCloud so the node shows up under Edge nodes and Queuey can tell you when it goes quiet. " +
@@ -228,7 +241,10 @@ public static class Recommendation
                 break;
 
             case SendPath.Client:
-                yield return "Add Queuey.Client (dotnet add package Queuey.Client --prerelease) and publish to the ingress, with the queue's signing key from .env (QueueyOptions.UseEnvironmentVariables()).";
+                yield return "Add Queuey.Client (dotnet add package Queuey.Client --prerelease) and publish to the ingress, with the workspace's signing key " +
+                             (write == SecretTarget.UserSecretsWord
+                                 ? "from the user secrets (QueueyOptions.UseSettings(key => builder.Configuration[key]))."
+                                 : "from the environment, and in Development from .env (QueueyOptions.UseEnvironmentVariables()).");
                 if (facts.IsEphemeral)
                     yield return "If the network here is unreliable, write to the database you already have and publish from a worker that reads it — that is your durability, since local disk is not.";
                 break;
@@ -237,9 +253,11 @@ public static class Recommendation
                 // The whole integration is one request, so say which one. "Use
                 // your HTTP client of choice" was correct and left an agent to
                 // guess the route and the header name.
-                yield return $"POST each event to {IngressRoute} with two headers, X-Api-Key and " +
-                             "Content-Type: application/json. A 202 means Queuey has it durably. There is no package " +
-                             "to add for this; the quickstart has the call: https://queuey.ai/docs/quickstart";
+                // Skillen (2026-10-09): workspacet tar bare signerte requests, så et kall med X-Api-Key ville blitt avvist.
+                yield return $"POST each event to {IngressRoute} with Content-Type: application/json, signed with the workspace's " +
+                             "signing key (QUEUEY_SIGNING_KEY_ID and QUEUEY_SIGNING_SECRET): five X-Queuey-* headers and an HMAC-SHA256 " +
+                             $"over the method, path, query, timestamp, nonce and body hash, as {SignedRequestsDocs} shows. A 202 means " +
+                             "Queuey has it durably. There is no package to add for this.";
                 yield return CallFor(facts);
                 foreach (var step in WhereToPublishFrom(facts))
                     yield return step;
@@ -250,11 +268,17 @@ public static class Recommendation
 
         if (send != SendPath.None)
         {
-            // Daemonen leser miljøet sitt, ikke .env (det gjør bare Development): nøkkelen går i fila tjenesten laster som miljø.
-            string target = send == SendPath.EdgeDaemon ? DaemonEnvironmentFile : write;
-            yield return "Log in (queuey login --profile dev), apply the deployment file (queuey apply --profile dev), and make the app's " +
-                         $"signing key for its queue: queuey keys mint --queue <queue> --profile dev --write {target}. It needs a login that " +
-                         "may manage keys, and the secret never passes through the terminal: the app reads the same value Queuey verifies.";
+            // Skillen (blindtest 2, funn 7): workspace-nøkkelen som standard, --queue bare med en grunn. Daemonen står på en maskin
+            // vi ikke styrer, så den får en nøkkel for sin kø, i fila tjenesten laster som miljø (den leser ikke .env).
+            yield return send == SendPath.EdgeDaemon
+                ? "Log in (queuey login --profile dev), apply the deployment file (queuey apply --profile dev), and make the node's " +
+                  $"signing key for its queue only, since it runs on a machine you may not control: queuey keys mint --queue <queue> --profile dev --write {DaemonEnvironmentFile}. " +
+                  "It needs a login that may manage keys, and the secret never passes through the terminal."
+                : "Log in (queuey login --profile dev), apply the deployment file (queuey apply --profile dev), and make the app's " +
+                  $"signing key for the workspace: queuey keys mint --profile dev --write {write}. It reaches every queue in the workspace, " +
+                  "also queues made later; add --queue <queue> only to limit it to one" +
+                  (send == SendPath.Edge ? ", as for a node on a machine you do not control" : "") +
+                  ". It needs a login that may manage keys, and the secret never passes through the terminal: the app reads the same value Queuey verifies.";
         }
     }
 
@@ -263,7 +287,10 @@ public static class Recommendation
         // The network is never in the repository. Ask it wherever it would
         // change the answer — which is anywhere a spool is possible.
         if (send is SendPath.Client or SendPath.PlainHttp && !facts.IsEphemeral)
+        {
             yield return NetworkQuestion;
+            yield return DiskQuestion;
+        }
 
         if (send is SendPath.Edge or SendPath.EdgeDaemon)
             yield return "Confirm the path you point the spool at is on the durable disk, not a temp directory that the host clears.";
@@ -272,22 +299,27 @@ public static class Recommendation
             yield return "Confirm the consumer runs after the commit, not inside the request — that is what makes it durable.";
     }
 
-    /// <summary>The publish call in the language the repository is written in. None of them needs a Queuey package.</summary>
+    /// <summary>
+    /// The signed publish call in the language the repository is written in. None of them needs a Queuey package: the
+    /// signature is an HMAC-SHA256 the language's standard library computes.
+    /// </summary>
     private static string CallFor(RepoFacts facts)
     {
         if (facts.Ecosystems.Contains("node"))
-            return "In JavaScript or TypeScript, fetch is all it takes: await fetch(url, { method: \"POST\", " +
-                   "headers: { \"X-Api-Key\": key, \"Content-Type\": \"application/json\" }, body: JSON.stringify(event) }), " +
-                   "then check for status 202.";
+            return "In JavaScript or TypeScript: compute the signature with createHmac('sha256', secret) from node:crypto, then " +
+                   "await fetch(url, { method: \"POST\", headers: { ...signatureHeaders, \"Content-Type\": \"application/json\" }, body }), " +
+                   $"and check for status 202. {SignedRequestsDocs} has the canonical string.";
 
         if (facts.Ecosystems.Contains("python"))
-            return "In Python: requests.post(url, json=event, headers={\"X-Api-Key\": key}), then check for status 202.";
+            return "In Python: compute the signature with hmac.new(secret, canonical, hashlib.sha256), then " +
+                   $"requests.post(url, data=body, headers=signature_headers), and check for status 202. {SignedRequestsDocs} has the canonical string.";
 
         if (facts.Ecosystems.Contains("go"))
-            return "In Go: an http.NewRequest POST with the two headers from net/http, then check for status 202.";
+            return "In Go: crypto/hmac with sha256 for the signature, then an http.NewRequest POST with the signature headers from " +
+                   $"net/http, and check for status 202. {SignedRequestsDocs} has the canonical string.";
 
-        return "To try it from a shell: curl -X POST \"$url\" -H \"X-Api-Key: $key\" " +
-               "-H \"Content-Type: application/json\" -d '{\"orderId\":\"10042\"}'";
+        return "To try it from a shell: compute the signature with openssl dgst -sha256 -hmac \"$QUEUEY_SIGNING_SECRET\" over the " +
+               $"canonical string, then curl -X POST \"$url\" with the five X-Queuey-* headers. {SignedRequestsDocs} has a script.";
     }
 
     /// <summary>
@@ -300,7 +332,7 @@ public static class Recommendation
         if (facts.HasServerSide)
         {
             yield return $"Publish from server-side code, which here is {Join(facts.ServerSide)}. " +
-                         "Read the key from a server-side secret such as QUEUEY_API_KEY.";
+                         "Read the signing key from server-side secrets, QUEUEY_SIGNING_KEY_ID and QUEUEY_SIGNING_SECRET.";
         }
         else if (facts.IsBrowserApp)
         {
@@ -325,7 +357,7 @@ public static class Recommendation
         // Mottakerens hemmelighet lages én gang, og samme verdi står i Queuey og der mottakeren leser den (Kenneth 2026-10-09).
         yield return $"Make the delivery secret: queuey credentials generate <queue>-signing --profile dev --write {write}. It stores the " +
                      "value in Queuey and as QUEUEY_DELIVERY_SECRET here, never shown; point the queue's delivery at it with " +
-                     "\"delivery\": { \"signing\": { \"enabled\": true, \"credentialRef\": \"<queue>-signing\" } }.";
+                     "\"delivery\": { \"signing\": { \"enabled\": true, \"credentialRef\": \"<queue>-signing\", \"templateKey\": \"queuey\" } }.";
         if (facts.IsDotNet)
         {
             yield return "Verify the signature over the RAW body, before anything deserializes it, with QueueyDeliveryVerifier.FromEnvironment() " +

@@ -79,7 +79,8 @@ public sealed class AdviseTests : IDisposable
 
         Assert.Equal(SendPath.Edge, advice.Send);
         Assert.Contains(advice.NextSteps, s => s.Contains(reads, StringComparison.Ordinal) && s.Contains("signs every transfer", StringComparison.Ordinal));
-        Assert.Contains(advice.NextSteps, s => s.Contains($"queuey keys mint --queue <queue> --profile dev --write {write}", StringComparison.Ordinal));
+        Assert.Contains(advice.NextSteps, s => s.Contains($"queuey keys mint --profile dev --write {write}", StringComparison.Ordinal)
+                                               && s.Contains("as for a node on a machine you do not control", StringComparison.Ordinal));
         Assert.DoesNotContain(advice.NextSteps, s => s.Contains("o.ApiKey", StringComparison.Ordinal));
         Assert.DoesNotContain(advice.NextSteps, s => s.Contains("ApiKey set to", StringComparison.Ordinal));
         Assert.Contains(advice.NextSteps, s => s.Contains("QUEUEY_EDGE_HEALTH_API_KEY", StringComparison.Ordinal)
@@ -228,8 +229,10 @@ public sealed class AdviseTests : IDisposable
 
         Assert.Equal(SendPath.PlainHttp, advice.Send);
         Assert.Contains(advice.NextSteps, s => s.Contains("https://ingress.queuey.ai/events/{tenantPublicId}/{queueName}", StringComparison.Ordinal));
-        Assert.Contains(advice.NextSteps, s => s.Contains("X-Api-Key", StringComparison.Ordinal));
-        Assert.Contains(advice.NextSteps, s => s.Contains("fetch(url", StringComparison.Ordinal));
+        // Skillen (blindtest 2): workspacet tar bare signerte requests, så kallet signeres, aldri med X-Api-Key.
+        Assert.Contains(advice.NextSteps, s => s.Contains("signed with the workspace's signing key", StringComparison.Ordinal));
+        Assert.DoesNotContain(advice.NextSteps, s => s.Contains("X-Api-Key", StringComparison.Ordinal));
+        Assert.Contains(advice.NextSteps, s => s.Contains("fetch(url", StringComparison.Ordinal) && s.Contains("createHmac", StringComparison.Ordinal));
         Assert.Contains(advice.NextSteps, s => s.Contains("Express (package.json)", StringComparison.Ordinal));
     }
 

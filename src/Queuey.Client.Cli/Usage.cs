@@ -14,7 +14,8 @@ COMMANDS
   advise         Read this repository and say how Queuey fits: Client, Edge or plain HTTP. Or turn a Desired
                  Flow into a deployment file and a code plan. Reads only.
   sync           Apply every [QueueyModel] stream found in an assembly (PUT /waas/streams).
-  queue          Declare queues from [QueueyQueue] types: queue plan | queue sync.
+  queue          Declare queues from [QueueyQueue] types: queue plan | queue sync. queue health reads a
+                 queue's traffic, receivers and blocked lanes.
   apply          Converge Queuey from a declarative deployment file (queuey.deploy.json).
   plan           Ask Queuey what apply would change and refuse, as dry runs. Writes nothing.
   verify         Verify a queue's flow with Queuey, step by step from the ingress to the final state.
@@ -25,13 +26,17 @@ COMMANDS
   keys           Mint the key a producer publishes with, for the workspace or one queue (--queue), as
                  --type signing (default) or api-key, written with --write .env|user-secrets: keys mint | list | revoke.
   publish        Publish one event to a queue the way a producer does, and print its id for verify.
-  events         Read one event's status and attempts as Queuey serves them: events get.
+  events         Read events as Queuey serves them: events get (one, with its attempts) | events search.
   create-tenant  Create a tenant under the current license.
   create-queue   Create a queue under a tenant.
   metrics        Show a queue's traffic snapshot.
   issues         List a tenant's issues.
   listen         Receive webhooks locally over a secure push session (Stripe-listen style).
-  replay         Replay one existing event to your connected listener (read-only DLQ debugging).
+  replay         Replay one event to your connected listener (read-only DLQ debugging), or send events to
+                 the queue's receiver again (--redeliver, --status dlq).
+  diagnose       Say why a queue's deliveries fail: Queuey's incident report and what the failures share.
+  resume         Verify a queue's receiver and resume delivery to it.
+  unlock         Lift the lock Queuey put on a queue's delivery.
   edge           Operate a Queuey Edge spool: status | retry | discard | recover | reset.
   whoami         Show the resolved hosts / tenant / license, and the key (masked) or the login.
 
@@ -177,6 +182,11 @@ QUEUE
                  Ensures each queue exists and patches the policy of those that declare one.
                  A queue with no delivery target is reported as a warning, not a failure: it
                  accepts events and logs them without delivering until an endpoint is set.
+  queuey queue health <queue> [--profile <name>] [--json]
+                 The queue's traffic snapshot, its receivers' state and its blocked lanes, as
+                 Queuey reads them. <queue> is the name or the id (que_…); a name is looked up in
+                 the workspace (--tenant, the profile's, or queuey.deploy.json's). The lanes need
+                 event.read; without it the rest is shown.
 
 APPLY
   queuey apply [--file queuey.deploy.json] [--dry-run] [--check] [--continue-on-error] [--json]
@@ -463,7 +473,9 @@ CREDENTIALS
                  value in both places, never shown. --write takes .env (or another file git
                  ignores) or user-secrets, as for keys mint. The answer says how the queue's
                  delivery points at it: ""delivery"": { ""signing"": { ""enabled"": true,
-                 ""credentialRef"": ""<name>"" } } in queuey.deploy.json, then apply. In .NET the
+                 ""credentialRef"": ""<name>"", ""templateKey"": ""queuey"" } } in queuey.deploy.json,
+                 then apply. templateKey ""queuey"" is Queuey's own signature, which the verifier
+                 checks. In .NET the
                  receiver verifies with QueueyDeliveryVerifier.FromEnvironment(). A name Queuey
                  already holds is refused unless --replace, which makes a new value for both, used
                  by every queue and ingress that names it. So is a target that already holds a
@@ -568,6 +580,14 @@ PUBLISH
                  tenantFrom names the file.
 
 EVENTS
+  queuey events search <queue> [--status dlq,failed] [--idempotency-key <k>] [--event-type <t>]
+                [--group-key <k>] [--source <s>] [--from <time>] [--to <time>] [--has-failures]
+                [--response-code <n>] [--page <n>] [--page-size <n>] [--profile <name>] [--json]
+                 A queue's events, newest first (GET /events/{queue}): by status (a comma list),
+                 the Idempotency-Key the producer sent, the event type, group, source, the time
+                 received, failures or a receiver's response code. 20 per page, at most 200.
+                 Never the payload text: searching it takes event.payload.read, which a key or a
+                 login does not have.
   queuey events get <evt_…> --queue <queue> [--content] [--deployment queuey.deploy.json]
                  [--profile <name>] [--json]
                  Reads one event as Queuey's REST API serves it (GET /events/{queue}/{event}):
@@ -585,8 +605,11 @@ EVENTS
                  in the workspace by apply's rule, as for publish.
 
 CREATE-TENANT
-  queuey create-tenant --name <display> [--environment dev|test|staging|prod] [--as-producer]
-                       [--with-default-queue] [--json]
+  queuey create-tenant --name <display> [--environment dev|test|staging|prod] [--profile <name>]
+                       [--as-producer] [--with-default-queue] [--json]
+                 With --profile it uses the profile's API host and its login, as queuey login
+                 --profile wrote them. Without a key or a login for the host it would reach,
+                 it sends nothing and names the hosts you are logged in to.
                  --environment marks the new workspace. An API key sets it only here, when
                  it creates the workspace: lowering it later takes a person. Without it, the
                  workspace has none, which Queuey counts as prod. A Queuey that does not take
@@ -639,6 +662,33 @@ REPLAY
                  listener (Local forward) and shares its payloads in full, a DLQ'd one included; on
                  any other queue the server refuses and says what to change. Run `queuey listen`
                  first so there's a listener to receive it.
+  queuey replay <evt_…> --queue <queue> --redeliver [--profile <name>] [--json]
+  queuey replay --queue <queue> --status dlq[,failed] [--max <n>] [--dry-run] [--profile <name>] [--json]
+                 Sends events to the queue's receiver again: one with --redeliver, or those with a
+                 status, at most --max (default 100, up to 500). --dry-run says how many match and
+                 sends nothing. In a prod workspace a key or a login sends up to 100 at once; more
+                 waits for a person: exit 5 with the link where they approve it.
+
+DIAGNOSE
+  queuey diagnose <queue> [--take <n>] [--profile <name>] [--json]
+                 Why the queue's deliveries fail: Queuey's incident report (locked, stalled,
+                 degraded or healthy, and what to do), and the response codes, endpoints and
+                 errors the last --take failed events (default 10, up to 25) have in common.
+                 Reads only.
+
+RESUME
+  queuey resume <queue> [--target <id>] [--replay none|failed|dlq] [--dry-run] [--profile <name>] [--json]
+                 Verifies the receiver and resumes delivery (verify-and-resume): Queuey probes
+                 it, sends the event at the head again, and lifts the lock once it is delivered.
+                 --replay also sends the failed or DLQ events again after. --target picks the
+                 receiver when the queue has several (queuey queue health lists them). --dry-run
+                 says what would happen. In a prod workspace a key or a login resumes only with
+                 a person's approval: exit 5 with the link.
+
+UNLOCK
+  queuey unlock <queue> [--profile <name>] [--json]
+                 Lifts the lock Queuey put on the queue's delivery. In a prod workspace a key or
+                 a login unlocks only with a person's approval: exit 5 with the link.
 
 EDGE
   queuey edge run     --spool <path> --tenant <ten_...>

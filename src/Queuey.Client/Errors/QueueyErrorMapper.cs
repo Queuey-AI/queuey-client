@@ -32,6 +32,7 @@ internal static class QueueyErrorMapper
         string body = await ReadBodyAsync(response, cancellationToken).ConfigureAwait(false);
 
         ParseError(body, out string? code, out string? message, out string? action);
+        string? consoleUrl = ConsoleUrlOf(body);
 
         if (string.IsNullOrWhiteSpace(message))
         {
@@ -42,14 +43,40 @@ internal static class QueueyErrorMapper
 
         return status switch
         {
-            400 => new QueueyValidationException(message!, code) { SuggestedAction = action },
-            401 => new QueueyAuthException(message!, code) { SuggestedAction = action },
-            403 => new QueueyForbiddenException(message!, code) { SuggestedAction = action },
-            404 => new QueueyNotFoundException(message!, code) { SuggestedAction = action },
-            409 => new QueueyConflictException(message!, code) { SuggestedAction = action },
-            422 => new QueueyLoopDetectedException(message!, code) { SuggestedAction = action },
-            _ => new QueueyException(message!, status, code) { SuggestedAction = action },
+            400 => new QueueyValidationException(message!, code) { SuggestedAction = action, ConsoleUrl = consoleUrl },
+            401 => new QueueyAuthException(message!, code) { SuggestedAction = action, ConsoleUrl = consoleUrl },
+            403 => new QueueyForbiddenException(message!, code) { SuggestedAction = action, ConsoleUrl = consoleUrl },
+            404 => new QueueyNotFoundException(message!, code) { SuggestedAction = action, ConsoleUrl = consoleUrl },
+            409 => new QueueyConflictException(message!, code) { SuggestedAction = action, ConsoleUrl = consoleUrl },
+            422 => new QueueyLoopDetectedException(message!, code) { SuggestedAction = action, ConsoleUrl = consoleUrl },
+            _ => new QueueyException(message!, status, code) { SuggestedAction = action, ConsoleUrl = consoleUrl },
         };
+    }
+
+    /// <summary>
+    /// The <c>error.consoleUrl</c> of the envelope, when it is an absolute https URL (or http on this machine) without user
+    /// info; null otherwise. A link with user@host reads as another host than it is.
+    /// </summary>
+    // Security-review av queuey-client #71 (B3): samme regel som konsoll-lenken fra innloggingen (K4 i #69).
+    private static string? ConsoleUrlOf(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return null;
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(body);
+            return doc.RootElement.ValueKind == JsonValueKind.Object
+                   && doc.RootElement.TryGetProperty("error", out JsonElement error) && error.ValueKind == JsonValueKind.Object
+                   && error.TryGetProperty("consoleUrl", out JsonElement url) && url.ValueKind == JsonValueKind.String
+                   && Uri.TryCreate(url.GetString(), UriKind.Absolute, out Uri? parsed)
+                   && (parsed.Scheme == Uri.UriSchemeHttps || (parsed.Scheme == Uri.UriSchemeHttp && parsed.IsLoopback))
+                   && string.IsNullOrEmpty(parsed.UserInfo)
+                ? parsed.ToString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     private static async Task<string> ReadBodyAsync(HttpResponseMessage response, CancellationToken cancellationToken)

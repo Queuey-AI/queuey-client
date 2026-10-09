@@ -36,9 +36,10 @@ internal static class EventsCommand
         return sub switch
         {
             "get" => await GetAsync(rest),
+            "search" => await EventsSearchCommand.RunAsync(rest),
             "" or "-h" or "--help" or "help" => Help(),
             _ => CliErrors.Write(CliErrors.WantsJson(rest), "unknown_subcommand",
-                $"Unknown events subcommand '{CliErrors.Shown(sub)}'. Expected 'get'.", action: null, status: null, ExitCodes.Usage),
+                $"Unknown events subcommand '{CliErrors.Shown(sub)}'. Expected 'get' or 'search'.", action: null, status: null, ExitCodes.Usage),
         };
     }
 
@@ -74,6 +75,14 @@ internal static class EventsCommand
         var service = provider.GetRequiredService<IQueueyService>();
 
         EventRead read = await service.GetEventAsync(queue!, eventId, revealContent: map.Has("content"));
+        // Security-review av #71 (B2): mottakerens URL i forsøkene og feiltekstene vises redigert. Innholdet (--content) er
+        // eventets eget og vises som Queuey serverer det.
+        read = new EventRead
+        {
+            QueuePublicId = read.QueuePublicId, EventPublicId = read.EventPublicId, Status = read.Status,
+            PayloadVisibility = read.PayloadVisibility, CanRevealContent = read.CanRevealContent,
+            Envelope = TargetUrlRedaction.RedactJson(read.Envelope, config) ?? read.Envelope, Content = read.Content,
+        };
 
         if (map.Has("json"))
             Console.WriteLine(JsonSerializer.Serialize(ToJson(read), CliHost.JsonOut));
