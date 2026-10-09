@@ -115,7 +115,7 @@ internal static class CliHost
             };
 
         string dotEnv = Path.Combine(Directory.GetCurrentDirectory(), ".env");
-        if (!File.Exists(dotEnv))
+        if (!IsOwnPlainFile(dotEnv))
             return config;
         IReadOnlyDictionary<string, string> read = EnvFile.Read(dotEnv, QueueyEnvironmentVariables.SigningKeyId, QueueyEnvironmentVariables.SigningSecret);
         return read.TryGetValue(QueueyEnvironmentVariables.SigningKeyId, out string? fileKey)
@@ -124,6 +124,29 @@ internal static class CliHost
             : config;
 
         static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+    }
+
+    /// <summary>
+    /// Whether <paramref name="path"/> is a regular file, not a link, that belongs to the user running the CLI. A <c>.env</c> that
+    /// is anything else is not read: it would let another user, or a repository the command runs in, choose the key a publish
+    /// signs with.
+    /// </summary>
+    // Security-review av #67 (KAN F).
+    internal static bool IsOwnPlainFile(string path)
+    {
+        var info = new FileInfo(path);
+        if (!info.Exists || info.LinkTarget is not null)
+            return false;
+        if (OperatingSystem.IsWindows())
+            return true;
+        try
+        {
+            return UserProfiles.Inspect(path).Owner == UserProfiles.CurrentUser();
+        }
+        catch (QueueyConfigurationException)
+        {
+            return false;
+        }
     }
 
     // Miljøet konfigurasjonen leses fra. En søm av samme grunn som TestHandler: en test skal ikke måtte

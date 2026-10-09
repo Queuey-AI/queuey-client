@@ -77,36 +77,57 @@ public sealed class PublishSigningTests : IDisposable
     public async Task With_a_login_publish_signs_with_the_key_in_dot_env_and_reads_nothing_else_from_it()
     {
         File.WriteAllText(Path.Combine(_dir, ".env"),
-            $"QUEUEY_API_KEY=qak_never.read\nexport QUEUEY_SIGNING_KEY_ID=hk_dotenv\nQUEUEY_SIGNING_SECRET='{Secret}'\nQUEUEY_TENANT=ten_other\n");
+            $"QUEUEY_API_KEY=qak_never.read\nexport QUEUEY_SIGNING_KEY_ID=hsk_01DOTENV\nQUEUEY_SIGNING_SECRET='{Secret}'\nQUEUEY_TENANT=ten_other\n");
         RecordingHandler api = Server();
 
         CliRun run = await Publish(api);
 
         Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
         Dictionary<string, string> sent = Sent(api);
-        Assert.Equal("hk_dotenv", sent["X-Queuey-Key-Id"]);
+        Assert.Equal("hsk_01DOTENV", sent["X-Queuey-Key-Id"]);
         Assert.True(sent.ContainsKey("X-Queuey-Signature"));
         Assert.False(sent.ContainsKey("X-Api-Key"));
         Assert.False(sent.ContainsKey("Authorization")); // tokenet går aldri til ingressen
-        Assert.Contains("Signing with key hk_dotenv from .env.", run.Stderr);
+        Assert.Contains("Signing with key hsk_01DOTENV from .env.", run.Stderr);
         Assert.DoesNotContain(Secret, run.Stdout + run.Stderr);
         Assert.All(api.Requests.Where(r => r.Uri.Host == "api.test"), r => Assert.Equal("Bearer at-opaque", api.Headers[api.Requests.IndexOf(r)]["Authorization"]));
     }
 
     [Fact]
+    public async Task A_dot_env_that_is_a_link_is_not_read_and_json_says_where_the_key_came_from()
+    {
+        // Security-review av #67 (KAN F): en .env som er en lenke, kunne la et repo eller en annen bruker velge nøkkelen.
+        string real = Path.Combine(_dir, "elsewhere.env");
+        File.WriteAllText(real, $"QUEUEY_SIGNING_KEY_ID=hsk_01LINKED\nQUEUEY_SIGNING_SECRET={Secret}\n");
+        if (!OperatingSystem.IsWindows())
+        {
+            File.CreateSymbolicLink(Path.Combine(_dir, ".env"), real);
+            CliRun linked = await Publish(Server(), null, "--json");
+            Assert.Equal(ExitCodes.RuntimeError, linked.Exit); // ingen nøkkel: ingressen vil ha en signatur
+            Assert.DoesNotContain("hsk_01LINKED", linked.Stdout + linked.Stderr);
+            File.Delete(Path.Combine(_dir, ".env"));
+        }
+
+        File.WriteAllText(Path.Combine(_dir, ".env"), $"QUEUEY_SIGNING_KEY_ID=hsk_01DOTENV\nQUEUEY_SIGNING_SECRET={Secret}\n");
+        CliRun run = await Publish(Server(), null, "--json");
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        Assert.Equal(".env", System.Text.Json.JsonDocument.Parse(run.Stdout).RootElement.GetProperty("signingKeyFrom").GetString());
+    }
+
+    [Fact]
     public async Task The_environment_wins_over_dot_env_and_half_a_pair_is_refused()
     {
-        File.WriteAllText(Path.Combine(_dir, ".env"), $"QUEUEY_SIGNING_KEY_ID=hk_dotenv\nQUEUEY_SIGNING_SECRET={Secret}\n");
+        File.WriteAllText(Path.Combine(_dir, ".env"), $"QUEUEY_SIGNING_KEY_ID=hsk_01DOTENV\nQUEUEY_SIGNING_SECRET={Secret}\n");
         RecordingHandler api = Server();
 
-        CliRun run = await Publish(api, new() { ["QUEUEY_SIGNING_KEY_ID"] = "hk_env", ["QUEUEY_SIGNING_SECRET"] = "env-secret" });
+        CliRun run = await Publish(api, new() { ["QUEUEY_SIGNING_KEY_ID"] = "hsk_01ENV", ["QUEUEY_SIGNING_SECRET"] = "env-secret" });
 
         Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
-        Assert.Equal("hk_env", Sent(api)["X-Queuey-Key-Id"]);
+        Assert.Equal("hsk_01ENV", Sent(api)["X-Queuey-Key-Id"]);
         Assert.Contains("from the environment", run.Stderr);
 
         RecordingHandler none = Server();
-        CliRun half = await Publish(none, new() { ["QUEUEY_SIGNING_KEY_ID"] = "hk_env" });
+        CliRun half = await Publish(none, new() { ["QUEUEY_SIGNING_KEY_ID"] = "hsk_01ENV" });
         Assert.Equal(ExitCodes.Configuration, half.Exit);
         Assert.Contains("QUEUEY_SIGNING_KEY_ID is set without QUEUEY_SIGNING_SECRET", half.Stderr);
         Assert.Empty(none.Requests);
@@ -115,7 +136,7 @@ public sealed class PublishSigningTests : IDisposable
     [Fact]
     public async Task An_api_key_that_is_set_wins_and_dot_env_is_not_read()
     {
-        File.WriteAllText(Path.Combine(_dir, ".env"), $"QUEUEY_SIGNING_KEY_ID=hk_dotenv\nQUEUEY_SIGNING_SECRET={Secret}\n");
+        File.WriteAllText(Path.Combine(_dir, ".env"), $"QUEUEY_SIGNING_KEY_ID=hsk_01DOTENV\nQUEUEY_SIGNING_SECRET={Secret}\n");
         RecordingHandler api = new(req => req switch
         {
             { Method.Method: "GET", Path: "/tenants/ten_abc/queues" } => FlowAnswers.Queues(),

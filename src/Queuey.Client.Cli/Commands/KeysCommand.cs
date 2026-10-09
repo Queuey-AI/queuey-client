@@ -82,7 +82,14 @@ internal static class KeysCommand
                 status: null, ExitCodes.RuntimeError, "Queuey error");
 
         if (file is not null)
+        {
+            if (!EnvFile.IsSafeValue(key.KeyId) || !EnvFile.IsSafeValue(key.Secret))
+                return CliErrors.Write(map.Has("json"), "mint_answer_invalid",
+                    "Queuey answered the mint with a key id or secret that has characters a .env cannot hold safely, so nothing was " +
+                    "written. Neither is shown.",
+                    "Revoke the new key in the Queuey console, and report this.", status: null, ExitCodes.RuntimeError, "Queuey error");
             return Written(map, key, file, map.Get("write")!);
+        }
 
         if (map.Has("json"))
         {
@@ -104,10 +111,10 @@ internal static class KeysCommand
     /// <summary>The key in the file, and what was written, without the secret.</summary>
     private static int Written(ArgMap map, IngressSigningKey key, string file, string shown)
     {
-        Dictionary<string, string?> previous;
+        EnvFile.Written written;
         try
         {
-            previous = EnvFile.Write(file, new[] { (Variables[0], key.KeyId!), (Variables[1], key.Secret!) });
+            written = EnvFile.Write(file, new[] { (Variables[0], key.KeyId!), (Variables[1], key.Secret!) });
         }
         catch (CliFileException ex)
         {
@@ -117,8 +124,8 @@ internal static class KeysCommand
                 $"Revoke it with queuey keys revoke {key.KeyId}, fix the file, and mint again.", status: null, ExitCodes.Configuration, "Error");
         }
 
-        string? replaced = previous[Variables[0]] is { } old && old != key.KeyId ? old : null;
-        bool readable = EnvFile.OthersCanRead(file);
+        string? replaced = written.Previous[Variables[0]] is { } old && old != key.KeyId ? old : null;
+        string? tightenedFrom = written.TightenedFrom is { } mode ? EnvFile.Octal(mode) : null;
 
         if (map.Has("json"))
         {
@@ -128,6 +135,9 @@ internal static class KeysCommand
                 file = shown,
                 variables = Variables,
                 replacedKeyId = replaced,
+                // Security-review av #67 (BØR A): fila er alltid 0600 etterpå; her står modusen den hadde, når den ble strammet.
+                mode = "0600",
+                tightenedFrom,
             }, CliHost.JsonOut));
         }
         else
@@ -140,8 +150,8 @@ internal static class KeysCommand
         if (replaced is not null)
             Console.Error.WriteLine($"Note: {shown} held key {TerminalText.Line(replaced)} before. It still verifies until it is revoked: " +
                                     $"queuey keys revoke {TerminalText.Line(replaced)}");
-        if (readable)
-            Console.Error.WriteLine($"Note: other users can read {shown}. Let only you read it: chmod 600 {shown}");
+        if (tightenedFrom is not null)
+            Console.Error.WriteLine($"Note: {shown} had mode {tightenedFrom}; it is 0600 now, readable and writable only by you.");
         return ExitCodes.Success;
     }
 
@@ -222,6 +232,10 @@ internal static class KeysCommand
         if (string.IsNullOrWhiteSpace(keyId))
             return CliErrors.Usage(map, "missing_argument", "keys revoke requires the key's id: queuey keys revoke <keyId>.",
                 "queuey keys list --queue <queue> lists them.");
+        // Security-review av #67 (KAN D): id-en går i stien, og noe annet enn en nøkkel-id kan være en hemmelighet limt inn feil.
+        if (!IsSigningKeyId(keyId))
+            return CliErrors.Usage(map, "invalid_value", "keys revoke takes a signing key's id (hsk_…). The value is not shown, since it is not one.",
+                "queuey keys list --queue <queue> lists them.");
 
         ResolvedConfig config = CliHost.Resolve(map, profiles: true);
         using ServiceProvider provider = CliHost.BuildProvider(config);
@@ -235,9 +249,14 @@ internal static class KeysCommand
         if (map.Has("json"))
             Console.WriteLine(JsonSerializer.Serialize(new { keyId, revoked = true }, CliHost.JsonOut));
         else
-            Console.WriteLine($"Revoked signing key {TerminalText.Line(keyId)}: every producer that signs with it is refused at the ingress now.");
+            Console.WriteLine($"Revoked signing key {keyId}: every producer that signs with it is refused at the ingress now.");
         return ExitCodes.Success;
     }
+
+    /// <summary>Whether <paramref name="value"/> has the shape of a signing key id: <c>hsk_</c> and an id of letters and digits.</summary>
+    internal static bool IsSigningKeyId(string? value)
+        => value is { Length: > 4 and <= 64 } && value.StartsWith("hsk_", StringComparison.Ordinal)
+           && value.Skip(4).All(char.IsAsciiLetterOrDigit);
 
     /// <summary>The queue's id: <c>--queue que_…</c> as given, or a name looked up in the configured workspace.</summary>
     private static async Task<string> QueueIdAsync(ArgMap map, ResolvedConfig config)

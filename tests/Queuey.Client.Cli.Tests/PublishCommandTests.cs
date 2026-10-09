@@ -70,7 +70,7 @@ public sealed class PublishCommandTests : IDisposable
         Assert.Equal("order-A-1", headers["Idempotency-Key"]);
 
         JsonElement json = JsonDocument.Parse(run.Stdout).RootElement;
-        Assert.Equal(new[] { "schemaVersion", "tenant", "tenantFrom", "queue", "queuePublicId", "eventPublicId", "receivedAtUtc", "mode", "replayed", "verify" },
+        Assert.Equal(new[] { "schemaVersion", "tenant", "tenantFrom", "queue", "queuePublicId", "eventPublicId", "receivedAtUtc", "mode", "replayed", "verify", "signingKeyFrom" },
             json.EnumerateObject().Select(p => p.Name).ToArray());
         Assert.Equal("configuration", json.GetProperty("tenantFrom").GetString());
         Assert.Equal(1, json.GetProperty("schemaVersion").GetInt32());

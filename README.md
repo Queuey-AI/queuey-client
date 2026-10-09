@@ -946,13 +946,17 @@ queuey keys mint --queue orders --write .env
 This writes `QUEUEY_SIGNING_KEY_ID` and `QUEUEY_SIGNING_SECRET` into `.env` and never prints the
 secret, not in `--json` either.
 
-- The lines that set them are replaced, and every other line stays. A new file is readable only by you.
-- In a git repository the file must be one git ignores, or nothing is minted.
+- The lines that set them are replaced, and every other line stays. Afterwards the file is readable and
+  writable only by you (0600). A file others could read is tightened, and the command says from what.
+- In a git repository the file must be one git ignores, or nothing is minted. So must a file that is a
+  link, or one you cannot read and write.
 - The producer reads them from the environment: `options.UseEnvironmentVariables()` in .NET fills each
   setting that is not set in code, from `QUEUEY_SIGNING_KEY_ID`, `QUEUEY_SIGNING_SECRET`,
-  `QUEUEY_TENANT`, `QUEUEY_INGRESS_BASE` and `QUEUEY_API_KEY`.
+  `QUEUEY_TENANT`, `QUEUEY_INGRESS_BASE` and `QUEUEY_API_KEY`. With both signing values set, it does not
+  read `QUEUEY_API_KEY`: the producer signs with the key that reaches only its queue.
 - `queuey publish` reads them too, from the environment or else from `./.env`, when no API key is set,
-  as with a login. Only those two names are read from `.env`, and a key that is set wins.
+  as with a login. Only those two names are read from `.env`, only when it is a plain file of your own,
+  and a key that is set wins. `--json` says where the key came from (`signingKeyFrom`).
 - Without `--write`, the secret is shown once.
 
 Minting needs a login (`queuey login`) for a person who may manage keys, or a credential with

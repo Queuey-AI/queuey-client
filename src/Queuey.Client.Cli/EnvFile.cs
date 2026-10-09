@@ -38,55 +38,99 @@ internal static class EnvFile
         {
             if (InsideAGitFolder(folder))
                 throw NotIgnored(path, "git could not be run, so whether git ignores it could not be checked");
-            return full;
+            return Writable(full, path);
         }
 
         if (inside.Exit != 0 || inside.Output.Trim() != "true")
-            return full; // Ikke i et repo.
+        {
+            // Security-review av #67 (BØR B): git kan feile inne i et repo (safe.directory, en ødelagt .git). Da avgjør mappene.
+            if (InsideAGitFolder(folder))
+                throw NotIgnored(path, "git could not say whether this is a repository it ignores the file in");
+            return Writable(full, path); // Ikke i et repo.
+        }
 
         // check-ignore: 0 er ignorert, 1 er ikke. En fil git alt sporer, er ikke ignorert, selv om et mønster treffer den.
         (int Exit, string Output)? ignored = Git(folder, new[] { "check-ignore", "-q", "--", full });
         return ignored switch
         {
-            { Exit: 0 } => full,
+            { Exit: 0 } => Writable(full, path),
             { Exit: 1 } => throw NotIgnored(path, "it is in a git repository, and git does not ignore it"),
             _ => throw NotIgnored(path, "git could not say whether it ignores it"),
         };
     }
 
     /// <summary>
+    /// <paramref name="full"/> when this user can read and write the file that is there (or there is none), so a key is never
+    /// minted into a file that cannot take it. Throws otherwise.
+    /// </summary>
+    // Security-review av #67 (KAN E): en .env som ikke kunne leses, ble oppdaget først etter mintingen.
+    private static string Writable(string full, string path)
+    {
+        if (!File.Exists(full))
+            return full;
+        try
+        {
+            using var probe = new FileStream(full, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+            return full;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new CliUsageException("invalid_value", $"--write names {path}, which this user cannot read and write ({ex.GetType().Name}). " +
+                "Nothing was minted.", "Name a file of your own, such as .env.");
+        }
+    }
+
+    /// <summary>What <see cref="Write"/> did: what each name held before, and the mode the file had when it was tightened.</summary>
+    internal sealed record Written(Dictionary<string, string?> Previous, UnixFileMode? TightenedFrom);
+
+    /// <summary>
     /// Writes <paramref name="values"/> into the file at <paramref name="full"/>: each replaces the line that sets it (with or
     /// without <c>export</c>), and later lines that set it again are dropped, so an old secret does not linger; one that is not
-    /// there is added at the end. Every other line stays. A new file is readable only by the user (0600); an existing one keeps
-    /// its mode. Returns what the file held for each name before, or null.
+    /// there is added at the end. Every other line stays. The file is readable and writable only by the user afterwards
+    /// (0600): an existing one that others could reach, is tightened, and the result says from what.
     /// </summary>
-    public static Dictionary<string, string?> Write(string full, IReadOnlyList<(string Name, string Value)> values)
+    // Security-review av #67 (BØR A): en eksisterende .env beholdt modusen sin, også 0644, så hemmeligheten ble lesbar for andre.
+    // Lenken sjekkes igjen her, rett før skrivingen, ikke bare i Check før mintingen.
+    public static Written Write(string full, IReadOnlyList<(string Name, string Value)> values)
     {
-        string? existing = File.Exists(full) ? File.ReadAllText(full) : null;
-        string merged = Merge(existing, values, out Dictionary<string, string?> previous);
-
-        UnixFileMode? mode = existing is not null && !OperatingSystem.IsWindows() ? File.GetUnixFileMode(full) : null;
+        const UnixFileMode OnlyTheUser = UnixFileMode.UserRead | UnixFileMode.UserWrite;
         string temp = Path.Combine(Path.GetDirectoryName(full)!, $".{Path.GetFileName(full)}.{Guid.NewGuid():N}.tmp");
         try
         {
+            if (File.Exists(full) && new FileInfo(full).LinkTarget is not null)
+                throw new IOException($"{full} became a link after it was checked, so it was not written.");
+
+            string? existing = File.Exists(full) ? File.ReadAllText(full) : null;
+            string merged = Merge(existing, values, out Dictionary<string, string?> previous);
+
+            UnixFileMode? before = existing is not null && !OperatingSystem.IsWindows() ? File.GetUnixFileMode(full) & (UnixFileMode)0xFFF : null;
             var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };
             if (!OperatingSystem.IsWindows())
-                options.UnixCreateMode = mode ?? (UnixFileMode.UserRead | UnixFileMode.UserWrite);
+                options.UnixCreateMode = OnlyTheUser;
             using (var stream = new FileStream(temp, options))
             using (var writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)))
                 writer.Write(merged);
-            if (mode is { } kept)
-                File.SetUnixFileMode(temp, kept); // umask kan ha tatt bort noe ved opprettelsen
+            if (!OperatingSystem.IsWindows())
+                File.SetUnixFileMode(temp, OnlyTheUser);
             File.Move(temp, full, overwrite: true);
+
+            return new Written(previous, before is { } mode && mode != OnlyTheUser ? mode : null);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             try { File.Delete(temp); } catch { /* ble kanskje aldri laget */ }
-            throw new CliFileException("file_unwritable", $"Could not write {full}: {ex.Message}", "Check that this user may write the file.", ex);
+            throw new CliFileException("file_unwritable", $"Could not write {full}: {ex.Message}", "Check that this user may read and write the file.", ex);
         }
-
-        return previous;
     }
+
+    /// <summary>A file mode as <c>chmod</c> writes it, such as <c>0644</c>.</summary>
+    internal static string Octal(UnixFileMode mode) => "0" + Convert.ToString((int)mode & 0xFFF, 8).PadLeft(3, '0');
+
+    /// <summary>Whether <paramref name="value"/> has only the characters a key id or secret is made of, which a .env holds unquoted.</summary>
+    // Security-review av #67 (KAN C): et svar fra serveren med linjeskift eller anførselstegn kunne lagt til linjer i .env.
+    internal static bool IsSafeValue(string? value)
+        => !string.IsNullOrEmpty(value) && value.Length <= 512
+           && value.All(c => char.IsAsciiLetterOrDigit(c) || "_-.+/=:@".Contains(c));
 
     /// <summary>
     /// The values <paramref name="names"/> are set to in the dotenv file at <paramref name="path"/>: the first line that sets
@@ -131,11 +175,6 @@ internal static class EnvFile
         int comment = raw.IndexOf(" #", StringComparison.Ordinal);
         return (comment >= 0 ? raw[..comment] : raw).Trim();
     }
-
-    /// <summary>Whether others than the user can read the file at <paramref name="full"/>. Never on Windows.</summary>
-    public static bool OthersCanRead(string full)
-        => !OperatingSystem.IsWindows() && File.Exists(full)
-           && (File.GetUnixFileMode(full) & (UnixFileMode.GroupRead | UnixFileMode.OtherRead)) != 0;
 
     /// <summary>The text of a dotenv file with <paramref name="values"/> merged in, and what each name held before.</summary>
     internal static string Merge(string? existing, IReadOnlyList<(string Name, string Value)> values, out Dictionary<string, string?> previous)

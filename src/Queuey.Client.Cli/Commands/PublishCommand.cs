@@ -100,7 +100,7 @@ internal static class PublishCommand
         });
 
         if (json)
-            Console.WriteLine(JsonSerializer.Serialize(ToJson(result, tenantFrom), CliHost.JsonOut));
+            Console.WriteLine(JsonSerializer.Serialize(ToJson(result, tenantFrom, config.SigningFrom), CliHost.JsonOut));
         else
             WriteHuman(result);
 
@@ -120,7 +120,7 @@ internal static class PublishCommand
         return $"queuey verify {queue} --event {eventId}";
     }
 
-    private static object ToJson(QueuePublishResult r, string? tenantFrom) => new
+    private static object ToJson(QueuePublishResult r, string? tenantFrom, string? signingKeyFrom) => new
     {
         schemaVersion = JsonSchemaVersion,
         tenant = r.TenantPublicId,
@@ -132,6 +132,8 @@ internal static class PublishCommand
         mode = r.Mode,
         replayed = r.Replayed,
         verify = VerifyCommandFor(r),
+        // Hvor signeringsnøkkelen kom fra (security-review av #67, KAN F): "the environment", ".env", eller null med en API-nøkkel.
+        signingKeyFrom,
     };
 
     // Navn og id-er kommer fra serveren eller kommandolinjen, så hver linje går gjennom TerminalText.

@@ -73,7 +73,9 @@ public sealed class QueueyOptions
 
     /// <summary>
     /// Fills each setting that is not set yet from its environment variable (<see cref="QueueyEnvironmentVariables"/>), such
-    /// as the signing key <c>queuey keys mint --write .env</c> writes. A value set in code wins. Returns these options.
+    /// as the signing key <c>queuey keys mint --write .env</c> writes. A value set in code wins. When the signing key and its
+    /// secret are both set, <c>QUEUEY_API_KEY</c> is not read: the producer signs with the key that reaches only its queue,
+    /// not a license-wide one. Returns these options.
     /// </summary>
     /// <param name="read">Reads a variable; <see cref="System.Environment.GetEnvironmentVariable(string)"/> when null.</param>
     public QueueyOptions UseEnvironmentVariables(Func<string, string?>? read = null)
@@ -81,9 +83,12 @@ public sealed class QueueyOptions
         read ??= System.Environment.GetEnvironmentVariable;
         string? Read(string name) => read(name) is { } value && !string.IsNullOrWhiteSpace(value) ? value.Trim() : null;
 
-        ApiKey ??= Read(QueueyEnvironmentVariables.ApiKey);
         SigningKeyId ??= Read(QueueyEnvironmentVariables.SigningKeyId);
         SigningSecret ??= Read(QueueyEnvironmentVariables.SigningSecret);
+        // Minste privilegium (security-review av #67, KAN G): med et signeringspar leses ikke QUEUEY_API_KEY, for en satt nøkkel
+        // ville vunnet over signeringen ved publisering. En nøkkel satt i koden vinner fortsatt.
+        if (string.IsNullOrWhiteSpace(SigningKeyId) || string.IsNullOrWhiteSpace(SigningSecret))
+            ApiKey ??= Read(QueueyEnvironmentVariables.ApiKey);
         TenantPublicId ??= Read(QueueyEnvironmentVariables.Tenant);
         LicensePublicId ??= Read(QueueyEnvironmentVariables.License);
         if (ApiBaseAddress is null && Read(QueueyEnvironmentVariables.ApiBase) is { } api)

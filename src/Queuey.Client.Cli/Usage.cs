@@ -409,9 +409,10 @@ KEYS
                  none, since a key that can mint keys turns pipeline access into account access.
                  --write .env puts QUEUEY_SIGNING_KEY_ID and QUEUEY_SIGNING_SECRET in that file
                  and never prints the secret, in --json neither. The lines that set them are
-                 replaced and every other line stays; a new file is readable only by you
-                 (chmod 600). In a git repository the file must be one git ignores, or nothing
-                 is minted. The SDK reads them with QueueyOptions.UseEnvironmentVariables().
+                 replaced and every other line stays, and the file is 0600 afterwards (one others
+                 could read is tightened, and the answer says from what). In a git repository the
+                 file must be one git ignores, and it may not be a link, or nothing is minted.
+                 The SDK reads them with QueueyOptions.UseEnvironmentVariables().
                  Without --write the secret is shown ONCE.
                  When Queuey gives the mint to a person, it exits 5 with the link, and
                  nothing is minted.
@@ -497,7 +498,8 @@ PUBLISH
                  Without an API key (as with a login, which the ingress does not take), it
                  signs with QUEUEY_SIGNING_KEY_ID and QUEUEY_SIGNING_SECRET from the
                  environment, else from ./.env, where `queuey keys mint` writes them (see
-                 KEYS). Only those two are read from .env, and a key that is set wins.
+                 KEYS). Only those two are read from .env, only from a plain file of your own,
+                 and a key that is set wins. --json says where (signingKeyFrom).
                  When the key may read the queue, what its ingress requires is read first.
                  An ingress that verifies a provider's signature (such as Stripe's) or
                  Queuey's own, or wants a key and a signature together, is refused before
