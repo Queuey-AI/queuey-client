@@ -144,7 +144,7 @@ internal sealed class EdgeTransferLoop : BackgroundService
                     _logger.LogCritical(EdgeLogEvents.RequiresAction,
                         "Transfer blocked: Queuey refused the signature's timestamp (HTTP {Status}): this machine's clock is more " +
                         "than 5 minutes off. Events are retained; probing every {Delay}. Sync the clock (NTP; under systemd, " +
-                        "time-sync.target) and Edge resumes automatically. The key is fine.",
+                        "time-sync.target) and Edge resumes automatically. The key is checked once the clock is right.",
                         outcome.Evidence?.StatusCode, delay);
                 }
                 else if (outcome.Class == TransferClass.RequiresAction)

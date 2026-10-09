@@ -201,7 +201,13 @@ internal static class EdgeCommand
     /// </summary>
     // Edge-signering (Kenneth 2026-10-09): daemonen leser de samme variablene som SDK-en, gjennom QueueyEdgeOptions.
     internal static QueueyEdgeOptions EdgeCredentials(ArgMap map)
-        => new QueueyEdgeOptions { ApiKey = map.Get("api-key") }.UseEnvironmentVariables(CliHost.Env);
+    {
+        // Security-review av #70 (K-a): flagget virker fortsatt, men den som bruker det, får vite hvor nøkkelen hører hjemme.
+        if (!string.IsNullOrWhiteSpace(map.Get("api-key")))
+            Console.Error.WriteLine("Warning: --api-key: argv is visible to every user on this machine; move it to QUEUEY_API_KEY or " +
+                                    "QUEUEY_EDGE_HEALTH_API_KEY in edge.env.");
+        return new QueueyEdgeOptions { ApiKey = map.Get("api-key") }.UseEnvironmentVariables(CliHost.Env);
+    }
 
     /// <summary>
     /// Hosts the Edge transfer loop as a STANDALONE daemon — the complete
@@ -226,7 +232,7 @@ internal static class EdgeCommand
             Console.Error.WriteLine(
                 "edge run needs --tenant <ten_...> (or QUEUEY_TENANT) and a key: the signing pair QUEUEY_SIGNING_KEY_ID and " +
                 "QUEUEY_SIGNING_SECRET in its environment, which queuey keys mint --write <file> writes for the service's " +
-                "environment file; or a publish-only key with --api-key <qak_...> or QUEUEY_API_KEY.");
+                "environment file; or a publish-only key in QUEUEY_API_KEY.");
             return ExitCodes.Configuration;
         }
 

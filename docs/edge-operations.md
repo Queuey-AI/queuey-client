@@ -14,13 +14,12 @@ queuey keys mint --queue sensor-readings --write edge.env   # the secret is neve
 
 Put it on the device as `/etc/queuey/edge.env`, owned by root and readable by
 nobody else (systemd reads it as root before it starts the service as `queuey`,
-so the service user never needs to read the file), then delete your copy:
+so the service user never needs to read the file). Stream it straight into
+place — it never lands in `/tmp` on the device — then delete your copy:
 
 ```bash
-scp edge.env device:/tmp/edge.env && rm edge.env
-# on the device:
-sudo install -d -m 700 -o root -g root /etc/queuey
-sudo install -m 600 -o root -g root /tmp/edge.env /etc/queuey/edge.env && rm /tmp/edge.env
+ssh device 'sudo install -d -m 700 -o root -g root /etc/queuey'
+ssh device 'sudo install -m 600 -o root -g root /dev/stdin /etc/queuey/edge.env' < edge.env && rm edge.env
 ```
 
 (A publish-only API key, *Limit to ingress* and scoped to the workspace, is the
@@ -78,9 +77,18 @@ the spool a durable home at `/var/lib/queuey` with the right ownership.
 **The clock matters.** Edge signs each transfer when it sends it, with this
 machine's clock, and Queuey refuses a signature more than 5 minutes off its
 own (`timestamp_out_of_range`). `time-sync.target` makes the service start
-after the clock is synchronised; a device without NTP, or with a dead RTC
-battery, holds its events — Edge logs that the clock is off, not the key —
-until the clock is right, then drains by itself.
+after the clock is synchronised — but only when a wait service is enabled;
+without one the target is reached at once. Enable the one for the time daemon
+the device runs:
+
+```bash
+sudo systemctl enable systemd-time-wait-sync.service   # with systemd-timesyncd
+sudo systemctl enable chrony-wait.service              # with chrony
+```
+
+A device without NTP, or with a dead RTC battery, holds its events — Edge logs
+that the clock is off; the key is checked once the clock is right — until the
+clock is right, then drains by itself.
 
 **4. Publish from whatever the device runs** — all three are the same
 durable accept boundary:

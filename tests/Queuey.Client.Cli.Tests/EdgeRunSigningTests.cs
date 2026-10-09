@@ -65,6 +65,8 @@ public sealed class EdgeRunSigningTests : IDisposable
         string edge = text.Substring(start, text.IndexOf("\n  queuey edge publish", start, StringComparison.Ordinal) - start);
 
         Assert.DoesNotContain("--api-key <qak", edge);
+        Assert.DoesNotContain("--mqtt-password <", edge); // K-c: passordet bare som QUEUEY_MQTT_PASSWORD
+        Assert.Contains("only as QUEUEY_MQTT_PASSWORD, never in argv", edge);
         Assert.DoesNotContain("with the pair it serves only", edge);
         Assert.Contains("QUEUEY_EDGE_HEALTH_API_KEY", edge);
         Assert.Contains("argv is visible to every user", edge);
@@ -101,6 +103,23 @@ public sealed class EdgeRunSigningTests : IDisposable
         Assert.Equal(ExitCodes.Configuration, run.Exit);
         Assert.Contains("QUEUEY_SIGNING_KEY_ID and QUEUEY_SIGNING_SECRET", run.Stderr);
         Assert.Contains("queuey keys mint --write", run.Stderr);
+        Assert.False(File.Exists(spool));
+    }
+
+    [Fact]
+    public async Task An_api_key_flag_is_warned_about_and_the_refusal_never_suggests_it()
+    {
+        // Security-review av #70 (K-a).
+        string spool = Path.Combine(_dir, "spool.db");
+
+        CliRun flagged = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "edge", "run", "--spool", spool, "--tenant", "ten_1", "--api-key", "qak_id.publishonly" }),
+            env: new Dictionary<string, string> { ["QUEUEY_SIGNING_KEY_ID"] = "hsk_01EDGE" });
+        CliRun none = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "edge", "run", "--spool", spool, "--tenant", "ten_1" }));
+
+        Assert.Contains("argv is visible to every user on this machine; move it to QUEUEY_API_KEY or QUEUEY_EDGE_HEALTH_API_KEY in edge.env", flagged.Stderr);
+        Assert.DoesNotContain("qak_id.publishonly", flagged.Stdout + flagged.Stderr);
+        Assert.DoesNotContain("--api-key", none.Stderr);
+        Assert.DoesNotContain("argv is visible", none.Stderr);
         Assert.False(File.Exists(spool));
     }
 

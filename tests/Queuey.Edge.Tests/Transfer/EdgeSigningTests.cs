@@ -220,7 +220,11 @@ public class EdgeSigningTests
         string runbook = File.ReadAllText(RepoFile("docs/edge-operations.md"));
         string readme = File.ReadAllText(RepoFile("src/Queuey.Edge/README.md"));
 
-        Assert.Contains("sudo install -m 600 -o root -g root /tmp/edge.env /etc/queuey/edge.env", runbook);
+        Assert.Contains("ssh device 'sudo install -m 600 -o root -g root /dev/stdin /etc/queuey/edge.env' < edge.env", runbook);
+        Assert.DoesNotContain("/tmp/edge.env", runbook);
+        Assert.Contains("systemctl enable systemd-time-wait-sync.service", runbook);
+        Assert.Contains("systemctl enable chrony-wait.service", runbook);
+        Assert.DoesNotContain("The key is fine", runbook);
         Assert.Contains("After=network-online.target time-sync.target", runbook);
         Assert.Contains("Wants=network-online.target time-sync.target", runbook);
         Assert.DoesNotContain("owned by the queuey user", runbook);
