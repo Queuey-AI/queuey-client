@@ -43,7 +43,7 @@ internal static class CliHost
     {
         string? profile = Profile(args);
         if (profile is null)
-            return CliConfig.Resolve(args, Env, ReadConfigJson(args));
+            return Logins.Attach(CliConfig.Resolve(args, Env, ReadConfigJson(args)), Env);
 
         // F2.7: en kommando uten profiler ville koblet til med queuey.json og QUEUEY_-variablene, ikke profilens miljø.
         if (!profiles)
@@ -55,8 +55,9 @@ internal static class CliHost
                                   "credentials and whoami take a profile.",
             };
 
+        // En profil uten apiKey bruker innloggingen for sin API-vert og lisens (queuey login, 2026-10-09).
         ConnectionProfile connection = UserProfiles.Load(profile, Env, out string path);
-        return CliConfig.ResolveProfile(args, Env, profile, connection, path);
+        return Logins.Attach(CliConfig.ResolveProfile(args, Env, profile, connection, path), Env);
     }
 
     /// <summary>

@@ -4,14 +4,16 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using Queuey.Client.Waas;
 
 namespace Queuey.Client.Cli;
 
 // F2.7 (2026-10-06, Kenneth: «Gjør din anbefaling på --profile»): tilkoblingen per miljø — nøkkelen, lisensen, vertene og
-// workspacet — bor hos brukeren, i ~/.queuey/config.json, aldri i repoet. `queuey login` skriver fila i Fase 4; til da skrives
-// den for hånd, og formatet står i README og `queuey --help`.
+// workspacet — bor hos brukeren, i ~/.queuey/config.json, aldri i repoet. `queuey login --profile` skriver profilen uten nøkkel
+// (2026-10-09, WriteLogin); tokenene står i credentials.json ved siden av (LoginStore). For hånd skrives den med en nøkkel, og
+// formatet står i README og `queuey --help`.
 //
 // Fila holder API-nøkler, så den leses bare når ingen andre enn eieren kan lese eller skrive den (0600 eller strengere), og
 // mappa den ligger i, ikke kan skrives av andre. Valgt fremfor en advarsel (som ssh gjør med en privat nøkkel): en advarsel på
@@ -82,10 +84,40 @@ internal static class UserProfiles
             throw new QueueyConfigurationException(
                 $"--profile {profile} needs its connection in {path}, and there is no such file.")
             {
-                SuggestedAction = $"Create it, readable only by you (chmod 600), with \"profiles\": {{ \"{profile}\": {{ \"apiKey\", \"license\", " +
-                                  "\"tenant\", \"apiBase\", \"ingressBase\" }} }}. `queuey --help` shows the format.",
+                SuggestedAction = $"Run `queuey login --profile {profile}`, which writes it. Or create it, readable only by you (chmod 600), with " +
+                                  $"\"profiles\": {{ \"{profile}\": {{ \"apiKey\", \"license\", \"tenant\", \"apiBase\", \"ingressBase\" }} }}. " +
+                                  "`queuey --help` shows the format.",
             };
 
+        UserConfig config = Read(path);
+        if (config.Profiles is not null && config.Profiles.TryGetValue(profile, out ConnectionProfile? found) && found is not null)
+            return found;
+
+        IEnumerable<string> names = (config.Profiles?.Keys ?? Enumerable.Empty<string>()).Where(DeploymentProfiles.IsName).OrderBy(n => n, StringComparer.Ordinal);
+        string has = names.Any() ? "It has " + string.Join(", ", names) + "." : "It has no profiles.";
+        throw new QueueyConfigurationException($"{path} has no profile '{profile}', so --profile {profile} has no connection. {has}")
+        {
+            SuggestedAction = $"Run `queuey login --profile {profile}`, which adds it. Or add \"{profile}\" under \"profiles\" in {path}, " +
+                              "with that environment's apiKey, license, tenant and hosts.",
+        };
+    }
+
+    /// <summary>
+    /// Profile <paramref name="profile"/>'s connection, or null when the file or the profile is not there yet, as for a first
+    /// <c>queuey login --profile</c>. A file others can reach, or one that cannot be read, still throws.
+    /// </summary>
+    internal static ConnectionProfile? TryLoad(string profile, Func<string, string?> env, out string path)
+    {
+        path = PathOf(env);
+        if (!File.Exists(path))
+            return null;
+        UserConfig config = Read(path);
+        return config.Profiles is not null && config.Profiles.TryGetValue(profile, out ConnectionProfile? found) ? found : null;
+    }
+
+    /// <summary>The file at <paramref name="path"/>, checked and parsed. Nothing it holds is ever shown in an error.</summary>
+    private static UserConfig Read(string path)
+    {
         // Fila som leses, er den som ble sjekket: lenkens endelige mål.
         string target = EnsureOnlyTheUserCanReachIt(path);
 
@@ -99,10 +131,9 @@ internal static class UserProfiles
             throw new QueueyConfigurationException($"Could not read {path}: {ex.GetType().Name}.");
         }
 
-        UserConfig config;
         try
         {
-            config = JsonSerializer.Deserialize<UserConfig>(json, ReadOptions) ?? new UserConfig();
+            return JsonSerializer.Deserialize<UserConfig>(json, ReadOptions) ?? new UserConfig();
         }
         catch (JsonException ex)
         {
@@ -118,16 +149,81 @@ internal static class UserProfiles
                 SuggestedAction = "Each profile takes apiKey, license, tenant, apiBase, ingressBase and source, all text.",
             };
         }
+    }
 
-        if (config.Profiles is not null && config.Profiles.TryGetValue(profile, out ConnectionProfile? found) && found is not null)
-            return found;
-
-        IEnumerable<string> names = (config.Profiles?.Keys ?? Enumerable.Empty<string>()).Where(DeploymentProfiles.IsName).OrderBy(n => n, StringComparer.Ordinal);
-        string has = names.Any() ? "It has " + string.Join(", ", names) + "." : "It has no profiles.";
-        throw new QueueyConfigurationException($"{path} has no profile '{profile}', so --profile {profile} has no connection. {has}")
+    /// <summary>
+    /// Writes what <c>queuey login --profile</c> found into profile <paramref name="profile"/>: the license, the hosts and the
+    /// workspace, or no workspace when <paramref name="tenant"/> is null. Every other profile, and every other field of this
+    /// one (an <c>apiKey</c>, a <c>source</c>), stays as it was. A profile with an <c>apiKey</c> keeps its hosts as they are
+    /// (a missing host is Queuey's own), gets the license only when it has none, and the workspace only when it has none and
+    /// already had the login's license, since the key wins over the login. The file is created readable only by the user (0600) when it is not there, and
+    /// replaced whole otherwise. Returns the file, whether the profile has an <c>apiKey</c>, and the workspace it names now.
+    /// </summary>
+    // Profilfletting (PR 4): fila leses som JSON-tre, ikke som UserConfig, så felt en nyere CLI har skrevet blir stående. Kommentarer
+    // går tapt, siden System.Text.Json ikke skriver dem tilbake; det står i README.
+    internal static (string Path, bool HasApiKey, string? Tenant) WriteLogin(
+        string profile, Func<string, string?> env, string license, string apiBase, string? ingressBase, string? tenant)
+    {
+        string path = PathOf(env);
+        string target = Path.GetFullPath(path);
+        JsonObject root = new();
+        if (File.Exists(path))
         {
-            SuggestedAction = $"Add \"{profile}\" under \"profiles\" in {path}, with that environment's apiKey, license, tenant and hosts.",
-        };
+            target = EnsureOnlyTheUserCanReachIt(path);
+            _ = Read(path); // Samme sjekk av formen som når fila leses, så en fil med feil aldri blir skrevet over halvveis.
+            root = JsonNode.Parse(File.ReadAllText(target), documentOptions: new JsonDocumentOptions
+            {
+                CommentHandling = JsonCommentHandling.Skip,
+                AllowTrailingCommas = true,
+            }) as JsonObject ?? new JsonObject();
+        }
+
+        if (root["profiles"] is not JsonObject profiles)
+            root["profiles"] = profiles = new JsonObject();
+        if (profiles[profile] is not JsonObject entry)
+            profiles[profile] = entry = new JsonObject();
+
+        // En profil med apiKey kobler til med nøkkelen, og den er skrevet av en person. Login flytter den aldri (security-review
+        // av #66, BØR 2, runde 2): vertene skrives ikke, for en vert som mangler, er Queueys egen, og å fylle den ville sendt
+        // nøkkelen til innloggingens vert. Lisensen fylles bare når den mangler, og workspacet bare når det mangler og profilen
+        // alt hadde innloggingens lisens.
+        bool hasApiKey = Has(entry, "apiKey");
+        if (hasApiKey)
+        {
+            bool sameLicense = entry["license"] is JsonValue had && had.TryGetValue(out string? hadLicense)
+                               && string.Equals(hadLicense?.Trim(), license, StringComparison.Ordinal);
+            Set(entry, "license", license, fillOnly: true);
+            if (sameLicense)
+                Set(entry, "tenant", tenant, fillOnly: true);
+        }
+        else
+        {
+            Set(entry, "license", license, fillOnly: false);
+            Set(entry, "apiBase", apiBase, fillOnly: false);
+            Set(entry, "ingressBase", ingressBase, fillOnly: false);
+            Set(entry, "tenant", tenant, fillOnly: false);
+        }
+
+        PrivateFiles.WriteAllText(target, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+        return (path, hasApiKey, entry["tenant"] is JsonValue written && written.TryGetValue(out string? kept) ? kept : null);
+
+        static bool Has(JsonObject entry, string name)
+            => entry[name] is JsonValue value && value.TryGetValue(out string? text) && !string.IsNullOrWhiteSpace(text);
+
+        static void Set(JsonObject entry, string name, string? value, bool fillOnly)
+        {
+            if (fillOnly && Has(entry, name))
+                return;
+            if (value is null)
+            {
+                if (!fillOnly)
+                    entry.Remove(name);
+            }
+            else
+            {
+                entry[name] = value;
+            }
+        }
     }
 
     /// <summary>
@@ -137,10 +233,15 @@ internal static class UserProfiles
     /// write to it without the sticky bit. Not on Windows, which has no Unix permissions; the user profile's ACL protects the
     /// file there. ACLs on Unix are not read.
     /// </summary>
-    internal static string EnsureOnlyTheUserCanReachIt(string path) => EnsureOnlyTheUserCanReachIt(path, Home());
+    internal static string EnsureOnlyTheUserCanReachIt(string path) => Ensure(path, Home(), "API keys");
+
+    /// <summary><see cref="EnsureOnlyTheUserCanReachIt(string)"/> for a file that holds <paramref name="holds"/>, as its error says.</summary>
+    internal static string EnsureOnlyTheUserCanReachFileHolding(string path, string holds) => Ensure(path, Home(), holds);
 
     /// <summary><see cref="EnsureOnlyTheUserCanReachIt(string)"/> with the home folder the walk stops at given.</summary>
-    internal static string EnsureOnlyTheUserCanReachIt(string path, string? home)
+    internal static string EnsureOnlyTheUserCanReachIt(string path, string? home) => Ensure(path, home, "API keys");
+
+    private static string Ensure(string path, string? home, string holds)
     {
         if (OperatingSystem.IsWindows())
             return path;
@@ -161,18 +262,39 @@ internal static class UserProfiles
                                            | UnixFileMode.OtherRead | UnixFileMode.OtherWrite | UnixFileMode.OtherExecute;
         if ((mode & GroupOrOthers) != 0)
             throw new QueueyConfigurationException(
-                $"{shown} holds API keys, and other users can reach it (mode {Octal(mode)}), so it was not read.")
+                $"{shown} holds {holds}, and other users can reach it (mode {Octal(mode)}), so it was not read.")
             {
                 SuggestedAction = $"Let only you read and write it: chmod 600 {target}",
             };
 
+        Folders(Path.GetDirectoryName(target), home, me, shown, "it was not read");
+        return target;
+    }
+
+    /// <summary>
+    /// Throws when another user could replace a file the CLI is about to write in <paramref name="folder"/>: the folder, or one
+    /// above it up to the home folder, belongs to another user than the user or root, or others can write to it without the
+    /// sticky bit. The same rules as for a file it reads. Not on Windows.
+    /// </summary>
+    // Security-review av #66 (KAN 5): en ny credentials.json eller config.json ble skrevet uten at mappene ble sjekket, så en
+    // mappe andre kunne skrive i, ble først oppdaget ved neste lesing, etter at tokenene var der.
+    internal static void EnsureOnlyTheUserCanWriteIn(string folder)
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+        string full = Path.GetFullPath(folder);
+        Folders(full, Home(), CurrentUser(), Path.Combine(full, "…"), "nothing was written");
+    }
+
+    private static void Folders(string? start, string? home, uint me, string shown, string outcome)
+    {
         // Hver mappe over fila, som ssh: til og med hjemmemappa når fila ligger der, ellers helt til roten.
-        for (string? folder = Path.GetDirectoryName(target); folder is not null; folder = Path.GetDirectoryName(folder))
+        for (string? folder = start; folder is not null; folder = Path.GetDirectoryName(folder))
         {
             (uint folderOwner, UnixFileMode folderMode) = Inspect(folder);
             if (folderOwner != me && folderOwner != 0)
                 throw new QueueyConfigurationException(
-                    $"{folder} belongs to another user (uid {folderOwner}), who could replace {shown}, so it was not read.")
+                    $"{folder} belongs to another user (uid {folderOwner}), who could replace {shown}, so {outcome}.")
                 {
                     SuggestedAction = "Keep the file in a folder that belongs to you, such as ~/.queuey.",
                 };
@@ -180,7 +302,7 @@ internal static class UserProfiles
             // En mappe andre kan skrive i, lar dem bytte ut fila, med mindre sticky-biten hindrer det (som i /tmp).
             if ((folderMode & (UnixFileMode.GroupWrite | UnixFileMode.OtherWrite)) != 0 && (folderMode & UnixFileMode.StickyBit) == 0)
                 throw new QueueyConfigurationException(
-                    $"{folder} can be written by other users (mode {Octal(folderMode)}), who could replace {shown}, so it was not read.")
+                    $"{folder} can be written by other users (mode {Octal(folderMode)}), who could replace {shown}, so {outcome}.")
                 {
                     SuggestedAction = $"Let only you write to it: chmod go-w {folder}",
                 };
@@ -188,8 +310,6 @@ internal static class UserProfiles
             if (home is not null && string.Equals(folder, home, StringComparison.Ordinal))
                 break;
         }
-
-        return target;
     }
 
     /// <summary>The file a link at <paramref name="path"/> finally points to, as a full path; the path itself when it is no link.</summary>

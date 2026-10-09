@@ -1662,7 +1662,7 @@ public sealed class QueueyService : IQueueyService, IQueueyPlans
         string tenant = string.IsNullOrWhiteSpace(tenantPublicId) ? RequireTenant() : tenantPublicId!;
         if (string.IsNullOrWhiteSpace(_options.LicensePublicId))
             throw MissingSetting.License();
-        if (string.IsNullOrWhiteSpace(_options.ApiKey))
+        if (string.IsNullOrWhiteSpace(_options.ApiKey) && _options.AccessTokenProvider is null)
             throw MissingSetting.ApiKey();
         return tenant;
     }

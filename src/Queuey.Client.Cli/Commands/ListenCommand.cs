@@ -120,8 +120,9 @@ internal static class ListenCommand
             // Konfigurasjonen leses inne i try (re-review av #50, K2): en --tenant som ikke er ten_…, en ugyldig --api-base og
             // en queuey.json som ikke kan leses, ga før et JSON-objekt over flere linjer fra CliEntry.
             config = Connection(map);
-            if (string.IsNullOrWhiteSpace(config.ApiKey))
-                return Refuse("config_error", "An API key is required (--api-key, QUEUEY_API_KEY, or queuey.json).", null, ExitCodes.Configuration);
+            if (string.IsNullOrWhiteSpace(config.ApiKey) && config.Login is null)
+                return Refuse("config_error", "An API key or a login is required: run `queuey login`, or set --api-key, QUEUEY_API_KEY, or apiKey in queuey.json.",
+                    null, ExitCodes.Configuration);
 
             target = await ResolveTargetAsync(map, config);
         }
@@ -230,7 +231,12 @@ internal static class ListenCommand
         HubConnection connection = new HubConnectionBuilder()
             .WithUrl(hubUrl, options =>
             {
-                options.Headers["X-Api-Key"] = config.ApiKey!;
+                // En nøkkel som er satt, vinner; ellers innloggingen, som Bearer. Tokenet hentes ved hver tilkobling, også etter et
+                // brudd, så en økt som varer lenger enn tokenet, fornyer det.
+                if (!string.IsNullOrWhiteSpace(config.ApiKey))
+                    options.Headers["X-Api-Key"] = config.ApiKey!;
+                else if (config.Login is { } login)
+                    options.AccessTokenProvider = async () => await login.AccessTokenAsync(CancellationToken.None);
                 options.SkipNegotiation = true;
                 options.Transports = HttpTransportType.WebSockets;
             })

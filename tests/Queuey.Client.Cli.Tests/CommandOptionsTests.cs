@@ -131,7 +131,7 @@ public sealed class CommandOptionsTests : IDisposable
 
     public static TheoryData<string[]> EveryCommand => new()
     {
-        new[] { "advise" }, new[] { "whoami" }, new[] { "sync" }, new[] { "queue", "plan" }, new[] { "queue", "sync" },
+        new[] { "advise" }, new[] { "login" }, new[] { "logout" }, new[] { "whoami" }, new[] { "sync" }, new[] { "queue", "plan" }, new[] { "queue", "sync" },
         new[] { "apply" }, new[] { "plan" }, new[] { "verify", "orders" }, new[] { "schema" }, new[] { "pull" },
         new[] { "keys", "mint" }, new[] { "credentials", "set" }, new[] { "credentials", "request" }, new[] { "credentials", "list" },
         new[] { "publish", "orders" }, new[] { "create-tenant" }, new[] { "create-queue" }, new[] { "metrics" },

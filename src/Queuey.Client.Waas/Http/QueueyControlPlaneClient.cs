@@ -34,7 +34,7 @@ internal sealed class QueueyControlPlaneClient
 
         // Credentials are validated when the call is actually made (never at construction), so a
         // publish-only consumer that resolves IQueueyService never trips a control-plane requirement.
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "waas", "streams");
@@ -55,7 +55,7 @@ internal sealed class QueueyControlPlaneClient
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
 
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "waas", "packages");
@@ -74,7 +74,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Assigns a stream (catalog entry) to a package (additive, idempotent). Returns 204.</summary>
     public async Task AssignStreamAsync(string packagePublicId, string catalogEntryPublicId, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         string tenant = RequireTenant();
 
@@ -96,7 +96,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Invites an integration partner by email (<c>POST /waas/integrations</c>).</summary>
     public async Task<IntegrationResponse> InviteIntegrationAsync(string email, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "waas", "integrations");
@@ -110,7 +110,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Grants a package to an integration (<c>POST …/packages/{pkg}/grants</c>). Idempotent. Returns 204.</summary>
     public async Task GrantPackageAsync(string integrationPublicId, string packagePublicId, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         string tenant = RequireTenant();
 
@@ -123,7 +123,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Revokes a package grant (<c>DELETE …/packages/{pkg}/grants/{integration}</c>). Idempotent. Returns 204.</summary>
     public async Task RevokePackageAsync(string integrationPublicId, string packagePublicId, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         string tenant = RequireTenant();
 
@@ -134,7 +134,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Activates a group key for an integration (<c>POST /waas/activations</c>) — the second routing gate.</summary>
     public async Task<ActivationResponse> ActivateAsync(string integrationPublicId, string groupKey, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "waas", "activations");
@@ -148,7 +148,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Deactivates a group key (<c>DELETE /waas/activations</c> — with a JSON body). Returns 204.</summary>
     public async Task DeactivateAsync(string integrationPublicId, string groupKey, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "waas", "activations");
@@ -168,7 +168,7 @@ internal sealed class QueueyControlPlaneClient
     public async Task<TenantSummaryResponse> CreateTenantAsync(
         string displayName, bool asProducer, bool withDefaultQueue, CancellationToken cancellationToken, string? environment = null)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants");
@@ -186,7 +186,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Creates a queue under a tenant (<c>POST /queues</c>).</summary>
     public async Task<QueueReadResponse> CreateQueueAsync(string tenantPublicId, string displayName, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues");
@@ -204,7 +204,7 @@ internal sealed class QueueyControlPlaneClient
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
 
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues");
@@ -229,7 +229,7 @@ internal sealed class QueueyControlPlaneClient
         if (string.IsNullOrWhiteSpace(queuePublicId)) throw new ArgumentException("A queue public id is required.", nameof(queuePublicId));
         if (request is null) throw new ArgumentNullException(nameof(request));
 
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues", queuePublicId, "policy");
@@ -244,7 +244,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Patches the workspace's default endpoint (<c>PATCH /tenants/{ten}/delivery</c>). Returns 204.</summary>
     public async Task PatchTenantDeliveryAsync(string tenantPublicId, PatchTenantDeliveryWireRequest request, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "delivery");
@@ -257,7 +257,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Patches one queue's destination (<c>PATCH /queues/{que}/delivery</c>). Returns 204.</summary>
     public async Task PatchQueueDeliveryAsync(string queuePublicId, PatchQueueDeliveryWireRequest request, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues", queuePublicId, "delivery");
@@ -270,7 +270,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Stores a delivery credential (<c>POST /tenants/{ten}/credentials</c>). The value is never readable again.</summary>
     public async Task<CredentialWireResponse> CreateCredentialAsync(string tenantPublicId, CreateCredentialWireRequest request, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "credentials");
@@ -286,7 +286,7 @@ internal sealed class QueueyControlPlaneClient
     /// </summary>
     public async Task<CredentialWireResponse> RotateCredentialAsync(string tenantPublicId, RotateCredentialWireRequest request, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "credentials", "rotate");
@@ -303,7 +303,7 @@ internal sealed class QueueyControlPlaneClient
     public async Task<CredentialRequestWireResponse> RequestCredentialAsync(
         string tenantPublicId, CreateCredentialRequestWireRequest request, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "credential-requests");
@@ -316,7 +316,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Lists a workspace's delivery credentials — labels only (<c>GET /tenants/{ten}/credentials</c>).</summary>
     public async Task<List<CredentialWireResponse>> ListCredentialsAsync(string tenantPublicId, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "credentials");
@@ -327,7 +327,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Lists a tenant's queues (<c>GET /tenants/{ten}/queues</c>).</summary>
     public async Task<List<QueueListItemResponse>> ListQueuesAsync(string tenantPublicId, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "queues");
@@ -371,7 +371,7 @@ internal sealed class QueueyControlPlaneClient
     /// </summary>
     public async Task<EventListItemResponse?> GetOldestFailingEventAsync(string queuePublicId, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), "status=Failed&pageSize=1&sortDirection=asc", "events", queuePublicId);
         EventListPageResponse page = await _connection.SendForJsonAsync<EventListPageResponse>(
@@ -385,7 +385,7 @@ internal sealed class QueueyControlPlaneClient
     /// </summary>
     public async Task ReadOneEventAsync(string queuePublicId, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), "pageSize=1", "events", queuePublicId);
         await _connection.SendForJsonAsync<EventListPageResponse>(
@@ -398,7 +398,7 @@ internal sealed class QueueyControlPlaneClient
     /// </summary>
     public async Task<EventDetailsResponse> GetEventAsync(string queuePublicId, string eventPublicId, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "events", queuePublicId, eventPublicId);
         return await _connection.SendForJsonAsync<EventDetailsResponse>(
@@ -413,7 +413,7 @@ internal sealed class QueueyControlPlaneClient
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
 
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues", queuePublicId, "verifications");
         byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
@@ -427,7 +427,7 @@ internal sealed class QueueyControlPlaneClient
     /// </summary>
     public async Task<FlowVerification> GetVerificationAsync(string queuePublicId, string verificationId, int waitSeconds, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), "waitSeconds=" + waitSeconds.ToString(CultureInfo.InvariantCulture),
             "queues", queuePublicId, "verifications", verificationId);
@@ -442,7 +442,7 @@ internal sealed class QueueyControlPlaneClient
     /// </summary>
     public async Task<JsonElement> GetEventEnvelopeJsonAsync(string queuePublicId, string eventPublicId, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "events", queuePublicId, eventPublicId);
         return await _connection.SendForJsonAsync<JsonElement>(
@@ -456,7 +456,7 @@ internal sealed class QueueyControlPlaneClient
     /// </summary>
     public async Task<JsonElement> GetEventContentJsonAsync(string queuePublicId, string eventPublicId, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "events", queuePublicId, eventPublicId, "content");
         return await _connection.SendForJsonAsync<JsonElement>(
@@ -477,7 +477,7 @@ internal sealed class QueueyControlPlaneClient
         string target, string aspect, HttpMethod method, object? request, CancellationToken cancellationToken, params string[] segments)
         where TPlan : DryRunAnswer
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), "dryRun=true", segments);
@@ -540,7 +540,7 @@ internal sealed class QueueyControlPlaneClient
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
 
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, segments);
@@ -553,7 +553,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Reads the workspace's delivery + policy config (<c>GET /tenants/{ten}/config</c>).</summary>
     public async Task<TenantConfigResponse> GetTenantConfigAsync(string tenantPublicId, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "config");
         return await _connection.SendForJsonAsync<TenantConfigResponse>(
@@ -563,7 +563,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Reads one queue's config with its per-section inherit flags (<c>GET /queues/{que}/config</c>).</summary>
     public async Task<QueueConfigResponse> GetQueueConfigAsync(string queuePublicId, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues", queuePublicId, "config");
         return await _connection.SendForJsonAsync<QueueConfigResponse>(
@@ -576,7 +576,7 @@ internal sealed class QueueyControlPlaneClient
     /// </summary>
     public async Task<QueueStoredResponse> GetQueueStoredAsync(string queuePublicId, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues", queuePublicId);
         return await _connection.SendForJsonAsync<QueueStoredResponse>(
@@ -587,7 +587,7 @@ internal sealed class QueueyControlPlaneClient
     public async Task<CreateQueueHmacClientWireResponse> MintIngressKeyAsync(
         string queuePublicId, CreateQueueHmacClientWireRequest request, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "hmacclients", "queues", queuePublicId);
@@ -602,7 +602,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Updates a package's name/description (<c>PUT …/packages/{pkg}</c>).</summary>
     public async Task<PackageApplyResponse> UpdatePackageAsync(string packagePublicId, string? name, string? description, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         string tenant = RequireTenant();
 
@@ -616,7 +616,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Archives a package (<c>POST …/packages/{pkg}/archive</c>). Returns 204.</summary>
     public async Task ArchivePackageAsync(string packagePublicId, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         string tenant = RequireTenant();
 
@@ -627,7 +627,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Removes a stream from a package (<c>DELETE …/packages/{pkg}/streams/{cat}</c>). Idempotent. Returns 204.</summary>
     public async Task RemoveStreamAsync(string packagePublicId, string catalogEntryPublicId, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         string tenant = RequireTenant();
 
@@ -640,7 +640,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Reads a queue traffic snapshot (<c>GET /queues/{q}/metrics/snapshot</c>).</summary>
     public async Task<QueueMetricsSnapshot> GetQueueMetricsSnapshotAsync(string queuePublicId, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues", queuePublicId, "metrics", "snapshot");
         return await _connection.SendForJsonAsync<QueueMetricsSnapshot>(
@@ -650,7 +650,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Replays an event to a connected listener (<c>POST /queues/{q}/replay-to-listener/{e}</c>).</summary>
     public async Task<ReplayResult> ReplayToListenerAsync(string queuePublicId, string eventPublicId, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "queues", queuePublicId, "replay-to-listener", eventPublicId);
         return await _connection.SendForJsonAsync<ReplayResult>(
@@ -660,7 +660,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Lists a tenant's issues (<c>GET /issues/{tenant}?status&amp;severity&amp;queuePublicId&amp;limit&amp;cursor</c>).</summary>
     public async Task<IssueListPage> ListIssuesAsync(string tenantPublicId, IssueQuery? query, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), BuildIssueQuery(query), "issues", tenantPublicId);
         return await _connection.SendForJsonAsync<IssueListPage>(
@@ -670,7 +670,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Reads one issue's detail (<c>GET /issues/{tenant}/{issue}</c>).</summary>
     public async Task<IssueDetails> GetIssueAsync(string tenantPublicId, string issuePublicId, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "issues", tenantPublicId, issuePublicId);
         return await _connection.SendForJsonAsync<IssueDetails>(
@@ -904,7 +904,7 @@ internal sealed class QueueyControlPlaneClient
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
 
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "deployment", "applies");
@@ -936,7 +936,7 @@ internal sealed class QueueyControlPlaneClient
     {
         if (request is null) throw new ArgumentNullException(nameof(request));
 
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "deployment", "plans");
         byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
@@ -957,7 +957,7 @@ internal sealed class QueueyControlPlaneClient
     /// </summary>
     public async Task SetPlanDesiredAsync(string tenantPublicId, string planPublicId, int step, JsonElement desired, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "deployment", "plans", planPublicId,
             "steps", step.ToString(CultureInfo.InvariantCulture), "desired");
@@ -969,7 +969,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Seals the plan (<c>POST …/plans/{plan}/seal</c>): its hash, and the policy's decision with the rule.</summary>
     public async Task<SealedPlanWireResponse> SealPlanAsync(string tenantPublicId, string planPublicId, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "deployment", "plans", planPublicId, "seal");
         return await _connection.SendForJsonAsync<SealedPlanWireResponse>(
@@ -982,7 +982,7 @@ internal sealed class QueueyControlPlaneClient
     /// </summary>
     public async Task<PlanPendingWireResponse> SubmitPlanAsync(string tenantPublicId, string planPublicId, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "deployment", "plans", planPublicId, "submit");
         return await _connection.SendForJsonAsync<PlanPendingWireResponse>(
@@ -992,7 +992,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Reads a plan with its steps (<c>GET /tenants/{ten}/deployment/plans/{plan}</c>).</summary>
     public async Task<PlanWireResponse> GetPlanAsync(string tenantPublicId, string planPublicId, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId, "deployment", "plans", planPublicId);
         return await _connection.SendForJsonAsync<PlanWireResponse>(
@@ -1002,7 +1002,7 @@ internal sealed class QueueyControlPlaneClient
     /// <summary>Reads how the workspace's own settings are managed (<c>GET /tenants/{ten}</c>, the <c>deployment</c> field).</summary>
     public async Task<TenantDeploymentResponse> GetTenantDeploymentAsync(string tenantPublicId, CancellationToken cancellationToken)
     {
-        IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
+        IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants", tenantPublicId);
@@ -1015,8 +1015,15 @@ internal sealed class QueueyControlPlaneClient
     private string RequireTenant()
         => string.IsNullOrWhiteSpace(_options.TenantPublicId) ? throw MissingSetting.Tenant() : _options.TenantPublicId!;
 
-    private string RequireApiKey()
-        => string.IsNullOrWhiteSpace(_options.ApiKey) ? throw MissingSetting.ApiKey() : _options.ApiKey!;
+    // Nøkkelen først, så innloggingen (queuey login, 2026-10-09): en nøkkel som er satt, er et uttrykkelig valg og vinner.
+    private IQueueyAuthenticator Authenticator()
+    {
+        if (!string.IsNullOrWhiteSpace(_options.ApiKey))
+            return new ApiKeyAuthenticator(_options.ApiKey!);
+        if (_options.AccessTokenProvider is { } token)
+            return new BearerTokenAuthenticator(token);
+        throw MissingSetting.ApiKey();
+    }
 
     private string RequireLicense()
         => string.IsNullOrWhiteSpace(_options.LicensePublicId) ? throw MissingSetting.License() : _options.LicensePublicId!;

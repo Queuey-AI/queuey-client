@@ -46,7 +46,7 @@ public class SyncStreamsTests
     [Theory]
     [InlineData("tenant", "A workspace (ten_…) is required for this call, and none is set.", "--tenant, QUEUEY_TENANT, or tenant in queuey.json")]
     [InlineData("license", "A license id (lic_…) is required for this call, and none is set.", "--license, QUEUEY_LICENSE, or license in queuey.json")]
-    [InlineData("key", "An API key is required for this call, and none is set.", "--api-key, QUEUEY_API_KEY, or apiKey in queuey.json")]
+    [InlineData("key", "An API key or a login is required for this call, and neither is set.", "run `queuey login`, or set --api-key, QUEUEY_API_KEY, or apiKey in queuey.json")]
     public async Task A_missing_setting_says_where_to_set_it_and_nothing_is_sent(string missing, string message, string where)
     {
         // Re-review 2026-10-05: tjenesten sa «required for SyncStreams» også for apply og pull, og uten handling.
@@ -66,6 +66,43 @@ public class SyncStreamsTests
         Assert.Equal(message, ex.Message);
         Assert.Contains(where, ex.SuggestedAction);
         Assert.Null(api.LastRequest);
+    }
+
+    [Fact]
+    public async Task Without_a_key_an_access_token_goes_as_a_bearer_and_is_asked_for_on_each_call()
+    {
+        // queuey login (2026-10-09): tilkoblingen er et OAuth-token, ikke en nøkkel. Det hentes per kall, så en CLI-kommando som
+        // varer lenger enn tokenet, fornyer det underveis.
+        int asked = 0;
+        var api = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(HttpStatusCode.OK, WaasTestHost.DefaultApplyBody()));
+        QueueyService service = WaasTestHost.Build(apiStub: api, streams: new[] { StreamDefinitionFactory.FromType(typeof(OrderCreated), null) },
+            configure: o =>
+            {
+                o.ApiKey = null;
+                o.AccessTokenProvider = _ => Task.FromResult($"opaque-token-{++asked}");
+            });
+
+        await service.SyncStreamsAsync();
+
+        HttpRequestMessage req = api.LastRequest!;
+        Assert.Equal("Bearer", req.Headers.Authorization!.Scheme);
+        Assert.Equal("opaque-token-1", req.Headers.Authorization.Parameter);
+        Assert.False(req.Headers.Contains(QueueyHeaders.ApiKey));
+        Assert.Equal("lic_1", req.Headers.GetValues(QueueyHeaders.LicensePublicId).Single());
+        Assert.Equal(1, asked);
+    }
+
+    [Fact]
+    public async Task A_key_that_is_set_wins_over_an_access_token()
+    {
+        var api = new StubHttpMessageHandler(_ => StubHttpMessageHandler.Json(HttpStatusCode.OK, WaasTestHost.DefaultApplyBody()));
+        QueueyService service = WaasTestHost.Build(apiStub: api, streams: new[] { StreamDefinitionFactory.FromType(typeof(OrderCreated), null) },
+            configure: o => o.AccessTokenProvider = _ => throw new InvalidOperationException("The key was set; the token is never asked for."));
+
+        await service.SyncStreamsAsync();
+
+        Assert.Equal("qak_kid.secret", api.LastRequest!.Headers.GetValues(QueueyHeaders.ApiKey).Single());
+        Assert.Null(api.LastRequest.Headers.Authorization);
     }
 
     [Fact]

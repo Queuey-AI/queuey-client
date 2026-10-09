@@ -25,6 +25,12 @@ internal sealed class ResolvedConfig
     /// <summary>The workspace the profile's connection names itself, before a flag or the deployment file has a say.</summary>
     public string? ProfileTenant { get; init; }
 
+    /// <summary>
+    /// The <c>queuey login</c> the CLI connects with when no API key is set, or null. A key that is set always wins, so this is
+    /// null whenever <see cref="ApiKey"/> is set.
+    /// </summary>
+    public LoginTokens? Login { get; init; }
+
     /// <summary>Applies the resolved values onto a <see cref="QueueyOptions"/>.</summary>
     public void Apply(QueueyOptions options)
     {
@@ -32,10 +38,31 @@ internal sealed class ResolvedConfig
         if (ApiBaseOverride != null) options.ApiBaseAddress = ApiBaseOverride;
         if (IngressBaseOverride != null) options.IngressBaseAddress = IngressBaseOverride;
         options.ApiKey = ApiKey;
+        options.AccessTokenProvider = string.IsNullOrWhiteSpace(ApiKey) && Login is { } login ? login.AccessTokenAsync : null;
         options.TenantPublicId = TenantPublicId;
         options.LicensePublicId = LicensePublicId;
         options.Source = Source;
     }
+
+    /// <summary>
+    /// The same config connecting with <paramref name="login"/>: its license when none is named, and the ingress host Queuey
+    /// gave with it when none is set.
+    /// </summary>
+    public ResolvedConfig WithLogin(LoginTokens login) => new()
+    {
+        Environment = Environment,
+        ApiBaseOverride = ApiBaseOverride,
+        IngressBaseOverride = IngressBaseOverride
+                              ?? (Uri.TryCreate(login.Login.IngressBase, UriKind.Absolute, out Uri? ingress) ? ingress : null),
+        ApiKey = ApiKey,
+        TenantPublicId = TenantPublicId,
+        LicensePublicId = LicensePublicId ?? login.Login.License,
+        Source = Source,
+        Profile = Profile,
+        ProfileFile = ProfileFile,
+        ProfileTenant = ProfileTenant,
+        Login = login,
+    };
 
     /// <summary>The same config pointed at another tenant — the one a deployment file names.</summary>
     public ResolvedConfig WithTenant(string? tenantPublicId) => new()
@@ -50,6 +77,7 @@ internal sealed class ResolvedConfig
         Profile = Profile,
         ProfileFile = ProfileFile,
         ProfileTenant = ProfileTenant,
+        Login = Login,
     };
 
     /// <summary>

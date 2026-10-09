@@ -14,10 +14,10 @@ internal static class MissingSetting
         };
 
     public static QueueyConfigurationException ApiKey() =>
-        new("An API key is required for this call, and none is set.")
+        new("An API key or a login is required for this call, and neither is set.")
         {
-            SuggestedAction = "Set QueueyOptions.ApiKey. In the CLI: --api-key, QUEUEY_API_KEY, or apiKey in queuey.json. " +
-                              "Keys are made in the Queuey console.",
+            SuggestedAction = "In the CLI: run `queuey login`, or set --api-key, QUEUEY_API_KEY, or apiKey in queuey.json. " +
+                              "In the SDK: QueueyOptions.ApiKey or AccessTokenProvider. Keys are made in the Queuey console.",
         };
 
     public static QueueyConfigurationException License() =>
