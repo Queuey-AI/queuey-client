@@ -327,16 +327,19 @@ its own rather than an `apply` flag, so a CLI too old to know it answers "Unknow
 running the apply you meant to plan. For the same reason every command rejects an option it does not
 take — a typo like `--paln` fails with exit 2 and the options that command accepts.
 
-Queuey stores the plan as a **configuration plan** (`plan_…`): the dry runs are its steps, the diff a
-person approves is Queuey's own, and Queuey seals it with a hash and the policy's decision. When the
-policy runs it (`execute`), `queuey apply --plan plan_…` applies it. When a person approves it
-(`requires_approval`), it goes to Queuey's approval inbox, the command prints where, and it exits `5`;
-once approved, `queuey apply --plan plan_…` applies it, and `--wait` waits for the approval. `denied`
-exits 1. `queuey plan --local` plans as before without storing anything, and so does `queuey plan`
-against a Queuey that stores no plans, saying so.
+By default the plan is made here and stored nowhere, as before, which is what a pull request wants.
+`queuey plan --store` stores it in Queuey as a **configuration plan** (`plan_…`): the dry runs are its
+steps, the diff a person approves is Queuey's own, and Queuey seals it with a hash and the policy's
+decision. When the policy runs it (`execute`), `queuey apply --plan plan_…` applies it. When a person
+approves it (`requires_approval`), `queuey apply --plan plan_…` sends it to Queuey's approval inbox, and
+`queuey plan --submit` does so at once: it prints where a person approves it and exits `5`. Once approved,
+`queuey apply --plan plan_…` applies it, and `--wait` waits for the approval. `denied` exits 1. A stored
+plan carries where the file is, and in GitHub Actions the branch, workflow and pull request, so the person
+who approves it sees where it comes from. Against a Queuey that stores no plans, `--store` plans here and
+says so.
 
 `queuey plan --json` prints the plan as an object a script can read; check `schemaVersion` first. A stored
-plan is version 2: `file`, `tenant`, `planId`, `planHash` (Queuey's, 64 hex characters), `stored`, `version`,
+plan (`--store`, `--submit`) is version 2: `file`, `tenant`, `planId`, `planHash` (Queuey's, 64 hex characters), `stored`, `version`,
 `status`, `decision`, `rule`, `class`, `approvalUrl`, `expiresAt`, `wouldSucceed`, `changeCount`, `queues`,
 `steps`, `skipped` and `warnings`. A local plan is version 1: the same without what only Queuey knows, with
 `planId` null and the client's `planHash`. Each step has its `target`, `aspect`, `creates`, `changes`,
@@ -357,14 +360,16 @@ production workspace, once Queuey enforces plans), `queuey apply` makes the plan
 once when the policy runs it; when a person approves it, apply writes nothing, prints where to approve it
 and exits `5`, and `queuey apply --wait [--timeout <seconds>]` waits for the approval (30 minutes unless
 `--timeout` says otherwise) and then applies it. Each write of an apply bound to a plan is one of its
-steps, sent once: a write whose answer was lost is sent again, and Queuey answering that the step is
-already written counts as written. When what the plan rests on has moved (`plan_stale`), or the file no
-longer matches it (`not_in_plan`), the apply stops with exit 1: plan again, and the new plan shows what is
-left. Until Queuey enforces plans, an apply without one goes through, and Queuey's
-`would_require_approval` warning is printed on stderr with what to do. A sync from code
+steps, sent once, and Queuey answering that the step is already written counts as written. A write whose
+answer was lost is looked up in the plan after a short, growing wait, and sent again only when the plan
+does not show it. When what the plan rests on has moved (`plan_stale`), or the file no longer matches it
+(`not_in_plan`), the apply stops with exit 1: plan again, and the new plan shows what is left. Until
+Queuey enforces plans, an apply without one goes through, and Queuey's `would_require_approval` warning
+is printed on stderr with what to do, and is in the result's `Warnings`. A sync from code
 (`SyncQueuesAsync`, `queuey queue sync`) that gets `plan_required` for a queue's change leaves that change
 out, reports it on the queue with what to do (`QueueApplyResult.NeedsPlan`), and goes on with the other
-queues, so an app that syncs when it starts still starts.
+queues, so an app that syncs when it starts still starts. It is in the result's `Warnings`, and logged as
+a warning when the host has logging; check `AllSucceeded`, not only for an exception.
 
 `queuey apply --dry-run --json` prints what the file declares, checked locally, for a script or an
 agent to read:
@@ -854,7 +859,8 @@ to miss in CI. On Windows, the CLI does not check: your user profile's ACL prote
 secrets to a file only the job can read, and point `QUEUEY_USER_CONFIG` at it.
 
 ```bash
-queuey plan --local --profile prod   # CI, in the pull request that promotes a change: stores no plan
+queuey plan --profile prod           # CI, in the pull request that promotes a change: stores no plan
+queuey plan --submit --profile prod  # on main, or for a release: a plan a person approves in Queuey's inbox
 queuey apply --profile prod     # on merge
 queuey apply --profile dev && queuey listen --profile dev --queue stripe --forward-to http://localhost:5000
 ```
@@ -996,7 +1002,7 @@ A stable contract, so CI can branch on them:
 | `2` | Bad arguments — among them an option the command does not take |
 | `3` | Missing or invalid credentials / configuration (including an unset `${VAR}`) |
 | `4` | The target assembly could not be loaded |
-| `5` | A configuration plan waits for a person's approval in Queuey's inbox (`plan`, `apply`); nothing was applied |
+| `5` | A configuration plan waits for a person's approval in Queuey's inbox (`plan --submit`, `apply`); nothing was applied |
 
 ### Recipes
 
