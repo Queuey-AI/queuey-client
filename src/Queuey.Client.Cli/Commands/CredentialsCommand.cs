@@ -181,7 +181,7 @@ internal static class CredentialsCommand
         catch (CredentialRotationPendingException pending)
         {
             // Security-review av #69 (K5): 202 er ingen lagret verdi.
-            return GeneratePending(map.Has("json"), pending);
+            return GeneratePending(map.Has("json"), config, pending);
         }
         catch (QueueyConflictException ex) when (ex.ErrorCode == "credential_exists")
         {
@@ -322,7 +322,7 @@ internal static class CredentialsCommand
         catch (CredentialRotationPendingException pending)
         {
             // Security-review av #69 (K5): en person lagrer den. Ingenting er lagret, og ingenting skrives her.
-            return GeneratePending(json, pending);
+            return GeneratePending(json, config, pending);
         }
         catch (QueueyConflictException ex) when (ex.ErrorCode == "credential_exists")
         {
@@ -396,14 +396,17 @@ internal static class CredentialsCommand
     }
 
     /// <summary>A generate Queuey gave to a person (202): nothing stored, nothing written, and exit 5 with the link.</summary>
-    private static int GeneratePending(bool json, CredentialRotationPendingException pending)
+    private static int GeneratePending(bool json, ResolvedConfig config, CredentialRotationPendingException pending)
     {
+        // Security-review av #71 runde 2 (K-c): lenken går gjennom samme sjekk som operatørkommandoene.
+        string? approvalUrl = Operator.Link(config, pending.ApprovalUrl, out bool withheld);
         if (json)
         {
             Console.WriteLine(JsonSerializer.Serialize(new
             {
                 status = CredentialRotationPendingException.PendingApproval,
-                approvalUrl = pending.ApprovalUrl,
+                approvalUrl,
+                linkWithheld = withheld ? Operator.Withheld : null,
                 credentialRequest = pending.CredentialRequest,
                 expiresAt = pending.ExpiresAt,
                 message = pending.Message,
@@ -412,8 +415,10 @@ internal static class CredentialsCommand
         }
 
         Console.WriteLine("Nothing was stored or written: a person stores this secret.");
-        if (pending.ApprovalUrl is { } url)
+        if (approvalUrl is { } url)
             Console.WriteLine($"  Give this link to a person who may manage the workspace's credentials: {TerminalText.Line(url)}");
+        else if (withheld)
+            Console.WriteLine($"  {Operator.Withheld} It waits in the Queuey console's inbox.");
         Console.Error.WriteLine(TerminalText.Line(pending.Message));
         return ExitCodes.PendingApproval;
     }
@@ -510,7 +515,7 @@ internal static class CredentialsCommand
         }
         catch (CredentialRotationPendingException pending)
         {
-            return RotationPending(map.Has("json"), pending);
+            return RotationPending(map.Has("json"), config, pending);
         }
         catch (QueueyConflictException ex) when (ex.ErrorCode == "credential_changed_meanwhile")
         {
@@ -567,14 +572,17 @@ internal static class CredentialsCommand
     /// A rotation Queuey gave to a person (202, Queuey #511): the link where they paste the value, and exit 5. The secret that
     /// was sent is never printed; Queuey did not keep it.
     /// </summary>
-    private static int RotationPending(bool json, CredentialRotationPendingException pending)
+    private static int RotationPending(bool json, ResolvedConfig config, CredentialRotationPendingException pending)
     {
+        // Security-review av #71 runde 2 (K-c): lenken går gjennom samme sjekk som operatørkommandoene.
+        string? approvalUrl = Operator.Link(config, pending.ApprovalUrl, out bool withheld);
         if (json)
         {
             Console.WriteLine(JsonSerializer.Serialize(new
             {
                 status = CredentialRotationPendingException.PendingApproval,
-                approvalUrl = pending.ApprovalUrl,
+                approvalUrl,
+                linkWithheld = withheld ? Operator.Withheld : null,
                 credentialRequest = pending.CredentialRequest,
                 expiresAt = pending.ExpiresAt,
                 policyRule = pending.PolicyRule,
@@ -585,7 +593,9 @@ internal static class CredentialsCommand
 
         // Teksten og lenken kommer fra serveren, så de går gjennom TerminalText (F2.7-regelen).
         Console.WriteLine("Nothing was rotated: a person has to paste the new value, and the value you sent was not kept.");
-        Console.WriteLine(pending.ApprovalUrl is { } url
+        if (withheld)
+            Console.WriteLine($"  {Operator.Withheld}");
+        Console.WriteLine(approvalUrl is { } url
             ? $"  Give this link to a person who may manage the workspace's credentials: {TerminalText.Line(url)}"
             : $"  A person pastes it on credential request {TerminalText.Line(pending.CredentialRequest ?? "?")} in the Queuey console.");
         if (pending.ExpiresAt is { } expires)

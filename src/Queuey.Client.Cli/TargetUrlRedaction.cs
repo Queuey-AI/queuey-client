@@ -207,7 +207,10 @@ internal static class TargetUrlRedaction
         "effectiveUrl", "targetUrl", "targetEndpoint", "url", "endpoint", "location",
     };
 
-    /// <summary>Queuey's own console links, checked where they are shown (OperatorLinks), never redacted here.</summary>
+    /// <summary>
+    /// Queuey's own console links: kept when <see cref="Operator.Link"/> takes them, null otherwise (security-review av #71
+    /// runde 2, K-d), at any depth in the answer.
+    /// </summary>
     private static readonly HashSet<string> ConsoleLinks = new(StringComparer.OrdinalIgnoreCase) { "approvalUrl", "consoleUrl" };
 
     /// <summary>
@@ -215,15 +218,15 @@ internal static class TargetUrlRedaction
     /// <c>targetUrl</c>, <c>targetEndpoint</c>, …) by <see cref="Redact"/>, and every other string by <see cref="RedactUrlsIn"/>,
     /// since an error text or a response preview can quote the URL.
     /// </summary>
-    public static JsonElement? RedactJson(JsonElement? element)
+    public static JsonElement? RedactJson(JsonElement? element, ResolvedConfig config)
     {
         if (element is not { } e) return null;
         JsonNode? node = JsonNode.Parse(e.GetRawText());
-        node = RedactNode(node, property: null);
+        node = RedactNode(node, property: null, config);
         return node is null ? JsonDocument.Parse("null").RootElement.Clone() : JsonDocument.Parse(node.ToJsonString()).RootElement.Clone();
     }
 
-    private static JsonNode? RedactNode(JsonNode? node, string? property)
+    private static JsonNode? RedactNode(JsonNode? node, string? property, ResolvedConfig config)
     {
         switch (node)
         {
@@ -231,17 +234,24 @@ internal static class TargetUrlRedaction
                 // Nye noder hele veien: en node som alt har en forelder, kan ikke settes inn igjen.
                 var redactedObject = new JsonObject();
                 foreach (KeyValuePair<string, JsonNode?> member in obj)
-                    redactedObject[member.Key] = RedactNode(member.Value, member.Key);
+                {
+                    JsonNode? redacted = RedactNode(member.Value, member.Key, config);
+                    redactedObject[member.Key] = redacted;
+                    // En lenke som ble holdt tilbake, sies fra om ved siden av, så svaret ikke later som det ikke fantes en.
+                    if (ConsoleLinks.Contains(member.Key) && redacted is null && member.Value is JsonValue v
+                        && v.GetValueKind() == JsonValueKind.String && !string.IsNullOrWhiteSpace(v.GetValue<string>()))
+                        redactedObject["linkWithheld"] = Operator.Withheld;
+                }
                 return redactedObject;
             case JsonArray array:
                 var redactedArray = new JsonArray();
                 foreach (JsonNode? item in array)
-                    redactedArray.Add(RedactNode(item, property));
+                    redactedArray.Add(RedactNode(item, property, config));
                 return redactedArray;
             case JsonValue value when value.GetValueKind() == JsonValueKind.String:
                 string text = value.GetValue<string>();
                 if (property is not null && ConsoleLinks.Contains(property))
-                    return JsonValue.Create(text);
+                    return JsonValue.Create(Operator.Link(config, text, out _));
                 return JsonValue.Create(property is not null && UrlProperties.Contains(property) ? Redact(text) : RedactUrlsIn(text));
             case null:
                 return null;

@@ -94,7 +94,7 @@ internal static class KeysCommand
         }
         catch (IngressKeyPendingException pending)
         {
-            return Pending(json, pending);
+            return Pending(json, config, pending);
         }
         catch (QueueyForbiddenException refused) when (refused.ErrorCode == "approval_required")
         {
@@ -284,14 +284,17 @@ internal static class KeysCommand
     /// <summary>
     /// A mint Queuey gave to a person (202): the link where they decide, and exit 5. Nothing was minted, so there is no secret.
     /// </summary>
-    private static int Pending(bool json, IngressKeyPendingException pending)
+    private static int Pending(bool json, ResolvedConfig config, IngressKeyPendingException pending)
     {
+        // Security-review av #71 runde 2 (K-c): lenken går gjennom samme sjekk som operatørkommandoene.
+        string? approvalUrl = Operator.Link(config, pending.ApprovalUrl, out bool withheld);
         if (json)
         {
             Console.WriteLine(JsonSerializer.Serialize(new
             {
                 status = CredentialRotationPendingException.PendingApproval,
-                approvalUrl = pending.ApprovalUrl,
+                approvalUrl,
+                linkWithheld = withheld ? Operator.Withheld : null,
                 expiresAt = pending.ExpiresAt,
                 policyRule = pending.PolicyRule,
                 message = pending.Message,
@@ -301,8 +304,10 @@ internal static class KeysCommand
 
         // Teksten og lenken kommer fra serveren, så de går gjennom TerminalText (F2.7-regelen).
         Console.WriteLine("Nothing was minted: a person decides on this key in Queuey's inbox.");
-        if (pending.ApprovalUrl is { } url)
+        if (approvalUrl is { } url)
             Console.WriteLine($"  Give this link to a person who may manage the workspace's keys: {TerminalText.Line(url)}");
+        else if (withheld)
+            Console.WriteLine($"  {Operator.Withheld} It waits in the Queuey console's inbox.");
         if (pending.ExpiresAt is { } expires)
             Console.WriteLine($"  The request expires at {expires.UtcDateTime:yyyy-MM-dd HH:mm} UTC.");
         Console.Error.WriteLine(TerminalText.Line(pending.Message));

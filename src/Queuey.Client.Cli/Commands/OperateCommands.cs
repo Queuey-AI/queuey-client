@@ -55,7 +55,7 @@ internal static class Operator
         {
             try
             {
-                return TargetUrlRedaction.RedactJson(await Management.OperateAsync(method, query, body, segments));
+                return TargetUrlRedaction.RedactJson(await Management.OperateAsync(method, query, body, segments), Config);
             }
             catch (QueueyException ex) when (ex is not QueueyConfigurationException)
             {
@@ -119,24 +119,32 @@ internal static class Operator
     }
 
     /// <summary>
-    /// <paramref name="url"/> when it may be shown as a link: https (or http on this machine), no user info, and the host of
-    /// the console the login names or of the API host. Null otherwise, with <paramref name="withheld"/> true when there was one.
+    /// <paramref name="url"/> when it may be shown as a link: https (or http on this machine), no user info, and on a host the
+    /// user chose — the console the login names, Queuey's own hosts, or the API host when <c>queuey.json</c> did not choose it.
+    /// Null otherwise, with <paramref name="withheld"/> true when there was a link.
     /// </summary>
-    // Security-review av #71 (B3): en lenke fra svaret er tekst serveren styrer, og en agent eller person følger den.
+    // Security-review av #71 (B3, runde 2 K-b): en lenke fra svaret er tekst serveren styrer, og en agent eller person følger den.
+    // En API-vert fra queuey.json er repoets valg, så den alene gjør ikke en lenke trygg.
     internal static string? Link(ResolvedConfig config, string? url, out bool withheld)
     {
         withheld = false;
         if (string.IsNullOrWhiteSpace(url)) return null;
         if (Uri.TryCreate(url, UriKind.Absolute, out Uri? link) && OAuthClient.IsSafe(link) && string.IsNullOrEmpty(link.UserInfo)
-            && (SameHost(link, ConsolePages.Base(config)) || SameHost(link, config.ResolvedApiBase().ToString())))
+            && TrustedHosts(config).Contains(link.Host, StringComparer.OrdinalIgnoreCase))
             return link.ToString();
         withheld = true;
         return null;
     }
 
-    private static bool SameHost(Uri link, string? origin)
-        => origin is not null && Uri.TryCreate(origin, UriKind.Absolute, out Uri? o)
-           && string.Equals(link.Host, o.Host, StringComparison.OrdinalIgnoreCase);
+    private static IEnumerable<string> TrustedHosts(ResolvedConfig config)
+    {
+        if (config.Login?.Login.ConsoleBase is { } console && Uri.TryCreate(console, UriKind.Absolute, out Uri? c))
+            yield return c.Host;
+        yield return new Uri(ConsolePages.Production).Host;
+        yield return new QueueyOptions().ResolveApiBaseAddress().Host;
+        if (!config.ApiBaseFromFile)
+            yield return config.ResolvedApiBase().Host;
+    }
 
     internal const string Withheld = "Queuey's answer had a link to another host than the console or the API, so it is not shown.";
 
@@ -149,6 +157,7 @@ internal static class Operator
         if (answer is not { ValueKind: JsonValueKind.Object } a || Text(a, "status") != "pending_approval")
             return null;
         string? approvalUrl = Link(config, Text(a, "approvalUrl"), out bool withheld);
+        withheld |= Text(a, "linkWithheld") is not null;
 
         if (json)
         {
@@ -209,13 +218,16 @@ internal static class Operator
     internal static bool IsApprovalRequired(QueueyException ex) => ex.StatusCode == 403 && ex.ErrorCode == "approval_required";
 
     /// <summary>
-    /// Whether <paramref name="value"/> is an id with <paramref name="prefix"/> and then letters, digits, <c>_</c> and <c>-</c>, at most
-    /// 64 characters: a path segment that cannot be <c>.</c>, <c>..</c> or anything else a URL resolves.
+    /// Whether <paramref name="value"/> is one path segment of letters, digits, <c>_</c> and <c>-</c>, at most 128 characters:
+    /// never <c>.</c>, <c>..</c> or anything else a URL resolves.
     /// </summary>
-    /// <summary>Whether <paramref name="value"/> is one path segment of letters, digits, <c>_</c> and <c>-</c>, at most 128 characters.</summary>
     internal static bool IsSegment(string? value)
         => value is { Length: > 0 and <= 128 } && value.All(c => c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '_' or '-');
 
+    /// <summary>
+    /// Whether <paramref name="value"/> is an id with <paramref name="prefix"/> and then letters, digits, <c>_</c> and <c>-</c>, at most
+    /// 64 characters in all: a path segment that cannot be <c>.</c>, <c>..</c> or anything else a URL resolves.
+    /// </summary>
     internal static bool IsId(string? value, string prefix)
         => value is { Length: <= 64 } && value.Length > prefix.Length && value.StartsWith(prefix, StringComparison.Ordinal)
            && value.Skip(prefix.Length).All(c => c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '_' or '-');
@@ -394,7 +406,8 @@ internal static class DiagnoseCommand
             int attempts = 0;
             foreach (JsonElement item in Operator.Items(failed, "items"))
             {
-                if (Operator.Text(item, "publicId") is not { } id) continue;
+                // Security-review av #71 runde 2 (K-e): id-en fra svaret blir et stisegment, så den må være en evt_-id.
+                if (Operator.Text(item, "publicId") is not { } id || !Operator.IsId(id, "evt_")) continue;
                 inspected.Add(id);
                 JsonElement? detail = await session.GetAsync(null, "events", session.QueueId, id);
                 foreach (JsonElement attempt in Operator.Items(detail, "attempts"))

@@ -492,4 +492,116 @@ public sealed class OperateCommandsTests
         Assert.Equal(ExitCodes.Usage, spaces.Exit);
         Assert.Empty(api.Requests);
     }
+
+    // ── runde 2: K-b, K-c, K-d, K-e ─────────────────────────────────────────
+
+    private static RecordingHandler PendingUnlock(string url) => new(req => req.Key == "POST /queues/que_1/unlock"
+        ? RecordingHandler.Json(HttpStatusCode.Accepted, new { operation = "op_1", status = "pending_approval", approvalUrl = url })
+        : throw new InvalidOperationException(req.Key));
+
+    [Fact]
+    public async Task A_link_on_an_api_host_that_queuey_json_chose_is_withheld()
+    {
+        // K-b: queuey.json ligger i repoet, så verten den velger, gjør ikke en lenke trygg.
+        string dir = Path.Combine(Path.GetTempPath(), "queuey-operate-link", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        string file = Path.Combine(dir, "queuey.json");
+        File.WriteAllText(file, """{ "apiKey": "qak_kid.secret", "license": "lic_1", "apiBase": "https://api.test" }""");
+        try
+        {
+            CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "unlock", "que_1", "--config", file, "--json" }),
+                PendingUnlock("https://api.test/console/inbox/op_1"));
+
+            Assert.Equal(ExitCodes.PendingApproval, run.Exit);
+            JsonElement root = JsonDocument.Parse(run.Stdout).RootElement;
+            Assert.Equal(JsonValueKind.Null, root.GetProperty("approvalUrl").ValueKind);
+            Assert.Equal(JsonValueKind.String, root.GetProperty("linkWithheld").ValueKind);
+
+            // Queueys egen konsollvert er alltid til å stole på.
+            CliRun own = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "unlock", "que_1", "--config", file, "--json" }),
+                PendingUnlock("https://app.queuey.ai/console/inbox/op_1"));
+            Assert.Equal("https://app.queuey.ai/console/inbox/op_1", JsonDocument.Parse(own.Stdout).RootElement.GetProperty("approvalUrl").GetString());
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task Keys_mint_and_credentials_rotate_withhold_a_link_to_another_host()
+    {
+        // K-c.
+        var mint = new RecordingHandler(req => req.Key == "POST /hmacclients/queues/que_1"
+            ? RecordingHandler.Json(HttpStatusCode.Accepted, new { status = "pending_approval", approvalUrl = "https://evil.test/inbox/op_1", message = "A person approves it." })
+            : throw new InvalidOperationException(req.Key));
+        var rotate = new RecordingHandler(req => req.Key == "POST /tenants/ten_1/credentials/rotate"
+            ? RecordingHandler.Json(HttpStatusCode.Accepted, new { status = "pending_approval", credentialRequest = "creq_1", approvalUrl = "https://evil.test/creq_1", message = "A person pastes it." })
+            : throw new InvalidOperationException(req.Key));
+
+        string folder = Directory.CreateTempSubdirectory("queuey-operate-mint-").FullName;
+        CliRun minted = await Run(mint, "keys", "mint", "--queue", "que_1", "--write", Path.Combine(folder, ".env"), "--json");
+        // --from-env leser prosessens miljø, som i CredentialsRotateTests.
+        string variable = "QUEUEY_OPERATE_TEST_" + Guid.NewGuid().ToString("N");
+        Environment.SetEnvironmentVariable(variable, "whsec_new_value");
+        CliRun rotated;
+        try
+        {
+            rotated = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With(
+                "credentials", "rotate", "--name", "stripe-whsec", "--from-env", variable, "--tenant", "ten_1", "--json")), rotate);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(variable, null);
+        }
+
+        foreach (CliRun run in new[] { minted, rotated })
+        {
+            Assert.True(run.Exit == ExitCodes.PendingApproval, run.Stdout + run.Stderr);
+            JsonElement root = JsonDocument.Parse(run.Stdout).RootElement;
+            Assert.Equal(JsonValueKind.Null, root.GetProperty("approvalUrl").ValueKind);
+            Assert.Equal(JsonValueKind.String, root.GetProperty("linkWithheld").ValueKind);
+            Assert.DoesNotContain("evil.test", run.Stdout + run.Stderr);
+        }
+    }
+
+    [Fact]
+    public async Task A_console_link_deep_in_an_answer_is_checked_too()
+    {
+        // K-d.
+        var api = new RecordingHandler(req => req.Key switch
+        {
+            "GET /queues/que_1/metrics/snapshot" => Ok(new { processState = "Locked", help = new { consoleUrl = "https://evil.test/x" } }),
+            "GET /queues/que_1/targets" => Ok(new[] { new { targetId = "tgt_1", consoleUrl = "https://api.test/console/q/que_1" } }),
+            "GET /events/que_1/lanes" => Ok(new { counts = new { total = 0 } }),
+            _ => throw new InvalidOperationException(req.Key),
+        });
+
+        CliRun run = await Run(api, "queue", "health", "que_1", "--json");
+
+        JsonElement root = JsonDocument.Parse(run.Stdout).RootElement;
+        JsonElement help = root.GetProperty("snapshot").GetProperty("help");
+        Assert.Equal(JsonValueKind.Null, help.GetProperty("consoleUrl").ValueKind);
+        Assert.Equal(JsonValueKind.String, help.GetProperty("linkWithheld").ValueKind);
+        Assert.Equal("https://api.test/console/q/que_1", root.GetProperty("targets")[0].GetProperty("consoleUrl").GetString());
+        Assert.DoesNotContain("evil.test", run.Stdout);
+    }
+
+    [Fact]
+    public async Task Diagnose_reads_only_event_ids_from_the_answer_as_path_segments()
+    {
+        // K-e.
+        var api = new RecordingHandler(req => req.Key switch
+        {
+            "GET /events/que_1/incident-report" => Ok(new { incidentType = "degraded" }),
+            "GET /events/que_1" => Ok(new { items = new[] { new { publicId = "../../admin" }, new { publicId = "evt_ok" } } }),
+            "GET /events/que_1/evt_ok" => Ok(new { attempts = Array.Empty<object>() }),
+            _ => throw new InvalidOperationException(req.Key),
+        });
+
+        CliRun run = await Run(api, "diagnose", "que_1", "--json");
+
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        Assert.Equal(new[] { "GET /events/que_1/incident-report", "GET /events/que_1", "GET /events/que_1/evt_ok" }, api.Requests.Select(r => r.Key));
+    }
 }
