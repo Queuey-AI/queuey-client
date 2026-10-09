@@ -992,7 +992,9 @@ makes or looks at the key. `--show-secret` prints it instead, once, and warns.
 
 - `user-secrets` runs `dotnet user-secrets set` for the project in the working folder, with the values on its
   stdin and never as arguments, which other users can see in the process list. The project needs a
-  `UserSecretsId`; `dotnet user-secrets init` adds one.
+  `UserSecretsId`; `dotnet user-secrets init` adds one. `dotnet user-secrets list` runs first, before anything is
+  minted or stored, and the answer names the id it uses. Both evaluate the project with MSBuild, so they run its
+  build logic: trust the project as you would for `dotnet build`.
 
 - The lines that set them are replaced, and every other line stays. Afterwards the file is readable and
   writable only by you (0600). A file others could read is tightened, and the command says from what.

@@ -106,13 +106,33 @@ public sealed class KeysAndSecretsTests : IDisposable
 
     // ── --write user-secrets ────────────────────────────────────────────────
 
-    /// <summary>A fake dotnet that logs its arguments and its stdin, so the test can see the secret never was an argument.</summary>
-    private (string Args, string Stdin) FakeDotnet(int exit = 0)
+    /// <summary>
+    /// A fake dotnet that logs its arguments and its stdin, so the test can see the secret never was an argument. `list`
+    /// answers as dotnet user-secrets does: the secrets file path with the id, and the secrets <paramref name="existing"/> holds;
+    /// without an id in the project it fails as dotnet does.
+    /// </summary>
+    private (string Args, string Stdin) FakeDotnet(int exit = 0, string existing = "")
     {
         string bin = Path.Combine(_dir, "bin"), args = Path.Combine(_dir, "dotnet-args.log"), stdin = Path.Combine(_dir, "dotnet-stdin.log");
         Directory.CreateDirectory(bin);
         string dotnet = Path.Combine(bin, "dotnet");
-        File.WriteAllText(dotnet, $"#!/bin/sh\necho \"$@\" >> '{args}'\ncat >> '{stdin}'\nexit {exit}\n");
+        File.WriteAllText(dotnet, $$"""
+            #!/bin/sh
+            echo "$@" >> '{{args}}'
+            if [ "$2" = "list" ]; then
+              if grep -q UserSecretsId "$4"; then
+                echo "Project file path $4."
+                echo "Secrets file path /home/u/.microsoft/usersecrets/shop-real-id/secrets.json."
+                printf '%s' '{{existing}}'
+                exit 0
+              fi
+              echo "Could not find the global property 'UserSecretsId' in MSBuild project '$4'."
+              exit 1
+            fi
+            cat >> '{{stdin}}'
+            exit {{exit}}
+
+            """);
         File.SetUnixFileMode(dotnet, (UnixFileMode)0x1C0);
         UserSecretsTarget.PathVariable = () => bin;
         return (args, stdin);
@@ -139,14 +159,18 @@ public sealed class KeysAndSecretsTests : IDisposable
         CliRun run = await Run(Server(), "keys", "mint", "--tenant", "ten_1", "--write", "user-secrets", "--json");
 
         Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
-        string argv = File.ReadAllText(args);
+        string[] calls = File.ReadAllLines(args);
+        Assert.StartsWith("user-secrets list --project ", calls[0]);   // forsjekken, før noe mintes (#69, B2)
+        string argv = calls[1];
         Assert.StartsWith("user-secrets set --project ", argv);
-        Assert.EndsWith("Shop.csproj\n", argv);
+        Assert.EndsWith("Shop.csproj", argv);
         Assert.DoesNotContain(Secret, argv);
         JsonElement sent = JsonDocument.Parse(File.ReadAllText(stdin)).RootElement;
         Assert.Equal("hsk_01WS", sent.GetProperty("QUEUEY_SIGNING_KEY_ID").GetString());
         Assert.Equal(Secret, sent.GetProperty("QUEUEY_SIGNING_SECRET").GetString());
         Assert.Equal("user-secrets", JsonDocument.Parse(run.Stdout).RootElement.GetProperty("target").GetString());
+        // Id-en dotnet user-secrets faktisk brukte, ikke den regex-en ville lest (#69, K1).
+        Assert.Contains("(id shop-real-id)", JsonDocument.Parse(run.Stdout).RootElement.GetProperty("written").GetString());
         Assert.DoesNotContain(Secret, run.Stdout + run.Stderr);
     }
 

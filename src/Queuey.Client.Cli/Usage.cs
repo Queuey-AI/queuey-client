@@ -435,6 +435,9 @@ KEYS
                    user-secrets: the user secrets of the .NET project in this folder, set with
                    `dotnet user-secrets set`, the values on its stdin, never as arguments. The
                    project needs a UserSecretsId (`dotnet user-secrets init` adds one).
+                   `dotnet user-secrets list` runs first, before anything is minted or stored,
+                   and the answer names the id it uses. Both evaluate the project with MSBuild,
+                   so they run its build logic: trust the project as you would for dotnet build.
                  Without --write nothing is minted: it says which variables the app needs, the
                  --write that fits this folder, and the console page where a person makes or
                  looks at the key. --show-secret mints and prints the secret instead, once, and
