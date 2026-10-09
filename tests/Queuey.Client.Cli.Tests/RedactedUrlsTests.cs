@@ -222,4 +222,27 @@ public sealed class RedactedUrlsTests
         Assert.Equal("/in/…", UrlRedaction.EndpointPath(null, "/in/AbCdEfGhIjKlMn?token=x"));
         Assert.Equal("/services/T1/B2/…", UrlRedaction.EndpointPath("https://hooks.slack.com/services/T1/B2/xoxb", "/ignored"));
     }
+
+    // ── N1: en ekstra runde over alle strenger ──────────────────────────────
+
+    [Fact]
+    public async Task Every_string_in_an_operator_answer_is_redacted_also_in_arrays_and_previews()
+    {
+        const string secret = "https://ops:hunter2@shop.test/in/s3cr3t-T0ken?sig=abc123";
+        var api = new RecordingHandler(req => req.Key == "GET /events/que_1/incident-report"
+            ? RecordingHandler.Json(HttpStatusCode.OK, new
+            {
+                incidentType = "locked",
+                requiredActions = new[] { $"Fix {secret}" },
+                lastFailedEvent = new { responsePreview = $"redirect to {secret}", payloadHeadersJson = $"{{\"Location\":\"{secret}\"}}" },
+            })
+            : req.Key == "GET /queues/que_1/metrics/snapshot" ? RecordingHandler.Json(HttpStatusCode.OK, new { })
+            : RecordingHandler.Json(HttpStatusCode.OK, new { items = Array.Empty<object>() }));
+
+        CliRun json = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("diagnose", "que_1", "--json")), api);
+
+        Assert.True(json.Exit == ExitCodes.Success, json.Stdout + json.Stderr);
+        foreach (string leak in new[] { "hunter2", "s3cr3t", "abc123" })
+            Assert.DoesNotContain(leak, json.Stdout);
+    }
 }

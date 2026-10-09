@@ -26,6 +26,9 @@ internal static class AnswerRedaction
         return node is null ? JsonDocument.Parse("null").RootElement.Clone() : JsonDocument.Parse(node.ToJsonString()).RootElement.Clone();
     }
 
+    // Security-review av #72 (N1): etter redigeringen etter feltnavn går RedactUrlsIn over hver streng som er igjen, også
+    // strenger rett i en array, som RestTargetUrlRedaction ikke rører. Det fanger responsePreview, payloadHeadersJson og
+    // annen tekst som kan sitere en adresse. Queueys egne lenker går gjennom Operator.Link i stedet.
     private static void CheckLinks(JsonNode? node, ResolvedConfig config)
     {
         switch (node)
@@ -33,21 +36,31 @@ internal static class AnswerRedaction
             case JsonObject obj:
                 foreach ((string name, JsonNode? child) in obj.ToList())
                 {
-                    if (ConsoleLinks.Contains(name) && child is JsonValue value && value.TryGetValue(out string? link))
+                    if (child is JsonValue value && value.TryGetValue(out string? text))
                     {
-                        string? shown = Operator.Link(config, link, out bool withheld);
-                        obj[name] = shown;
-                        // En lenke som ble holdt tilbake, sies fra om ved siden av, så svaret ikke later som det ikke fantes en.
-                        if (withheld)
-                            obj["linkWithheld"] = Operator.Withheld;
+                        if (ConsoleLinks.Contains(name))
+                        {
+                            string? shown = Operator.Link(config, text, out bool withheld);
+                            obj[name] = shown;
+                            // En lenke som ble holdt tilbake, sies fra om ved siden av, så svaret ikke later som det ikke fantes en.
+                            if (withheld)
+                                obj["linkWithheld"] = Operator.Withheld;
+                        }
+                        else
+                            obj[name] = TargetUrlRedaction.RedactUrlsIn(text);
                     }
                     else
                         CheckLinks(child, config);
                 }
                 break;
             case JsonArray array:
-                foreach (JsonNode? item in array)
-                    CheckLinks(item, config);
+                for (int i = 0; i < array.Count; i++)
+                {
+                    if (array[i] is JsonValue item && item.TryGetValue(out string? text))
+                        array[i] = TargetUrlRedaction.RedactUrlsIn(text);
+                    else
+                        CheckLinks(array[i], config);
+                }
                 break;
         }
     }
