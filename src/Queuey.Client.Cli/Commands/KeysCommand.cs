@@ -67,13 +67,16 @@ internal static class KeysCommand
         // Målet sjekkes før noe mintes: en hemmelighet som ikke kan skrives, er en nøkkel som må trekkes tilbake.
         SecretTarget? target = map.Get("write") is { } write ? SecretTarget.Parse(write) : null;
 
-        ResolvedConfig config = CliHost.Resolve(map, profiles: true);
+        (ResolvedConfig config, string? workspaceFrom) = DeploymentTenant.OrFromDeploymentFile(CliHost.Resolve(map, profiles: true), map);
+        if (workspaceFrom is not null)
+            Console.Error.WriteLine($"Workspace {config.TenantPublicId} from {workspaceFrom}.");
         string? queue = string.IsNullOrWhiteSpace(map.Get("queue")) ? null : await QueueIdAsync(map, config);
         string? tenant = config.TenantPublicId;
         if (queue is null && string.IsNullOrWhiteSpace(tenant))
             return CliErrors.Configuration(map, "config_error",
                 "keys mint without --queue mints for the workspace, and none is named.",
-                "Name it with --tenant, the profile's tenant, or QUEUEY_TENANT; or mint for one queue with --queue <name|que_…>.");
+                "Name it with --tenant, the profile's tenant, QUEUEY_TENANT, or tenant in queuey.deploy.json; or mint for one queue " +
+                "with --queue <name|que_…>.");
 
         // Uten --write mintes ingenting (Kenneth 2026-10-09): en nøkkel ingen kan se, er til ingen nytte, og hemmeligheten skal ikke
         // stå i terminalen. Svaret sier hvilke variabler appen trenger, hvor --write legger dem, og hvor en person ser nøkkelen.
@@ -111,7 +114,8 @@ internal static class KeysCommand
                     $"Queuey answered the mint with a key id or secret that has characters {target.Shown} cannot hold safely, so nothing was " +
                     "written. Neither is shown.",
                     "Revoke the new key in the Queuey console, and report this.", status: null, ExitCodes.RuntimeError, "Queuey error");
-            return Written(map, key, target, apiKey ? new[] { (variables[0], key.Secret!) } : new[] { (variables[0], key.KeyId!), (variables[1], key.Secret!) });
+            return Written(map, key, target, apiKey ? new[] { (variables[0], key.Secret!) } : new[] { (variables[0], key.KeyId!), (variables[1], key.Secret!) },
+                workspaceFrom);
         }
 
         // --show-secret: den eneste veien til hemmeligheten i terminalen, valgt med vilje.
@@ -204,7 +208,8 @@ internal static class KeysCommand
     }
 
     /// <summary>The key in the target, and what was written, without the secret.</summary>
-    private static int Written(ArgMap map, IngressSigningKey key, SecretTarget target, IReadOnlyList<(string Name, string Value)> values)
+    private static int Written(ArgMap map, IngressSigningKey key, SecretTarget target, IReadOnlyList<(string Name, string Value)> values,
+        string? workspaceFrom = null)
     {
         IReadOnlyDictionary<string, string?> previous;
         string? tightenedFrom;
@@ -240,6 +245,7 @@ internal static class KeysCommand
             Console.WriteLine(JsonSerializer.Serialize(new
             {
                 key.ClientPublicId, key.ClientName, key.KeyId, key.QueuePublicId, key.Type, key.Scope, key.TenantPublicId, key.Origin,
+                workspaceFrom,
                 file = target.Kind == "file" ? map.Get("write") : null,
                 target = target.Kind,
                 written = target.Shown,

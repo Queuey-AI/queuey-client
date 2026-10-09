@@ -83,6 +83,39 @@ internal static class DeploymentTenant
     }
 
     /// <summary>
+    /// <paramref name="config"/>, or — when no flag, profile, <c>QUEUEY_TENANT</c> or <c>queuey.json</c> names a workspace — the
+    /// one the deployment file here names, with the profile's values; and where it came from, to say so. For <c>keys mint</c>
+    /// and <c>credentials generate</c>: a workspace <c>apply</c> made after the login is in the file, not in the profile. A
+    /// file that is missing, names none, or cannot be read leaves <paramref name="config"/> as it is.
+    /// </summary>
+    // Blindtest 2 (2026-10-09, funn 5): skillens `keys mint --profile dev` feilet med «none is named», fordi workspacet stod i
+    // deploy-fila (${QUEUEY_TENANT} i profilen dev), ikke i innloggingens profil. Rekkefølgen er flagg, profil, deploy-fil.
+    public static (ResolvedConfig Config, string? From) OrFromDeploymentFile(ResolvedConfig config, ArgMap map)
+    {
+        if (!string.IsNullOrWhiteSpace(config.TenantPublicId))
+            return (config, null);
+
+        string path = DeploymentFile.DefaultFileName;
+        if (!System.IO.File.Exists(path))
+            return (config, null);
+
+        string? profile = CliHost.Profile(map);
+        string? tenant;
+        try
+        {
+            tenant = ReadFromFile(CliFiles.ReadAllText(path), path, profile);
+        }
+        catch (QueueyConfigurationException)
+        {
+            return (config, null);
+        }
+
+        if (string.IsNullOrWhiteSpace(tenant) || !CliErrors.LooksLikeAWorkspaceId(tenant!.Trim()))
+            return (config, null);
+        return (config.WithTenant(tenant.Trim()), profile is null ? path : $"{path} (profile {profile})");
+    }
+
+    /// <summary>
     /// The tenant of the deployment file a command acts by when it needs nothing else from the file — the one
     /// <c>--deployment</c> names, or the default one here when there is one — and the file's path. For <c>verify</c>,
     /// <c>publish</c> and <c>events get</c>, so they reach the workspace apply writes to.

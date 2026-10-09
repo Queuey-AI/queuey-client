@@ -295,10 +295,13 @@ internal static class CredentialsCommand
         // verifiserer med; å bytte den er et valg, som --replace gjør uttrykkelig, for Queuey og for målet.
         bool localExists = target.Current(DeliverySecretVariable).ContainsKey(DeliverySecretVariable);
 
-        ResolvedConfig config = ListenCommand.Connection(map);
+        (ResolvedConfig config, string? workspaceFrom) = DeploymentTenant.OrFromDeploymentFile(ListenCommand.Connection(map), map);
+        if (workspaceFrom is not null)
+            Console.Error.WriteLine($"Workspace {config.TenantPublicId} from {workspaceFrom}.");
         string? tenant = config.TenantPublicId;
         if (string.IsNullOrWhiteSpace(tenant))
-            return CliErrors.Configuration(map, "config_error", "A workspace is required. Set --tenant, QUEUEY_TENANT, the profile's tenant, or tenant in queuey.json.");
+            return CliErrors.Configuration(map, "config_error", "A workspace is required. Set --tenant, QUEUEY_TENANT, the profile's tenant, " +
+                "tenant in queuey.json, or tenant in queuey.deploy.json.");
 
         using ServiceProvider provider = CliHost.BuildProvider(config);
         var service = provider.GetRequiredService<IQueueyService>();
@@ -371,6 +374,7 @@ internal static class CredentialsCommand
                 variable = DeliverySecretVariable,
                 replacedLocally = localExists,
                 tightenedFrom,
+                workspaceFrom,
                 deliverySigning = new { enabled = true, credentialRef = stored.Name },
             }, CliHost.JsonOut));
             return ExitCodes.Success;
