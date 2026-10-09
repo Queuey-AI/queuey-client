@@ -707,6 +707,12 @@ internal static class Redeliver
         bool json = map.Has("json");
         if (!Operator.TryNumber(map, "max", 1, 500, DefaultMax, out int max, out int bad)) return bad;
         string[] statuses = (map.Get("status") ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        // Security-review av #71 runde 2 (R1): en --status som blir tom («,» eller « »), sendte én hendelse uten --redeliver.
+        if (map.Has("status") && statuses.Length == 0)
+            return CliErrors.Usage(map, "invalid_value", "--status takes one or more statuses, such as dlq or dlq,failed. Nothing was sent.");
+        if (eventId is not null && !map.Has("redeliver"))
+            return CliErrors.Usage(map, "missing_argument",
+                "One event goes to the receiver again only with --redeliver: queuey replay <evt_…> --queue <q> --redeliver. Nothing was sent.");
         if (eventId is null && statuses.Length == 0)
             return CliErrors.Usage(map, "missing_argument",
                 "replay sends again either one event (queuey replay <evt_…> --queue <q> --redeliver) or the events with a status " +

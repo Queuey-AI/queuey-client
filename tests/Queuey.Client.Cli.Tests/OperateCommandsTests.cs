@@ -277,6 +277,9 @@ public sealed class OperateCommandsTests
     [InlineData("replay --queue que_1 --max 5")]                           // --max uten --status
     [InlineData("replay --queue que_1 --dry-run")]
     [InlineData("replay --queue que_1 --redeliver")]                       // --redeliver uten hendelse
+    [InlineData("replay evt_1 --queue que_1 --status ,")]                  // R1: --status som blir tom
+    [InlineData("replay evt_1 --queue que_1 --status ,,")]
+    [InlineData("replay --queue que_1 --status ,")]
     [InlineData("replay ../x --queue que_1 --redeliver")]                  // K1
     [InlineData("replay evt_1/.. --queue que_1 --redeliver")]
     [InlineData("resume que_1 --target ..")]
@@ -474,5 +477,19 @@ public sealed class OperateCommandsTests
             Directory.SetCurrentDirectory(before);
             try { Directory.Delete(dir, recursive: true); } catch { }
         }
+    }
+
+    [Fact]
+    public async Task One_event_never_reaches_the_receiver_without_redeliver_even_with_a_blank_status()
+    {
+        // Security-review av #71 runde 2 (R1).
+        var api = new RecordingHandler(req => throw new InvalidOperationException("Nothing is sent: " + req.Key));
+
+        CliRun blank = await Run(api, "replay", "evt_1", "--queue", "que_1", "--status", " ");
+        CliRun spaces = await Run(api, "replay", "evt_1", "--queue", "que_1", "--status", " , ");
+
+        Assert.Equal(ExitCodes.Usage, blank.Exit);
+        Assert.Equal(ExitCodes.Usage, spaces.Exit);
+        Assert.Empty(api.Requests);
     }
 }
