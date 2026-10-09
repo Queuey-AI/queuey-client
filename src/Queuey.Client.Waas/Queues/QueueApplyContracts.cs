@@ -12,6 +12,12 @@ internal sealed class QueueApplyRequest
 {
     public string TenantPublicId { get; set; } = default!;
     public string DisplayName { get; set; } = default!;
+
+    /// <summary>
+    /// The policy apply patches next, sent so Queuey checks it against the plan's limits before it creates the queue (Queuey
+    /// #513, 2026-10-09): a queue is then never created that its own policy fails on. Checked, not stored; left out when empty.
+    /// </summary>
+    public QueuePolicyPatchRequest? Policy { get; set; }
 }
 
 /// <summary>

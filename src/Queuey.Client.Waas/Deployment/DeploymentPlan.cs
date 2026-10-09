@@ -71,6 +71,13 @@ public sealed class DeploymentPlan
     /// </summary>
     public bool ApplyRequiresPlan { get; init; }
 
+    /// <summary>This plan with <paramref name="steps"/> in place of its steps.</summary>
+    internal DeploymentPlan WithSteps(IReadOnlyList<DeploymentPlanStep> steps) => new()
+    {
+        Tenant = Tenant, PlanId = PlanId, PlanHash = PlanHash, Queues = Queues, Steps = steps, Skipped = Skipped,
+        ApplyStarted = ApplyStarted, Stored = Stored, Warnings = Warnings, ApplyRequiresPlan = ApplyRequiresPlan,
+    };
+
     /// <summary>True when Queuey would accept every write.</summary>
     public bool WouldSucceed => Steps.All(s => s.Error is null);
 
@@ -136,6 +143,13 @@ public sealed class DeploymentPlanStep
     /// declares none, and without the parts that are null.
     /// </summary>
     internal JsonElement? StoredDesired { get; init; }
+
+    /// <summary>This step refused with <paramref name="error"/>.</summary>
+    internal DeploymentPlanStep WithError(QueueyException error) => new()
+    {
+        Target = Target, Aspect = Aspect, Creates = Creates, Changes = Changes, Notes = Notes, Error = error, State = State,
+        Desired = Desired, StoredIndex = StoredIndex, StoredDesired = StoredDesired,
+    };
 }
 
 /// <summary>One value that would change: a path into the config read-back, and the JSON on each side.</summary>
@@ -386,8 +400,15 @@ internal sealed class DeploymentPlanner
         return writes;
     }
 
-    private static PlannedWrite QueuePut(string name, string tenant, bool exists)
-        => new($"queues.{name}", "queue", HttpMethod.Put, new QueueApplyRequest { TenantPublicId = tenant, DisplayName = name },
+    // Policyen følger med når køen ville blitt opprettet (Queuey #513): planens tak sjekkes da i dry run-en av PUT /queues, så et
+    // tak gir wouldSucceed false med grunnen, i stedet for at apply lager en kø og så stopper på policyen.
+    private static PlannedWrite QueuePut(string name, string tenant, bool exists, QueuePolicy? policy = null)
+        => new($"queues.{name}", "queue", HttpMethod.Put, new QueueApplyRequest
+            {
+                TenantPublicId = tenant,
+                DisplayName = name,
+                Policy = !exists && policy is { IsEmpty: false } ? QueueyService.ToPatch(policy) : null,
+            },
             new[] { "queues" }, ChangesNothing: exists);
 
     /// <summary>
@@ -472,7 +493,7 @@ internal sealed class DeploymentPlanner
         ApplyQueuePlanResponse applied;
         try
         {
-            applied = (ApplyQueuePlanResponse)await AnswerAsync(QueuePut(name, tenant, existing.ContainsKey(name)), answered, ct).ConfigureAwait(false);
+            applied = (ApplyQueuePlanResponse)await AnswerAsync(QueuePut(name, tenant, existing.ContainsKey(name), plan.Definition.Policy), answered, ct).ConfigureAwait(false);
         }
         catch (QueueyException ex) when (ex is not DryRunIgnoredException)
         {

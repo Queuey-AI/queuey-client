@@ -249,6 +249,51 @@ public class StoredPlanTests : IDisposable
     }
 
     [Fact]
+    public async Task A_new_queues_policy_goes_with_put_queues_and_a_plan_cap_there_is_a_refusal_that_seals_nothing()
+    {
+        // Queuey #513 (2026-10-09): policyen sendes med PUT /queues, så planens tak sjekkes før køen lages.
+        var server = new PlansServer();
+        server.Routes["PUT /queues"] = _ => StubHttpMessageHandler.Json(HttpStatusCode.BadRequest,
+            new { error = new { code = "retention_cap_exceeded", message = "RetentionDays 30 exceeds the plan's 7." } });
+
+        DeploymentPlan plan = await StoreAsync(server, """{ "tenant": "ten_abc", "queues": { "orders": { "retentionDays": 30 } } }""");
+
+        (_, string? body) = Assert.Single(server.Sent, s => s.Request.Method == HttpMethod.Put && s.Request.RequestUri!.AbsolutePath == "/queues");
+        Assert.Equal(30, JsonDocument.Parse(body!).RootElement.GetProperty("policy").GetProperty("retentionDays").GetInt32());
+        Assert.False(plan.WouldSucceed);
+        Assert.Equal("retention_cap_exceeded", plan.Steps.Single(s => s.Error is not null).Error!.ErrorCode);
+        Assert.DoesNotContain(server.Sent, s => s.Request.RequestUri!.AbsolutePath.EndsWith("/seal", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task A_refusal_of_what_apply_sends_to_a_new_queue_lands_on_its_step_instead_of_failing_the_plan()
+    {
+        // Queuey #513: PUT …/desired kan svare 400 (planens tak). Det står på steget, og planen forsegles ikke.
+        var server = new PlansServer();
+        server.Routes[$"PUT /tenants/ten_abc/deployment/plans/{PlanId}/steps/0/desired"] = _ => StubHttpMessageHandler.Json(HttpStatusCode.BadRequest,
+            new { error = new { code = "retention_cap_exceeded", message = "RetentionDays 30 exceeds the plan's 7.", action = "Set policy.retentionDays within the plan's window." } });
+
+        DeploymentPlan plan = await StoreAsync(server, """{ "tenant": "ten_abc", "queues": { "orders": { "retentionDays": 30 } } }""");
+
+        Assert.False(plan.WouldSucceed);
+        DeploymentPlanStep refused = Assert.Single(plan.Steps, s => s.Error is not null);
+        Assert.True(refused.Creates);
+        Assert.Equal("retention_cap_exceeded", refused.Error!.ErrorCode);
+        Assert.DoesNotContain(server.Sent, s => s.Request.RequestUri!.AbsolutePath.EndsWith("/seal", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task An_existing_queue_gets_no_policy_in_put_queues()
+    {
+        var server = new PlansServer("orders");
+
+        await StoreAsync(server, """{ "tenant": "ten_abc", "queues": { "orders": { "retentionDays": 3 } } }""");
+
+        Assert.All(server.Sent.Where(s => s.Request.Method == HttpMethod.Put && s.Request.RequestUri!.AbsolutePath == "/queues"),
+            s => Assert.False(JsonDocument.Parse(s.Body!).RootElement.TryGetProperty("policy", out _)));
+    }
+
+    [Fact]
     public async Task A_plan_the_policy_gives_to_a_person_is_sealed_and_waits_to_be_submitted_unless_asked()
     {
         // BØR 2 fra reviewen av #64: en plan fra en PR-jobb skal ikke vente i innboksen, så den sendes inn bare på uttrykkelig valg.
@@ -351,7 +396,8 @@ public class StoredPlanTests : IDisposable
         // kø som nettopp ble opprettet og alt er logOnly.
         Assert.Equal(new[]
         {
-            "PUT /queues {\"tenantPublicId\":\"ten_abc\",\"displayName\":\"orders\"}",
+            // Policyen følger med til en ny kø, så planens tak sjekkes før den lages (Queuey #513).
+            "PUT /queues {\"tenantPublicId\":\"ten_abc\",\"displayName\":\"orders\",\"policy\":{\"retentionDays\":3}}",
             "PATCH /queues/que_orders/policy {\"retentionDays\":3}",
             "PATCH /queues/que_orders/local-forward {\"enabled\":true}",
             "PATCH /queues/que_orders/mode-change {\"mode\":1}",
