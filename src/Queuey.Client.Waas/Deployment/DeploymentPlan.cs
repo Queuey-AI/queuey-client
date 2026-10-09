@@ -626,7 +626,11 @@ internal sealed class DeploymentPlanner
         }
         catch (QueueyException ex) when (ex is not DryRunIgnoredException)
         {
-            return new DeploymentPlanStep { Target = write.Target, Aspect = write.Aspect, Error = ex };
+            // Et avslag på å senke miljøet får veien ut fra kommandolinjen: et nytt workspace med miljøet (gullflyten 2026-10-09).
+            QueueyException error = write.Body is PatchWorkspaceWireRequest { Environment: var environment }
+                ? EnvironmentWayOut.Rewrite(ex, environment)
+                : ex;
+            return new DeploymentPlanStep { Target = write.Target, Aspect = write.Aspect, Error = error };
         }
     }
 
@@ -665,8 +669,8 @@ internal sealed class DeploymentPlanner
         + ". apply would create the queue, and Queuey would refuse its kind.", errorCode: "local_forward_needs_dev_workspace")
     {
         SuggestedAction = "Give the queue \"kind\": \"http\" where the workspace is not dev, or take the kind from a variable, such as "
-                          + $"${{{DeploymentTemplate.QueueKindVariable(name)}}}, set to http there. If the workspace is for development, a "
-                          + "person marks it dev with Set environment… on its page in the Queuey console.",
+                          + $"${{{DeploymentTemplate.QueueKindVariable(name)}}}, set to http there. If the workspace is for development: "
+                          + EnvironmentWayOut.For("dev"),
     };
 
     private static bool IsAbsoluteUrl(string? url)

@@ -467,7 +467,14 @@ anything is sent, rather than read as a header or as a removal.
 first, and a workspace without one counts as `prod`. `apply` writes it before anything else. A key may
 raise it towards `prod`, but a file that names a lower environment than the workspace has, including
 anything but `prod` on a workspace that has none, is refused with `environment_lowering_needs_a_person`
-before anything else is written, and the error says where a person changes it in the Queuey console.
+before anything else is written. A key sets the environment when it creates a workspace, so the error
+says how to make one marked with it: `queuey create-tenant --name <name> --environment dev`. And when no
+workspace is named anywhere (the file's `tenant`, `--tenant`, `QUEUEY_TENANT`, `queuey.json` or the
+profile) and the file says `dev` or `test`, `apply` creates one marked so itself, named `queuey-dev` or
+`queuey-test`, says its id, and applies to it. Every output after that names it, errors too
+(`createdWorkspace` in `--json`, with `"tenantOption": "--tenant ten_…"`): name it, or the next `apply`
+creates another. It never does so in CI, and never for a file whose delivery names a `credentialRef`, which
+a new workspace does not have yet; those fail as a missing workspace, with `create-tenant` as the way out.
 A file applied to several workspaces takes it from a variable: `"environment": "${QUEUEY_WORKSPACE_ENVIRONMENT}"`,
 which `pull --as` writes for you.
 
@@ -703,10 +710,23 @@ one JSON value of at most 64 KB, and Queuey never signs it as a provider.
 
 `--timeout` (or `--wait`) is how long Queuey follows the event, in seconds: a minute when left out, at
 most 900. `verify` exits 0 only when the verification passed. `failed`, `timed_out` and `not_tried`
-exit 1 with Queuey's summary, and a refusal exits 1 with Queuey's message. With `--json`, the result is
-`{ "schemaVersion": 2, "tenant", "queue", "queuePublicId", "verification": { … } }`: the verification in
-Queuey's own shape, with its own `schemaVersion`, the same one Queuey's agent tools answer with. Neither
-output shows a payload value or a secret: the evidence is ids, statuses, times and header names.
+exit 1 with Queuey's summary, and a refusal exits 1 with Queuey's message. With `--json`, verify prints
+one JSON object per line, each with `"schemaVersion": 3` and a `status`. Once Queuey follows the event,
+and before verify waits, the first line is `{ "status": "waiting", "verificationId", "eventType",
+"observeUntil", "message", … }`: trigger the event then. The last is `{ "status": "done", "tenant", "queue",
+"queuePublicId", "verification": { … } }`: the verification in Queuey's own shape, with its own
+`schemaVersion`, the same one Queuey's agent tools answer with. Neither output shows a payload value or a
+secret: the evidence is ids, statuses, times and header names.
+
+`--background` starts the verification and returns at once with its id and the command that reads the
+outcome later, so the same shell can trigger the event. It exits 0 once the verification is started,
+whatever comes of it, so it is no gate in CI: `--wait ver_…` is, with the exit codes above.
+
+```bash
+queuey verify stripe --event-type checkout.session.completed --ingress-auth stripe --background
+stripe trigger checkout.session.completed
+queuey verify que_… --wait ver_…    # reads it until Queuey has settled it
+```
 
 `queuey publish <queue>` publishes one event the way a producer does: with the configured key, to the
 queue's ingress URL. A fixed `--idempotency-key` makes the event recognizable: publishing it again answers
@@ -988,8 +1008,8 @@ carries the per-flag detail this table leaves out.
 | `metrics <que_…>` | A queue's traffic snapshot |
 | `issues <ten_…>` | A workspace's issues |
 | `edge` | Operate an Edge spool: `run`, `publish`, `status`, `drain`, `retry`, `discard`, `recover`, `reset` |
-| `create-tenant` / `create-queue` | Provision imperatively (prefer `apply`) |
-| `whoami` | The resolved host, environment, tenant and license (key masked) |
+| `create-tenant` / `create-queue` | Provision imperatively (prefer `apply`); `create-tenant --environment dev` makes a dev workspace |
+| `whoami` | The resolved hosts (Production, Local or Custom), tenant and license (key masked) |
 
 ### Exit codes
 

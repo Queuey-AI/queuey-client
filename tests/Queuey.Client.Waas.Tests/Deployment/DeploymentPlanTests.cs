@@ -150,10 +150,12 @@ public class DeploymentPlanTests
         server.Queues.Add(OrdersRow);
         server.Routes["GET /tenants/ten_abc/credentials"] = _ => StubHttpMessageHandler.Json(HttpStatusCode.OK, Array.Empty<object>());
 
-        var ex = await Assert.ThrowsAsync<QueueyConfigurationException>(() => PlanAsync(server, """
+        // Et avslag, ikke en konfigurasjonsfeil (gullflyten 2026-10-09): nøkkelen og verten er i orden, workspacet mangler navnet.
+        var ex = await Assert.ThrowsAsync<QueueyException>(() => PlanAsync(server, """
         { "tenant": "ten_abc", "queues": { "orders": { "delivery": { "url": "/orders", "credentialRef": "orders-key" } } } }
         """));
 
+        Assert.Equal("credential_not_found", ex.ErrorCode);
         Assert.Contains("No credential named 'orders-key'", ex.Message);
         Assert.Empty(server.Writes);
     }

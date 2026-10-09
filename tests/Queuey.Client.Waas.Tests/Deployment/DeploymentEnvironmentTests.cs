@@ -103,7 +103,10 @@ public class DeploymentEnvironmentTests
         Assert.Equal(403, refusal.StatusCode);
         Assert.Equal("environment_lowering_needs_a_person", refusal.ErrorCode);
         Assert.Contains("from prod to dev", refusal.Message);
-        Assert.Contains("Queuey console", refusal.SuggestedAction);
+        // Veien ut er kommandolinjen, ikke en person i konsollet (gullflyten 2026-10-09).
+        Assert.StartsWith("An API key sets a workspace's environment only when it creates one. Make a workspace marked dev with "
+                          + "`queuey create-tenant --name <name> --environment dev`", refusal.SuggestedAction);
+        Assert.DoesNotContain("console", refusal.SuggestedAction);
         Assert.Equal(new[] { "PATCH /tenants/ten_abc" },
             api.Requests.Where(r => r.Method != HttpMethod.Get).Select(r => $"{r.Method} {r.RequestUri!.AbsolutePath}").ToArray());
     }
@@ -136,6 +139,9 @@ public class DeploymentEnvironmentTests
         DeploymentPlanStep step = Assert.Single(plan.Steps, s => s.Aspect == "environment");
         Assert.Equal("workspace", step.Target);
         Assert.Equal("environment_lowering_needs_a_person", step.Error!.ErrorCode);
+        Assert.Equal(403, step.Error.StatusCode);
+        Assert.Contains("`queuey create-tenant --name <name> --environment test`", step.Error.SuggestedAction);
+        Assert.DoesNotContain("console", step.Error.SuggestedAction);
         int index = api.Requests.FindIndex(r => r.RequestUri!.AbsolutePath == "/tenants/ten_abc" && r.Method == HttpMethod.Patch);
         Assert.Equal("?dryRun=true", api.Requests[index].RequestUri!.Query);
         Assert.Equal("""{"environment":"test"}""", Encoding.UTF8.GetString(api.Bodies[index]!));

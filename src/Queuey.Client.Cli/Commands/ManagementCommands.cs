@@ -11,7 +11,12 @@ namespace Queuey.Client.Cli;
 internal static class CreateTenantCommand
 {
     internal static readonly CommandOptions Options = new(
-        "create-tenant", flags: new[] { "as-producer", "with-default-queue", "json" }, values: new[] { "name" }, positionals: 1);
+        "create-tenant", flags: new[] { "as-producer", "with-default-queue", "json" }, values: new[] { "name", "environment" }, positionals: 1,
+        hints: new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            // Det globale hintet for --env handler om vertene, ikke workspacets miljø (review av #65, K4).
+            ["env"] = "--env is not an option: the new workspace's environment is --environment dev|test|staging|prod.",
+        });
 
     public static async Task<int> RunAsync(string[] args)
     {
@@ -21,13 +26,40 @@ internal static class CreateTenantCommand
         string? name = map.Get("name") ?? map.FirstPositional;
         if (string.IsNullOrWhiteSpace(name)) return CliErrors.Usage(map, "missing_argument", "create-tenant requires --name <display>.");
 
+        // Gullflyten 2026-10-09: uten --environment ble workspacet prod, og bare en person kan senke det etterpå. En nøkkel setter
+        // det når den lager workspacet.
+        string? environment = null;
+        if (map.Has("environment") && EnvironmentOption(map, out environment) is { } refused)
+            return refused;
+
         using ServiceProvider sp = CliHost.BuildProvider(CliHost.Resolve(map));
         var svc = sp.GetRequiredService<IQueueyService>();
-        TenantResult t = await svc.Management.CreateTenantAsync(name!, map.Has("as-producer"), map.Has("with-default-queue"));
+        TenantResult t;
+        if (environment is null)
+            t = await svc.Management.CreateTenantAsync(name!, map.Has("as-producer"), map.Has("with-default-queue"));
+        else if (svc.Management is QueueyManagement management)
+            t = await management.CreateWorkspaceAsync(name!, environment, map.Has("as-producer"), map.Has("with-default-queue"));
+        else
+            return CliErrors.Write(map.Has("json"), "unsupported", "This build's Queuey client can't set a workspace's environment.", null,
+                status: null, ExitCodes.RuntimeError, "Queuey error");
 
         if (map.Has("json")) Console.WriteLine(JsonSerializer.Serialize(t, CliHost.JsonOut));
-        else Console.WriteLine($"Created tenant {t.PublicId} ({t.DisplayName}, kind={t.Kind})");
+        else Console.WriteLine($"Created tenant {t.PublicId} ({t.DisplayName}, kind={t.Kind}{(t.Environment is { } env ? $", environment={env}" : "")})");
         return ExitCodes.Success;
+    }
+
+    /// <summary>The value of <c>--environment</c>, lower case, or the exit code of the usage error for one Queuey does not take.</summary>
+    private static int? EnvironmentOption(ArgMap map, out string? environment)
+    {
+        environment = map.Get("environment")?.Trim().ToLowerInvariant();
+        if (environment is not null && DeploymentWorkspace.EnvironmentValues.Contains(environment, StringComparer.Ordinal))
+            return null;
+
+        string got = environment is null ? "" : CliErrors.Shown(environment);
+        environment = null;
+        return CliErrors.Usage(map, "invalid_value",
+            $"--environment takes one of {string.Join(", ", DeploymentWorkspace.EnvironmentValues)}; got '{got}'.",
+            "Leave it out for a workspace without one, which Queuey counts as prod.");
     }
 }
 

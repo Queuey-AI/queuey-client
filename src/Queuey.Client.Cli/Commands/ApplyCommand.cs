@@ -70,6 +70,42 @@ internal static class ApplyCommand
         // Workspacet fila navngir, ellers det konfigurerte — og feil når --tenant eller QUEUEY_TENANT sier
         // noe annet enn fila. Samme regel som verify, så de treffer samme workspace.
         ResolvedConfig config = CliHost.ResolveForDeployment(map, fileTenant, path);
+
+        // Gullflyten 2026-10-09: et dev-workspace kunne ikke lages fra CLI-en. Navngir ingenting et workspace, og fila sier dev
+        // eller test, lager apply det først og applyer til det, men aldri i CI eller for en levering med credential
+        // (WorkspaceCreation). Et navngitt workspace lages aldri på nytt.
+        CreatedWorkspace? created = null;
+        if (string.IsNullOrWhiteSpace(config.TenantPublicId) && !map.Has("check") && planId is null)
+        {
+            DeploymentFile expanded = profile is null ? file.Expand() : target;
+            if (expanded.Workspace?.EnvironmentToSend is { } environment)
+            {
+                if (WorkspaceCreation.Refusal(environment, expanded, path, CliHost.Env) is { } notCreated)
+                    throw notCreated;
+                created = await CreateWorkspaceAsync(config, path, environment);
+                config = config.WithTenant(created.PublicId);
+            }
+        }
+
+        // Etter at workspacet er laget, står det i hver utgang, også en feil: ellers lager neste forsøk et til (review av #65, B1).
+        try
+        {
+            return await ApplyAsync(map, path, file, target, config, planId, wait, created);
+        }
+        catch (QueueyException ex) when (created is not null)
+        {
+            bool configuration = ex is QueueyConfigurationException;
+            return CliErrors.Write(map.Has("json"), configuration ? "config_error" : ex.ErrorCode ?? "queuey_error", ex.Message,
+                (ex.SuggestedAction is null ? "" : ex.SuggestedAction + " ") + created.NameIt, configuration ? null : ex.StatusCode,
+                configuration ? ExitCodes.Configuration : ExitCodes.RuntimeError, configuration ? "Config error" : "Queuey error",
+                new Dictionary<string, object?> { ["createdWorkspace"] = created.ToJson() });
+        }
+    }
+
+    private static async Task<int> ApplyAsync(
+        ArgMap map, string path, DeploymentFile file, DeploymentFile target, ResolvedConfig config, string? planId, TimeSpan wait,
+        CreatedWorkspace? created)
+    {
         using ServiceProvider provider = CliHost.BuildProvider(config);
         var service = provider.GetRequiredService<IQueueyService>();
 
@@ -81,7 +117,7 @@ internal static class ApplyCommand
 
         // En plan Queuey lagrer (F3.11): kilden og det den tar tilbake, er planens.
         var storedPlans = provider.GetRequiredService<IQueueyPlans>();
-        var run = new ApplyRun(service, storedPlans, file, path, config, map, wait);
+        var run = new ApplyRun(service, storedPlans, file, path, config, map, wait, created);
         if (planId is not null)
             return await run.StoredAsync(await storedPlans.GetStoredPlanAsync(planId, config.TenantPublicId));
 
@@ -159,6 +195,39 @@ internal static class ApplyCommand
         return null;
     }
 
+    /// <summary>A workspace apply created because nothing named one and the file says its environment.</summary>
+    private sealed record CreatedWorkspace(string PublicId, string? DisplayName, string Environment)
+    {
+        /// <summary>The option that names it, ready to use.</summary>
+        public string TenantOption => $"--tenant {PublicId}";
+
+        /// <summary>What to do so the next apply reaches it.</summary>
+        public string NameIt => $"This apply created workspace {PublicId}: name it with {TenantOption}, or the next apply creates another.";
+
+        public object ToJson() => new { publicId = PublicId, displayName = DisplayName, environment = Environment, tenantOption = TenantOption };
+    }
+
+    /// <summary>
+    /// Creates the workspace the file describes, marked with its environment, and says on stderr how to name it, so the next
+    /// apply reaches it instead of creating another.
+    /// </summary>
+    private static async Task<CreatedWorkspace> CreateWorkspaceAsync(ResolvedConfig config, string path, string environment)
+    {
+        using ServiceProvider provider = CliHost.BuildProvider(config);
+        if (provider.GetRequiredService<IQueueyService>().Management is not QueueyManagement management)
+            throw new QueueyException("This build's Queuey client can't create a workspace with an environment.", errorCode: "unsupported");
+
+        // Et nøytralt navn, aldri mappens: den kan bære et kundenavn, og navnet vises for hele lisensen (review av #65, K3).
+        string name = WorkspaceCreation.NameFor(environment);
+        TenantResult tenant = await management.CreateWorkspaceAsync(name, environment);
+        string id = tenant.PublicId ?? throw new QueueyException("Queuey created a workspace and did not say its id.", errorCode: "workspace_id_missing");
+
+        Console.Error.WriteLine($"No workspace is named, and {path} says environment {environment}: created workspace {id} "
+                                + $"({TerminalText.Line(tenant.DisplayName ?? name)}, {environment}).");
+        Console.Error.WriteLine($"  → Name it, or the next apply creates another: \"tenant\": \"{id}\" in {path}, tenant in the profile, or --tenant {id}.");
+        return new CreatedWorkspace(id, tenant.DisplayName, environment);
+    }
+
     /// <summary>One apply from the command line: the service, the file, and how the result is written.</summary>
     private sealed class ApplyRun
     {
@@ -169,9 +238,13 @@ internal static class ApplyCommand
         private readonly ResolvedConfig _config;
         private readonly ArgMap _map;
         private readonly TimeSpan _wait;
+        private readonly CreatedWorkspace? _created;
 
-        public ApplyRun(IQueueyService service, IQueueyPlans plans, DeploymentFile file, string path, ResolvedConfig config, ArgMap map, TimeSpan wait)
+        public ApplyRun(
+            IQueueyService service, IQueueyPlans plans, DeploymentFile file, string path, ResolvedConfig config, ArgMap map, TimeSpan wait,
+            CreatedWorkspace? created)
         {
+            _created = created;
             _service = service;
             _plans = plans;
             _file = file;
@@ -182,6 +255,17 @@ internal static class ApplyCommand
         }
 
         private bool Json => _map.Has("json");
+
+        /// <summary><paramref name="json"/> as apply prints it, with <c>createdWorkspace</c> when this apply created the workspace.</summary>
+        private string WithCreated(object json)
+        {
+            if (_created is null)
+                return JsonSerializer.Serialize(json, CliHost.JsonOut);
+
+            var node = (System.Text.Json.Nodes.JsonObject)JsonSerializer.SerializeToNode(json, CliHost.JsonOut)!;
+            node["createdWorkspace"] = JsonSerializer.SerializeToNode(_created.ToJson(), CliHost.JsonOut);
+            return node.ToJsonString(CliHost.JsonOut);
+        }
 
         /// <summary>
         /// Makes the plan Queuey asked for, sends it to the inbox when a person approves it, and applies it once the policy runs
@@ -206,7 +290,7 @@ internal static class ApplyCommand
             if (!plan.WouldSucceed)
             {
                 if (Json)
-                    Console.WriteLine(JsonSerializer.Serialize(PlanCommand.ToJson(plan, _path), CliHost.JsonOut));
+                    Console.WriteLine(WithCreated(PlanCommand.ToJson(plan, _path)));
                 else
                 {
                     Console.WriteLine($"Queuey plan — {_path} → {_config.ResolvedApiBase()}  (tenant {plan.Tenant})");
@@ -267,19 +351,21 @@ internal static class ApplyCommand
         {
             if (Json)
             {
-                Console.WriteLine(JsonSerializer.Serialize(new
+                Console.WriteLine(WithCreated(new
                 {
                     schemaVersion = ResultJsonSchemaVersion,
                     file = _path,
                     pendingApproval = true,
                     plan = StoredPlanText.ToJson(plan),
-                }, CliHost.JsonOut));
+                }));
             }
             else
             {
                 if (!shown || _wait > TimeSpan.Zero)
                     StoredPlanText.WriteNext(plan);
                 Console.WriteLine("Nothing was applied: the plan waits for a person's approval.");
+                if (_created is not null)
+                    Console.Error.WriteLine($"  → {_created.NameIt}");
             }
 
             return ExitCodes.PendingApproval;
@@ -290,7 +376,7 @@ internal static class ApplyCommand
             string? tenant = _config.TenantPublicId;
 
             if (Json)
-                Console.WriteLine(JsonSerializer.Serialize(ToJsonResult(result, _path, _config, tenant, source, adopt, adoptPlan, plan), CliHost.JsonOut));
+                Console.WriteLine(JsonSerializer.Serialize(ToJsonResult(result, _path, _config, tenant, source, adopt, adoptPlan, plan, _created), CliHost.JsonOut));
             else
                 WriteHuman(result, _path, _config, tenant, plan);
 
@@ -729,10 +815,13 @@ internal static class ApplyCommand
 
     private static object ToJsonResult(
         QueueSyncResult result, string path, ResolvedConfig config, string? tenant,
-        DeploymentFileSource? source, IReadOnlyList<string> adopt, DeploymentPlan? adoptPlan, StoredPlan? plan) => new
+        DeploymentFileSource? source, IReadOnlyList<string> adopt, DeploymentPlan? adoptPlan, StoredPlan? plan, CreatedWorkspace? created) => new
     {
         schemaVersion = ResultJsonSchemaVersion,
         file = path,
+        // Workspacet apply laget fordi ingenting navnga et, og fila sa miljøet; null ellers. Navngi det, ellers lager neste
+        // apply et til.
+        createdWorkspace = created?.ToJson(),
         // Planen Queuey lagrer, som applyen skrev (F3.11); null for en apply uten plan.
         plan = plan is null ? null : StoredPlanText.ToJson(plan),
         // Fila slik Queuey merker det applyen styrer med (F2.4): uten userinfo, query og fragment.
@@ -755,7 +844,8 @@ internal static class ApplyCommand
         created = result.Created,
         failed = result.Failed,
         notAttempted = result.NotAttempted,
-        warnings = result.Warnings,
+        // Bare klientens egne: Queueys står i serverWarnings, og sto før i begge (gullflyten 2026-10-09).
+        warnings = result.Warnings.Where(w => !result.ServerWarnings.Contains(w, StringComparer.Ordinal)),
         // Advarslene Queuey svarte med (X-Queuey-Warning), som would_require_approval (F3.11). De står også på stderr.
         serverWarnings = result.ServerWarnings,
         queues = result.Applied.Select(r => new

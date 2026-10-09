@@ -7,6 +7,9 @@ internal sealed class CreateTenantWireRequest
     public string DisplayName { get; set; } = default!;
     public bool CreateAsProducer { get; set; }
     public bool CreateDefaultQueue { get; set; }
+
+    /// <summary><c>dev</c>, <c>test</c>, <c>staging</c> or <c>prod</c>; left out when null, and Queuey then counts it as prod.</summary>
+    public string? Environment { get; set; }
 }
 
 /// <summary>Wire response for a tenant: <c>{ publicId: "ten_…", displayName, status, kind }</c>.</summary>
@@ -16,6 +19,9 @@ internal sealed class TenantSummaryResponse
     public string? DisplayName { get; set; }
     public string? Status { get; set; }
     public string? Kind { get; set; }
+
+    /// <summary>The workspace's environment, or null when it has none or Queuey does not say.</summary>
+    public string? Environment { get; set; }
 }
 
 /// <summary>Wire request for <c>POST /queues</c>.</summary>

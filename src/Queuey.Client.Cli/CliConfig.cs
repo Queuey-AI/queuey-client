@@ -52,6 +52,20 @@ internal sealed class ResolvedConfig
         ProfileTenant = ProfileTenant,
     };
 
+    /// <summary>
+    /// What the hosts are, for whoami: <c>Production</c> for Queuey's own, <c>Local</c> when both are on this machine, and
+    /// <c>Custom</c> for any other.
+    /// </summary>
+    // Gullflyten 2026-10-09: whoami sa Production mot localhost, fordi Production er det eneste innebygde miljøet.
+    public string HostsLabel()
+    {
+        var production = new QueueyOptions { Environment = QueueyEnvironment.Production };
+        Uri api = ResolvedApiBase(), ingress = ResolvedIngressBase();
+        if (api == production.ResolveApiBaseAddress() && ingress == production.ResolveIngressBaseAddress())
+            return "Production";
+        return api.IsLoopback && ingress.IsLoopback ? "Local" : "Custom";
+    }
+
     public Uri ResolvedApiBase() => ToOptions().ResolveApiBaseAddress();
     public Uri ResolvedIngressBase() => ToOptions().ResolveIngressBaseAddress();
 

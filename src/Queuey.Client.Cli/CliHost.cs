@@ -19,6 +19,16 @@ internal static class CliHost
     };
 
     /// <summary>
+    /// <see cref="JsonOut"/> on one line: for output a reader takes a line at a time (NDJSON), such as <c>verify --json</c>, and
+    /// for a <c>--json</c> error, which can come in such a stream.
+    /// </summary>
+    public static readonly JsonSerializerOptions JsonLine = new(JsonSerializerDefaults.Web)
+    {
+        WriteIndented = false,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
+
+    /// <summary>
     /// The connection for a command that takes no profile: flags, the <c>QUEUEY_</c> variables, <c>queuey.json</c>. Refused
     /// when <c>QUEUEY_PROFILE</c> is set, since the command would connect somewhere else than the profile says.
     /// </summary>

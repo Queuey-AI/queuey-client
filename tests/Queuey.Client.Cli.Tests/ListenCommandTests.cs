@@ -99,6 +99,39 @@ public sealed class ListenCommandTests
     }
 
     [Fact]
+    public void A_dropped_connection_and_its_return_are_lines_in_the_json_stream_too()
+    {
+        // Gullflyten 2026-10-09: gjenoppkoblingen sto bare på stderr, så en agent som leste strømmen, så den ikke.
+        var (stdout, stderr) = (new StringWriter(), new StringWriter());
+        var output = new ListenOutput(json: true, stdout, stderr);
+
+        output.Listening(new ListenTarget("queue", "que_1", Name: "orders"), "listen:queue:que_1", "http://localhost:5000", tookOver: false);
+        output.Reconnecting();
+        output.Reconnected("listen:queue:que_1");
+
+        JsonElement[] lines = Lines(stdout);
+        Assert.Equal(new[] { "listening", "reconnecting", "reconnected" }, lines.Select(l => l.GetProperty("type").GetString()));
+        Assert.All(lines, l => Assert.Equal(1, l.GetProperty("schemaVersion").GetInt32()));
+        Assert.Equal("listen:queue:que_1", lines[2].GetProperty("scopeKey").GetString());
+        // En person ser det på stderr som før.
+        Assert.Contains("… connection lost, reconnecting", stderr.ToString());
+        Assert.Contains("… reconnected — listening on listen:queue:que_1", stderr.ToString());
+    }
+
+    [Fact]
+    public void Without_json_a_reconnect_is_only_a_note_on_stderr()
+    {
+        var (stdout, stderr) = (new StringWriter(), new StringWriter());
+        var output = new ListenOutput(json: false, stdout, stderr);
+
+        output.Reconnecting();
+        output.Reconnected("listen:queue:que_1");
+
+        Assert.Equal("", stdout.ToString());
+        Assert.Contains("… connection lost, reconnecting", stderr.ToString());
+    }
+
+    [Fact]
     public void Without_json_a_delivery_shows_the_event_id_beside_its_type()
     {
         var (stdout, stderr) = (new StringWriter(), new StringWriter());

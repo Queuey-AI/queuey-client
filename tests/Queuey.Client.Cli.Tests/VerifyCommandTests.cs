@@ -101,6 +101,130 @@ public sealed class VerifyCommandTests : IDisposable
         Assert.StartsWith("✓ Passed — que_orders in ten_abc, event evt_1", run.Stdout);
     }
 
+    // ── Gullflyten 2026-10-09: verify sier når den venter, og kan starte i bakgrunnen ──────────────
+
+    private static JsonElement[] JsonLines(string stdout)
+        => stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(l => JsonDocument.Parse(l).RootElement.Clone()).ToArray();
+
+    private static object Session(bool settled = false, string outcome = "pending") => FlowAnswers.Verification(outcome, settled: settled,
+        mode: "observed_session", eventId: settled ? "evt_1" : null,
+        expectations: new { eventType = "checkout.session.completed", ingressAuth = "stripe" });
+
+    [Fact]
+    public async Task With_json_the_first_line_says_it_is_waiting_before_it_waits_and_the_last_is_the_outcome()
+    {
+        RecordingHandler api = Server(Session(), Session(), FlowAnswers.Verification("passed", mode: "observed_session"));
+
+        CliRun run = await CliHarness.RunAsync(() => Verify(
+            "que_orders", "--event-type", "checkout.session.completed", "--ingress-auth", "stripe", "--json"), api);
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.Equal(string.Empty, run.Stderr);
+        JsonElement[] lines = JsonLines(run.Stdout);
+        Assert.Equal(new[] { "waiting", "done" }, lines.Select(l => l.GetProperty("status").GetString()));
+        Assert.All(lines, l => Assert.Equal(3, l.GetProperty("schemaVersion").GetInt32()));
+
+        JsonElement waiting = lines[0];
+        Assert.Equal("ver_1", waiting.GetProperty("verificationId").GetString());
+        Assert.Equal("que_orders", waiting.GetProperty("queuePublicId").GetString());
+        Assert.Equal("observed_session", waiting.GetProperty("mode").GetString());
+        Assert.Equal("checkout.session.completed", waiting.GetProperty("eventType").GetString());
+        Assert.Equal("stripe", waiting.GetProperty("ingressAuth").GetString());
+        Assert.Equal("Waiting up to 60 s for the next 'checkout.session.completed' event on que_orders, verified with stripe. " +
+                     "Trigger it now: an event that arrived before this does not count.", waiting.GetProperty("message").GetString());
+        Assert.Equal(JsonValueKind.Null, waiting.GetProperty("next").ValueKind);
+
+        Assert.Equal("passed", lines[1].GetProperty("verification").GetProperty("outcome").GetString());
+    }
+
+    [Fact]
+    public async Task Background_starts_the_verification_and_returns_its_id_and_how_to_read_it_without_waiting()
+    {
+        RecordingHandler api = Server(Session());
+
+        CliRun json = await CliHarness.RunAsync(() => Verify(
+            "orders", "--event-type", "checkout.session.completed", "--ingress-auth", "stripe", "--background", "--tenant", "ten_abc", "--json"), api);
+
+        Assert.Equal(ExitCodes.Success, json.Exit);
+        // Bare starten: ingen lesing av verifiseringen.
+        Assert.Equal(new[] { "GET /tenants/ten_abc/queues", "POST /queues/que_orders/verifications" }, Keys(api));
+        JsonElement line = Assert.Single(JsonLines(json.Stdout));
+        Assert.Equal("waiting", line.GetProperty("status").GetString());
+        Assert.Equal("ver_1", line.GetProperty("verificationId").GetString());
+        Assert.Equal("queuey verify que_orders --wait ver_1", line.GetProperty("next").GetString());
+
+        CliRun human = await CliHarness.RunAsync(() => Verify(
+            "que_orders", "--event-type", "checkout.session.completed", "--background"), Server(Session()));
+
+        Assert.Equal(ExitCodes.Success, human.Exit);
+        Assert.StartsWith("Started verification ver_1. Waiting up to 60 s for the next 'checkout.session.completed' event", human.Stdout);
+        Assert.Contains("  Read the outcome with: queuey verify que_orders --wait ver_1", human.Stdout);
+    }
+
+    [Fact]
+    public async Task Wait_with_a_verification_id_reads_the_one_already_started_until_Queuey_settles_it()
+    {
+        RecordingHandler api = Server(Session(), Session(), FlowAnswers.Verification("passed", mode: "observed_session"));
+
+        CliRun run = await CliHarness.RunAsync(() => Verify("que_orders", "--wait", "ver_1", "--json"), api);
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        // Ingen ny verifisering startes.
+        Assert.Equal(new[] { "GET /queues/que_orders/verifications/ver_1", "GET /queues/que_orders/verifications/ver_1" }, Keys(api));
+        JsonElement[] lines = JsonLines(run.Stdout);
+        Assert.Equal(new[] { "waiting", "done" }, lines.Select(l => l.GetProperty("status").GetString()));
+        Assert.StartsWith("Reading verification ver_1 on que_orders until Queuey settles it, at the latest 2026-10-06T10:01:00Z.",
+            lines[0].GetProperty("message").GetString());
+        Assert.True(lines[1].GetProperty("verification").GetProperty("settled").GetBoolean());
+    }
+
+    [Theory]
+    [InlineData("--event-type", "x")]
+    [InlineData("--background", null)]
+    [InlineData("--timeout", "30")]
+    public async Task Wait_with_a_verification_id_takes_nothing_that_would_start_another(string option, string? value)
+    {
+        string[] args = value is null ? new[] { "que_orders", "--wait", "ver_1", option } : new[] { "que_orders", "--wait", "ver_1", option, value };
+
+        CliRun run = await CliHarness.RunAsync(() => Verify(args));
+
+        Assert.Equal(ExitCodes.Usage, run.Exit);
+        Assert.Contains($"--wait ver_1 reads a verification that is already started, so it takes no {option}.", run.Stderr);
+    }
+
+    [Fact]
+    public async Task Wait_with_seconds_is_still_the_timeout()
+    {
+        RecordingHandler api = Server(FlowAnswers.Verification("passed"));
+
+        CliRun run = await CliHarness.RunAsync(() => Verify("que_orders", "--event", "evt_1", "--wait", "30"), api);
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.Equal(30, api.Requests[0].Json.GetProperty("timeoutSeconds").GetInt32());
+    }
+
+    [Fact]
+    public async Task An_error_after_the_waiting_line_is_one_line_too()
+    {
+        int read = 0;
+        var api = new RecordingHandler(req => req.Key switch
+        {
+            "POST /queues/que_orders/verifications" => RecordingHandler.Json(HttpStatusCode.Created, Session()),
+            "GET /queues/que_orders/verifications/ver_1" when read++ == 0
+                => RecordingHandler.Error(HttpStatusCode.Forbidden, "forbidden", "The key may not read the queue's events."),
+            _ => throw new InvalidOperationException(req.Key),
+        });
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With(
+            "verify", "que_orders", "--event-type", "checkout.session.completed", "--json")), api);
+
+        Assert.Equal(ExitCodes.RuntimeError, run.Exit);
+        JsonElement[] lines = JsonLines(run.Stdout);
+        Assert.Equal(2, lines.Length);
+        Assert.Equal("waiting", lines[0].GetProperty("status").GetString());
+        Assert.Equal("forbidden", lines[1].GetProperty("error").GetProperty("code").GetString());
+    }
+
     [Fact]
     public async Task Send_posts_the_test_event_as_a_json_value_with_its_type()
     {
@@ -124,9 +248,12 @@ public sealed class VerifyCommandTests : IDisposable
         Assert.Equal(2, payload.GetProperty("lines").GetArrayLength());
 
         JsonElement root = JsonDocument.Parse(run.Stdout).RootElement;
-        Assert.Equal(new[] { "schemaVersion", "tenant", "queue", "queuePublicId", "verification" }, Names(root));
+        Assert.Equal(new[] { "schemaVersion", "status", "tenant", "queue", "queuePublicId", "verification" }, Names(root));
         Assert.Equal(VerifyCommand.JsonSchemaVersion, root.GetProperty("schemaVersion").GetInt32());
-        Assert.Equal(2, VerifyCommand.JsonSchemaVersion);
+        Assert.Equal(3, VerifyCommand.JsonSchemaVersion);
+        Assert.Equal("done", root.GetProperty("status").GetString());
+        // Avgjort med en gang: ingen waiting-linje, bare resultatet, på én linje.
+        Assert.Single(run.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries));
         Assert.Equal("ten_abc", root.GetProperty("tenant").GetString());
         Assert.Equal("orders", root.GetProperty("queue").GetString());
         Assert.Equal("que_orders", root.GetProperty("queuePublicId").GetString());

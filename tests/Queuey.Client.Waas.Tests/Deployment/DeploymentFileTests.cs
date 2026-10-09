@@ -264,9 +264,11 @@ public class DeploymentFileTests
 
         QueueyService service = WaasTestHost.Build(apiStub: api);
 
-        var ex = await Assert.ThrowsAsync<QueueyConfigurationException>(
+        // Et avslag (credential_not_found), ikke en konfigurasjonsfeil (gullflyten 2026-10-09).
+        var ex = await Assert.ThrowsAsync<QueueyException>(
             () => service.ApplyDeploymentAsync(DeploymentFile.Parse(Sample)));
 
+        Assert.Equal("credential_not_found", ex.ErrorCode);
         Assert.Contains("No credential named 'partner-key'", ex.Message);
         Assert.Contains("queuey credentials set --tenant ten_abc --name partner-key", ex.Message);
         Assert.All(api.Requests, r => Assert.Equal(HttpMethod.Get, r.Method));

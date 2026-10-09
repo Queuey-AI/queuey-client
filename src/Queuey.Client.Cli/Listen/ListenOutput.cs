@@ -10,7 +10,8 @@ namespace Queuey.Client.Cli;
 /// <summary>
 /// What <c>queuey listen</c> prints. With <c>--json</c>: one JSON object per line on stdout (NDJSON), each with
 /// <c>schemaVersion</c> and a <c>type</c> — <c>listening</c>, then a <c>delivery</c> per forward, a <c>lost</c> when a
-/// workspace session loses one of its queues, and one line that ends the stream: <c>refused</c> (it never listened, an
+/// workspace session loses one of its queues, <c>reconnecting</c> and <c>reconnected</c> when the connection drops and comes
+/// back, and one line that ends the stream: <c>refused</c> (it never listened, an
 /// error before the session included), <c>superseded</c> (another session took the queue over) or <c>closed</c>
 /// (stopped, terminated, or the connection was lost for good). Addresses are redacted as Queuey redacts them for agents.
 /// Notes for a person go to stderr either way. Without <c>--json</c>: lines for a person.
@@ -135,6 +136,27 @@ internal sealed class ListenOutput
         }
 
         Err($"Lost {lost.QueuePublicId}: {lost.Message}");
+    }
+
+    /// <summary>The connection dropped, and the session tries to come back; deliveries wait until it does.</summary>
+    // Gullflyten 2026-10-09: gjenoppkoblingen sto bare på stderr, så en agent som leste JSON-strømmen, så ingenting.
+    public void Reconnecting()
+    {
+        if (Ended)
+            return;
+        if (_json)
+            Write(new { schemaVersion = JsonSchemaVersion, type = "reconnecting" });
+        Err("… connection lost, reconnecting");
+    }
+
+    /// <summary>The connection came back, and the session listens on <paramref name="scopeKey"/> again.</summary>
+    public void Reconnected(string? scopeKey)
+    {
+        if (Ended)
+            return;
+        if (_json)
+            Write(new { schemaVersion = JsonSchemaVersion, type = "reconnected", scopeKey });
+        Err($"… reconnected — listening on {scopeKey}");
     }
 
     public void Refused(string code, string message, string? action, DateTimeOffset? heldSinceUtc)

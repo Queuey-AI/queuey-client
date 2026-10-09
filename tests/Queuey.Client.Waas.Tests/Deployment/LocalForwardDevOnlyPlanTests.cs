@@ -58,7 +58,7 @@ public class LocalForwardDevOnlyPlanTests
             + $"listener (queuey listen): workspace ten_abc {described}. apply would create the queue, and Queuey would refuse its kind.",
             error.Message);
         Assert.Contains("${QUEUEY_STRIPE_DELIVERY_KIND}", error.SuggestedAction);
-        Assert.Contains("Set environment… on its page in the Queuey console", error.SuggestedAction);
+        Assert.Contains("`queuey create-tenant --name <name> --environment dev`", error.SuggestedAction);
         Assert.False(plan.WouldSucceed);
     }
 

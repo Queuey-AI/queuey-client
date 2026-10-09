@@ -104,7 +104,16 @@ internal sealed class CredentialResolver
         }
     }
 
-    private QueueyConfigurationException Missing(List<(string Name, string Where, string? Type)> missing, Dictionary<string, string> byName)
+    /// <summary>
+    /// The code a missing credential fails with: the same as <c>queuey credentials rotate</c> gives for a name the workspace has no
+    /// credential under. Exit 1 in the CLI, as a refusal, not 3: the key and the host are fine, the workspace lacks the credential.
+    /// </summary>
+    // Gullflyten 2026-10-09: et manglende navn i leveringen ga exit 3, koden for nøkkel- og vertsfeil, mens det samme i ingressen
+    // er et notat. Ingressen godtar et navn som ikke finnes ennå (Queuey F2.3); leveringen kan ikke sendes uten id-en, så den
+    // nektes før noe skrives, i både plan og apply, som et avslag (exit 1).
+    internal const string NotFoundCode = "credential_not_found";
+
+    private QueueyException Missing(List<(string Name, string Where, string? Type)> missing, Dictionary<string, string> byName)
     {
         var names = missing.Select(m => m.Name).Distinct(StringComparer.Ordinal).ToList();
 
@@ -112,7 +121,7 @@ internal sealed class CredentialResolver
         // flere får plassholdere, siden typene kan være ulike. Navnene kommer fra fila uten noen formsjekk, så de vises bare i
         // den trygge formen (review av #58, B1): før sto de rått i feilen og i kommandoen, forbi TerminalText.
         string? type = missing.Select(m => m.Type).Distinct().Count() == 1 ? missing[0].Type : null;
-        return new QueueyConfigurationException(
+        return new QueueyException(
             (names.Count == 1
                 ? CredentialNameRules.Showable(names[0]) is { } shown
                     ? $"No credential named '{shown}' in workspace {_tenantPublicId}"
@@ -123,7 +132,7 @@ internal sealed class CredentialResolver
                 ? $"Store it first. {_storing.HowToStore(names[0], type)} "
                 : $"Store each first. {_storing.HowToStore(CredentialStoring.Placeholder, null)}"
                   + (names.Any(n => CredentialNameRules.Showable(n) is null) ? " " + CredentialStoring.NotShown : "") + " ")
-            + Available(byName));
+            + Available(byName), errorCode: NotFoundCode);
     }
 
     private static string Quoted(string name) => CredentialNameRules.Showable(name) is { } shown ? $"'{shown}'" : "a name that is not shown";
@@ -159,12 +168,12 @@ internal sealed class CredentialResolver
         if (byName.TryGetValue(name, out string? publicId))
             return publicId;
 
-        throw new QueueyConfigurationException(
+        throw new QueueyException(
             (CredentialNameRules.Showable(name) is { } shown
                 ? $"No credential named '{shown}' in workspace {_tenantPublicId}. "
                 : $"No credential with the name the file gives in workspace {_tenantPublicId}. ") +
             $"Store it first. {_storing.HowToStore(name, null)} " +
-            Available(byName));
+            Available(byName), errorCode: NotFoundCode);
     }
 
     /// <summary>Resolves both halves of a workspace delivery patch, returning a copy safe to send.</summary>

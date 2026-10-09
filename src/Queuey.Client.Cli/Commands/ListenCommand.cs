@@ -266,7 +266,7 @@ internal static class ListenCommand
 
         connection.Reconnecting += _ =>
         {
-            output.Note("… connection lost, reconnecting");
+            output.Reconnecting();
             return Task.CompletedTask;
         };
         connection.Reconnected += async _ =>
@@ -277,7 +277,7 @@ internal static class ListenCommand
             {
                 ListenReply reply = await ClaimAsync(connection, target, sessionId, takeOver: false, ownerAware, CancellationToken.None);
                 if (reply.Listening)
-                    output.Note($"… reconnected — listening on {reply.ScopeKey}");
+                    output.Reconnected(reply.ScopeKey);
                 else if (reply.Code == "listener_already_connected")
                     ended.TrySetResult(new ListenEnd("superseded", reply.Message ?? "Another queuey listen session has the queue now."));
                 else

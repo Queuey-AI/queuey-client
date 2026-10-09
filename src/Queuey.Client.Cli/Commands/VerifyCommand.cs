@@ -24,7 +24,7 @@ internal static class VerifyCommand
 {
     internal static readonly CommandOptions Options = new(
         "verify",
-        flags: new[] { "send", "stdin", "json" },
+        flags: new[] { "send", "stdin", "json", "background" },
         values: new[] { "event", "event-type", "ingress-auth", "data", "file", "timeout", "wait", "deployment", "queue", "profile" },
         positionals: 1,
         hints: new Dictionary<string, string>(StringComparer.Ordinal)
@@ -51,11 +51,26 @@ internal static class VerifyCommand
         if (string.IsNullOrWhiteSpace(queue))
             return CliErrors.Usage(map, "missing_argument", "verify requires <queue>: the queue's name, or its id (que_…).");
 
-        if (Timeout(map, out TimeSpan? timeout) is { } badTimeout)
-            return badTimeout;
+        // --wait ver_… leser en verifisering som alt er startet, som med --background (gullflyten 2026-10-09). Ellers er --wait
+        // sekundene, et annet navn på --timeout, som før.
+        string? resume = ResumeId(map);
+        FlowVerificationRequest? request = null;
+        if (resume is not null)
+        {
+            string[] others = new[] { "event", "event-type", "ingress-auth", "send", "timeout", "background" }.Concat(BodySources).Where(map.Has).ToArray();
+            if (others.Length > 0)
+                return CliErrors.Usage(map, "conflicting_options",
+                    $"--wait {resume} reads a verification that is already started, so it takes no {string.Join(", ", others.Select(o => "--" + o))}.",
+                    "Queuey follows the event for the time the verification was started with.");
+        }
+        else
+        {
+            if (Timeout(map, out TimeSpan? timeout) is { } badTimeout)
+                return badTimeout;
 
-        if (Request(map, timeout, out FlowVerificationRequest? request) is { } refused)
-            return refused;
+            if (Request(map, timeout, out request) is { } refused)
+                return refused;
+        }
 
         // Workspacet apply skrev til, etter samme regel som apply: fila sin tenant, ellers den konfigurerte, og feil når
         // --tenant eller QUEUEY_TENANT navngir et annet enn fila. Det trengs for å finne køen ved navn.
@@ -64,19 +79,89 @@ internal static class VerifyCommand
 
         using ServiceProvider provider = CliHost.BuildProvider(config);
         var service = provider.GetRequiredService<IQueueyService>();
-
         bool json = map.Has("json");
-        FlowVerification result = await service.VerifyFlowAsync(queue!, request!, json ? null : new StartLine(queue!));
+
+        // Starten og lesingen hver for seg er interne hjelpere på QueueyService.
+        var flows = service as QueueyService;
+        if ((resume is not null || map.Has("background")) && flows is null)
+            return CliErrors.Write(json, "unsupported", "This build's Queuey client can't start a verification in the background.", null,
+                status: null, ExitCodes.RuntimeError, "Queuey error");
+
+        // Med --json skrives én linje per hendelse (NDJSON): waiting når Queuey følger eventen, så resultatet. Før kom ingenting
+        // før verifiseringen var avgjort, og agenten måtte gjette når den skulle trigge eventen (gullflyten 2026-10-09).
+        IProgress<FlowVerification> progress = json ? new WaitingLine(queue!, config.TenantPublicId, resumed: resume is not null) : new StartLine(queue!, resumed: resume is not null);
+
+        FlowVerification result;
+        if (map.Has("background"))
+        {
+            result = await flows!.StartFlowVerificationAsync(queue!, request!);
+            if (!result.Settled)
+                return Started(queue!, config.TenantPublicId, result, json);
+        }
+        else if (resume is not null)
+            result = await flows!.ResumeFlowVerificationAsync(queue!, resume, progress);
+        else
+            result = await service.VerifyFlowAsync(queue!, request!, progress);
 
         // Workspacet er det Queuey sier køen ligger i; det konfigurerte når svaret ikke har det.
         string? tenant = result.Subject.WorkspacePublicId ?? config.TenantPublicId;
         if (json)
-            Console.WriteLine(JsonSerializer.Serialize(ToJson(queue!, tenant, result), CliHost.JsonOut));
+            Console.WriteLine(JsonSerializer.Serialize(ToJson(queue!, tenant, result), CliHost.JsonLine));
         else
             WriteHuman(queue!, tenant, result);
 
         return result.Passed ? ExitCodes.Success : ExitCodes.RuntimeError;
     }
+
+    /// <summary>The verification id <c>--wait</c> names (<c>ver_…</c>), or null when it is seconds or not given.</summary>
+    private static string? ResumeId(ArgMap map)
+        => map.Get("wait")?.Trim() is { } value && value.StartsWith("ver_", StringComparison.Ordinal) ? value : null;
+
+    /// <summary>The command that reads <paramref name="v"/> until Queuey has settled it.</summary>
+    private static string ResumeCommand(string queue, FlowVerification v)
+        => $"queuey verify {v.Subject.QueuePublicId ?? queue} --wait {v.VerificationId}";
+
+    /// <summary>
+    /// <c>--background</c>: the verification is started and Queuey follows the event on its own. Says so, with its id and the
+    /// command that reads the outcome, and exits 0.
+    /// </summary>
+    private static int Started(string queue, string? tenant, FlowVerification v, bool json)
+    {
+        string next = ResumeCommand(queue, v);
+        if (json)
+            Console.WriteLine(JsonSerializer.Serialize(WaitingLine.Json(queue, v.Subject.WorkspacePublicId ?? tenant, v, resumed: false, next), CliHost.JsonLine));
+        else
+        {
+            Console.WriteLine($"Started verification {v.VerificationId}. {WaitingText(queue, v, resumed: false)}");
+            Console.WriteLine($"  Read the outcome with: {next}");
+        }
+
+        return ExitCodes.Success;
+    }
+
+    /// <summary>What verify says once Queuey follows an event: what it waits for, how long, and to trigger it.</summary>
+    private static string WaitingText(string queueName, FlowVerification value, bool resumed)
+    {
+        string queue = Where(queueName, value.Subject.QueuePublicId);
+        if (resumed)
+            return $"Reading verification {value.VerificationId} on {queue} until Queuey settles it, at the latest "
+                   + $"{value.ObserveUntil.ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture)}.";
+
+        long seconds = Math.Max(0, (long)Math.Ceiling((value.ObserveUntil - value.CreatedAt).TotalSeconds));
+        return value.Mode switch
+        {
+            FlowVerificationModes.ObservedSession =>
+                $"Waiting up to {seconds} s for the next '{value.Expectations.EventType}' event on {queue}" +
+                (value.Expectations.IngressAuth is { } scheme ? $", verified with {scheme}" : "") +
+                ". Trigger it now: an event that arrived before this does not count.",
+            FlowVerificationModes.Active =>
+                $"Sent a test event to {queue}{Event(value)}. Following it for up to {seconds} s.",
+            _ => $"Following{Event(value)} on {queue} for up to {seconds} s.",
+        };
+    }
+
+    private static string Event(FlowVerification value)
+        => value.Subject.EventPublicId is { } id ? " " + id : "";
 
     /// <summary>
     /// What the command line asks Queuey to verify, or the exit code of the usage error that says why it cannot ask. Nothing
@@ -192,8 +277,12 @@ internal static class VerifyCommand
         string? raw = map.Get(name);
         if (!int.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out int seconds) || seconds < 1)
             return CliErrors.Usage(map, "invalid_value",
-                $"--{name} takes whole seconds, at least 1; got '{(raw is null ? "" : CliErrors.Shown(raw))}'.",
-                "Queuey follows an event for at most 15 minutes (900 seconds), and for a minute when --timeout is left out.");
+                name == "wait"
+                    // --wait tar også en verifiserings id; en id som er skrevet feil, var før bare «not seconds» (review av #65, K4).
+                    ? $"--wait takes whole seconds, at least 1, or a verification id (ver_…, lower case); got '{(raw is null ? "" : CliErrors.Shown(raw))}'."
+                    : $"--{name} takes whole seconds, at least 1; got '{(raw is null ? "" : CliErrors.Shown(raw))}'.",
+                "Queuey follows an event for at most 15 minutes (900 seconds), and for a minute when --timeout is left out. "
+                + "--background says the id of the verification it started.");
 
         timeout = TimeSpan.FromSeconds(seconds);
         return null;
@@ -214,9 +303,14 @@ internal static class VerifyCommand
     private sealed class StartLine : IProgress<FlowVerification>
     {
         private readonly string _queue;
+        private readonly bool _resumed;
         private bool _written;
 
-        public StartLine(string queue) => _queue = queue;
+        public StartLine(string queue, bool resumed)
+        {
+            _queue = queue;
+            _resumed = resumed;
+        }
 
         public void Report(FlowVerification value)
         {
@@ -224,22 +318,55 @@ internal static class VerifyCommand
             _written = true;
             if (value.Settled) return;
 
-            long seconds = Math.Max(0, (long)Math.Ceiling((value.ObserveUntil - value.CreatedAt).TotalSeconds));
-            string queue = Where(_queue, value.Subject.QueuePublicId);
-            Console.Error.WriteLine(value.Mode switch
-            {
-                FlowVerificationModes.ObservedSession =>
-                    $"Waiting up to {seconds} s for the next '{value.Expectations.EventType}' event on {queue}" +
-                    (value.Expectations.IngressAuth is { } scheme ? $", verified with {scheme}" : "") +
-                    ". Trigger it now: an event that arrived before this does not count.",
-                FlowVerificationModes.Active =>
-                    $"Sent a test event to {queue}{Event(value)}. Following it for up to {seconds} s.",
-                _ => $"Following{Event(value)} on {queue} for up to {seconds} s.",
-            });
+            Console.Error.WriteLine(WaitingText(_queue, value, _resumed));
+        }
+    }
+
+    /// <summary>
+    /// With <c>--json</c>: the first line on stdout once Queuey follows an event, <c>{"status":"waiting", …}</c>, before verify
+    /// waits for the outcome. Nothing when Queuey settled it at once.
+    /// </summary>
+    private sealed class WaitingLine : IProgress<FlowVerification>
+    {
+        private readonly string _queue;
+        private readonly string? _tenant;
+        private readonly bool _resumed;
+        private bool _written;
+
+        public WaitingLine(string queue, string? tenant, bool resumed)
+        {
+            _queue = queue;
+            _tenant = tenant;
+            _resumed = resumed;
         }
 
-        private static string Event(FlowVerification value)
-            => value.Subject.EventPublicId is { } id ? " " + id : "";
+        public void Report(FlowVerification value)
+        {
+            if (_written) return;
+            _written = true;
+            if (value.Settled) return;
+
+            Console.WriteLine(JsonSerializer.Serialize(Json(_queue, value.Subject.WorkspacePublicId ?? _tenant, value, _resumed, next: null), CliHost.JsonLine));
+            Console.Out.Flush();
+        }
+
+        /// <summary>The waiting line. <paramref name="next"/> is the command that reads the outcome, with <c>--background</c>.</summary>
+        public static object Json(string queue, string? tenant, FlowVerification v, bool resumed, string? next) => new
+        {
+            schemaVersion = JsonSchemaVersion,
+            status = "waiting",
+            tenant,
+            queue,
+            queuePublicId = v.Subject.QueuePublicId,
+            verificationId = v.VerificationId,
+            mode = v.Mode,
+            eventType = v.Expectations.EventType,
+            ingressAuth = v.Expectations.IngressAuth,
+            eventId = v.Subject.EventPublicId,
+            observeUntil = v.ObserveUntil,
+            message = WaitingText(queue, v, resumed),
+            next,
+        };
     }
 
     private static string Where(string queue, string? queuePublicId)
@@ -345,11 +472,14 @@ internal static class VerifyCommand
     /// </summary>
     // Versjon 2 (F2.6, 2026-10-06): utfallet er Queuey sin flytverifisering, under «verification», i Queuey sin egen form med
     // sin egen schemaVersion. Versjon 1 var verify sitt eget verdikt (verdict, action), fra da verify publiserte selv.
-    internal const int JsonSchemaVersion = 2;
+    // Versjon 3 (gullflyten 2026-10-09): én linje per hendelse (NDJSON), hver med status: waiting før verify venter, så done med
+    // resultatet. Før var stdout ett objekt over flere linjer, og en leser av hele stdout får nå to objekter.
+    internal const int JsonSchemaVersion = 3;
 
     private static object ToJson(string queue, string? tenant, FlowVerification v) => new
     {
         schemaVersion = JsonSchemaVersion,
+        status = "done",
         tenant,
         queue,
         queuePublicId = v.Subject.QueuePublicId,

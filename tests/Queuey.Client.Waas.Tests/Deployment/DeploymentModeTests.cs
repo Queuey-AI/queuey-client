@@ -223,7 +223,7 @@ public class DeploymentModeTests
         // Før ble navnet slått opp etter PUT: køen ble opprettet, feilet og lå igjen i logOnly.
         var api = new Api { Credentials = new object[] { new { publicId = "cred_1", name = "partner-key", type = "ApiKeyHeader" } } };
 
-        var ex = await Assert.ThrowsAsync<QueueyConfigurationException>(() => Apply(api, """
+        var ex = await Assert.ThrowsAsync<QueueyException>(() => Apply(api, """
         { "workspace": { "delivery": { "baseUrl": "https://hooks.example.com", "credentialRef": "partner-key" } },
           "queues": {
             "orders":   { "delivery": { "url": "/orders" } },

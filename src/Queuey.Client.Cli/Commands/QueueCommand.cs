@@ -214,7 +214,8 @@ internal static class QueueCommand
         notAttempted = result.NotAttempted,
         // De som trenger en lagret plan (Queuey F3.11): synken gikk videre uten endringen.
         planRequired = result.PlanRequired.Select(r => r.Name),
-        warnings = result.Warnings,
+        // Bare klientens egne: Queueys står i serverWarnings (gullflyten 2026-10-09).
+        warnings = result.Warnings.Where(w => !result.ServerWarnings.Contains(w, StringComparer.Ordinal)),
         serverWarnings = result.ServerWarnings,
         queues = result.Applied.Select(r => new
         {

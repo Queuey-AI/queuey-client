@@ -161,15 +161,22 @@ internal sealed class QueueyControlPlaneClient
 
     // ── Management: tenants + queues (root routes on the API host) ─────────────
 
-    /// <summary>Creates a tenant (<c>POST /tenants</c>). LicenseId 0 → the backend uses the license header.</summary>
-    public async Task<TenantSummaryResponse> CreateTenantAsync(string displayName, bool asProducer, bool withDefaultQueue, CancellationToken cancellationToken)
+    /// <summary>
+    /// Creates a tenant (<c>POST /tenants</c>). LicenseId 0 → the backend uses the license header. <paramref name="environment"/>
+    /// is left out when null.
+    /// </summary>
+    public async Task<TenantSummaryResponse> CreateTenantAsync(
+        string displayName, bool asProducer, bool withDefaultQueue, CancellationToken cancellationToken, string? environment = null)
     {
         IQueueyAuthenticator authenticator = new ApiKeyAuthenticator(RequireApiKey());
         string license = RequireLicense();
 
         Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "tenants");
         byte[] body = JsonSerializer.SerializeToUtf8Bytes(
-            new CreateTenantWireRequest { LicenseId = 0, DisplayName = displayName, CreateAsProducer = asProducer, CreateDefaultQueue = withDefaultQueue },
+            new CreateTenantWireRequest
+            {
+                LicenseId = 0, DisplayName = displayName, CreateAsProducer = asProducer, CreateDefaultQueue = withDefaultQueue, Environment = environment,
+            },
             QueueyJson.Options);
 
         return await _connection.SendForJsonAsync<TenantSummaryResponse>(
