@@ -115,8 +115,10 @@ public sealed class LoginCommandTests : IDisposable
         // Endepunktet fra metadataen, som offentlig klient uten hemmelighet, og scopet operate som standard.
         Dictionary<string, string> device = Assert.Single(server.FormsTo("/connect/device"));
         Assert.Equal("queuey-cli", device["client_id"]);
-        Assert.Equal("operate", device["scope"]);
+        Assert.Equal("operate", device["scope"]); // aldri offline_access: backend #512 gir refresh-token til queuey-cli uten
         Assert.False(device.ContainsKey("client_secret"));
+        Assert.False(device.ContainsKey("resource"));
+        Assert.Equal(OAuthClient.DeviceName(Environment.MachineName), device["device_name"]);
         Assert.Empty(server.FormsTo("/connect/token")); // personen kan ikke ha godkjent ennå
         Assert.Empty(_opened);                          // ingen terminal: ingen nettleser
 
@@ -128,6 +130,16 @@ public sealed class LoginCommandTests : IDisposable
             Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, ModeOf(CredentialsFile));
             Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, ModeOf(_queuey));
         }
+    }
+
+    [Theory]
+    [InlineData("kenneths-mac", "kenneths-mac")]
+    [InlineData("  bad\u001b[2Jname\n ", "bad[2Jname")]
+    [InlineData("", null)]
+    public void The_machine_name_is_sent_clean_and_at_most_100_characters(string name, string? sent)
+    {
+        Assert.Equal(sent, OAuthClient.DeviceName(name));
+        Assert.Equal(100, OAuthClient.DeviceName(new string('m', 150))!.Length);
     }
 
     [Fact]
