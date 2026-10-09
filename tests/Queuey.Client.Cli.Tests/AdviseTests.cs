@@ -65,6 +65,38 @@ public sealed class AdviseTests : IDisposable
         Assert.Contains(advice.NextSteps, s => s.Contains("localhost:7300", StringComparison.Ordinal));
     }
 
+    [Theory]
+    [InlineData(".env", "options.UseEnvironmentVariables()")]
+    [InlineData("user-secrets", "options.UseSettings(builder.Configuration)")]
+    public void Edge_is_told_to_mint_the_signing_key_and_read_it_as_the_client_does(string write, string reads)
+    {
+        // Edge-signering (Kenneth 2026-10-09): samme flyt som for Queuey.Client.
+        File_("SensorGateway.csproj", "<Project Sdk=\"Microsoft.NET.Sdk.Worker\"></Project>");
+        File_("Worker.cs", "public class Worker : BackgroundService { }");
+        File_("deploy/sensor-gateway.service", "[Unit]\nDescription=Sensor gateway\n[Service]\nExecStart=/opt/gateway/app");
+
+        var advice = Recommendation.For(RepoScan.Scan(_root), write);
+
+        Assert.Equal(SendPath.Edge, advice.Send);
+        Assert.Contains(advice.NextSteps, s => s.Contains(reads, StringComparison.Ordinal) && s.Contains("signs every transfer", StringComparison.Ordinal));
+        Assert.Contains(advice.NextSteps, s => s.Contains($"queuey keys mint --queue <queue> --profile dev --write {write}", StringComparison.Ordinal));
+        Assert.DoesNotContain(advice.NextSteps, s => s.Contains("o.ApiKey", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void The_edge_daemon_gets_its_signing_key_in_the_file_the_service_loads_as_its_environment()
+    {
+        File_("package.json", "{ \"name\": \"collector\" }");
+        File_("Dockerfile", "FROM node:20\nVOLUME /data");
+
+        var advice = Advise();
+
+        Assert.Equal(SendPath.EdgeDaemon, advice.Send);
+        Assert.Contains(advice.NextSteps, s => s.Contains("queuey keys mint --queue <queue> --profile dev --write edge.env", StringComparison.Ordinal));
+        Assert.Contains(advice.NextSteps, s => s.Contains("EnvironmentFile=", StringComparison.Ordinal));
+        Assert.DoesNotContain(advice.NextSteps, s => s.Contains("--write .env", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void A_service_that_scales_to_zero_is_NOT_told_to_use_Edge_however_bad_its_network()
     {

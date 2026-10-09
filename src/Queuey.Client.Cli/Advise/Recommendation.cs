@@ -77,6 +77,9 @@ public static class Recommendation
     /// <summary>The production ingress route, in the shape every docs page and the quickstart use.</summary>
     public const string IngressRoute = "https://ingress.queuey.ai/events/{tenantPublicId}/{queueName}";
 
+    /// <summary>The file <c>keys mint</c> writes the Edge daemon's signing key to, which the service loads as its environment.</summary>
+    public const string DaemonEnvironmentFile = "edge.env";
+
     /// <summary>Where the self-contained CLI binaries are, for a machine with no .NET.</summary>
     public const string ReleasesUrl = "https://github.com/Queuey-AI/queuey-client/releases/latest";
 
@@ -199,13 +202,22 @@ public static class Recommendation
                 yield return "Add Queuey.Edge to the producing project: dotnet add package Queuey.Edge --prerelease.";
                 yield return "Point Storage.Path at the durable disk, not a temp directory.";
                 yield return "Publish with PublishAsync — it commits locally before it returns, and transfer, retries and backlog draining are Edge's job.";
-                yield return "Turn on Health.ReportToCloud so the node shows up under Edge nodes and Queuey can tell you when it goes quiet.";
+                // Edge-signering (Kenneth 2026-10-09): Edge signerer med samme nøkkel som klienten, lest etter de samme reglene.
+                yield return write == SecretTarget.UserSecretsWord
+                    ? "Configure it with options.UseSettings(builder.Configuration): Edge reads the queue's signing key from the user " +
+                      "secrets and signs every transfer when it sends it, so a backlog never goes out with a stale signature."
+                    : "Configure it with options.UseEnvironmentVariables(): Edge reads the queue's signing key from the environment, " +
+                      "and in Development from .env, and signs every transfer when it sends it, so a backlog never goes out with a stale signature.";
+                yield return "Turn on Health.ReportToCloud so the node shows up under Edge nodes and Queuey can tell you when it goes quiet. " +
+                             "Queuey's check-in takes an API key, so it also needs ApiKey set to a publish-only key.";
                 break;
 
             case SendPath.EdgeDaemon:
                 yield return "Install the queuey CLI on the machine: dotnet tool install -g Queuey.Cli --prerelease, " +
                              $"or — with no .NET — the self-contained binary for its platform from {ReleasesUrl}.";
-                yield return "Run: queuey edge run --spool /var/lib/queuey/spool.db --listen 7300 --report-health";
+                yield return "Run: queuey edge run --spool /var/lib/queuey/spool.db --listen 7300, with the signing key in its " +
+                             $"environment: load {DaemonEnvironmentFile} as the service's environment file (systemd EnvironmentFile=). " +
+                             "Add --report-health with a publish-only --api-key to see the node under Edge nodes; Queuey's check-in takes an API key.";
                 yield return "Publish from your code to http://localhost:7300/events/{tenant}/{queue} — same wire shape as the cloud ingress, and a 202 means it is committed locally.";
                 break;
 
@@ -232,8 +244,10 @@ public static class Recommendation
 
         if (send != SendPath.None)
         {
+            // Daemonen leser miljøet sitt, ikke .env (det gjør bare Development): nøkkelen går i fila tjenesten laster som miljø.
+            string target = send == SendPath.EdgeDaemon ? DaemonEnvironmentFile : write;
             yield return "Log in (queuey login --profile dev), apply the deployment file (queuey apply --profile dev), and make the app's " +
-                         $"signing key for its queue: queuey keys mint --queue <queue> --profile dev --write {write}. It needs a login that " +
+                         $"signing key for its queue: queuey keys mint --queue <queue> --profile dev --write {target}. It needs a login that " +
                          "may manage keys, and the secret never passes through the terminal: the app reads the same value Queuey verifies.";
         }
     }
