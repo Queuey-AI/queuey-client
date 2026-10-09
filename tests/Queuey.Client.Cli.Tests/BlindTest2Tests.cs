@@ -319,4 +319,33 @@ public sealed class BlindTest2Tests : IDisposable
         Assert.Contains("Did not write ten_new to queuey.deploy.json: profiles.dev.variables has QUEUEY_TENANT already.", run.Stderr);
         Assert.Equal(JsonValueKind.Null, JsonDocument.Parse(run.Stdout).RootElement.GetProperty("fileUpdated").ValueKind);
     }
+
+    [Fact]
+    public async Task Apply_never_writes_through_a_link_and_never_writes_an_id_that_is_not_a_workspace_id()
+    {
+        // Security-review av #71 (K2).
+        if (OperatingSystem.IsWindows()) return;
+        string real = Path.Combine(_dir, "real.deploy.json");
+        File.WriteAllText(real, Scaffolded);
+        File.CreateSymbolicLink(Path.Combine(_dir, "queuey.deploy.json"), real);
+        Directory.SetCurrentDirectory(_dir);
+
+        CliRun linked = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "apply", "--profile", "dev", "--no-git" }), CreatesWorkspace(), Env());
+
+        Assert.Equal(Scaffolded, File.ReadAllText(real));
+        Assert.Contains("Did not write ten_new to queuey.deploy.json: it is a link", linked.Stderr);
+
+        File.Delete(Path.Combine(_dir, "queuey.deploy.json"));
+        File.WriteAllText(Path.Combine(_dir, "queuey.deploy.json"), Scaffolded);
+        var odd = new RecordingHandler(req => req.Key == "POST /tenants"
+            ? RecordingHandler.Json(HttpStatusCode.OK, new { publicId = "ten_x\u001b]0;y", displayName = "queuey-dev", environment = "dev" })
+            : throw new InvalidOperationException(req.Key));
+
+        CliRun invalid = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "apply", "--profile", "dev", "--no-git", "--json" }), odd, Env());
+
+        Assert.Equal(ExitCodes.RuntimeError, invalid.Exit);
+        Assert.Contains("workspace_id_invalid", invalid.Stdout);
+        Assert.Equal(Scaffolded, File.ReadAllText(Path.Combine(_dir, "queuey.deploy.json")));
+        Assert.DoesNotContain('\u001b', invalid.Stdout + invalid.Stderr);
+    }
 }

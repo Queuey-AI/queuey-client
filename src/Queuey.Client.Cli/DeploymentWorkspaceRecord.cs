@@ -35,6 +35,18 @@ internal static class DeploymentWorkspaceRecord
     internal static Written? Record(string path, string profile, string tenant, out string? notWritten)
     {
         notWritten = null;
+        // Security-review av #71 (K2): id-en er serverens tekst, og den skrives i en fil som committes og vises i terminalen.
+        if (!CliErrors.LooksLikeAWorkspaceId(tenant))
+        {
+            notWritten = "Queuey's answer did not have the shape of a workspace id";
+            return null;
+        }
+        // Ingen lenke følges: fila skrives via en temp-fil og rename, som EnvFile.Write gjør.
+        if (new FileInfo(path).LinkTarget is not null)
+        {
+            notWritten = "it is a link, which apply does not write through";
+            return null;
+        }
         byte[] bytes = File.ReadAllBytes(path);
         int bom = bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF ? 3 : 0;
 
@@ -81,10 +93,26 @@ internal static class DeploymentWorkspaceRecord
             edited.Insert(at, insert);
 
         byte[] output = Encoding.UTF8.GetBytes(edited.ToString());
-        using (var stream = new FileStream(path, FileMode.Truncate, FileAccess.Write))
+        string full = Path.GetFullPath(path);
+        string temp = Path.Combine(Path.GetDirectoryName(full)!, $".{Path.GetFileName(full)}.{Guid.NewGuid():N}.tmp");
+        try
         {
-            if (bom > 0) stream.Write(bytes, 0, bom);
-            stream.Write(output, 0, output.Length);
+            using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write))
+            {
+                if (bom > 0) stream.Write(bytes, 0, bom);
+                stream.Write(output, 0, output.Length);
+            }
+            // Modusen fila hadde, beholdes: den er committet og deles, ikke privat som .env.
+            if (!OperatingSystem.IsWindows())
+                File.SetUnixFileMode(temp, File.GetUnixFileMode(full));
+            if (new FileInfo(full).LinkTarget is not null)
+                throw new IOException($"{path} became a link while apply wrote it, so it was not written.");
+            File.Move(temp, full, overwrite: true);
+        }
+        catch
+        {
+            try { File.Delete(temp); } catch { /* ble kanskje aldri laget */ }
+            throw;
         }
 
         return new Written(path, profile, Variable, tenant, AddedTenantReference: true);

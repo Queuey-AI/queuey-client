@@ -267,6 +267,10 @@ internal static class ApplyCommand
         string name = WorkspaceCreation.NameFor(environment);
         TenantResult tenant = await management.CreateWorkspaceAsync(name, environment);
         string id = tenant.PublicId ?? throw new QueueyException("Queuey created a workspace and did not say its id.", errorCode: "workspace_id_missing");
+        // Security-review av #71 (K2): id-en vises og kan skrives i deploy-fila, så den må ha formen til en workspace-id.
+        if (!CliErrors.LooksLikeAWorkspaceId(id))
+            throw new QueueyException("Queuey created a workspace and answered with an id that is not a workspace id. It is not shown.",
+                errorCode: "workspace_id_invalid");
 
         Console.Error.WriteLine($"No workspace is named, and {path} says environment {environment}: created workspace {id} "
                                 + $"({TerminalText.Line(tenant.DisplayName ?? name)}, {environment}).");
