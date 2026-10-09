@@ -37,6 +37,9 @@ internal sealed class StoredLogin
     /// <summary>The ingress host Queuey gave with the token (<c>ingress_base</c>), or null.</summary>
     public string? IngressBase { get; set; }
 
+    /// <summary>True when <see cref="IngressBase"/> was given with <c>--ingress-base</c>: a renewal then keeps it.</summary>
+    public bool IngressBaseFromFlag { get; set; }
+
     public string AccessToken { get; set; } = "";
     public DateTimeOffset AccessTokenExpiresAt { get; set; }
     public string? RefreshToken { get; set; }

@@ -45,6 +45,12 @@ public sealed record RepoFacts
     /// <summary>What the scan left out because of a limit, in words. Empty when it read everything it wanted.</summary>
     public IReadOnlyList<string> ScanLimits { get; init; } = Array.Empty<string>();
 
+    /// <summary>Every file the scan read, repository-relative.</summary>
+    public IReadOnlyList<string> FilesRead { get; init; } = Array.Empty<string>();
+
+    /// <summary>The manifest each ecosystem was read from.</summary>
+    public IReadOnlyList<Evidence> EcosystemEvidence { get; init; } = Array.Empty<Evidence>();
+
     public bool IsDotNet => Ecosystems.Contains("dotnet");
     public bool HasDurability => Durability.Count > 0;
     public bool HasDurableDisk => DurableDisk.Count > 0;
@@ -144,6 +150,7 @@ public static class RepoScan
         var queueyAlready = new List<Evidence>();
         var serverSide = new List<Evidence>();
         var browserApp = new List<Evidence>();
+        var ecosystemEvidence = new List<Evidence>();
 
         foreach (var file in files)
         {
@@ -152,7 +159,8 @@ public static class RepoScan
             var text = walk.Read(file);
             if (text.Length == 0) continue;
 
-            DetectEcosystem(name, ecosystems);
+            if (DetectEcosystem(name, ecosystems) is { } ecosystem)
+                ecosystemEvidence.Add(new Evidence(ecosystem, relative));
             DetectQueuey(name, text, relative, queueyAlready, IsManifest(name));
             DetectDurability(name, text, relative, durability, IsManifest(name));
             DetectHosting(name, text, relative, durableDisk, ephemeral);
@@ -171,6 +179,8 @@ public static class RepoScan
             ServerSide = Dedupe(serverSide),
             BrowserApp = Dedupe(browserApp),
             ScanLimits = walk.Limits,
+            FilesRead = walk.FilesRead,
+            EcosystemEvidence = Dedupe(ecosystemEvidence),
         };
     }
 
@@ -227,12 +237,16 @@ public static class RepoScan
         @"^(src/)?pages/api/",
         System.Text.RegularExpressions.RegexOptions.Compiled);
 
-    private static void DetectEcosystem(string name, ISet<string> ecosystems)
+    private static string? DetectEcosystem(string name, ISet<string> ecosystems)
     {
-        if (name.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase)) ecosystems.Add("dotnet");
-        else if (name.Equals("package.json", StringComparison.OrdinalIgnoreCase)) ecosystems.Add("node");
-        else if (name is "pyproject.toml" or "requirements.txt") ecosystems.Add("python");
-        else if (name == "go.mod") ecosystems.Add("go");
+        string? found = name.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) ? "dotnet"
+            : name.Equals("package.json", StringComparison.OrdinalIgnoreCase) ? "node"
+            : name is "pyproject.toml" or "requirements.txt" ? "python"
+            : name == "go.mod" ? "go"
+            : null;
+        if (found is not null)
+            ecosystems.Add(found);
+        return found;
     }
 
     private static void DetectQueuey(string name, string text, string relative, List<Evidence> into, bool isManifest)

@@ -47,6 +47,14 @@ internal static class LoginCommand
             return CliErrors.Usage(map, "invalid_value", $"--scope takes operate or read; got '{CliErrors.Shown(scope)}'.",
                 "operate (the default) lets the login change what the person may change; read only looks.");
 
+        // Blindtesten 2026-10-09 (funn 6): ingress-verten Queuey ga, var lokalt en gammel tunnel. --ingress-base overstyrer den,
+        // også for innloggingen, og sjekkes før noe sendes.
+        // Samme regel som endepunktene (OAuthClient.IsSafe, security-review av #68, K1): https, eller http på denne maskinen.
+        if (Clean(map.Get("ingress-base")) is { } ingressFlag
+            && !(Uri.TryCreate(ingressFlag, UriKind.Absolute, out Uri? ingressUri) && OAuthClient.IsSafe(ingressUri)))
+            return CliErrors.Usage(map, "invalid_value", $"--ingress-base takes an https URL, or http on this machine; got '{CliErrors.Shown(ingressFlag)}'.",
+                "Such as http://localhost:5084 for a Queuey on this machine.");
+
         string? profile = CliHost.Profile(map);
         (ConnectionProfile? existing, Uri apiBase, string? license) = Connection(map, profile);
         string host = LoginStore.HostKey(apiBase);
@@ -143,7 +151,7 @@ internal static class LoginCommand
 
             // To samtidige `queuey login` (security-review av #66, BØR 1): den andre ventet på låsen mens den første løste inn koden.
             // Den skal bruke den innloggingen, ikke be om en ny kode.
-            if (FinishedMeanwhile(file, run.Host, started) is { } meanwhile)
+            if (FinishedMeanwhile(file, run.Host, run.Scope, started) is { } meanwhile)
                 return (null, false, meanwhile);
 
             int before = file.Pending.Count;
@@ -178,13 +186,15 @@ internal static class LoginCommand
     private sealed record PollOutcome(StoredLogin? Login, int? Failed);
 
     /// <summary>
-    /// The newest login for <paramref name="host"/> stored at or after <paramref name="since"/>: the one another queuey login
-    /// finished meanwhile, whatever scope Queuey granted it. Null when there is none.
+    /// The newest login for <paramref name="host"/> stored at or after <paramref name="since"/> with no more than the
+    /// <paramref name="asked"/> scope: the one another queuey login finished meanwhile. One with the same scope or a narrower
+    /// one (read for operate) counts; a broader one (operate for read) never does. Null when there is none.
     /// </summary>
-    // Security-review av #66, runde 2: en innlogging Queuey ga et smalere scope (read for operate), ble meldt som «ended without a
-    // login». Den gjelder; scopet står i svaret.
-    internal static StoredLogin? FinishedMeanwhile(CredentialsFile file, string host, DateTimeOffset since)
-        => file.For(host).Where(l => l.LoggedInAt >= since).OrderByDescending(l => l.LoggedInAt).FirstOrDefault();
+    // Security-review av #66, runde 2: en innlogging Queuey ga et smalere scope, ble meldt som «ended without a login». Den gjelder.
+    // Security-review KAN 2 (2026-10-09): et bredere scope enn det som ble bedt om, tas aldri i bruk.
+    internal static StoredLogin? FinishedMeanwhile(CredentialsFile file, string host, string asked, DateTimeOffset since)
+        => file.For(host).Where(l => l.LoggedInAt >= since && LoginTokens.WithinScope(l.Scope, asked))
+            .OrderByDescending(l => l.LoggedInAt).FirstOrDefault();
 
     /// <summary>
     /// Asks once whether the code is approved, no sooner than the interval after the last time any process asked, or after it
@@ -209,7 +219,7 @@ internal static class LoginCommand
             PendingLogin? stored = file.Pending.FirstOrDefault(p => p.DeviceCode == pending.DeviceCode);
             if (stored is null)
             {
-                StoredLogin? theirs = FinishedMeanwhile(file, run.Host, pending.CreatedAt);
+                StoredLogin? theirs = FinishedMeanwhile(file, run.Host, run.Scope, pending.CreatedAt);
                 return theirs is not null
                     ? new PollOutcome(theirs, null)
                     : new PollOutcome(null, run.CodeEnded("code_ended",
@@ -323,6 +333,13 @@ internal static class LoginCommand
 
     internal static string? Clean(string? value) => string.IsNullOrWhiteSpace(value) ? null : value!.Trim();
 
+    /// <summary>
+    /// The ingress host when Queuey runs on this machine (<paramref name="apiBase"/> is loopback) and the ingress is on another
+    /// host, which a local stack seldom has; null otherwise.
+    /// </summary>
+    internal static string? IngressElsewhere(Uri apiBase, string? ingress)
+        => apiBase.IsLoopback && Uri.TryCreate(ingress, UriKind.Absolute, out Uri? uri) && !uri.IsLoopback ? ingress : null;
+
     /// <summary>One run of <c>queuey login</c>: what it was asked for, and how it writes what it did.</summary>
     private sealed class LoginRun
     {
@@ -401,7 +418,19 @@ internal static class LoginCommand
                 Scope = Scope,
                 LoggedInAt = LoginTokens.Now(),
             };
-            LoginTokens.Apply(login, answer);
+            // Et svar med bredere scope enn det som ble bedt om (operate for read), lagres ikke: tokenet ville kunne mer enn
+            // personen godkjente at denne maskinen skulle få (security-review KAN 2, 2026-10-09). Apply sjekker det, med Scope satt
+            // til det som ble bedt om, og sjekker det samme ved hver fornyelse (#68, K2).
+            try
+            {
+                LoginTokens.Apply(login, answer);
+            }
+            catch (QueueyException ex) when (ex.ErrorCode == "login_scope_broader")
+            {
+                file.Pending.RemoveAll(p => p.DeviceCode == pending.DeviceCode);
+                LoginStore.Write(Path, file);
+                throw;
+            }
 
             StoredLogin? replaced = file.Find(Host, login.License);
             if (replaced is not null)
@@ -455,6 +484,13 @@ internal static class LoginCommand
             string? tenant = null, note = null, workspaceName = null, workspaceEnvironment = null, profileFile = null;
             bool profileHasKey = false;
 
+            if (Clean(Map.Get("ingress-base")) is { } flaggedIngress)
+                login = await KeepIngressAsync(login, LoginStore.HostKey(new Uri(flaggedIngress, UriKind.Absolute)));
+            if (IngressElsewhere(ApiBase, login.IngressBase) is { } elsewhere)
+                Console.Error.WriteLine($"Warning: Queuey is on this machine ({Host}), and its ingress host is {TerminalText.Line(elsewhere)}, " +
+                                        "another host. If your local ingress is not there, log in again with --ingress-base " +
+                                        "http://localhost:<port>.");
+
             if (Profile is not null)
             {
                 workspaces ??= await oauth.WorkspacesAsync(login.AccessToken, login.License, CancellationToken.None)
@@ -481,6 +517,7 @@ internal static class LoginCommand
                 {
                     status = "logged_in",
                     alreadyLoggedIn = already,
+                    ingressBase = login.IngressBase,
                     apiHost = Host,
                     license = login.License,
                     scope = login.Scope,
@@ -496,9 +533,13 @@ internal static class LoginCommand
             else
             {
                 string who = login.User is null ? "" : $" as {TerminalText.Line(login.User)}";
+                // Bare et smalere scope kan stå her: et bredere lagres aldri (Store, FinishedMeanwhile).
                 if (login.Scope != Scope)
-                    Console.Error.WriteLine($"Note: Queuey granted scope {login.Scope}, not {Scope}.");
+                    Console.Error.WriteLine($"Note: Queuey granted only scope {login.Scope}, narrower than {Scope}: this login can look, not change.");
                 Console.WriteLine($"{(already ? "Already logged in" : "Logged in")} to {Host}{who}, license {login.License}, scope {login.Scope}.");
+                // Ingress-verten innloggingen bruker, også når den var der fra før (security-review av #68, K1).
+                Console.WriteLine($"Ingress host: {TerminalText.Line(login.IngressBase ?? "Queuey's default")}" +
+                                  (login.IngressBaseFromFlag ? " (from --ingress-base)" : login.IngressBase is null ? "" : " (as Queuey gave it)"));
                 if (Profile is not null)
                     Console.WriteLine(tenant is null
                         ? $"Profile {Profile} ({profileFile}): license and hosts written, no workspace."
@@ -513,6 +554,21 @@ internal static class LoginCommand
                 Console.Error.WriteLine($"Note: profile {Profile} in {profileFile} has an apiKey, which wins over the login, so only the fields " +
                                         "it lacked were filled. Remove the apiKey there to use the login.");
             return ExitCodes.Success;
+        }
+
+        /// <summary>The login with <paramref name="ingress"/> as its ingress host, given with --ingress-base, which renewals keep.</summary>
+        private async Task<StoredLogin> KeepIngressAsync(StoredLogin login, string ingress)
+        {
+            using (await LoginStore.LockAsync(Path, CancellationToken.None))
+            {
+                CredentialsFile file = LoginStore.Read(Path);
+                StoredLogin stored = file.Find(Host, login.License) ?? login;
+                stored.IngressBase = ingress;
+                stored.IngressBaseFromFlag = true;
+                if (file.Logins.Contains(stored))
+                    LoginStore.Write(Path, file);
+                return stored;
+            }
         }
 
         /// <summary>

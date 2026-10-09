@@ -94,7 +94,16 @@ internal sealed class LoginTokens
                 errorCode: answer.Error);
         }
 
-        Apply(login, answer);
+        try
+        {
+            Apply(login, answer);
+        }
+        catch (QueueyException ex) when (ex.ErrorCode == "login_scope_broader")
+        {
+            Forget(path, file, login);
+            throw;
+        }
+
         LoginStore.Write(path, file);
         return login;
     }
@@ -102,6 +111,15 @@ internal sealed class LoginTokens
     /// <summary>The tokens and what came with them in <paramref name="answer"/>, onto <paramref name="login"/>.</summary>
     internal static void Apply(StoredLogin login, TokenAnswer answer)
     {
+        // Et svar med bredere scope enn innloggingen har (operate for read), lagres aldri, heller ikke ved en fornyelse
+        // (security-review av #68, K2). Ingenting er endret når dette kastes.
+        if (ScopeOf(answer.Scope) is { } granted && !string.IsNullOrEmpty(login.Scope) && !WithinScope(granted, login.Scope))
+            throw new QueueyException($"Queuey granted scope {granted} where the login has {login.Scope}, so it was not kept.",
+                errorCode: "login_scope_broader")
+            {
+                SuggestedAction = "Disconnect it under Connected apps in the Queuey console, and run queuey login again.",
+            };
+
         login.AccessToken = answer.AccessToken!;
         login.AccessTokenExpiresAt = Now() + TimeSpan.FromSeconds(answer.ExpiresIn is > 0 ? answer.ExpiresIn.Value : 3600);
         // Refresh-tokenet roterer: det nye lagres alltid. Uten et nytt i svaret gjelder det gamle fortsatt (RFC 6749 §6).
@@ -109,7 +127,8 @@ internal sealed class LoginTokens
         login.Scope = ScopeOf(answer.Scope) ?? login.Scope;
         // Serveren styrer verdiene (security-review av #66, KAN 6): en ingress som ikke er https eller lokal http, og en person
         // som ikke er en kort tekst, lagres ikke.
-        login.IngressBase = SafeIngress(answer.IngressBase) ?? login.IngressBase;
+        if (!login.IngressBaseFromFlag)
+            login.IngressBase = SafeIngress(answer.IngressBase) ?? login.IngressBase;
         login.User = answer.User is { Length: <= 200 } user ? TerminalText.Line(user) : login.User;
     }
 
@@ -117,6 +136,10 @@ internal sealed class LoginTokens
     /// <c>operate</c> or <c>read</c> from a granted scope list such as <c>operate offline_access</c>, or null when it names
     /// neither. The login is matched on this, so a server that adds a scope of its own does not make every run a new login.
     /// </summary>
+    /// <summary>Whether <paramref name="granted"/> reaches no further than <paramref name="asked"/>: the same, or read for operate.</summary>
+    internal static bool WithinScope(string granted, string asked)
+        => granted == asked || (granted == "read" && asked == "operate");
+
     internal static string? ScopeOf(string? granted)
     {
         string[] scopes = (granted ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries);

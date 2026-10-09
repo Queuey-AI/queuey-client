@@ -147,7 +147,9 @@ public static class Recommendation
             yield return $"Queuey is already here: {Join(facts.QueueyAlready)}.";
 
         if (facts.Ecosystems.Count > 0)
-            yield return $"Ecosystem: {string.Join(", ", facts.Ecosystems)}.";
+            yield return facts.EcosystemEvidence.Count > 0
+                ? $"Ecosystem: {Join(facts.EcosystemEvidence)}."
+                : $"Ecosystem: {string.Join(", ", facts.Ecosystems)}.";
 
         switch (send)
         {
@@ -170,7 +172,7 @@ public static class Recommendation
                     yield return $"Local disk does not survive here: {Join(facts.EphemeralHosting)}. " +
                                  "Edge needs a spool that outlives a restart, so it is not an option — regardless of the network.";
                 else
-                    yield return "Nothing here suggests an unreliable network or a spool to hold events, so publish directly.";
+                    yield return $"Nothing in the {facts.FilesRead.Count} file(s) read (filesRead) suggests an unreliable network or a spool to hold events, so publish directly.";
                 break;
         }
 
@@ -183,13 +185,13 @@ public static class Recommendation
         switch (send)
         {
             case SendPath.ClientFromExistingDurability:
-                yield return "Add Queuey.Client to the project that owns the consumer.";
+                yield return "Add Queuey.Client to the project that owns the consumer: dotnet add package Queuey.Client --prerelease.";
                 yield return "Publish from inside the consumer that already runs after the commit — not from the request path.";
                 yield return "Keep your bus or outbox. Queuey is the destination, not a replacement for it.";
                 break;
 
             case SendPath.Edge:
-                yield return "Add Queuey.Edge to the producing project.";
+                yield return "Add Queuey.Edge to the producing project: dotnet add package Queuey.Edge --prerelease.";
                 yield return "Point Storage.Path at the durable disk, not a temp directory.";
                 yield return "Publish with PublishAsync — it commits locally before it returns, and transfer, retries and backlog draining are Edge's job.";
                 yield return "Turn on Health.ReportToCloud so the node shows up under Edge nodes and Queuey can tell you when it goes quiet.";
@@ -203,7 +205,7 @@ public static class Recommendation
                 break;
 
             case SendPath.Client:
-                yield return "Add Queuey.Client and publish to the ingress.";
+                yield return "Add Queuey.Client (dotnet add package Queuey.Client --prerelease) and publish to the ingress, with the queue's signing key from .env (QueueyOptions.UseEnvironmentVariables()).";
                 if (facts.IsEphemeral)
                     yield return "If the network here is unreliable, write to the database you already have and publish from a worker that reads it — that is your durability, since local disk is not.";
                 break;
@@ -225,7 +227,9 @@ public static class Recommendation
 
         if (send != SendPath.None)
         {
-            yield return "Create the workspace and queue: queuey create-tenant, then queuey create-queue. The API key itself is minted in the console.";
+            yield return "Log in (queuey login --profile dev), apply the deployment file (queuey apply --profile dev), and make the app's " +
+                         "signing key for its queue: queuey keys mint --queue <queue> --profile dev --write .env. It needs a login that " +
+                         "may manage keys, and the secret never passes through the terminal.";
         }
     }
 

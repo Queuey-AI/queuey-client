@@ -19,8 +19,8 @@ public sealed record PlannedFile(string Path, string Content, string Action, boo
 /// the plan and change nothing. The two cannot disagree, because they are the
 /// same plan.
 ///
-/// The scaffold stays deliberately small: a deployment file, and a gitignore
-/// line that keeps the API key out of git. Adding the package is left to
+/// The scaffold stays deliberately small: a deployment file, and gitignore
+/// lines that keep the API key's queuey.json and the signing key's .env out of git. Adding the package is left to
 /// <c>dotnet add package</c>, printed as a step — editing someone's project
 /// file is a bigger liberty than this command should take, and the command to
 /// do it is one line they can read.
@@ -28,6 +28,17 @@ public sealed record PlannedFile(string Path, string Content, string Action, boo
 public static class ScaffoldPlan
 {
     public const string DeployFileName = "queuey.deploy.json";
+
+    /// <summary>
+    /// What a person must know before applying the scaffold to a workspace that already exists: it takes signed requests
+    /// only, which loosens a workspace that demands an API key as well.
+    /// </summary>
+    // Security-review av #68 (K4): scaffolden kunne nedgradere ApiKeyAndSignedRequest til SignedRequest uten et ord.
+    // ApiKeyAndSignedRequest som standard ville krevd en lisensbred nøkkel i hver app, så scaffolden sier fra i stedet.
+    public const string IngressNote =
+        "queuey.deploy.json sets the workspace to take signed requests only (authMode SignedRequest). If your workspace already " +
+        "demands an API key and a signature (ApiKeyAndSignedRequest), set authMode to that in the file before you apply, or " +
+        "apply loosens it. queuey plan --profile dev shows the change before anything is written.";
     private const string ConfigFileName = "queuey.json";
 
     /// <summary>
@@ -44,7 +55,7 @@ public static class ScaffoldPlan
         return string.IsNullOrEmpty(slug) ? "events" : slug;
     }
 
-    public static IReadOnlyList<PlannedFile> For(string root, string queueName)
+    public static IReadOnlyList<PlannedFile> For(string root, string queueName, int retentionDays = PlanRetention.FreeDays)
     {
         if (string.IsNullOrWhiteSpace(root)) throw new ArgumentException("A repository path is required.", nameof(root));
         if (string.IsNullOrWhiteSpace(queueName)) throw new ArgumentException("A queue name is required.", nameof(queueName));
@@ -55,7 +66,7 @@ public static class ScaffoldPlan
         var deployExists = File.Exists(deployPath);
         planned.Add(new PlannedFile(
             DeployFileName,
-            DeploymentFileContent(queueName),
+            DeploymentFileContent(queueName, retentionDays),
             deployExists ? "already exists — left alone" : "create",
             deployExists));
 
@@ -66,31 +77,54 @@ public static class ScaffoldPlan
     }
 
     /// <summary>
-    /// A deployment file with one queue and nothing else. Every field left out
-    /// means "leave alone", so a scaffold that says little changes little — and
-    /// it carries no secrets by construction.
+    /// A deployment file with one queue, the workspace's ingress security, and a dev profile. Every field left out means
+    /// "leave alone", so a scaffold that says little changes little — and it carries no secrets by construction.
+    ///
+    /// The workspace takes signed requests with Queuey's own template, so every queue in it inherits that: a producer signs
+    /// with the key <c>queuey keys mint --queue … --write .env</c> writes, and nothing else gets in. The template is named,
+    /// since the file needs one. The environment comes from the profile, so <c>queuey apply --profile dev</c> creates a dev
+    /// workspace secured that way, and production is one more profile (docs agent, 2026-10-09).
     ///
     /// No "$schema" line: the deployment parser rejects properties it does not
     /// know, so adding one would make the file we just wrote unreadable to
     /// `queuey apply`. A test parses this content to keep that honest.
+    ///
+    /// The retention is one the license's plan allows (<see cref="PlanRetention"/>): 30 was refused on Free, whose limit is 7
+    /// (blind test 2026-10-09).
     /// </summary>
-    private static string DeploymentFileContent(string queueName) =>
+    private static string DeploymentFileContent(string queueName, int retentionDays) =>
         $$"""
         {
+          "workspace": {
+            "environment": "${QUEUEY_WORKSPACE_ENVIRONMENT}",
+            "ingress": {
+              "authMode": "SignedRequest",
+              "signedRequest": { "template": "queuey" }
+            }
+          },
           "queues": {
             "{{queueName}}": {
               "dlqEnabled": true,
-              "retentionDays": 30
+              "retentionDays": {{retentionDays}}
             }
+          },
+          "profiles": {
+            "dev": { "variables": { "QUEUEY_WORKSPACE_ENVIRONMENT": "dev" } }
           }
         }
 
         """;
 
+    /// <summary>The files a repository must keep out of git: the API key's <c>queuey.json</c>, and the signing key's <c>.env</c>.</summary>
+    private static readonly (string File, string Why)[] Ignored =
+    {
+        (ConfigFileName, "a connection with an API key, if you use one"),
+        (".env", "the signing key queuey keys mint --write .env writes"),
+    };
+
     /// <summary>
-    /// Keeps <c>queuey.json</c> out of git. It holds the API key; the
-    /// deployment file beside it is meant to be committed, and the whole point
-    /// of them being two files is that one of them can be.
+    /// Keeps <c>queuey.json</c> and <c>.env</c> out of git. <c>queuey keys mint --write .env</c> refuses a file git would commit,
+    /// so <c>.env</c> has to be ignored before the key is made.
     /// </summary>
     private static PlannedFile? GitignorePlan(string root)
     {
@@ -98,20 +132,19 @@ public static class ScaffoldPlan
         var exists = File.Exists(path);
         var current = exists ? File.ReadAllText(path) : string.Empty;
 
-        var alreadyIgnored = current
-            .Split('\n')
-            .Select(line => line.Trim())
-            .Any(line => line == ConfigFileName || line == "/" + ConfigFileName);
+        var lines = current.Split('\n').Select(line => line.Trim()).ToArray();
+        var missing = Ignored.Where(i => !lines.Any(line => line == i.File || line == "/" + i.File)).ToArray();
+        if (missing.Length == 0) return null;
 
-        if (alreadyIgnored) return null;
-
-        var addition = $"{Environment.NewLine}# Queuey connection config — holds the API key, never commit it{Environment.NewLine}{ConfigFileName}{Environment.NewLine}";
+        var addition = string.Concat(missing.Select(m =>
+            $"{Environment.NewLine}# Queuey: {m.Why} — never commit it{Environment.NewLine}{m.File}{Environment.NewLine}"));
         var content = exists ? current.TrimEnd('\n', '\r') + addition : addition.TrimStart('\r', '\n');
+        var names = string.Join(" and ", missing.Select(m => m.File));
 
         return new PlannedFile(
             ".gitignore",
             content,
-            exists ? $"add {ConfigFileName}" : $"create, ignoring {ConfigFileName}",
+            exists ? $"add {names}" : $"create, ignoring {names}",
             exists);
     }
 

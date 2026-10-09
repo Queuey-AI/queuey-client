@@ -52,9 +52,19 @@ internal static class ApplyCommand
             // Network-free: ParseNamed has expanded and resolved the file, so names, policy and an unset ${VAR}
             // already failed there, in the dry run, rather than during the deploy it was meant to protect.
 
-            // En leverings-URL på maskinen eller et privat nett avvises som apply avviser den (Queuey F2.3), med de utvidede
-            // verdiene: ParseNamed har alt utvidet fila, så variablene finnes.
-            DeploymentDestinations.EnsureReachable(profile is null ? file.Expand() : target, DryRunApiBase(map, profile));
+            // En leverings-URL på maskinen eller et privat nett (Queuey F2.3), med de utvidede verdiene: ParseNamed har alt utvidet
+            // fila. Blindtesten 2026-10-09 (funn 5): en dry-run kobler ikke til, og vet ikke hva Queuey tillater. En lokal stack
+            // leverer til localhost, så det er en advarsel her; plan og apply spør Queuey, og serverens svar gjelder.
+            try
+            {
+                DeploymentDestinations.EnsureReachable(profile is null ? file.Expand() : target, DryRunApiBase(map, profile));
+            }
+            catch (QueueyConfigurationException unreachable)
+            {
+                Console.Error.WriteLine($"Warning: {unreachable.Message}");
+                Console.Error.WriteLine("  The dry run does not connect, so Queuey decides when you plan or apply: Queuey's hosts refuse " +
+                                        "such a URL, and a Queuey on this machine may reach it. " + unreachable.SuggestedAction);
+            }
 
             // Det som vises, er fila slik den står, med ${VAR} uutvidet. Før skrev --json de utvidede verdiene, også et
             // token i en ?code=, mens teksten viste workspacet uutvidet og køene utvidet (review 2026-10-05).
@@ -290,11 +300,11 @@ internal static class ApplyCommand
             if (!plan.WouldSucceed)
             {
                 if (Json)
-                    Console.WriteLine(WithCreated(PlanCommand.ToJson(plan, _path)));
+                    Console.WriteLine(WithCreated(PlanCommand.ToJson(plan, _path, _config.IngressSource())));
                 else
                 {
                     Console.WriteLine($"Queuey plan — {_path} → {_config.ResolvedApiBase()}  (tenant {plan.Tenant})");
-                    PlanCommand.WriteBody(plan);
+                    PlanCommand.WriteBody(plan, _config);
                 }
 
                 return ExitCodes.RuntimeError;
@@ -303,7 +313,7 @@ internal static class ApplyCommand
             if (!Json)
             {
                 Console.WriteLine($"Queuey plan — {_path} → {_config.ResolvedApiBase()}  (tenant {plan.Tenant})");
-                PlanCommand.WriteBody(plan);
+                PlanCommand.WriteBody(plan, _config);
             }
 
             return await StoredAsync(stored, shown: true);
@@ -421,7 +431,8 @@ internal static class ApplyCommand
     internal static void WriteStepError(QueueyException error)
     {
         Console.WriteLine($"      ✗ {TerminalText.Line(error.ErrorCode ?? "refused")}: {TerminalText.Line(error.Message)}");
-        if (error.SuggestedAction is { } action)
+        // Blindtesten 2026-10-09 (funn 2): et plantak skal sies som et plantak, med veien ut.
+        if ((error.SuggestedAction ?? Advise.PlanRetention.CapHint(error.ErrorCode)) is { } action)
             Console.WriteLine($"        → {TerminalText.Line(action)}");
     }
 
@@ -678,7 +689,7 @@ internal static class ApplyCommand
             // Serverens forslag står under feilen den hører til. Før 2026-09-24 viste bare --plan og
             // feil som stoppet hele kommandoen det; en vanlig apply mistet det. Teksten er Queueys, så den går gjennom
             // TerminalText, som i CliErrors (local forwarding bare i dev, 2026-10-06: avslaget har veien ut her).
-            if (!r.Succeeded && r.Error?.SuggestedAction is { } action)
+            if (!r.Succeeded && (r.Error?.SuggestedAction ?? Advise.PlanRetention.CapHint(r.Error?.ErrorCode)) is { } action)
                 Console.WriteLine($"      → {TerminalText.Line(action)}");
         }
 
@@ -853,7 +864,7 @@ internal static class ApplyCommand
             r.Name, r.Succeeded, r.PublicId, r.Created, r.PolicyApplied, r.Mode,
             error = r.Error?.Message,
             errorCode = r.Error?.ErrorCode,
-            action = r.Error?.SuggestedAction,
+            action = r.Error?.SuggestedAction ?? Advise.PlanRetention.CapHint(r.Error?.ErrorCode),
             status = r.Error?.StatusCode,
         }),
     };

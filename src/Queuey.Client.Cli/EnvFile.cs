@@ -60,6 +60,23 @@ internal static class EnvFile
     }
 
     /// <summary>
+    /// Whether git tracks the file at <paramref name="full"/> (<c>git ls-files --error-unmatch</c>), or cannot say while it lies
+    /// in a repository folder. False outside a repository.
+    /// </summary>
+    internal static bool TrackedByGit(string full)
+    {
+        string folder = Path.GetDirectoryName(full)!;
+        (int Exit, string Output)? listed = Git(folder, new[] { "ls-files", "--error-unmatch", "--", Path.GetFileName(full) });
+        return listed switch
+        {
+            { Exit: 0 } => true,
+            // 1: git kjenner ikke fila. Utenfor et repo svarer git 128, og da avgjør mappene.
+            { Exit: 1 } => false,
+            _ => InsideAGitFolder(folder),
+        };
+    }
+
+    /// <summary>
     /// <paramref name="full"/> when this user can read and write the file that is there (or there is none), so a key is never
     /// minted into a file that cannot take it. Throws otherwise.
     /// </summary>

@@ -31,6 +31,20 @@ public sealed class ReadmeExampleTests : IDisposable
     }
 
     [Fact]
+    public void The_readme_says_the_packages_are_previews_on_nuget_and_that_an_app_publishes_with_a_signing_key()
+    {
+        // Blindtesten 2026-10-09 (funn 7) og docs-agenten: README sa at ingenting var på NuGet, kalte ApiKey en «license-wide
+        // FullAccess key», og en `dotnet add package` uten --prerelease feiler mens alt er preview.
+        string readme = File.ReadAllText(Path.Combine(RepoRoot(), "README.md"));
+
+        Assert.DoesNotContain("nothing is on NuGet", readme);
+        Assert.DoesNotContain("FullAccess", readme);
+        Assert.Contains("signing key", readme);
+        foreach (string line in readme.Split('\n').Where(l => l.Contains("dotnet add package", StringComparison.Ordinal)))
+            Assert.Contains("--prerelease", line);
+    }
+
+    [Fact]
     public void The_readme_has_deployment_file_examples_to_check()
     {
         // Vakt mot at uttrekket stille finner ingenting, så teorien under består uten å ha sjekket noe.

@@ -422,7 +422,12 @@ public sealed class ScaffoldPlanTests : IDisposable
         var parsed = Queuey.Client.Waas.DeploymentFile.Parse(deploy.Content);
 
         Assert.True(parsed.Queues.ContainsKey("orders"));
-        parsed.Expand().Resolve();   // throws if the policy does not hold together
+        // Miljøet kommer fra profilen (docs-agenten 2026-10-09), så fila leses som apply --profile dev leser den.
+        Queuey.Client.Waas.DeploymentFile dev = parsed.ForProfile("dev", _ => null);
+        dev.Resolve();   // throws if the policy does not hold together
+        Assert.Equal("dev", dev.Workspace!.Environment);
+        Assert.Equal("SignedRequest", dev.Workspace.Ingress!.AuthMode);
+        Assert.Equal("queuey", dev.Workspace.Ingress.SignedRequest!.Template);
     }
 
     [Fact]
@@ -451,11 +456,17 @@ public sealed class ScaffoldPlanTests : IDisposable
     [Fact]
     public void A_config_file_that_is_already_ignored_is_left_alone_entirely()
     {
-        File_(".gitignore", "bin/\nqueuey.json\n");
+        File_(".gitignore", "bin/\nqueuey.json\n.env\n");
 
         var plan = ScaffoldPlan.For(_root, "orders");
 
         Assert.DoesNotContain(plan, p => p.Path == ".gitignore");
+
+        // Med bare queuey.json legges .env til, for keys mint --write .env nekter en fil git ville committet (funn c).
+        File_(".gitignore", "bin/\nqueuey.json\n");
+        var ignore = ScaffoldPlan.For(_root, "orders").Single(p => p.Path == ".gitignore");
+        Assert.EndsWith(".env" + Environment.NewLine, ignore.Content, StringComparison.Ordinal);
+        Assert.Equal("add .env", ignore.Action);
     }
 
     [Fact]

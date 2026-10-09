@@ -24,7 +24,7 @@ The core pattern — **decorate, sync, publish** — lives in [`DemoModel.cs`](D
 - .NET 8 or 9 SDK.
 - A running Queuey backend — the **API** host (control plane) and the **Ingress** host (publish).
   Locally that's `Queuey.Api` (`http://localhost:5223`) and `Queuey.Ingress` (`http://localhost:5084`).
-- A **tenant** and a **license-wide FullAccess API key** (`qak_…`) + your **license id** (`lic_…`).
+- A **tenant**, a **license-wide API key** (`qak_…`) + your **license id** (`lic_…`): this sample manages Queuey (sync, queues), which takes a person's key. An app that only publishes signs with a key for its queue instead (`queuey keys mint --queue <queue> --write .env`).
 
 ## Configure
 
@@ -36,7 +36,7 @@ Config is read from environment variables (with local-dev defaults). Set the one
 | `QUEUEY_INGRESS_BASE` | `http://localhost:5084` | Publish (ingress) host |
 | `QUEUEY_TENANT` | `ten_your_tenant` | Producer tenant public id |
 | `QUEUEY_LICENSE` | `lic_your_license` | License public id (for control-plane calls) |
-| `QUEUEY_API_KEY` | `qak_your.key` | License-wide FullAccess API key |
+| `QUEUEY_API_KEY` | `qak_your.key` | License-wide API key (a person's, for managing Queuey) |
 
 ## Run
 
@@ -68,7 +68,7 @@ Against production instead of localhost, add `QUEUEY_API_BASE`/`QUEUEY_INGRESS_B
 ## Use it in your own project
 
 ```bash
-dotnet add package Queuey.Client.Waas
+dotnet add package Queuey.Client.Waas --prerelease
 ```
 
 ```csharp

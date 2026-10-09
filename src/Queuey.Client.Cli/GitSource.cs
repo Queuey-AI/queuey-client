@@ -20,8 +20,9 @@ namespace Queuey.Client.Cli;
 //   kjørbar fil som heter git, ville da fått den kjørt av queuey apply. git slås derfor opp her, bare i de absolutte
 //   oppføringene i PATH, og startes med full sti.
 // - Barneprosessen får ingen QUEUEY_*-variabler: git trenger ikke API-nøkkelen, og en hook eller en hjelper skal ikke se den.
-// - Commit-en sendes bare når fila er som i HEAD (git status --porcelain er tom for den), ellers sier merket noe fila ikke er.
-//   Med --ignored, så en fil git ignorerer, og som derfor ikke er i noen commit, heller ikke får en (re-reviewen 2026-10-06).
+// - Commit-en sendes bare når fila er som i HEAD: blob-en i HEAD og fila hashet uten filtre (hash-object --no-filters) er like.
+//   En fil HEAD ikke har, ny eller ignorert, får ingen commit (re-reviewen 2026-10-06). Ingen filterdriver fra repoet kjøres
+//   (security-review av #68 runde 2).
 
 /// <summary>Where a deployment file lives, from the command's flags and, unless told not to, from git.</summary>
 internal static class GitSource
@@ -31,6 +32,10 @@ internal static class GitSource
 
     /// <summary>The runner the CLI uses: the <c>git</c> found in <see cref="PathVariable"/>, a few seconds at most per call.</summary>
     internal static GitRunner Git { get; set; } = RunGit;
+
+    /// <summary>What git is always run with, before the command: no fsmonitor, and no hooks a repository could set.</summary>
+    internal static readonly string[] SafeArguments =
+        { "-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + (OperatingSystem.IsWindows() ? "NUL" : "/dev/null") };
 
     /// <summary>The search path git is looked up in. The process's <c>PATH</c>; tests give their own.</summary>
     internal static Func<string?> PathVariable { get; set; } = () => Environment.GetEnvironmentVariable("PATH");
@@ -53,8 +58,13 @@ internal static class GitSource
                 path ??= Git(directory, "rev-parse", "--show-prefix")?.Trim() is { } prefix
                     ? prefix + fileName
                     : null;
+                // Fila er som i HEAD når blob-en der er de samme bytene som fila. Ingen filtre kjøres (security-review av #68 runde
+                // 2, R2-K2): `status` kunne starte en clean-filterdriver repoet konfigurerte. En fil HEAD ikke har (ny, eller ignorert),
+                // har ingen blob, og får ingen commit.
                 if (commit is null && Git(directory, "rev-parse", "HEAD")?.Trim() is { Length: > 0 } head
-                    && Git(directory, "status", "--porcelain", "--ignored", "--", fileName) is { } status && status.Trim().Length == 0)
+                    && Git(directory, "rev-parse", $"HEAD:./{fileName}")?.Trim() is { Length: > 0 } committed
+                    && Git(directory, "hash-object", "--no-filters", "--", fileName)?.Trim() is { Length: > 0 } current
+                    && string.Equals(committed, current, StringComparison.OrdinalIgnoreCase))
                     commit = head;
             }
         }
@@ -107,7 +117,9 @@ internal static class GitSource
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };
-            foreach (string argument in arguments)
+            // Ingen fsmonitor og ingen hooks (security-review av #68, K3): et repo kan sette en kommando i core.fsmonitor, som git
+            // kjører ved status og andre lesinger.
+            foreach (string argument in SafeArguments.Concat(arguments))
                 start.ArgumentList.Add(argument);
             // Ingen pager og ingen spørsmål om passord: en remote som vil ha innlogging, skal ikke stoppe en apply.
             start.Environment["GIT_TERMINAL_PROMPT"] = "0";

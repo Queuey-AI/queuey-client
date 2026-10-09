@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -17,7 +18,9 @@ namespace Queuey.Client;
 /// <c>https://api.queuey.ai</c>. Authenticated with the same <c>X-Api-Key</c> plus the
 /// <c>X-License-PublicId</c> header (<see cref="LicensePublicId"/>).</item>
 /// </list>
-/// A single <b>license-wide FullAccess</b> API key covers publish + sync + management. The optional
+/// An app publishes with a <b>signing key</b> for its queue (<see cref="SigningKeyId"/> + <see cref="SigningSecret"/>, from
+/// <c>queuey keys mint --write .env</c>), which reaches nothing else. A license-wide API key belongs to a person and is
+/// for managing Queuey (sync, apply, the control plane), not for an app that only publishes. The optional
 /// <see cref="ManagementToken"/> (Entra bearer) is only needed for the cross-organization
 /// partner-relation surface, which is out of scope for V1.
 /// <para>Set <see cref="Environment"/> to pick default hosts (defaults to <see cref="QueueyEnvironment.Production"/>);
@@ -38,8 +41,8 @@ public sealed class QueueyOptions
     public string? TenantPublicId { get; set; }
 
     /// <summary>
-    /// API key in the form <c>qak_&lt;keyId&gt;.&lt;secret&gt;</c>, sent as the <c>X-Api-Key</c> header.
-    /// A license-wide FullAccess key is the primary credential for the whole SDK.
+    /// API key in the form <c>qak_&lt;keyId&gt;.&lt;secret&gt;</c>, sent as the <c>X-Api-Key</c> header. A license-wide key
+    /// belongs to a person and manages Queuey; an app that publishes signs with <see cref="SigningKeyId"/> instead.
     /// </summary>
     public string? ApiKey { get; set; }
 
@@ -75,16 +78,31 @@ public sealed class QueueyOptions
     /// Fills each setting that is not set yet from its environment variable (<see cref="QueueyEnvironmentVariables"/>), such
     /// as the signing key <c>queuey keys mint --write .env</c> writes. A value set in code wins. When the signing key and its
     /// secret are both set, <c>QUEUEY_API_KEY</c> is not read: the producer signs with the key that reaches only its queue,
-    /// not a license-wide one. Returns these options.
+    /// not a license-wide one.
+    /// In Development (<c>DOTNET_ENVIRONMENT</c> or <c>ASPNETCORE_ENVIRONMENT</c>), when the environment does not hold both,
+    /// the signing key and its secret are read as a pair from <c>.env</c> in the working folder, and nothing else is: the
+    /// hosts, the tenant and the API key never come from it. Only from a regular file of the user's own (on Windows: under the
+    /// user's profile folder) that git does not track. Elsewhere <c>.env</c> is never read: production takes its secrets
+    /// from the platform's environment. Returns these options.
     /// </summary>
     /// <param name="read">Reads a variable; <see cref="System.Environment.GetEnvironmentVariable(string)"/> when null.</param>
     public QueueyOptions UseEnvironmentVariables(Func<string, string?>? read = null)
+        => UseEnvironmentVariables(read, System.IO.Directory.GetCurrentDirectory());
+
+    /// <summary><see cref="UseEnvironmentVariables(Func{string, string?}?)"/> with the folder whose <c>.env</c> is read given.</summary>
+    internal QueueyOptions UseEnvironmentVariables(Func<string, string?>? read, string? dotEnvFolder)
     {
         read ??= System.Environment.GetEnvironmentVariable;
         string? Read(string name) => read(name) is { } value && !string.IsNullOrWhiteSpace(value) ? value.Trim() : null;
 
-        SigningKeyId ??= Read(QueueyEnvironmentVariables.SigningKeyId);
-        SigningSecret ??= Read(QueueyEnvironmentVariables.SigningSecret);
+        // Signeringsparet tas fra ett sted: miljøet når det har begge, ellers .env (bare i Development, DotEnvFile). Ingen andre
+        // navn leses fra .env: en fil i arbeidsmappa skal ikke kunne velge vertene nøkkelen sendes til (security-review av #68, R1).
+        (string? keyId, string? secret) = (Read(QueueyEnvironmentVariables.SigningKeyId), Read(QueueyEnvironmentVariables.SigningSecret));
+        if ((keyId is null || secret is null) && dotEnvFolder is not null && DotEnvFile.IsDevelopment(read)
+            && DotEnvFile.ReadSigningPair(dotEnvFolder) is { } fromFile)
+            (keyId, secret) = fromFile;
+        SigningKeyId ??= keyId;
+        SigningSecret ??= secret;
         // Minste privilegium (security-review av #67, KAN G): med et signeringspar leses ikke QUEUEY_API_KEY, for en satt nøkkel
         // ville vunnet over signeringen ved publisering. En nøkkel satt i koden vinner fortsatt.
         if (string.IsNullOrWhiteSpace(SigningKeyId) || string.IsNullOrWhiteSpace(SigningSecret))
@@ -124,7 +142,7 @@ public sealed class QueueyOptions
     }
 }
 
-/// <summary>The environment variables <see cref="QueueyOptions.UseEnvironmentVariables"/> reads, and the <c>queuey</c> CLI uses.</summary>
+/// <summary>The environment variables <see cref="QueueyOptions.UseEnvironmentVariables(Func{string, string?}?)"/> reads, and the <c>queuey</c> CLI uses.</summary>
 public static class QueueyEnvironmentVariables
 {
     /// <summary><c>QUEUEY_API_KEY</c>: <see cref="QueueyOptions.ApiKey"/>.</summary>

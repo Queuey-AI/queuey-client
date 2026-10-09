@@ -80,7 +80,9 @@ internal static class AdviseCommand
 
         Advice advice = Recommendation.For(facts);
         var queueName = ScaffoldPlan.DefaultQueueName(root, map.Get("queue"));
-        IReadOnlyList<PlannedFile> scaffold = ScaffoldPlan.For(root, queueName);
+        (int retentionDays, string retentionFrom) = await PlanRetention.ForAsync(Connection(map));
+        IReadOnlyList<PlannedFile> scaffold = ScaffoldPlan.For(root, queueName, retentionDays);
+        IReadOnlyList<string> filesRead = RepoWalk.FilesUnion(facts.FilesRead, flowFacts.FilesRead);
         IReadOnlyList<FlowCandidate> candidates = FlowAdvisor.Candidates(flowFacts, root);
 
         if (map.Has("json"))
@@ -102,23 +104,41 @@ internal static class AdviseCommand
                     docs = "https://queuey.ai/llms-full.txt",
                     queue = queueName,
                     files = scaffold.Select(f => new { path = f.Path, action = f.Action, exists = f.Exists }),
+                    filesNote = ScaffoldPlan.IngressNote,
+                    retentionDays,
+                    retentionFrom,
+                    filesRead,
                     candidates = candidates.Select(c => new { summary = c.Summary, flow = c.Flow.ToJson(FlowSchema.Url) }),
                     scanLimited = RepoWalk.Union(facts.ScanLimits, flowFacts.Limits),
                 },
                 CliHost.JsonOut));
 
             // --json still performs whatever was asked for; it just does not narrate.
-            return await DoRequestedWorkAsync(map, root, queueName, scaffold, quiet: true);
+            return await DoRequestedWorkAsync(map, root, queueName, scaffold, retentionDays, quiet: true);
         }
 
-        WriteHuman(root, advice, queueName, scaffold, map, candidates, RepoWalk.Union(facts.ScanLimits, flowFacts.Limits));
-        return await DoRequestedWorkAsync(map, root, queueName, scaffold, quiet: false);
+        WriteHuman(root, advice, queueName, scaffold, map, candidates, RepoWalk.Union(facts.ScanLimits, flowFacts.Limits), filesRead,
+            retentionFrom);
+        return await DoRequestedWorkAsync(map, root, queueName, scaffold, retentionDays, quiet: false);
     }
 
     /// <summary>
     /// advise --intent: reads the Desired Flow, enriches it from the repository, and proposes the design, or stops at the
     /// conflicts with exit 1. Writes nothing.
     /// </summary>
+    /// <summary>The connection advise may read the license's plan with, or null when there is none or it cannot be resolved.</summary>
+    private static ResolvedConfig? Connection(ArgMap map)
+    {
+        try
+        {
+            return CliHost.Resolve(map);
+        }
+        catch (Exception ex) when (ex is QueueyConfigurationException or CliUsageException or CliFileException)
+        {
+            return null;
+        }
+    }
+
     private static int Intent(ArgMap map, string root, string intentPath)
     {
         DesiredFlow intent;
@@ -162,7 +182,11 @@ internal static class AdviseCommand
 
         IReadOnlyList<string> limits = RepoWalk.Union(facts.Limits, repo.ScanLimits);
         if (map.Has("json"))
-            Console.WriteLine(IntentJson(root, intentPath, advice, limits).ToJsonString(CliHost.JsonOut));
+        {
+            JsonObject json = IntentJson(root, intentPath, advice, limits);
+            json["filesRead"] = new JsonArray(RepoWalk.FilesUnion(facts.FilesRead, repo.FilesRead).Select(f => (JsonNode?)JsonValue.Create(f)).ToArray());
+            Console.WriteLine(json.ToJsonString(CliHost.JsonOut));
+        }
         else
             AdviseIntentText.Write(root, advice, limits);
 
@@ -256,7 +280,7 @@ internal static class AdviseCommand
     /// files first, because the deployment file is what apply converges from.
     /// </summary>
     private static async Task<int> DoRequestedWorkAsync(
-        ArgMap map, string root, string queueName, IReadOnlyList<PlannedFile> scaffold, bool quiet)
+        ArgMap map, string root, string queueName, IReadOnlyList<PlannedFile> scaffold, int retentionDays, bool quiet)
     {
         if (map.Has("write-files"))
         {
@@ -265,7 +289,7 @@ internal static class AdviseCommand
         }
 
         if (map.Has("apply"))
-            return await ApplyAsync(map, queueName, quiet);
+            return await ApplyAsync(map, queueName, retentionDays, quiet);
 
         return ExitCodes.Success;
     }
@@ -321,13 +345,13 @@ internal static class AdviseCommand
     /// past. When the key cannot reach far enough, say which step it was and
     /// where a human does it, rather than leaving a 403 in the output.
     /// </summary>
-    private static async Task<int> ApplyAsync(ArgMap map, string queueName, bool quiet)
+    private static async Task<int> ApplyAsync(ArgMap map, string queueName, int retentionDays, bool quiet)
     {
         var file = new DeploymentFile
         {
             Queues = new Dictionary<string, DeploymentQueue>(StringComparer.Ordinal)
             {
-                [queueName] = new DeploymentQueue { DlqEnabled = true, RetentionDays = 30 },
+                [queueName] = new DeploymentQueue { DlqEnabled = true, RetentionDays = retentionDays },
             },
         };
 
@@ -348,8 +372,10 @@ internal static class AdviseCommand
         }
         catch (QueueyConfigurationException ex)
         {
-            Console.Error.WriteLine($"--apply needs credentials: {ex.Message}");
-            Console.Error.WriteLine("Mint an API key in the console (the license menu → Manage license → API keys), then set QUEUEY_API_KEY and QUEUEY_TENANT.");
+            Console.Error.WriteLine($"--apply needs a connection: {ex.Message}");
+            Console.Error.WriteLine("Log in with queuey login (it prints a link to approve), and name the workspace with --tenant or QUEUEY_TENANT. " +
+                                    "The app's own key is a signing key for its queue: queuey keys mint --queue <queue> --write .env, " +
+                                    "which needs a login that may manage keys.");
             Console.Error.WriteLine("Everything above this line still holds — the advice and any files written needed no credentials.");
             return ExitCodes.Configuration;
         }
@@ -387,7 +413,7 @@ internal static class AdviseCommand
 
     private static void WriteHuman(
         string root, Advice advice, string queueName, IReadOnlyList<PlannedFile> scaffold, ArgMap map,
-        IReadOnlyList<FlowCandidate> candidates, IReadOnlyList<string> limits)
+        IReadOnlyList<FlowCandidate> candidates, IReadOnlyList<string> limits, IReadOnlyList<string> filesRead, string retentionFrom)
     {
         Console.WriteLine($"Queuey — how this fits  ({Path.GetFullPath(root)})");
         Console.WriteLine();
@@ -407,6 +433,14 @@ internal static class AdviseCommand
 
         WriteSection("The scan was limited", limits);
 
+        // Blindtesten 2026-10-09 (funn 8): hjelpeteksten lovet at hver konklusjon navngir fila den kom fra, og advise sa ikke
+        // hvilke filer den leste.
+        Console.WriteLine();
+        Console.WriteLine(filesRead.Count == 0
+            ? "Read: no files (nothing the scan looks at)."
+            : $"Read {filesRead.Count} file(s): " + Wrap(TerminalText.Line(string.Join(", ", filesRead.Take(30))
+                + (filesRead.Count > 30 ? $", and {filesRead.Count - 30} more (all in --json, filesRead)" : ""))));
+
         var willWrite = map.Has("write-files");
         var willApply = map.Has("apply");
 
@@ -416,11 +450,14 @@ internal static class AdviseCommand
             : $"Files --write-files would create (queue \"{queueName}\"):");
         foreach (var file in scaffold)
             Console.WriteLine($"  - {file.Path}: {file.Action}");
+        Console.WriteLine($"  The queue keeps events for {TerminalText.Line(retentionFrom)}.");
+        Console.WriteLine($"  {Wrap(ScaffoldPlan.IngressNote)}");
 
         if (!willApply)
         {
             Console.WriteLine();
-            Console.WriteLine($"--apply would create the queue \"{queueName}\" in your workspace. The API key itself is always minted in the console.");
+            Console.WriteLine($"--apply would create the queue \"{queueName}\" in your workspace, with your login. The app's signing key " +
+                              $"comes from queuey keys mint --queue {queueName} --write .env, which needs a login that may manage keys.");
         }
 
         Console.WriteLine();

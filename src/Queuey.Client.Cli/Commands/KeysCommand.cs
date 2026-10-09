@@ -24,7 +24,7 @@ internal static class KeysCommand
     internal static readonly CommandOptions ListOptions = new("keys list", flags: new[] { "json" }, values: new[] { "queue", "profile" });
     internal static readonly CommandOptions RevokeOptions = new("keys revoke", flags: new[] { "json" }, values: new[] { "reason", "profile" }, positionals: 1);
 
-    /// <summary>The variables <c>--write</c> sets, the names the SDK reads (<see cref="QueueyOptions.UseEnvironmentVariables"/>).</summary>
+    /// <summary>The variables <c>--write</c> sets, the names the SDK reads (<see cref="QueueyOptions.UseEnvironmentVariables(System.Func{string, string?}?)"/>).</summary>
     internal static readonly string[] Variables = { QueueyEnvironmentVariables.SigningKeyId, QueueyEnvironmentVariables.SigningSecret };
 
     public static async Task<int> RunAsync(string[] args)

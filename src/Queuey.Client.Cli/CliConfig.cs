@@ -68,21 +68,33 @@ internal sealed class ResolvedConfig
         Profile = Profile,
         ProfileFile = ProfileFile,
         ProfileTenant = ProfileTenant,
+        IngressBaseFrom = IngressBaseFrom,
         Login = Login,
         SigningKeyId = keyId,
         SigningSecret = secret,
         SigningFrom = from,
     };
 
+    /// <summary>
+    /// Where the ingress host came from, as a person reads it: a flag, a variable, <c>queuey.json</c>, a profile, or the login.
+    /// Null means Queuey's own default.
+    /// </summary>
+    public string? IngressBaseFrom { get; init; }
+
+    /// <summary><see cref="IngressBaseFrom"/>, or Queuey's default when nothing set it.</summary>
+    public string IngressSource() => IngressBaseFrom ?? "Queuey's default ingress host";
+
     /// <summary>Where <see cref="SigningKeyId"/> came from: the environment or <c>.env</c>. Null without one.</summary>
     public string? SigningFrom { get; init; }
+
+    private static Uri? LoginIngress(LoginTokens login)
+        => Uri.TryCreate(login.Login.IngressBase, UriKind.Absolute, out Uri? ingress) ? ingress : null;
 
     public ResolvedConfig WithLogin(LoginTokens login) => new()
     {
         Environment = Environment,
         ApiBaseOverride = ApiBaseOverride,
-        IngressBaseOverride = IngressBaseOverride
-                              ?? (Uri.TryCreate(login.Login.IngressBase, UriKind.Absolute, out Uri? ingress) ? ingress : null),
+        IngressBaseOverride = IngressBaseOverride ?? LoginIngress(login),
         ApiKey = ApiKey,
         TenantPublicId = TenantPublicId,
         LicensePublicId = LicensePublicId ?? login.Login.License,
@@ -90,6 +102,9 @@ internal sealed class ResolvedConfig
         Profile = Profile,
         ProfileFile = ProfileFile,
         ProfileTenant = ProfileTenant,
+        IngressBaseFrom = IngressBaseOverride is null && LoginIngress(login) is not null
+            ? (login.Login.IngressBaseFromFlag ? "the login (--ingress-base when logging in)" : "the login (the ingress host Queuey gave)")
+            : IngressBaseFrom,
         Login = login,
         SigningKeyId = SigningKeyId,
         SigningSecret = SigningSecret,
@@ -109,6 +124,7 @@ internal sealed class ResolvedConfig
         Profile = Profile,
         ProfileFile = ProfileFile,
         ProfileTenant = ProfileTenant,
+        IngressBaseFrom = IngressBaseFrom,
         Login = Login,
         SigningKeyId = SigningKeyId,
         SigningSecret = SigningSecret,
@@ -147,12 +163,17 @@ internal static class CliConfig
     public static ResolvedConfig Resolve(ArgMap args, Func<string, string?> getEnv, string? configJson)
     {
         FileConfig file = ParseFile(configJson);
+        EnsureTheFileDoesNotChooseWhereAKeyGoes(args, getEnv, file);
 
         return new ResolvedConfig
         {
             Environment = ParseEnvironment(First(args.Get("env"), getEnv("QUEUEY_ENV"), file.Environment)),
             ApiBaseOverride = ParseUri(First(args.Get("api-base"), getEnv("QUEUEY_API_BASE"), file.ApiBase)),
             IngressBaseOverride = ParseUri(First(args.Get("ingress-base"), getEnv("QUEUEY_INGRESS_BASE"), file.IngressBase)),
+            IngressBaseFrom = !string.IsNullOrWhiteSpace(args.Get("ingress-base")) ? "--ingress-base"
+                : !string.IsNullOrWhiteSpace(getEnv("QUEUEY_INGRESS_BASE")) ? "QUEUEY_INGRESS_BASE"
+                : !string.IsNullOrWhiteSpace(file.IngressBase) ? $"{IngressFromFilePrefix}{args.Get("config") ?? "queuey.json"}"
+                : null,
             ApiKey = First(args.Get("api-key"), getEnv("QUEUEY_API_KEY"), file.ApiKey),
             TenantPublicId = Workspace(
                 (args.Get("tenant"), "--tenant"),
@@ -162,6 +183,58 @@ internal static class CliConfig
             Source = First(args.Get("source"), getEnv("QUEUEY_SOURCE"), file.Source),
         };
     }
+
+    /// <summary>
+    /// Refuses a <c>queuey.json</c> that names a host for an API key the file does not hold itself: the key from
+    /// <c>--api-key</c> or <c>QUEUEY_API_KEY</c>, the host from the file, and the host neither Queuey's own nor on this
+    /// machine. <c>queuey.json</c> sits in the repository, so whoever wrote it would choose where the key is sent.
+    /// <c>--api-base</c> or <c>--ingress-base</c> (or the variable) names the host instead, and then it is the caller's choice.
+    /// </summary>
+    // Security-review av #68 (B1, 2026-10-09): en nøkkel i miljøet gikk til verten queuey.json i et klonet repo pekte på.
+    private static void EnsureTheFileDoesNotChooseWhereAKeyGoes(ArgMap args, Func<string, string?> getEnv, FileConfig file)
+    {
+        // Security-review av #68 runde 2 (R2-1): en apiKey i fila ga ikke unntak før, for flagget og miljøet vinner over den, og
+        // en dummy-nøkkel i fila slapp nøkkelen fra miljøet gjennom til fila sin vert.
+        bool keyFromOutside = !string.IsNullOrWhiteSpace(args.Get("api-key")) || !string.IsNullOrWhiteSpace(getEnv("QUEUEY_API_KEY"));
+        if (!keyFromOutside)
+            return;
+
+        foreach ((string? fromFile, string flag, string variable, string field, Uri own) in new[]
+                 {
+                     (file.ApiBase, "api-base", "QUEUEY_API_BASE", "apiBase", new QueueyOptions().ResolveApiBaseAddress()),
+                     (file.IngressBase, "ingress-base", "QUEUEY_INGRESS_BASE", "ingressBase", new QueueyOptions().ResolveIngressBaseAddress()),
+                 })
+        {
+            if (string.IsNullOrWhiteSpace(fromFile) || !string.IsNullOrWhiteSpace(args.Get(flag)) || !string.IsNullOrWhiteSpace(getEnv(variable)))
+                continue;
+            if (FileChoseHost(fromFile, own) is { } host)
+                throw FileChoseHostRefusal(field, args.Get("config") ?? "queuey.json", host, flag, variable,
+                    "the API key comes from --api-key or QUEUEY_API_KEY");
+        }
+    }
+
+    /// <summary>The prefix of <see cref="ResolvedConfig.IngressBaseFrom"/> when the ingress host came from <c>queuey.json</c>.</summary>
+    internal const string IngressFromFilePrefix = "ingressBase in ";
+
+    /// <summary>
+    /// The host <paramref name="fromFile"/> names when a file should not choose it for a key: an absolute URL that is neither
+    /// on this machine nor Queuey's own <paramref name="own"/>. Null otherwise.
+    /// </summary>
+    internal static string? FileChoseHost(string? fromFile, Uri own)
+    {
+        if (string.IsNullOrWhiteSpace(fromFile) || !Uri.TryCreate(fromFile!.Trim(), UriKind.Absolute, out Uri? host) || host.IsLoopback
+            || string.Equals(host.GetLeftPart(UriPartial.Authority), own.GetLeftPart(UriPartial.Authority), StringComparison.OrdinalIgnoreCase))
+            return null;
+        return host.GetLeftPart(UriPartial.Authority);
+    }
+
+    internal static QueueyConfigurationException FileChoseHostRefusal(string field, string file, string host, string flag, string variable, string keyFrom)
+        => new($"{field} in {file} names {host}, and {keyFrom}, not from that file. A file in the repository does not choose " +
+               "where your key is sent, so nothing was sent.")
+        {
+            SuggestedAction = $"If that host is yours, name it yourself: --{flag} {host} (or {variable}). " +
+                              "Or log in with queuey login, which sends a login only to the host it was made for.",
+        };
 
     /// <summary>
     /// The connection of profile <paramref name="profile"/> (F2.7): a flag first, then the profile, never <c>queuey.json</c>.
@@ -198,6 +271,9 @@ internal static class CliConfig
             Environment = QueueyEnvironment.Production,
             ApiBaseOverride = ParseUri(Pick("api-base", "QUEUEY_API_BASE", values.ApiBase, "API host")),
             IngressBaseOverride = ParseUri(Pick("ingress-base", "QUEUEY_INGRESS_BASE", values.IngressBase, "ingress host")),
+            IngressBaseFrom = !string.IsNullOrWhiteSpace(args.Get("ingress-base")) ? "--ingress-base"
+                : !string.IsNullOrWhiteSpace(values.IngressBase) ? $"profile {profile} in {path}"
+                : null,
             ApiKey = Pick("api-key", "QUEUEY_API_KEY", values.ApiKey, "API key"),
             TenantPublicId = tenant is null ? null : WorkspaceId(tenant, args.Get("tenant") is null ? $"tenant of profile {profile}" : "--tenant"),
             LicensePublicId = Pick("license", "QUEUEY_LICENSE", values.License, "license"),

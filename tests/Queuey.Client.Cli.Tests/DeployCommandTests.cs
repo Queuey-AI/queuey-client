@@ -92,15 +92,20 @@ public sealed class DeployCommandTests : IDisposable
     }
 
     [Fact]
-    public async Task A_dry_run_refuses_a_delivery_url_on_this_machine_and_points_to_the_local_listener()
+    public async Task A_dry_run_warns_about_a_delivery_url_on_this_machine_and_leaves_it_to_queuey()
     {
+        // Blindtesten 2026-10-09 (funn 5): en dry-run kobler ikke til, og en lokal stack leverer til localhost. Det er en
+        // advarsel, ikke en feil; plan og apply spør Queuey.
         string path = DeployFile("""{ "queues": { "stripe": { "delivery": { "url": "http://localhost:3000/api/stripe" } } } }""");
 
-        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path, "--dry-run")));
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path, "--dry-run", "--json")));
 
-        Assert.Equal(ExitCodes.Configuration, run.Exit);
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.Contains("Warning:", run.Stderr);
         Assert.Contains("queues.stripe.delivery.url: it points at localhost, which is on this machine", run.Stderr);
+        Assert.Contains("Queuey decides when you plan or apply", run.Stderr);
         Assert.Contains("localForward", run.Stderr);
+        Assert.Equal(2, JsonDocument.Parse(run.Stdout).RootElement.GetProperty("schemaVersion").GetInt32()); // stdout er fortsatt bare JSON
     }
 
     [Fact]
