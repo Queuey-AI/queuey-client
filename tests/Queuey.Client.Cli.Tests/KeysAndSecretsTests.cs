@@ -82,6 +82,67 @@ public sealed class KeysAndSecretsTests : IDisposable
     }
 
     [Fact]
+    public async Task An_api_key_already_in_the_file_is_reported_masked_and_the_answer_says_the_sdk_reads_it_from_the_environment()
+    {
+        // Security-review av #69 (K2 og funksjonelt): den gamle nøkkelen publiserer til den trekkes tilbake, og SDK-en leser
+        // QUEUEY_API_KEY bare fra miljøet, ikke fra .env.
+        RecordingHandler api = Server(_ => RecordingHandler.Json(HttpStatusCode.OK, new
+        {
+            clientPublicId = "acl_1", clientName = "queuey-cli", keyId = "kid1", secret = "qak_kid1.publishonly", queuePublicId = "que_1",
+            scope = "queue", tenantPublicId = "ten_1", type = "api-key",
+        }));
+        string env = Path.Combine(_dir, ".env");
+        File.WriteAllText(env, "QUEUEY_API_KEY=qak_old.oldsecretvalue\n");
+
+        CliRun human = await Run(api, "keys", "mint", "--queue", "que_1", "--type", "api-key", "--write", env);
+        File.WriteAllText(env, "QUEUEY_API_KEY=qak_old.oldsecretvalue\n");
+        CliRun json = await Run(api, "keys", "mint", "--queue", "que_1", "--type", "api-key", "--write", env, "--json");
+
+        Assert.True(human.Exit == ExitCodes.Success, human.Stdout + human.Stderr);
+        Assert.Contains("held another QUEUEY_API_KEY (qak_old.**** (set)) before. It still publishes until it is revoked", human.Stderr);
+        Assert.Contains("reads QUEUEY_API_KEY from the environment, not from a file", human.Stdout);
+        Assert.DoesNotContain("UseEnvironmentVariables", human.Stdout);
+        Assert.Equal("qak_old.**** (set)", JsonDocument.Parse(json.Stdout).RootElement.GetProperty("replacedApiKey").GetString());
+        Assert.DoesNotContain("oldsecretvalue", human.Stdout + human.Stderr + json.Stdout + json.Stderr);
+        Assert.DoesNotContain("publishonly", human.Stdout + human.Stderr + json.Stdout + json.Stderr);
+    }
+
+    [Fact]
+    public async Task A_signing_pair_in_a_file_is_read_from_the_environment_or_from_env_in_development()
+    {
+        string env = Path.Combine(_dir, ".env");
+
+        CliRun run = await Run(Server(), "keys", "mint", "--tenant", "ten_1", "--write", env);
+
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        Assert.Contains("UseEnvironmentVariables(): from the environment, and from .env in Development", run.Stdout);
+    }
+
+    [Theory]
+    [InlineData("ten_a-b", null, "https://app.queuey.ai/console/t")]
+    [InlineData("ten_1", "que_a/../b", "https://app.queuey.ai/console/t/ten_1?tab=security")]
+    [InlineData("ten_1", "que_1\u001b[2J", "https://app.queuey.ai/console/t/ten_1?tab=security")]
+    public async Task An_id_outside_letters_digits_and_underscore_gets_no_link_of_its_own_and_no_escape_reaches_the_terminal(
+        string tenant, string? queue, string console)
+    {
+        // Security-review av #69 (K3): id-en havner både i lenken og i kommandoen Guide foreslår.
+        var api = new RecordingHandler(req => throw new InvalidOperationException("Nothing is minted: " + req.Key));
+        string[] args = new[] { "keys", "mint", "--tenant", tenant }
+            .Concat(queue is null ? Array.Empty<string>() : new[] { "--queue", queue })
+            .Concat(new[] { "--api-key", "qak_kid.secret", "--license", "lic_1", "--config", Path.Combine(_dir, "none.json") })
+            .ToArray();
+
+        CliRun human = await CliHarness.RunAsync(() => CliEntry.RunAsync(args), api);
+        CliRun json = await CliHarness.RunAsync(() => CliEntry.RunAsync(args.Append("--json").ToArray()), api);
+
+        Assert.Empty(api.Requests);
+        Assert.True(human.Exit == ExitCodes.Success, human.Stdout + human.Stderr);
+        Assert.DoesNotContain('\u001b', human.Stdout + human.Stderr); // char: kultursammenligning ignorerer kontrolltegn
+        Assert.Contains(console, human.Stdout);
+        Assert.Equal(console, JsonDocument.Parse(json.Stdout).RootElement.GetProperty("consoleUrl").GetString());
+    }
+
+    [Fact]
     public async Task Approval_required_exits_5_with_the_link_and_writes_nothing()
     {
         RecordingHandler api = Server(_ => RecordingHandler.Json(HttpStatusCode.Forbidden, new

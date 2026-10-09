@@ -173,10 +173,11 @@ internal static class KeysCommand
         }
 
         Console.WriteLine($"Nothing was minted. The app needs {string.Join(" and ", variables)}.");
-        Console.WriteLine($"  To mint the key and put it where the app reads it, without showing it: {command}");
+        // Kommandoen har id-er, og lenken en vert fra innloggingen: begge går gjennom TerminalText (security-review av #69, K3).
+        Console.WriteLine($"  To mint the key and put it where the app reads it, without showing it: {TerminalText.Line(command)}");
         Console.WriteLine("  --write takes .env (or another file git ignores) or user-secrets (the .NET project's user secrets).");
         if (console is not null)
-            Console.WriteLine($"  Or a person makes or looks at the key in the console: {console}");
+            Console.WriteLine($"  Or a person makes or looks at the key in the console: {TerminalText.Line(console)}");
         Console.WriteLine("  --show-secret prints it here instead, once.");
         return ExitCodes.Success;
     }
@@ -226,6 +227,11 @@ internal static class KeysCommand
         string? replaced = key.Type != IngressKeyTypes.ApiKey && previous.TryGetValue(names[0], out string? old) && old is not null && old != key.KeyId
             ? old
             : null;
+        // Security-review av #69 (K2): en API-nøkkel som sto der, publiserer fortsatt til den trekkes tilbake. Den vises maskert.
+        string? replacedApiKey = key.Type == IngressKeyTypes.ApiKey && previous.TryGetValue(names[0], out string? oldKey) && oldKey is not null
+                                 && oldKey != key.Secret
+            ? CliHost.MaskKey(oldKey)
+            : null;
 
         if (map.Has("json"))
         {
@@ -237,6 +243,7 @@ internal static class KeysCommand
                 written = target.Shown,
                 variables = names,
                 replacedKeyId = replaced,
+                replacedApiKey,
                 // Security-review av #67 (BØR A): en fil er alltid 0600 etterpå; her står modusen den hadde, når den ble strammet.
                 mode = target.Kind == "file" ? "0600" : null,
                 tightenedFrom,
@@ -246,14 +253,21 @@ internal static class KeysCommand
         {
             Console.WriteLine($"Minted {Describe(key)}.");
             Console.WriteLine($"Wrote {string.Join(" and ", names)} to {target.Shown}. The secret is not shown.");
-            Console.WriteLine(target.Kind == "file"
-                ? "A producer reads them from the environment, with QueueyOptions.UseEnvironmentVariables() in .NET."
-                : "The app reads them from its configuration, with QueueyOptions.UseSettings(key => configuration[key]).");
+            // Det SDK-en faktisk leser (security-review av #69): fra .env bare signeringsparet, i Development; QUEUEY_API_KEY fra miljøet.
+            Console.WriteLine(target.Kind != "file"
+                ? "The app reads them from its configuration, with QueueyOptions.UseSettings(key => configuration[key])."
+                : key.Type == IngressKeyTypes.ApiKey
+                    ? "The SDK reads QUEUEY_API_KEY from the environment, not from a file: load the file into the app's environment, "
+                      + "or write to user-secrets instead."
+                    : "A producer reads them with QueueyOptions.UseEnvironmentVariables(): from the environment, and from .env in Development.");
         }
 
         if (replaced is not null)
             Console.Error.WriteLine($"Note: {target.Shown} held key {TerminalText.Line(replaced)} before. It still verifies until it is revoked: " +
                                     $"queuey keys revoke {TerminalText.Line(replaced)}");
+        if (replacedApiKey is not null)
+            Console.Error.WriteLine($"Note: {target.Shown} held another QUEUEY_API_KEY ({TerminalText.Line(replacedApiKey)}) before. It still publishes " +
+                                    "until it is revoked, in the Queuey console.");
         if (tightenedFrom is not null)
             Console.Error.WriteLine($"Note: {target.Shown} had mode {tightenedFrom}; it is 0600 now, readable and writable only by you.");
         return ExitCodes.Success;

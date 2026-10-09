@@ -1004,6 +1004,11 @@ makes or looks at the key. `--show-secret` prints it instead, once, and warns.
   setting that is not set in code, from `QUEUEY_SIGNING_KEY_ID`, `QUEUEY_SIGNING_SECRET`,
   `QUEUEY_TENANT`, `QUEUEY_INGRESS_BASE` and `QUEUEY_API_KEY`. With both signing values set, it does not
   read `QUEUEY_API_KEY`: the producer signs with the key that reaches only its queue.
+  From `./.env` it reads only the signing pair, and only in Development (`DOTNET_ENVIRONMENT` or
+  `ASPNETCORE_ENVIRONMENT`). A `QUEUEY_API_KEY` written to a file reaches the app only when something loads
+  that file into its environment; `--write user-secrets` with `options.UseSettings(...)` needs no such step.
+- A key the target already held is named, never shown in full: the old signing key id, or the old
+  `QUEUEY_API_KEY` masked (`replacedKeyId` / `replacedApiKey` in `--json`). It still works until it is revoked.
 - `queuey publish` reads them too, from the environment or else from `./.env`, when no API key is set,
   as with a login. Only those two names are read from `.env`, only when it is a plain file of your own,
   and a key that is set wins. `--json` says where the key came from (`signingKeyFrom`).
