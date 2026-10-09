@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 
 namespace Queuey.Client.Cli;
 
@@ -30,11 +31,15 @@ internal static class ConsolePages
     {
         if (Base(config) is not { } console)
             return null;
-        bool tenantOk = tenant is not null && Queuey.Client.Waas.WorkspaceIds.IsOne(tenant);
-        bool queueOk = queue is not null && queue.StartsWith("que_", StringComparison.Ordinal) && queue.Length <= 64
-                       && queue.Substring(4).IndexOfAny(new[] { '/', '?', '#', '&' }) < 0;
+        // Bare [A-Za-z0-9_] etter prefikset (security-review av #69, K3): id-en havner i en URL og i terminalen.
+        bool tenantOk = IsId(tenant, "ten_");
+        bool queueOk = IsId(queue, "que_");
         return tenantOk && queueOk ? $"{console}/console/t/{tenant}/q/{queue}?panel=security"
             : tenantOk ? $"{console}/console/t/{tenant}?tab=security"
             : $"{console}/console/t";
     }
+
+    private static bool IsId(string? value, string prefix)
+        => value is { Length: > 4 and <= 64 } && value.StartsWith(prefix, StringComparison.Ordinal)
+           && value.Substring(prefix.Length).All(c => c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '_');
 }
