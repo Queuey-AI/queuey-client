@@ -103,6 +103,19 @@ public sealed class DotEnvFileTests : IDisposable
     }
 
     [Fact]
+    public void The_delivery_secret_is_read_from_the_environment_and_in_development_from_dot_env()
+    {
+        // credentials generate --write .env skriver QUEUEY_DELIVERY_SECRET (2026-10-09).
+        System.IO.File.AppendAllText(System.IO.Path.Combine(_dir, ".env"), "QUEUEY_DELIVERY_SECRET=from-file\n");
+
+        Assert.Equal("from-env", new QueueyOptions().UseEnvironmentVariables(
+            Env(("DOTNET_ENVIRONMENT", "Development"), ("QUEUEY_DELIVERY_SECRET", "from-env")), _dir).DeliverySecret);
+        Assert.Equal("from-file", new QueueyOptions().UseEnvironmentVariables(Env(("DOTNET_ENVIRONMENT", "Development")), _dir).DeliverySecret);
+        Assert.Null(new QueueyOptions().UseEnvironmentVariables(Env(("DOTNET_ENVIRONMENT", "Production")), _dir).DeliverySecret);
+        Assert.Equal("from-config", new QueueyOptions().UseSettings(Env(("QUEUEY_DELIVERY_SECRET", "from-config"))).DeliverySecret);
+    }
+
+    [Fact]
     public void Only_the_signing_pair_is_ever_taken_from_dot_env_never_a_host_a_tenant_or_a_key()
     {
         // Security-review av #68 (R1): en .env som pekte vertene et annet sted, styrte hvor nøkkelen gikk.

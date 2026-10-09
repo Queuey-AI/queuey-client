@@ -190,14 +190,21 @@ internal static class CliHost
         return services.BuildServiceProvider();
     }
 
-    /// <summary>Masks a <c>qak_&lt;keyId&gt;.&lt;secret&gt;</c> key to <c>qak_&lt;keyId&gt;.**** (set)</c>.</summary>
+    /// <summary>
+    /// Masks a <c>qak_&lt;keyId&gt;.&lt;secret&gt;</c> key to <c>qak_&lt;keyId&gt;.**** (set)</c>. Anything else shows as <c>(set)</c>
+    /// alone, since a value of another shape may be all secret.
+    /// </summary>
+    // Security-review av #69 (R2-2): prefikset vises bare når det har formen til en nøkkel-id.
     public static string MaskKey(string? key)
     {
         if (string.IsNullOrEmpty(key)) return "(not set)";
         int dot = key.IndexOf('.');
-        string prefix = dot > 0 ? key.Substring(0, dot) : (key.Length > 6 ? key.Substring(0, 6) : key);
-        return prefix + ".**** (set)";
+        string prefix = dot > 0 ? key.Substring(0, dot) : "";
+        return KeyPrefix.IsMatch(prefix) ? prefix + ".**** (set)" : "(set)";
     }
+
+    private static readonly System.Text.RegularExpressions.Regex KeyPrefix =
+        new(@"^qak_[A-Za-z0-9_-]{1,32}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
     private static string? ReadConfigJson(ArgMap args)
     {

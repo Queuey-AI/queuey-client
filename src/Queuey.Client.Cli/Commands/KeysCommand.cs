@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -20,7 +21,7 @@ namespace Queuey.Client.Cli;
 /// </remarks>
 internal static class KeysCommand
 {
-    internal static readonly CommandOptions MintOptions = new("keys mint", flags: new[] { "json" }, values: new[] { "queue", "name", "write", "profile" });
+    internal static readonly CommandOptions MintOptions = new("keys mint", flags: new[] { "json", "show-secret" }, values: new[] { "queue", "name", "write", "profile", "type" });
     internal static readonly CommandOptions ListOptions = new("keys list", flags: new[] { "json" }, values: new[] { "queue", "profile" });
     internal static readonly CommandOptions RevokeOptions = new("keys revoke", flags: new[] { "json" }, values: new[] { "reason", "profile" }, positionals: 1);
 
@@ -54,104 +55,223 @@ internal static class KeysCommand
         if (!MintOptions.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) return Help();
 
-        if (string.IsNullOrWhiteSpace(map.Get("queue")))
-            return CliErrors.Usage(map, "missing_argument", "keys mint requires --queue <name|que_…>.");
+        bool json = map.Has("json");
         if (map.Has("write") && string.IsNullOrWhiteSpace(map.Get("write")))
-            return CliErrors.Usage(map, "missing_value", "--write takes a file, such as .env.");
+            return CliErrors.Usage(map, "missing_value", "--write takes where the secret goes: .env (or another file), or user-secrets.");
+        string type = (map.Get("type") ?? IngressKeyTypes.Signing).Trim().ToLowerInvariant();
+        if (type is not (IngressKeyTypes.Signing or IngressKeyTypes.ApiKey))
+            return CliErrors.Usage(map, "invalid_value", $"--type takes {IngressKeyTypes.Signing} (the default) or {IngressKeyTypes.ApiKey}.",
+                "signing: the app signs each event with the key. api-key: the app sends a key that can only publish here, in X-Api-Key.");
+        string[] variables = type == IngressKeyTypes.ApiKey ? new[] { QueueyEnvironmentVariables.ApiKey } : Variables;
 
-        // Fila sjekkes før noe mintes: en hemmelighet som ikke kan skrives, er en nøkkel som må trekkes tilbake.
-        string? file = map.Get("write") is { } write ? EnvFile.Check(write) : null;
+        // Målet sjekkes før noe mintes: en hemmelighet som ikke kan skrives, er en nøkkel som må trekkes tilbake.
+        SecretTarget? target = map.Get("write") is { } write ? SecretTarget.Parse(write) : null;
 
         ResolvedConfig config = CliHost.Resolve(map, profiles: true);
-        string queue = await QueueIdAsync(map, config);
+        string? queue = string.IsNullOrWhiteSpace(map.Get("queue")) ? null : await QueueIdAsync(map, config);
+        string? tenant = config.TenantPublicId;
+        if (queue is null && string.IsNullOrWhiteSpace(tenant))
+            return CliErrors.Configuration(map, "config_error",
+                "keys mint without --queue mints for the workspace, and none is named.",
+                "Name it with --tenant, the profile's tenant, or QUEUEY_TENANT; or mint for one queue with --queue <name|que_…>.");
+
+        // Uten --write mintes ingenting (Kenneth 2026-10-09): en nøkkel ingen kan se, er til ingen nytte, og hemmeligheten skal ikke
+        // stå i terminalen. Svaret sier hvilke variabler appen trenger, hvor --write legger dem, og hvor en person ser nøkkelen.
+        if (target is null && !map.Has("show-secret"))
+            return Guide(json, config, tenant, queue, type, variables);
+
         using ServiceProvider provider = CliHost.BuildProvider(config);
-        var service = provider.GetRequiredService<IQueueyService>();
+        if (provider.GetRequiredService<IQueueyService>().Management is not QueueyManagement management)
+            return CliErrors.Write(json, "unsupported", "This build's Queuey client can't mint keys.", null, status: null, ExitCodes.RuntimeError);
 
         IngressSigningKey key;
         try
         {
-            key = await service.Management.MintIngressKeyAsync(queue, map.Get("name") ?? "queuey-cli");
+            key = await management.MintKeyAsync(queue, tenant, map.Get("name") ?? "queuey-cli", type);
         }
         catch (IngressKeyPendingException pending)
         {
-            return Pending(map.Has("json"), pending);
+            return Pending(json, pending);
+        }
+        catch (QueueyForbiddenException refused) when (refused.ErrorCode == "approval_required")
+        {
+            // Queuey #513: en innlogging i et prod-workspace mynter ikke selv; en person gjør det, på siden lenken viser.
+            return ApprovalRequired(json, refused);
         }
 
-        if (string.IsNullOrWhiteSpace(key.KeyId) || string.IsNullOrEmpty(key.Secret))
-            return CliErrors.Write(map.Has("json"), "mint_answer_incomplete", "Queuey answered the mint without a key id and a secret.", null,
+        bool apiKey = type == IngressKeyTypes.ApiKey;
+        if ((!apiKey && string.IsNullOrWhiteSpace(key.KeyId)) || string.IsNullOrEmpty(key.Secret))
+            return CliErrors.Write(json, "mint_answer_incomplete", "Queuey answered the mint without a key id and a secret.", null,
                 status: null, ExitCodes.RuntimeError, "Queuey error");
 
-        if (file is not null)
+        if (target is not null)
         {
-            if (!EnvFile.IsSafeValue(key.KeyId) || !EnvFile.IsSafeValue(key.Secret))
-                return CliErrors.Write(map.Has("json"), "mint_answer_invalid",
-                    "Queuey answered the mint with a key id or secret that has characters a .env cannot hold safely, so nothing was " +
+            if ((!apiKey && !EnvFile.IsSafeValue(key.KeyId)) || !EnvFile.IsSafeValue(key.Secret))
+                return CliErrors.Write(json, "mint_answer_invalid",
+                    $"Queuey answered the mint with a key id or secret that has characters {target.Shown} cannot hold safely, so nothing was " +
                     "written. Neither is shown.",
                     "Revoke the new key in the Queuey console, and report this.", status: null, ExitCodes.RuntimeError, "Queuey error");
-            return Written(map, key, file, map.Get("write")!);
+            return Written(map, key, target, apiKey ? new[] { (variables[0], key.Secret!) } : new[] { (variables[0], key.KeyId!), (variables[1], key.Secret!) });
         }
 
-        if (map.Has("json"))
+        // --show-secret: den eneste veien til hemmeligheten i terminalen, valgt med vilje.
+        Console.Error.WriteLine("Warning: --show-secret prints the secret. Anything that reads this terminal or its log has it now.");
+        if (json)
         {
-            Console.WriteLine(JsonSerializer.Serialize(new { key.ClientPublicId, key.ClientName, key.KeyId, key.Secret, key.QueuePublicId }, CliHost.JsonOut));
+            Console.WriteLine(JsonSerializer.Serialize(new
+            {
+                key.ClientPublicId, key.ClientName, key.KeyId, key.Secret, key.QueuePublicId, key.Type, key.Scope, key.TenantPublicId, key.Origin,
+                variables,
+            }, CliHost.JsonOut));
             return ExitCodes.Success;
         }
 
-        Console.WriteLine($"Minted an ingress signing key for {key.QueuePublicId}.");
+        Console.WriteLine($"Minted {Describe(key)}.");
         Console.WriteLine();
-        Console.WriteLine($"  SigningKeyId  = {key.KeyId}");
-        Console.WriteLine($"  SigningSecret = {key.Secret}");
+        if (apiKey)
+            Console.WriteLine($"  {variables[0]} = {key.Secret}");
+        else
+        {
+            Console.WriteLine($"  {variables[0]} = {key.KeyId}");
+            Console.WriteLine($"  {variables[1]} = {key.Secret}");
+        }
         Console.WriteLine();
         Console.WriteLine("The secret is shown once and cannot be retrieved again — put it in your secret store now.");
-        Console.WriteLine("Then set QueueyOptions.SigningKeyId and .SigningSecret, and drop the API key from your producer.");
-        Console.Error.WriteLine("Tip: --write .env puts them in a git-ignored file instead, and never prints the secret.");
         return ExitCodes.Success;
     }
 
-    /// <summary>The key in the file, and what was written, without the secret.</summary>
-    private static int Written(ArgMap map, IngressSigningKey key, string file, string shown)
+    /// <summary>What the key is, in words: its type, id and where it publishes.</summary>
+    private static string Describe(IngressSigningKey key)
+        => $"{(key.Type == IngressKeyTypes.ApiKey ? "a publishing API key" : "an ingress signing key")}" +
+           $"{(key.KeyId is null ? "" : $" {TerminalText.Line(key.KeyId)}")} for " +
+           (key.Scope == "workspace" || key.QueuePublicId is null
+               ? $"every queue in workspace {TerminalText.Line(key.TenantPublicId ?? "?")}"
+               : $"queue {TerminalText.Line(key.QueuePublicId)}") +
+           (key.Origin is { } origin ? $", minted by {TerminalText.Line(origin)}" : "");
+
+    /// <summary>
+    /// keys mint without <c>--write</c>: nothing is minted. The variables the app needs, the targets <c>--write</c> takes, and
+    /// the console page where a person makes or looks at the key.
+    /// </summary>
+    private static int Guide(bool json, ResolvedConfig config, string? tenant, string? queue, string type, string[] variables)
     {
-        EnvFile.Written written;
+        string suggested = SecretTarget.SuggestedFor(Directory.GetCurrentDirectory());
+        string? console = ConsolePages.Security(config, tenant, queue);
+        string command = $"queuey keys mint{(queue is null ? "" : $" --queue {queue}")}{(type == IngressKeyTypes.Signing ? "" : $" --type {type}")} --write {suggested}";
+        if (json)
+        {
+            Console.WriteLine(JsonSerializer.Serialize(new
+            {
+                minted = false,
+                type,
+                variables,
+                write = new[] { ".env", SecretTarget.UserSecretsWord },
+                suggested = command,
+                consoleUrl = console,
+            }, CliHost.JsonOut));
+            return ExitCodes.Success;
+        }
+
+        Console.WriteLine($"Nothing was minted. The app needs {string.Join(" and ", variables)}.");
+        // Kommandoen har id-er, og lenken en vert fra innloggingen: begge går gjennom TerminalText (security-review av #69, K3).
+        Console.WriteLine($"  To mint the key and put it where the app reads it, without showing it: {TerminalText.Line(command)}");
+        Console.WriteLine("  --write takes .env (or another file git ignores) or user-secrets (the .NET project's user secrets).");
+        if (console is not null)
+            Console.WriteLine($"  Or a person makes or looks at the key in the console: {TerminalText.Line(console)}");
+        Console.WriteLine("  --show-secret prints it here instead, once.");
+        return ExitCodes.Success;
+    }
+
+    /// <summary>Queuey refused the mint until a person makes the key (403 <c>approval_required</c>): exit 5, with the page.</summary>
+    private static int ApprovalRequired(bool json, QueueyForbiddenException refused)
+    {
+        if (json)
+        {
+            Console.WriteLine(JsonSerializer.Serialize(new
+            {
+                status = "approval_required",
+                message = refused.Message,
+                action = refused.SuggestedAction,
+            }, CliHost.JsonOut));
+            return ExitCodes.PendingApproval;
+        }
+
+        Console.WriteLine("Nothing was minted: a person makes this key.");
+        Console.WriteLine($"  {TerminalText.Line(refused.Message)}");
+        if (refused.SuggestedAction is { } action)
+            Console.WriteLine($"  → {TerminalText.Line(action)}");
+        return ExitCodes.PendingApproval;
+    }
+
+    /// <summary>The key in the target, and what was written, without the secret.</summary>
+    private static int Written(ArgMap map, IngressSigningKey key, SecretTarget target, IReadOnlyList<(string Name, string Value)> values)
+    {
+        IReadOnlyDictionary<string, string?> previous;
+        string? tightenedFrom;
         try
         {
-            written = EnvFile.Write(file, new[] { (Variables[0], key.KeyId!), (Variables[1], key.Secret!) });
+            (previous, tightenedFrom) = target.Write(values);
         }
         catch (CliFileException ex)
         {
             // Nøkkelen finnes, men hemmeligheten er tapt: den vises ikke her heller. Den trekkes tilbake, og en ny mintes.
             return CliErrors.Write(map.Has("json"), ex.Code,
-                $"Minted key {key.KeyId}, but could not write it to {shown}: {ex.Message} The secret is not shown.",
-                $"Revoke it with queuey keys revoke {key.KeyId}, fix the file, and mint again.", status: null, ExitCodes.Configuration, "Error");
+                $"Minted key {key.KeyId}, but could not write it to {target.Shown}: {ex.Message} The secret is not shown.",
+                key.KeyId is { } id && IsSigningKeyId(id)
+                    ? $"Revoke it with queuey keys revoke {id}, fix where it goes, and mint again."
+                    : "Revoke it in the Queuey console, fix where it goes, and mint again.",
+                status: null, ExitCodes.Configuration, "Error");
         }
 
-        string? replaced = written.Previous[Variables[0]] is { } old && old != key.KeyId ? old : null;
-        string? tightenedFrom = written.TightenedFrom is { } mode ? EnvFile.Octal(mode) : null;
+        string[] names = values.Select(v => v.Name).ToArray();
+        // Bare en verdi med formen til en signerings-id vises (security-review av #69, R2-3): noe annet kan være en hemmelighet.
+        string? replaced = key.Type != IngressKeyTypes.ApiKey && previous.TryGetValue(names[0], out string? old) && old is not null && old != key.KeyId
+                           && IsSigningKeyId(old)
+            ? old
+            : null;
+        // Security-review av #69 (K2): en API-nøkkel som sto der, publiserer fortsatt til den trekkes tilbake. Den vises maskert.
+        string? replacedApiKey = key.Type == IngressKeyTypes.ApiKey && previous.TryGetValue(names[0], out string? oldKey) && oldKey is not null
+                                 && oldKey != key.Secret
+            ? CliHost.MaskKey(oldKey)
+            : null;
 
         if (map.Has("json"))
         {
             Console.WriteLine(JsonSerializer.Serialize(new
             {
-                key.ClientPublicId, key.ClientName, key.KeyId, key.QueuePublicId,
-                file = shown,
-                variables = Variables,
+                key.ClientPublicId, key.ClientName, key.KeyId, key.QueuePublicId, key.Type, key.Scope, key.TenantPublicId, key.Origin,
+                file = target.Kind == "file" ? map.Get("write") : null,
+                target = target.Kind,
+                written = target.Shown,
+                variables = names,
                 replacedKeyId = replaced,
-                // Security-review av #67 (BØR A): fila er alltid 0600 etterpå; her står modusen den hadde, når den ble strammet.
-                mode = "0600",
+                replacedApiKey,
+                // Security-review av #67 (BØR A): en fil er alltid 0600 etterpå; her står modusen den hadde, når den ble strammet.
+                mode = target.Kind == "file" ? "0600" : null,
                 tightenedFrom,
             }, CliHost.JsonOut));
         }
         else
         {
-            Console.WriteLine($"Minted ingress signing key {key.KeyId} for {key.QueuePublicId}.");
-            Console.WriteLine($"Wrote {Variables[0]} and {Variables[1]} to {shown}. The secret is not shown.");
-            Console.WriteLine("A producer reads them from the environment, with QueueyOptions.UseEnvironmentVariables() in .NET.");
+            Console.WriteLine($"Minted {Describe(key)}.");
+            Console.WriteLine($"Wrote {string.Join(" and ", names)} to {target.Shown}. The secret is not shown.");
+            // Det SDK-en faktisk leser (security-review av #69): fra .env bare signeringsparet, i Development; QUEUEY_API_KEY fra miljøet.
+            Console.WriteLine(target.Kind != "file"
+                ? "The app reads them from its configuration, with QueueyOptions.UseSettings(key => configuration[key])."
+                : key.Type == IngressKeyTypes.ApiKey
+                    ? "The SDK reads QUEUEY_API_KEY from the environment, not from a file: load the file into the app's environment, "
+                      + "or write to user-secrets instead."
+                    : "A producer reads them with QueueyOptions.UseEnvironmentVariables(): from the environment, and from .env in Development.");
         }
 
         if (replaced is not null)
-            Console.Error.WriteLine($"Note: {shown} held key {TerminalText.Line(replaced)} before. It still verifies until it is revoked: " +
+            Console.Error.WriteLine($"Note: {target.Shown} held key {TerminalText.Line(replaced)} before. It still verifies until it is revoked: " +
                                     $"queuey keys revoke {TerminalText.Line(replaced)}");
+        if (replacedApiKey is not null)
+            Console.Error.WriteLine($"Note: {target.Shown} held another QUEUEY_API_KEY ({TerminalText.Line(replacedApiKey)}) before. It may still " +
+                                    "work, and it may reach the whole license, not one queue: revoke it in the Queuey console if nothing needs it.");
         if (tightenedFrom is not null)
-            Console.Error.WriteLine($"Note: {shown} had mode {tightenedFrom}; it is 0600 now, readable and writable only by you.");
+            Console.Error.WriteLine($"Note: {target.Shown} had mode {tightenedFrom}; it is 0600 now, readable and writable only by you.");
         return ExitCodes.Success;
     }
 
@@ -187,38 +307,43 @@ internal static class KeysCommand
     {
         if (!ListOptions.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) return Help();
-        if (string.IsNullOrWhiteSpace(map.Get("queue")))
-            return CliErrors.Usage(map, "missing_argument", "keys list requires --queue <name|que_…>.");
-
         ResolvedConfig config = CliHost.Resolve(map, profiles: true);
-        string queue = await QueueIdAsync(map, config);
+        // Uten --queue: workspacets nøkler, de som publiserer til hver kø i det (Queuey #513).
+        string? queue = string.IsNullOrWhiteSpace(map.Get("queue")) ? null : await QueueIdAsync(map, config);
+        if (queue is null && string.IsNullOrWhiteSpace(config.TenantPublicId))
+            return CliErrors.Configuration(map, "config_error", "keys list without --queue lists the workspace's keys, and none is named.",
+                "Name it with --tenant, the profile's tenant, or QUEUEY_TENANT; or list one queue's with --queue <name|que_…>.");
         using ServiceProvider provider = CliHost.BuildProvider(config);
         if (provider.GetRequiredService<IQueueyService>().Management is not QueueyManagement management)
             return CliErrors.Write(map.Has("json"), "unsupported", "This build's Queuey client can't list keys.", null, status: null, ExitCodes.RuntimeError);
 
-        IReadOnlyList<QueueHmacClientWireResponse> keys = await management.ListIngressKeysAsync(queue);
+        IReadOnlyList<QueueHmacClientWireResponse> keys = queue is not null
+            ? await management.ListIngressKeysAsync(queue)
+            : await management.ListWorkspaceKeysAsync(config.TenantPublicId!);
 
         if (map.Has("json"))
         {
             Console.WriteLine(JsonSerializer.Serialize(new
             {
                 queuePublicId = queue,
+                tenantPublicId = queue is null ? config.TenantPublicId : null,
                 keys = keys.Select(k => new
                 {
-                    k.KeyId, k.ClientPublicId, k.ClientName, active = k.KeyIsActive && k.ClientIsActive,
+                    k.KeyId, k.ClientPublicId, k.ClientName, k.Scope, k.Origin, active = k.KeyIsActive && k.ClientIsActive,
                     k.LastUsedAtUtc, k.ExpiresAtUtc, k.RevokedAtUtc, k.RevokedReason,
                 }),
             }, CliHost.JsonOut));
             return ExitCodes.Success;
         }
 
-        Console.WriteLine($"{keys.Count} signing key(s) for {queue}:");
+        Console.WriteLine($"{keys.Count} key(s) for {(queue is null ? $"workspace {config.TenantPublicId}" : queue)}:");
         foreach (QueueHmacClientWireResponse k in keys)
         {
             string state = k.RevokedAtUtc is { } revoked ? $"revoked {revoked.UtcDateTime:yyyy-MM-dd}"
                 : k.KeyIsActive && k.ClientIsActive ? "active" : "inactive";
             string used = k.LastUsedAtUtc is { } last ? $"last used {last.UtcDateTime:yyyy-MM-dd HH:mm} UTC" : "never used";
-            Console.WriteLine(TerminalText.Line($"  {k.KeyId}  {k.ClientName}  {state}, {used}"));
+            Console.WriteLine(TerminalText.Line($"  {k.KeyId}  {k.ClientName}  {(k.Scope is { } scope ? scope + ", " : "")}{state}, {used}"
+                                                + (k.Origin is { } origin ? $", by {origin}" : "")));
         }
 
         return ExitCodes.Success;

@@ -415,6 +415,9 @@ public sealed class QueueyService : IQueueyService, IQueueyPlans
                 {
                     TenantPublicId = tenantPublicId,
                     DisplayName = definition.Name,
+                    // Sjekket mot planens tak før en ny kø lages (Queuey #513); en kø som finnes, sjekkes av PATCH-en som før.
+                    // Som planen sender den (DeploymentPlan.QueuePut): bare for en kø som ikke fantes.
+                    Policy = definition.Policy.IsEmpty || hooks?.Existed?.Invoke(definition.Name) == true ? null : ToPatch(definition.Policy),
                 },
                 cancellationToken).ConfigureAwait(false);
         }
@@ -868,12 +871,31 @@ public sealed class QueueyService : IQueueyService, IQueueyPlans
         if (!plan.WouldSucceed)
             return WithStored(plan, stored, skipped, warnings);
 
-        // 4. Det apply sender til hver kø planen oppretter, på opprettelsessteget.
+        // 4. Det apply sender til hver kø planen oppretter, på opprettelsessteget. Et avslag (400, som planens tak, Queuey #513) står
+        //    på steget, og planen forsegles ikke, som for et avslag i dry run-en.
+        var steps = new List<DeploymentPlanStep>(plan.Steps.Count);
+        bool refused = false;
         foreach (DeploymentPlanStep step in plan.Steps)
         {
             if (step.Creates && step.StoredIndex is { } index && step.StoredDesired is { } desired)
-                await _controlPlane.SetPlanDesiredAsync(tenant, stored.PlanId, index, desired, cancellationToken).ConfigureAwait(false);
+            {
+                try
+                {
+                    await _controlPlane.SetPlanDesiredAsync(tenant, stored.PlanId, index, desired, cancellationToken).ConfigureAwait(false);
+                }
+                catch (QueueyException ex) when (ex.StatusCode == 400)
+                {
+                    steps.Add(step.WithError(ex));
+                    refused = true;
+                    continue;
+                }
+            }
+
+            steps.Add(step);
         }
+
+        if (refused)
+            return WithStored(plan.WithSteps(steps), stored, skipped, warnings);
 
         // 5. Forseglingen: hashen og policyens avgjørelse. Trenger planen en person, sendes den til innboksen bare når den som
         //    kaller, ber om det (BØR 2 fra reviewen av #64): en plan fra en PR-jobb skal ikke vente i innboksen.

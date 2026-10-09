@@ -78,7 +78,7 @@ internal static class AdviseCommand
             return CliErrors.Usage(map, "missing_directory", ex.Message);
         }
 
-        Advice advice = Recommendation.For(facts);
+        Advice advice = Recommendation.For(facts, SecretTarget.SuggestedFor(root));
         var queueName = ScaffoldPlan.DefaultQueueName(root, map.Get("queue"));
         (int retentionDays, string retentionFrom) = await PlanRetention.ForAsync(Connection(map));
         IReadOnlyList<PlannedFile> scaffold = ScaffoldPlan.For(root, queueName, retentionDays);

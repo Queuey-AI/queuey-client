@@ -402,13 +402,37 @@ public sealed class IngressSigningKey
     /// <summary>Goes in <c>QueueyOptions.SigningSecret</c>. Shown once and never retrievable again.</summary>
     public string? Secret { get; init; }
 
-    /// <summary>The queue the key signs for.</summary>
+    /// <summary>The queue the key signs for; null for a workspace key, which publishes to every queue of <see cref="TenantPublicId"/>.</summary>
     public string? QueuePublicId { get; init; }
+
+    /// <summary><c>signing</c> (sign each event with <see cref="KeyId"/> and <see cref="Secret"/>) or <c>api-key</c> (send
+    /// <see cref="Secret"/>, a <c>qak_…</c> that can only publish, in <c>X-Api-Key</c>).</summary>
+    public string? Type { get; init; }
+
+    /// <summary><c>queue</c> or <c>workspace</c>: where the key publishes.</summary>
+    public string? Scope { get; init; }
+
+    /// <summary>The workspace the key belongs to.</summary>
+    public string? TenantPublicId { get; init; }
+
+    /// <summary>«‹person› via ‹client›» for a key a <c>queuey login</c> minted; null otherwise.</summary>
+    public string? Origin { get; init; }
+}
+
+/// <summary>The kinds of key a mint makes (Queuey #513): a signing key (the default), or an API key that can only publish.</summary>
+public static class IngressKeyTypes
+{
+    /// <summary>A signing key: the producer signs each event with it.</summary>
+    public const string Signing = "signing";
+
+    /// <summary>An API key (<c>qak_…</c>) that can only publish to the queue or workspace it was minted for.</summary>
+    public const string ApiKey = "api-key";
 }
 
 internal sealed class CreateQueueHmacClientWireRequest
 {
     public string Name { get; set; } = default!;
+    public string? Type { get; set; }
 }
 
 internal sealed class CreateQueueHmacClientWireResponse
@@ -418,6 +442,10 @@ internal sealed class CreateQueueHmacClientWireResponse
     public string? KeyId { get; set; }
     public string? Secret { get; set; }
     public string? QueuePublicId { get; set; }
+    public string? Type { get; set; }
+    public string? Scope { get; set; }
+    public string? TenantPublicId { get; set; }
+    public string? Origin { get; set; }
 
     // 202 når policyen gir mintingen til en person (som rotate, Queuey #511). Ingen av feltene over er satt da, og ingen nøkkel
     // er laget. Queuey svarer ikke slik for minting i dag (2026-10-09); CLI-en er klar når den gjør det.
@@ -431,6 +459,8 @@ internal sealed class CreateQueueHmacClientWireResponse
 /// <summary>Wire shape of one key in <c>GET /hmacclients/queues/{que}</c>: metadata only, never the secret.</summary>
 internal sealed class QueueHmacClientWireResponse
 {
+    public string? Scope { get; set; }
+    public string? Origin { get; set; }
     public string? ClientPublicId { get; set; }
     public string? ClientName { get; set; }
     public bool ClientIsActive { get; set; }

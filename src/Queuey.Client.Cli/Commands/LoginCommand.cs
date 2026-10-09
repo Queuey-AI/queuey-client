@@ -417,6 +417,12 @@ internal static class LoginCommand
                 License = answer.License!,
                 Scope = Scope,
                 LoggedInAt = LoginTokens.Now(),
+                // Konsollet personen godkjente i, for lenker til sider der (keys mint uten --write, 2026-10-09).
+                // Uten brukerinfo (security-review av #69, K4): en lenke med user@host ser ut som en annen vert enn den er.
+                ConsoleBase = Uri.TryCreate(pending.VerificationUri, UriKind.Absolute, out Uri? console) && OAuthClient.IsSafe(console)
+                              && string.IsNullOrEmpty(console.UserInfo)
+                    ? console.GetLeftPart(UriPartial.Authority)
+                    : null,
             };
             // Et svar med bredere scope enn det som ble bedt om (operate for read), lagres ikke: tokenet ville kunne mer enn
             // personen godkjente at denne maskinen skulle få (security-review KAN 2, 2026-10-09). Apply sjekker det, med Scope satt

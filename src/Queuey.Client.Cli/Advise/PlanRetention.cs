@@ -23,7 +23,8 @@ internal static class PlanRetention
 
     /// <summary>
     /// The days to scaffold, and a sentence saying where they come from. With a login for the API host, the plan is read from
-    /// Queuey (<c>GET /billing/status</c> and <c>GET /billing/plans</c>); without one, or when that fails, Free's 7. An API key
+    /// Queuey: the workspace's <c>planLimits.retentionDays</c> (<c>GET /tenants/{t}</c>) when a workspace is known, else the
+    /// license's plan (<c>GET /billing/status</c> and <c>GET /billing/plans</c>); without a login, or when that fails, Free's 7. An API key
     /// is never used here: a bare advise must not send a key anywhere, least of all to a host a repository's queuey.json names.
     /// The login goes only to the host it was made for, and no redirect is followed.
     /// </summary>
@@ -41,6 +42,21 @@ internal static class PlanRetention
                 : new HttpClient(new HttpClientHandler { AllowAutoRedirect = false });
             http.Timeout = TimeSpan.FromSeconds(5);
             Uri api = config.ResolvedApiBase();
+
+            // Med et kjent workspace: planens tak slik Queuey gir det for workspacet (GET /tenants/{t} → planLimits, Queuey #513), uten
+            // faktureringsdata, og som innloggingen alltid når.
+            if (config.TenantPublicId is { } tenant
+                && await GetAsync(http, config, new Uri(api, $"tenants/{Uri.EscapeDataString(tenant)}"), cancellationToken).ConfigureAwait(false) is var workspace
+                && workspace.ValueKind == JsonValueKind.Object
+                && workspace.TryGetProperty("planLimits", out JsonElement limits) && limits.ValueKind == JsonValueKind.Object
+                && limits.TryGetProperty("retentionDays", out JsonElement capDays) && capDays.ValueKind == JsonValueKind.Number)
+            {
+                int workspaceCap = capDays.GetInt32();
+                int within = Math.Max(1, Math.Min(MostDays, workspaceCap));
+                return (within, workspaceCap <= MostDays
+                    ? $"{within} days, the most the plan lets workspace {tenant} keep events"
+                    : $"{within} days, within the plan of workspace {tenant}");
+            }
 
             JsonElement status = await GetAsync(http, config, new Uri(api, "billing/status"), cancellationToken).ConfigureAwait(false);
             string? level = status.TryGetProperty("plan", out JsonElement plan) ? plan.GetString() : null;

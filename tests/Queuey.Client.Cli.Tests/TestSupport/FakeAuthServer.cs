@@ -34,6 +34,9 @@ internal sealed class FakeAuthServer
     /// <summary>Metadata-svaret, eller null for en Queuey uten innlogging (404).</summary>
     public bool OffersLogin { get; set; } = true;
 
+    /// <summary>The verification_uri /connect/device answers with; the console's origin is taken from it.</summary>
+    public string VerificationUri { get; set; } = "https://app.test/connect";
+
     /// <summary>Hvert gyldige refresh-token, og access-tokenet som hører til det.</summary>
     private readonly HashSet<string> _refreshTokens = new();
     private readonly HashSet<string> _accessTokens = new();
@@ -93,7 +96,7 @@ internal sealed class FakeAuthServer
                 {
                     ["device_code"] = $"dc{Forms.Count}-secret",
                     ["user_code"] = "WDJB-MJHT",
-                    ["verification_uri"] = "https://app.test/connect",
+                    ["verification_uri"] = VerificationUri,
                     ["verification_uri_complete"] = "https://app.test/connect?code=WDJB-MJHT",
                     ["expires_in"] = 600,
                     ["interval"] = Interval,

@@ -133,7 +133,7 @@ public sealed class CommandOptionsTests : IDisposable
     {
         new[] { "advise" }, new[] { "login" }, new[] { "logout" }, new[] { "whoami" }, new[] { "sync" }, new[] { "queue", "plan" }, new[] { "queue", "sync" },
         new[] { "apply" }, new[] { "plan" }, new[] { "verify", "orders" }, new[] { "schema" }, new[] { "pull" },
-        new[] { "keys", "mint" }, new[] { "keys", "list" }, new[] { "keys", "revoke" }, new[] { "credentials", "set" }, new[] { "credentials", "request" }, new[] { "credentials", "list" },
+        new[] { "keys", "mint" }, new[] { "keys", "list" }, new[] { "keys", "revoke" }, new[] { "credentials", "set" }, new[] { "credentials", "generate" }, new[] { "credentials", "request" }, new[] { "credentials", "list" },
         new[] { "publish", "orders" }, new[] { "create-tenant" }, new[] { "create-queue" }, new[] { "metrics" },
         new[] { "issues" }, new[] { "listen" }, new[] { "replay" },
         new[] { "edge", "status" }, new[] { "edge", "publish", "orders" }, new[] { "edge", "run" }, new[] { "edge", "kick" },
@@ -204,7 +204,7 @@ public sealed class CommandOptionsTests : IDisposable
             ["PULL"] = new[] { PullCommand.Options },
             ["KEYS"] = new[] { KeysCommand.MintOptions, KeysCommand.ListOptions, KeysCommand.RevokeOptions },
             ["LOGIN"] = new[] { LoginCommand.Options, LogoutCommand.Options },
-            ["CREDENTIALS"] = new[] { CredentialsCommand.SetOptions, CredentialsCommand.RotateOptions, CredentialsCommand.RequestOptions, CredentialsCommand.ListOptions },
+            ["CREDENTIALS"] = new[] { CredentialsCommand.GenerateOptions, CredentialsCommand.SetOptions, CredentialsCommand.RotateOptions, CredentialsCommand.RequestOptions, CredentialsCommand.ListOptions },
             ["PUBLISH"] = new[] { PublishCommand.Options },
             ["EVENTS"] = new[] { EventsCommand.GetOptions },
             ["CREATE-TENANT"] = new[] { CreateTenantCommand.Options },

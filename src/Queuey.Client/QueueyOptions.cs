@@ -53,6 +53,12 @@ public sealed class QueueyOptions
     /// </summary>
     public Func<CancellationToken, Task<string>>? AccessTokenProvider { get; set; }
 
+    /// <summary>
+    /// The secret a receiver verifies Queuey's deliveries with (<see cref="QueueyDeliveryVerifier"/>): the value of the
+    /// HmacSigning credential the queue's delivery signs with. Not used to send anything.
+    /// </summary>
+    public string? DeliverySecret { get; set; }
+
     /// <summary>HMAC signing key id (sent as <c>X-Queuey-Key-Id</c>). Alternative ingress auth to <see cref="ApiKey"/>.</summary>
     public string? SigningKeyId { get; set; }
 
@@ -103,6 +109,9 @@ public sealed class QueueyOptions
             (keyId, secret) = fromFile;
         SigningKeyId ??= keyId;
         SigningSecret ??= secret;
+        // Mottakerens hemmelighet på samme måte (2026-10-09): miljøet, ellers .env i Development.
+        DeliverySecret ??= Read(QueueyEnvironmentVariables.DeliverySecret)
+                           ?? (dotEnvFolder is not null && DotEnvFile.IsDevelopment(read) ? DotEnvFile.ReadDeliverySecret(dotEnvFolder) : null);
         // Minste privilegium (security-review av #67, KAN G): med et signeringspar leses ikke QUEUEY_API_KEY, for en satt nøkkel
         // ville vunnet over signeringen ved publisering. En nøkkel satt i koden vinner fortsatt.
         if (string.IsNullOrWhiteSpace(SigningKeyId) || string.IsNullOrWhiteSpace(SigningSecret))
@@ -114,6 +123,20 @@ public sealed class QueueyOptions
         if (IngressBaseAddress is null && Read(QueueyEnvironmentVariables.IngressBase) is { } ingress)
             IngressBaseAddress = new Uri(ingress, UriKind.Absolute);
         return this;
+    }
+
+    /// <summary>
+    /// Fills each setting that is not set yet from <paramref name="read"/>, by the same <c>QUEUEY_*</c> names as
+    /// <see cref="UseEnvironmentVariables(Func{string, string?}?)"/>, and nothing else: no <c>.env</c>. For .NET configuration,
+    /// which holds user secrets, environment variables and appsettings, as <c>options.UseSettings(key =&gt; configuration[key])</c>.
+    /// A value set in code wins. Returns these options.
+    /// </summary>
+    // Kenneth 2026-10-09: `queuey keys mint --write user-secrets` setter verdiene i prosjektets user secrets, som .NET-konfigurasjonen
+    // leser. Uten en avhengighet til Microsoft.Extensions.Configuration: den som kaller, gir oppslaget.
+    public QueueyOptions UseSettings(Func<string, string?> read)
+    {
+        if (read is null) throw new ArgumentNullException(nameof(read));
+        return UseEnvironmentVariables(read, dotEnvFolder: null);
     }
 
     /// <summary>The effective ingress (publish) base address: <see cref="IngressBaseAddress"/> or the environment default.</summary>
@@ -165,4 +188,10 @@ public static class QueueyEnvironmentVariables
 
     /// <summary><c>QUEUEY_INGRESS_BASE</c>: <see cref="QueueyOptions.IngressBaseAddress"/>.</summary>
     public const string IngressBase = "QUEUEY_INGRESS_BASE";
+
+    /// <summary>
+    /// <c>QUEUEY_DELIVERY_SECRET</c>: <see cref="QueueyOptions.DeliverySecret"/>, the secret a receiver verifies Queuey's
+    /// deliveries with, as <c>queuey credentials generate --write</c> writes it.
+    /// </summary>
+    public const string DeliverySecret = "QUEUEY_DELIVERY_SECRET";
 }

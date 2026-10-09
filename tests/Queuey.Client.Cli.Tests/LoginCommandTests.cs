@@ -245,6 +245,22 @@ public sealed class LoginCommandTests : IDisposable
         Assert.Contains("Waiting for approval", run.Stderr);
     }
 
+    [Theory]
+    [InlineData("https://app.test/connect", "https://app.test")]
+    [InlineData("https://app.test@evil.test/connect", null)] // security-review av #69 (K4): brukerinfo gir ingen konsoll-lenke
+    [InlineData("https://ada:pw@app.test/connect", null)]
+    public async Task The_console_is_the_origin_of_the_verification_page_and_never_one_with_user_info(string verification, string? console)
+    {
+        LoginCommand.IsTerminal = () => true;
+        var server = new FakeAuthServer { VerificationUri = verification };
+        server.PollAnswers.Enqueue("approve");
+
+        CliRun run = await Run(server, "login", "--api-base", FakeAuthServer.Api, "--scope", "read");
+
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        Assert.Equal(console, LoginStore.Read(CredentialsFile).Logins.Single().ConsoleBase);
+    }
+
     [Fact]
     public async Task A_queuey_without_login_metadata_says_to_use_an_api_key()
     {
