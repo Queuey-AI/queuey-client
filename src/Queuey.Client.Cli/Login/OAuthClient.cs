@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -101,11 +102,16 @@ internal sealed class OAuthClient : IDisposable
     /// <summary>Asks for a device code for <paramref name="scope"/> (RFC 8628 §3.1).</summary>
     public async Task<DeviceAuthorization> StartDeviceAsync(OAuthEndpoints endpoints, string scope, CancellationToken cancellationToken)
     {
-        using HttpResponseMessage response = await PostFormAsync(endpoints.DeviceAuthorization, new Dictionary<string, string>
+        var form = new Dictionary<string, string>
         {
             ["client_id"] = ClientId,
             ["scope"] = scope,
-        }, cancellationToken).ConfigureAwait(false);
+        };
+        // Backend #512: konsollet viser maskinnavnet ved godkjenningen, så personen kan se at koden kom fra sin egen maskin.
+        if (DeviceName(MachineName()) is { } device)
+            form["device_name"] = device;
+
+        using HttpResponseMessage response = await PostFormAsync(endpoints.DeviceAuthorization, form, cancellationToken).ConfigureAwait(false);
 
         JsonElement root = await ReadJsonAsync(response, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
@@ -128,6 +134,26 @@ internal sealed class OAuthClient : IDisposable
             ["device_code"] = deviceCode,
             ["client_id"] = ClientId,
         }, cancellationToken);
+
+    /// <summary>The machine's name, as <c>device_name</c> carries it. A seam for tests.</summary>
+    internal static Func<string?> MachineName { get; set; } = () =>
+    {
+        try { return Environment.MachineName; }
+        catch (InvalidOperationException) { return null; }
+    };
+
+    /// <summary>
+    /// <paramref name="name"/> as <c>device_name</c> takes it: control characters removed, trimmed, at most
+    /// <see cref="MaxDeviceNameLength"/> characters; null when nothing is left.
+    /// </summary>
+    internal static string? DeviceName(string? name)
+    {
+        string clean = new string((name ?? "").Where(c => !char.IsControl(c)).ToArray()).Trim();
+        return clean.Length == 0 ? null : clean.Length <= MaxDeviceNameLength ? clean : clean[..MaxDeviceNameLength];
+    }
+
+    /// <summary>The longest <c>device_name</c> Queuey takes (backend #512).</summary>
+    internal const int MaxDeviceNameLength = 100;
 
     /// <summary>Trades a refresh token for new tokens (RFC 6749 §6). The answer carries a new refresh token to keep.</summary>
     public Task<TokenAnswer> RefreshAsync(OAuthEndpoints endpoints, string refreshToken, CancellationToken cancellationToken)
