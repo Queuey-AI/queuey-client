@@ -218,14 +218,28 @@ internal sealed class QueueyManagement : IQueueyManagement
         };
     }
 
-    public async Task<IngressSigningKey> MintIngressKeyAsync(string queuePublicId, string name, CancellationToken cancellationToken = default)
+    public Task<IngressSigningKey> MintIngressKeyAsync(string queuePublicId, string name, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(queuePublicId)) throw new ArgumentException("A queue public id is required.", nameof(queuePublicId));
-        if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("A key name is required.", nameof(name));
+        return MintKeyAsync(queuePublicId, null, name, IngressKeyTypes.Signing, cancellationToken);
+    }
 
-        CreateQueueHmacClientWireResponse r = await _controlPlane
-            .MintIngressKeyAsync(queuePublicId, new CreateQueueHmacClientWireRequest { Name = name.Trim() }, cancellationToken)
-            .ConfigureAwait(false);
+    /// <summary>
+    /// Mints a key (Queuey #513): for <paramref name="queuePublicId"/>, or without one for every queue of
+    /// <paramref name="tenantPublicId"/>; a signing key or, with <see cref="IngressKeyTypes.ApiKey"/>, an API key that can only
+    /// publish there. A mint a person must decide on throws: 202 as <see cref="IngressKeyPendingException"/>, and 403
+    /// <c>approval_required</c> as <see cref="QueueyForbiddenException"/> with the console link in its action.
+    /// </summary>
+    internal async Task<IngressSigningKey> MintKeyAsync(
+        string? queuePublicId, string? tenantPublicId, string name, string type, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("A key name is required.", nameof(name));
+        var request = new CreateQueueHmacClientWireRequest { Name = name.Trim(), Type = type == IngressKeyTypes.Signing ? null : type };
+
+        CreateQueueHmacClientWireResponse r = queuePublicId is not null
+            ? await _controlPlane.MintIngressKeyAsync(queuePublicId, request, cancellationToken).ConfigureAwait(false)
+            : await _controlPlane.MintWorkspaceKeyAsync(tenantPublicId ?? throw new ArgumentException("A queue or a workspace is required."),
+                request, cancellationToken).ConfigureAwait(false);
 
         if (string.Equals(r.Status, CredentialRotationPendingException.PendingApproval, StringComparison.Ordinal))
             throw new IngressKeyPendingException(r.Message ?? "A person decides on this key in Queuey's inbox; nothing was minted.",
@@ -238,8 +252,16 @@ internal sealed class QueueyManagement : IQueueyManagement
             KeyId = r.KeyId,
             Secret = r.Secret,
             QueuePublicId = r.QueuePublicId,
+            Type = r.Type ?? type,
+            Scope = r.Scope ?? (queuePublicId is null ? "workspace" : "queue"),
+            TenantPublicId = r.TenantPublicId ?? tenantPublicId,
+            Origin = r.Origin,
         };
     }
+
+    /// <summary>The keys that publish to every queue of <paramref name="tenantPublicId"/>: metadata, never a secret.</summary>
+    internal async Task<IReadOnlyList<QueueHmacClientWireResponse>> ListWorkspaceKeysAsync(string tenantPublicId, CancellationToken cancellationToken = default)
+        => await _controlPlane.ListWorkspaceKeysAsync(tenantPublicId, cancellationToken).ConfigureAwait(false);
 
     /// <summary>The signing keys of <paramref name="queuePublicId"/>, active and revoked: metadata, never a secret.</summary>
     internal async Task<IReadOnlyList<QueueHmacClientWireResponse>> ListIngressKeysAsync(string queuePublicId, CancellationToken cancellationToken = default)

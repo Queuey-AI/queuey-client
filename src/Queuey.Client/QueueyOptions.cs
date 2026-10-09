@@ -116,6 +116,20 @@ public sealed class QueueyOptions
         return this;
     }
 
+    /// <summary>
+    /// Fills each setting that is not set yet from <paramref name="read"/>, by the same <c>QUEUEY_*</c> names as
+    /// <see cref="UseEnvironmentVariables(Func{string, string?}?)"/>, and nothing else: no <c>.env</c>. For .NET configuration,
+    /// which holds user secrets, environment variables and appsettings, as <c>options.UseSettings(key =&gt; configuration[key])</c>.
+    /// A value set in code wins. Returns these options.
+    /// </summary>
+    // Kenneth 2026-10-09: `queuey keys mint --write user-secrets` setter verdiene i prosjektets user secrets, som .NET-konfigurasjonen
+    // leser. Uten en avhengighet til Microsoft.Extensions.Configuration: den som kaller, gir oppslaget.
+    public QueueyOptions UseSettings(Func<string, string?> read)
+    {
+        if (read is null) throw new ArgumentNullException(nameof(read));
+        return UseEnvironmentVariables(read, dotEnvFolder: null);
+    }
+
     /// <summary>The effective ingress (publish) base address: <see cref="IngressBaseAddress"/> or the environment default.</summary>
     public Uri ResolveIngressBaseAddress() =>
         IngressBaseAddress is null ? QueueyHosts.Ingress(Environment) : ValidateOverride(IngressBaseAddress, nameof(IngressBaseAddress));

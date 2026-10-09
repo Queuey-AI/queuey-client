@@ -416,22 +416,35 @@ PULL
                  behaviour only; destinations stay in the deployment file.
 
 KEYS
-  queuey keys mint --queue <name|que_...> [--write <file>] [--name <label>] [--profile <name>] [--json]
-                 Mints an ingress signing key so producers can publish with HMAC instead of
-                 an API key. Needs a login (queuey login) for a person who may manage keys, or
-                 a credential with key-management rights — a deploy key deliberately has
-                 none, since a key that can mint keys turns pipeline access into account access.
-                 --write .env puts QUEUEY_SIGNING_KEY_ID and QUEUEY_SIGNING_SECRET in that file
-                 and never prints the secret, in --json neither. The lines that set them are
-                 replaced and every other line stays, and the file is 0600 afterwards (one others
-                 could read is tightened, and the answer says from what). In a git repository the
-                 file must be one git ignores, and it may not be a link, or nothing is minted.
-                 The SDK reads them with QueueyOptions.UseEnvironmentVariables().
-                 Without --write the secret is shown ONCE.
-                 When Queuey gives the mint to a person, it exits 5 with the link, and
-                 nothing is minted.
-  queuey keys list --queue <name|que_...> [--profile <name>] [--json]
-                 The queue's signing keys: id, name, active or revoked, last use. Never a secret.
+  queuey keys mint [--queue <name|que_...>] [--type signing|api-key] [--write <target>] [--show-secret]
+                   [--name <label>] [--profile <name>] [--json]
+                 Mints the key a producer publishes with: for one queue with --queue, else for
+                 every queue in the workspace (--tenant or the profile's), also queues made
+                 later. --type signing (the default) gives QUEUEY_SIGNING_KEY_ID and
+                 QUEUEY_SIGNING_SECRET, which the app signs each event with; api-key gives
+                 QUEUEY_API_KEY, a key that can only publish there. Needs a login (queuey login)
+                 for a person who may manage keys, or a credential with key-management rights.
+                 In a prod workspace a login gets approval_required: it exits 5 with the link
+                 where a person makes the key, and nothing is minted or written.
+                 --write puts the values where the app reads them and never prints the secret,
+                 in --json neither:
+                   .env (or another file): the lines that set them are replaced, every other
+                   line stays, and the file is 0600 afterwards (one others could read is
+                   tightened, and the answer says from what). In a git repository the file must
+                   be one git ignores, and it may not be a link, or nothing is minted.
+                   user-secrets: the user secrets of the .NET project in this folder, set with
+                   `dotnet user-secrets set`, the values on its stdin, never as arguments. The
+                   project needs a UserSecretsId (`dotnet user-secrets init` adds one).
+                 Without --write nothing is minted: it says which variables the app needs, the
+                 --write that fits this folder, and the console page where a person makes or
+                 looks at the key. --show-secret mints and prints the secret instead, once, and
+                 warns.
+                 The SDK reads the values with QueueyOptions.UseEnvironmentVariables() (the
+                 environment, and .env in Development) or UseSettings(key => configuration[key])
+                 (.NET configuration, user secrets among it).
+  queuey keys list [--queue <name|que_...>] [--profile <name>] [--json]
+                 The queue's keys, or without --queue the workspace's: id, name, scope, who
+                 minted it, active or revoked, last use. Never a secret.
   queuey keys revoke <keyId> [--reason <text>] [--profile <name>] [--json]
                  Every producer that signs with the key is refused at the ingress at once. In
                  a prod workspace an API key gets 403 approval_required, and a person revokes.

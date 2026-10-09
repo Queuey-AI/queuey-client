@@ -584,13 +584,32 @@ internal sealed class QueueyControlPlaneClient
     }
 
     /// <summary>Mints an ingress signing key for a queue (<c>POST /hmacclients/queues/{que}</c>).</summary>
-    public async Task<CreateQueueHmacClientWireResponse> MintIngressKeyAsync(
+    public Task<CreateQueueHmacClientWireResponse> MintIngressKeyAsync(
         string queuePublicId, CreateQueueHmacClientWireRequest request, CancellationToken cancellationToken)
+        => MintAsync(new[] { "hmacclients", "queues", queuePublicId }, request, cancellationToken);
+
+    /// <summary>Mints a key for every queue in a workspace (<c>POST /hmacclients/tenants/{ten}</c>, Queuey #513).</summary>
+    public Task<CreateQueueHmacClientWireResponse> MintWorkspaceKeyAsync(
+        string tenantPublicId, CreateQueueHmacClientWireRequest request, CancellationToken cancellationToken)
+        => MintAsync(new[] { "hmacclients", "tenants", tenantPublicId }, request, cancellationToken);
+
+    /// <summary>The keys that publish to every queue of a workspace (<c>GET /hmacclients/tenants/{ten}</c>): metadata only.</summary>
+    public async Task<List<QueueHmacClientWireResponse>> ListWorkspaceKeysAsync(string tenantPublicId, CancellationToken cancellationToken)
+    {
+        IQueueyAuthenticator authenticator = Authenticator();
+        string license = RequireLicense();
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "hmacclients", "tenants", tenantPublicId);
+        return await _connection.SendForJsonAsync<List<QueueHmacClientWireResponse>>(
+            HttpMethod.Get, uri, null, null, authenticator, LicenseHeader(license), cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<CreateQueueHmacClientWireResponse> MintAsync(
+        string[] segments, CreateQueueHmacClientWireRequest request, CancellationToken cancellationToken)
     {
         IQueueyAuthenticator authenticator = Authenticator();
         string license = RequireLicense();
 
-        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, "hmacclients", "queues", queuePublicId);
+        Uri uri = QueueyUri.Build(_options.ResolveApiBaseAddress(), null, segments);
         byte[] body = JsonSerializer.SerializeToUtf8Bytes(request, QueueyJson.Options);
 
         return await _connection.SendForJsonAsync<CreateQueueHmacClientWireResponse>(

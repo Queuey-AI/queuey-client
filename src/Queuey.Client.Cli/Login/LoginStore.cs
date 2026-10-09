@@ -37,6 +37,12 @@ internal sealed class StoredLogin
     /// <summary>The ingress host Queuey gave with the token (<c>ingress_base</c>), or null.</summary>
     public string? IngressBase { get; set; }
 
+    /// <summary>
+    /// The console's origin, as the login's verification link named it, such as <c>https://app.queuey.ai</c>: where commands
+    /// link a person to a page. Null for a login stored before it was kept.
+    /// </summary>
+    public string? ConsoleBase { get; set; }
+
     /// <summary>True when <see cref="IngressBase"/> was given with <c>--ingress-base</c>: a renewal then keeps it.</summary>
     public bool IngressBaseFromFlag { get; set; }
 

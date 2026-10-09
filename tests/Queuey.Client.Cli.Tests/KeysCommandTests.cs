@@ -120,13 +120,34 @@ public sealed class KeysCommandTests : IDisposable
     }
 
     [Fact]
-    public async Task Without_write_the_key_is_shown_once_as_before_with_a_tip_to_write_it()
+    public async Task Without_write_nothing_is_minted_and_the_answer_names_the_variables_and_where_a_person_sees_the_key()
     {
-        CliRun run = await Run(Minting(), "keys", "mint", "--queue", "que_1");
+        // Kenneth 2026-10-09: hemmeligheten skal ikke stå i terminalen. Uten --write mintes ingenting.
+        var api = new RecordingHandler(req => throw new InvalidOperationException("Nothing is minted: " + req.Key));
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[]
+        {
+            "keys", "mint", "--queue", "que_1", "--tenant", "ten_1", "--api-key", "qak_kid.secret", "--license", "lic_1",
+            "--config", Path.Combine(_dir, "none.json"), "--json",
+        }), api);
 
         Assert.Equal(ExitCodes.Success, run.Exit);
-        Assert.Contains($"SigningSecret = {Secret}", run.Stdout);
-        Assert.Contains("--write .env", run.Stderr);
+        Assert.Empty(api.Requests);
+        JsonElement json = JsonDocument.Parse(run.Stdout).RootElement;
+        Assert.False(json.GetProperty("minted").GetBoolean());
+        Assert.Equal(new[] { "QUEUEY_SIGNING_KEY_ID", "QUEUEY_SIGNING_SECRET" }, json.GetProperty("variables").EnumerateArray().Select(v => v.GetString()).ToArray());
+        Assert.Equal("https://app.queuey.ai/console/t/ten_1/q/que_1?panel=security", json.GetProperty("consoleUrl").GetString());
+        Assert.Contains("--write .env", json.GetProperty("suggested").GetString());
+    }
+
+    [Fact]
+    public async Task Show_secret_is_the_one_way_to_the_secret_in_the_terminal_and_it_warns()
+    {
+        CliRun run = await Run(Minting(), "keys", "mint", "--queue", "que_1", "--show-secret");
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.Contains($"QUEUEY_SIGNING_SECRET = {Secret}", run.Stdout);
+        Assert.Contains("Warning: --show-secret prints the secret", run.Stderr);
     }
 
     [Fact]
@@ -249,7 +270,7 @@ public sealed class KeysCommandTests : IDisposable
         CliRun run = await Run(Minting(secret: "abc\nQUEUEY_API_KEY=qak_evil"), "keys", "mint", "--queue", "que_1", "--write", env);
 
         Assert.Equal(ExitCodes.RuntimeError, run.Exit);
-        Assert.Contains("has characters a .env cannot hold safely", run.Stderr);
+        Assert.Contains("cannot hold safely", run.Stderr);
         Assert.False(File.Exists(env));
         Assert.DoesNotContain("qak_evil", run.Stdout + run.Stderr);
     }
