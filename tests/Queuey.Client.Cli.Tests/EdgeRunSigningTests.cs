@@ -44,6 +44,33 @@ public sealed class EdgeRunSigningTests : IDisposable
     }
 
     [Fact]
+    public async Task The_health_key_comes_from_its_own_variable_and_leaves_the_api_key_unset()
+    {
+        // Security-review av #70 (B1): helse-nøkkelen står i edge.env, aldri i argv, og bare innsjekken bruker den.
+        QueueyEdgeOptions read = await Credentials(new()
+        {
+            ["QUEUEY_SIGNING_KEY_ID"] = "hsk_01EDGE", ["QUEUEY_SIGNING_SECRET"] = "s3cr3t", ["QUEUEY_EDGE_HEALTH_API_KEY"] = "qak_h.healthonly",
+        });
+
+        Assert.Equal("hsk_01EDGE", read.SigningKeyId);
+        Assert.Equal("qak_h.healthonly", read.Health.ApiKey);
+        Assert.Null(read.ApiKey);
+    }
+
+    [Fact]
+    public void No_edge_text_puts_a_key_in_argv_and_the_health_key_is_named()
+    {
+        string text = Usage.Text.Replace("\r\n", "\n");
+        int start = text.IndexOf("\nEDGE\n", StringComparison.Ordinal);
+        string edge = text.Substring(start, text.IndexOf("\n  queuey edge publish", start, StringComparison.Ordinal) - start);
+
+        Assert.DoesNotContain("--api-key <qak", edge);
+        Assert.DoesNotContain("with the pair it serves only", edge);
+        Assert.Contains("QUEUEY_EDGE_HEALTH_API_KEY", edge);
+        Assert.Contains("argv is visible to every user", edge);
+    }
+
+    [Fact]
     public async Task An_api_key_flag_is_kept_beside_the_pair_for_the_health_check_in()
     {
         QueueyEdgeOptions read = await Credentials(new()

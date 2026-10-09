@@ -76,6 +76,15 @@ internal sealed class EdgeHealthReporter : BackgroundService
     }
 
     private readonly EdgeRuntimeState _state;
+
+    /// <summary>
+    /// The key the check-in sends: the health key, else the key the node publishes with. Never the signing secret.
+    /// </summary>
+    // Security-review av #70 (B1): helse-nøkkelen brukes bare her, så eventene forblir signert.
+    private string? CheckInKey
+        => !string.IsNullOrWhiteSpace(_options.Health.ApiKey) ? _options.Health.ApiKey
+            : !string.IsNullOrWhiteSpace(_options.ApiKey) ? _options.ApiKey
+            : null;
     private int? _lastWarnedStatus;
 
     /// <summary>The node's stable identity (minted on first use). Exposed for the CLI's status readout.</summary>
@@ -98,12 +107,12 @@ internal sealed class EdgeHealthReporter : BackgroundService
 
         // Queuey's check-in tar bare X-Api-Key (EdgeNodeResolveMiddleware, 2026-10-09). En node med bare signeringsnøkkel
         // ville fått 401 hvert intervall, med et råd om å sjekke ApiKey; den sier det én gang i stedet og sender ingenting.
-        if (string.IsNullOrWhiteSpace(_options.ApiKey))
+        if (CheckInKey is null)
         {
             _logger.LogWarning(EdgeLogEvents.HealthReportFailed,
                 "Health.ReportToCloud is on, but this node has only a signing key, and Queuey's check-in takes an API key. " +
-                "Events are signed and flow as before; the node does not appear under Edge nodes until ApiKey is set to a " +
-                "publish-only key as well.");
+                "Events are signed and flow as before; the node does not appear under Edge nodes until " +
+                QueueyEdgeEnvironmentVariables.HealthApiKey + " holds a publish-only key, in the environment or configuration.");
             return;
         }
 
@@ -178,7 +187,7 @@ internal sealed class EdgeHealthReporter : BackgroundService
             {
                 Content = new StringContent(JsonSerializer.Serialize(report, Json), Encoding.UTF8, "application/json")
             };
-            request.Headers.TryAddWithoutValidation("X-Api-Key", _options.ApiKey);
+            request.Headers.TryAddWithoutValidation("X-Api-Key", CheckInKey);
             request.Headers.TryAddWithoutValidation("X-Queuey-Edge-Version", EdgeVersion);
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);

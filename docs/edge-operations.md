@@ -12,9 +12,19 @@ machine you don't control, and reaches nothing but its queue:
 queuey keys mint --queue sensor-readings --write edge.env   # the secret is never shown
 ```
 
-Copy `edge.env` to the device as `/etc/queuey/edge.env` and delete your copy.
+Put it on the device as `/etc/queuey/edge.env`, owned by root and readable by
+nobody else (systemd reads it as root before it starts the service as `queuey`,
+so the service user never needs to read the file), then delete your copy:
+
+```bash
+scp edge.env device:/tmp/edge.env && rm edge.env
+# on the device:
+sudo install -d -m 700 -o root -g root /etc/queuey
+sudo install -m 600 -o root -g root /tmp/edge.env /etc/queuey/edge.env && rm /tmp/edge.env
+```
+
 (A publish-only API key, *Limit to ingress* and scoped to the workspace, is the
-alternative; Queuey's fleet check-in, `--report-health`, still takes one.)
+alternative to the signing key, as `QUEUEY_API_KEY` in the same file.)
 
 **2. Get the binary onto the device.** One self-contained file, no .NET
 runtime needed on the device:
@@ -37,8 +47,8 @@ non-event:
 # /etc/systemd/system/queuey-edge.service
 [Unit]
 Description=Queuey Edge
-After=network-online.target
-Wants=network-online.target
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
 
 [Service]
 ExecStart=/opt/queuey/queuey edge run --spool /var/lib/queuey/spool.db --listen 7311
@@ -53,16 +63,24 @@ WantedBy=multi-user.target
 ```
 
 ```bash
-# /etc/queuey/edge.env  (chmod 600, owned by the queuey user)
+# /etc/queuey/edge.env  (root:root, 0600 — installed as above)
 QUEUEY_TENANT=ten_...
 QUEUEY_SIGNING_KEY_ID=hsk_...       # from queuey keys mint --write edge.env
 QUEUEY_SIGNING_SECRET=...
-# QUEUEY_API_KEY=qak_...            # alternative; with the pair set it is not read
+# QUEUEY_EDGE_HEALTH_API_KEY=qak_...  # a publish-only key, only for --report-health (the check-in takes an API key today)
+# QUEUEY_API_KEY=qak_...            # alternative to the pair; with the pair set it is not read
 # QUEUEY_INGRESS_BASE=http://localhost:5084   # only for testing against a local Queuey
 ```
 
 `sudo systemctl enable --now queuey-edge` — done. `StateDirectory` gives
 the spool a durable home at `/var/lib/queuey` with the right ownership.
+
+**The clock matters.** Edge signs each transfer when it sends it, with this
+machine's clock, and Queuey refuses a signature more than 5 minutes off its
+own (`timestamp_out_of_range`). `time-sync.target` makes the service start
+after the clock is synchronised; a device without NTP, or with a dead RTC
+battery, holds its events — Edge logs that the clock is off, not the key —
+until the clock is right, then drains by itself.
 
 **4. Publish from whatever the device runs** — all three are the same
 durable accept boundary:

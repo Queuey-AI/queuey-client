@@ -45,8 +45,10 @@ builder.Services.AddQueueyEdge(o =>
 ```
 
 Edge signs every transfer with the same HMAC as `Queuey.Client`, at the moment it sends: an event that waited in the
-spool through an outage goes out with a fresh timestamp and nonce, so the ingress's replay window never rejects a
-backlog. The secret stays in memory; the spool never holds it. A workspace that takes signed requests only
+spool through an outage goes out with a fresh timestamp and nonce, not the ones it had when it was published. The
+timestamp is this machine's clock, and the ingress refuses one more than 5 minutes off its own
+(`timestamp_out_of_range`), so the clock must be synchronised (NTP). With a clock that is off, Edge holds the events,
+says the clock is the cause, and drains once it is right. The secret stays in memory; the spool never holds it. A workspace that takes signed requests only
 (`authMode: SignedRequest`, template `queuey`, as `queuey advise --write-files` scaffolds it) accepts Edge as it
 accepts the SDK.
 
@@ -54,9 +56,9 @@ The configuration follows `Queuey.Client`'s rules: a value set in code wins; the
 or as a pair from `.env` in the working folder in Development only; with the pair set, `QUEUEY_API_KEY` is not read.
 `UseSettings(...)` reads the same names from .NET configuration and never `.env`.
 
-**Alternative: a publish-only API key.** `o.ApiKey = "qak_..."` (or `QUEUEY_API_KEY` without the pair) works as before,
-for a workspace that takes API keys. With both set, events are signed, and the key is used only for the fleet check-in
-below.
+**Alternative: a publish-only API key.** `QUEUEY_API_KEY` (read when the pair is not set, from the environment or
+configuration — never a literal in code) works as before, for a workspace that takes API keys. With both set, events
+are signed.
 
 ```csharp
 // Anywhere in your app
@@ -127,9 +129,11 @@ o.Health.ReportToCloud = true;   // or: queuey edge run --report-health --node-n
 o.Health.NodeName = "barge-07";  // defaults to the machine name
 ```
 
-Queuey's check-in takes an API key today, not a signature: a node that signs its events also needs `ApiKey` (a
-publish-only key) to appear under Edge nodes. Without one it says so once at startup and sends no reports; its events
-flow as before.
+Queuey's check-in takes an API key today, not a signature. A node that signs its events checks in with
+`QUEUEY_EDGE_HEALTH_API_KEY`, a publish-only key that nothing but the check-in uses: put it in the environment
+(`UseEnvironmentVariables()`) or in configuration such as user-secrets (`UseSettings(builder.Configuration)`), never as a
+literal in code; for the daemon, in its environment file. Without one the node says so once at startup and sends no
+reports; its events flow as before. Queuey will take a signed check-in; then the health key goes away.
 
 The node then POSTs its health snapshot to Queuey Cloud — at startup, on
 every state change, and every 5 minutes otherwise; a refused report backs
@@ -147,7 +151,8 @@ that from `last seen`; the node itself never escalates.
 ### Already have a broker on the gateway? Subscribe, don't rewrite (Queuey.Edge.Mqtt)
 
 ```bash
-queuey edge run --spool /var/lib/queuey/spool.db --tenant ten_… --api-key qak_… \
+# the signing key in the daemon's environment, as above
+queuey edge run --spool /var/lib/queuey/spool.db --tenant ten_… \
   --mqtt localhost:1883 --mqtt-routes "plant/+/alarms=alarms@1;plant/+/state=machine-state@1"
 ```
 

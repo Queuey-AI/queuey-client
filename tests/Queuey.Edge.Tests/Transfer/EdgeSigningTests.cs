@@ -140,6 +140,103 @@ public class EdgeSigningTests
     }
 
     [Fact]
+    public async Task The_health_key_from_the_environment_goes_only_to_the_check_in_and_events_stay_signed()
+    {
+        // Security-review av #70 (B1): QUEUEY_EDGE_HEALTH_API_KEY er bare for innsjekken.
+        var dir = Directory.CreateTempSubdirectory("queuey-edge-health-key-");
+        try
+        {
+            var ingress = new VerifyingIngress(Secret);
+            var env = Env(("QUEUEY_SIGNING_KEY_ID", KeyId), ("QUEUEY_SIGNING_SECRET", Secret), ("QUEUEY_TENANT", "ten_test"),
+                ("QUEUEY_EDGE_HEALTH_API_KEY", "qak_h.healthonly"));
+            await using (var edge = await QueueyEdge.StartAsync(o =>
+                         {
+                             o.UseEnvironmentVariables(env);
+                             o.IngressBaseAddress = new Uri("https://ingress.test/");
+                             o.Storage.Path = Path.Combine(dir.FullName, "spool.db");
+                             o.Health.ReportToCloud = true;
+                             o.HttpMessageHandlerFactory = ingress.Another;
+                         }))
+            {
+                await edge.PublishAsync("orders", new { seq = 1 });
+                var deadline = DateTime.UtcNow.AddSeconds(5);
+                while (DateTime.UtcNow < deadline
+                       && !(ingress.Seen.Any(s => s.Path.StartsWith("/events/", StringComparison.Ordinal))
+                            && ingress.Seen.Any(s => s.Path.EndsWith("/health", StringComparison.Ordinal))))
+                    await Task.Delay(50);
+            }
+
+            var events = ingress.Seen.Where(s => s.Path.StartsWith("/events/", StringComparison.Ordinal)).ToArray();
+            var health = ingress.Seen.Where(s => s.Path.EndsWith("/health", StringComparison.Ordinal)).ToArray();
+            Assert.NotEmpty(events);
+            Assert.NotEmpty(health);
+            Assert.All(events, s =>
+            {
+                Assert.True(s.Verified);
+                Assert.False(s.Headers.ContainsKey(QueueyHeaders.ApiKey));
+            });
+            Assert.All(health, s =>
+            {
+                Assert.Equal("qak_h.healthonly", s.Headers[QueueyHeaders.ApiKey]);
+                Assert.False(s.Headers.ContainsKey(QueueyHeaders.Signature));
+            });
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            dir.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Edge_reaches_the_client_only_through_its_public_surface()
+    {
+        // Security-review av #70 (K1): ingen InternalsVisibleTo fra Queuey.Client til Queuey.Edge, så pakkene kan versjoneres hver for seg.
+        var friends = typeof(QueueyOptions).Assembly.GetCustomAttributes(typeof(System.Runtime.CompilerServices.InternalsVisibleToAttribute), false)
+            .Cast<System.Runtime.CompilerServices.InternalsVisibleToAttribute>()
+            .Select(a => a.AssemblyName)
+            .ToArray();
+
+        Assert.DoesNotContain("Queuey.Edge", friends);
+    }
+
+    [Theory]
+    [InlineData("""{"error":{"code":"timestamp_out_of_range","message":"Timestamp is outside the allowed window."}}""", TransferReason.ClockSkew)]
+    [InlineData("""{"error":{"code":"invalid_signature","message":"Signature mismatch."}}""", TransferReason.AuthenticationRejected)]
+    [InlineData("not json", TransferReason.AuthenticationRejected)]
+    public void A_401_for_the_timestamp_is_the_clock_not_the_key(string body, TransferReason reason)
+    {
+        // Security-review av #70 (K2).
+        var outcome = new TransferOutcomeClassifier().ClassifyResponse(401, body, null, DateTimeOffset.UtcNow, 1);
+
+        Assert.Equal(TransferClass.RequiresAction, outcome.Class);
+        Assert.Equal(reason, outcome.Reason);
+    }
+
+    [Fact]
+    public void The_runbook_installs_edge_env_as_root_only_and_starts_after_the_clock_is_synchronised()
+    {
+        // Security-review av #70 (K2, K3).
+        string runbook = File.ReadAllText(RepoFile("docs/edge-operations.md"));
+        string readme = File.ReadAllText(RepoFile("src/Queuey.Edge/README.md"));
+
+        Assert.Contains("sudo install -m 600 -o root -g root /tmp/edge.env /etc/queuey/edge.env", runbook);
+        Assert.Contains("After=network-online.target time-sync.target", runbook);
+        Assert.Contains("Wants=network-online.target time-sync.target", runbook);
+        Assert.DoesNotContain("owned by the queuey user", runbook);
+        Assert.DoesNotContain("never rejects a", readme);
+        Assert.Contains("timestamp_out_of_range", readme);
+        // B1: ingen nøkkel i argv eller som literal i koden.
+        foreach (string text in new[] { runbook, readme })
+        {
+            Assert.DoesNotContain("--api-key qak", text);
+            Assert.DoesNotContain("o.ApiKey = \"", text);
+        }
+        Assert.Contains("QUEUEY_EDGE_HEALTH_API_KEY", readme);
+        Assert.Contains("QUEUEY_EDGE_HEALTH_API_KEY", runbook);
+    }
+
+    [Fact]
     public async Task With_both_the_signing_pair_wins_over_the_api_key()
     {
         var clock = new FakeClock();
@@ -180,7 +277,7 @@ public class EdgeSigningTests
         var env = Env(("QUEUEY_SIGNING_KEY_ID", KeyId), ("QUEUEY_SIGNING_SECRET", Secret), ("QUEUEY_API_KEY", "qak_id.licensewide"),
             ("QUEUEY_TENANT", "ten_env"), ("QUEUEY_INGRESS_BASE", "http://localhost:5084"));
 
-        var options = new QueueyEdgeOptions().UseEnvironmentVariables(env, dotEnvFolder: null);
+        var options = new QueueyEdgeOptions().UseEnvironmentVariables(env);
 
         Assert.Equal(KeyId, options.SigningKeyId);
         Assert.Equal(Secret, options.SigningSecret);
@@ -194,7 +291,7 @@ public class EdgeSigningTests
     public void Without_the_pair_QUEUEY_API_KEY_is_read_and_a_value_set_in_code_wins()
     {
         var options = new QueueyEdgeOptions { TenantPublicId = "ten_code" }
-            .UseEnvironmentVariables(Env(("QUEUEY_API_KEY", "qak_id.publishonly"), ("QUEUEY_TENANT", "ten_env")), dotEnvFolder: null);
+            .UseEnvironmentVariables(Env(("QUEUEY_API_KEY", "qak_id.publishonly"), ("QUEUEY_TENANT", "ten_env")));
 
         Assert.Equal("qak_id.publishonly", options.ApiKey);
         Assert.Equal("ten_code", options.TenantPublicId);
@@ -210,15 +307,18 @@ public class EdgeSigningTests
         try
         {
             File.WriteAllText(Path.Combine(dir.FullName, ".env"),
-                $"QUEUEY_SIGNING_KEY_ID={KeyId}\nQUEUEY_SIGNING_SECRET={Secret}\nQUEUEY_TENANT=ten_from_file\n");
+                $"QUEUEY_SIGNING_KEY_ID={KeyId}\nQUEUEY_SIGNING_SECRET={Secret}\nQUEUEY_TENANT=ten_from_file\nQUEUEY_EDGE_HEALTH_API_KEY=qak_h.file\n");
             if (!OperatingSystem.IsWindows())
                 File.SetUnixFileMode(Path.Combine(dir.FullName, ".env"), UnixFileMode.UserRead | UnixFileMode.UserWrite);
 
-            var options = new QueueyEdgeOptions().UseEnvironmentVariables(Env(("DOTNET_ENVIRONMENT", environment)), dir.FullName);
+            // Klientens .env-søm via InternalsVisibleTo til testprosjektet: Edge selv bruker bare de offentlige metodene (K1).
+            var env = Env(("DOTNET_ENVIRONMENT", environment));
+            var options = new QueueyEdgeOptions().FillFrom(client => client.UseEnvironmentVariables(env, dir.FullName), env);
 
             Assert.Equal(read ? KeyId : null, options.SigningKeyId);
             Assert.Equal(read ? Secret : null, options.SigningSecret);
             Assert.Null(options.TenantPublicId); // fra .env leses bare paret
+            Assert.Null(options.Health.ApiKey);    // og aldri helse-nøkkelen
         }
         finally
         {
@@ -256,6 +356,16 @@ public class EdgeSigningTests
     }
 
     // ── plumbing ─────────────────────────────────────────────────────────
+
+    private static string RepoFile(string relative)
+    {
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir is not null; dir = dir.Parent)
+        {
+            string candidate = Path.Combine(dir.FullName, relative);
+            if (File.Exists(candidate)) return candidate;
+        }
+        throw new FileNotFoundException(relative);
+    }
 
     private static Func<string, string?> Env(params (string Name, string Value)[] values)
     {

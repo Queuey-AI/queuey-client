@@ -194,10 +194,10 @@ internal static class EdgeCommand
 
     /// <summary>
     /// The daemon's keys, by the same rules as <c>Queuey.Client</c> and an embedded Edge: <c>QUEUEY_SIGNING_KEY_ID</c> and
-    /// <c>QUEUEY_SIGNING_SECRET</c> from the environment (in Development also from <c>.env</c>), and <c>--api-key</c> or
-    /// <c>QUEUEY_API_KEY</c>. With the pair in the environment, <c>QUEUEY_API_KEY</c> is not read; an <c>--api-key</c> is kept,
-    /// and then only the health check-in uses it, since events are signed. The secret has no flag: argv is visible to
-    /// every user on the machine.
+    /// <c>QUEUEY_SIGNING_SECRET</c> from the environment (in Development also from <c>.env</c>), else <c>QUEUEY_API_KEY</c>;
+    /// and <c>QUEUEY_EDGE_HEALTH_API_KEY</c>, which only the health check-in sends. <c>--api-key</c> still works for a node
+    /// that publishes with an API key, but no text suggests it: argv is visible to every user on the machine, and the
+    /// signing secret has no flag at all.
     /// </summary>
     // Edge-signering (Kenneth 2026-10-09): daemonen leser de samme variablene som SDK-en, gjennom QueueyEdgeOptions.
     internal static QueueyEdgeOptions EdgeCredentials(ArgMap map)
@@ -275,6 +275,7 @@ internal static class EdgeCommand
             o.ApiKey = credentials.ApiKey;
             o.SigningKeyId = credentials.SigningKeyId;
             o.SigningSecret = credentials.SigningSecret;
+            o.Health.ApiKey = credentials.Health.ApiKey;
             o.TenantPublicId = tenant;
             o.Storage.Path = spoolPath;
             if (spoolKey is not null)

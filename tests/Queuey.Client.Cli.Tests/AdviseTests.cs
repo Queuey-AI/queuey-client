@@ -81,6 +81,9 @@ public sealed class AdviseTests : IDisposable
         Assert.Contains(advice.NextSteps, s => s.Contains(reads, StringComparison.Ordinal) && s.Contains("signs every transfer", StringComparison.Ordinal));
         Assert.Contains(advice.NextSteps, s => s.Contains($"queuey keys mint --queue <queue> --profile dev --write {write}", StringComparison.Ordinal));
         Assert.DoesNotContain(advice.NextSteps, s => s.Contains("o.ApiKey", StringComparison.Ordinal));
+        Assert.DoesNotContain(advice.NextSteps, s => s.Contains("ApiKey set to", StringComparison.Ordinal));
+        Assert.Contains(advice.NextSteps, s => s.Contains("QUEUEY_EDGE_HEALTH_API_KEY", StringComparison.Ordinal)
+                                               && s.Contains(write == "user-secrets" ? "UseSettings" : "UseEnvironmentVariables", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -95,6 +98,9 @@ public sealed class AdviseTests : IDisposable
         Assert.Contains(advice.NextSteps, s => s.Contains("queuey keys mint --queue <queue> --profile dev --write edge.env", StringComparison.Ordinal));
         Assert.Contains(advice.NextSteps, s => s.Contains("EnvironmentFile=", StringComparison.Ordinal));
         Assert.DoesNotContain(advice.NextSteps, s => s.Contains("--write .env", StringComparison.Ordinal));
+        // Security-review av #70 (B1): helse-nøkkelen i edge.env, aldri i argv.
+        Assert.Contains(advice.NextSteps, s => s.Contains("QUEUEY_EDGE_HEALTH_API_KEY in edge.env", StringComparison.Ordinal));
+        Assert.DoesNotContain(advice.NextSteps, s => s.Contains("--api-key", StringComparison.Ordinal));
     }
 
     [Fact]

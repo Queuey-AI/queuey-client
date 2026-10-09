@@ -641,14 +641,15 @@ REPLAY
                  first so there's a listener to receive it.
 
 EDGE
-  queuey edge run     --spool <path> --tenant <ten_...> [--api-key <qak_...>]
+  queuey edge run     --spool <path> --tenant <ten_...>
                 [--listen <port>] [--report-health] [--node-name <name>] [--ingress-base <uri>] [--source <s>]
                 [--mqtt <host[:port]> --mqtt-routes ""filter=queue[@segment];…"" [--mqtt-user <u> --mqtt-password <p>] [--mqtt-tls]]
                  Signs every transfer with the queue's signing key, read from the environment
                  as QUEUEY_SIGNING_KEY_ID and QUEUEY_SIGNING_SECRET (queuey keys mint writes
-                 them into the service's environment file); a publish-only --api-key or
-                 QUEUEY_API_KEY is the alternative, and with the pair it serves only
-                 --report-health, since Queuey's check-in takes an API key.
+                 them into the service's environment file). Without the pair it publishes with
+                 QUEUEY_API_KEY, a publish-only key; with the pair, QUEUEY_API_KEY is not read.
+                 Keys come from the environment, not flags: argv is visible to every user on
+                 the machine.
                  Hosts the Edge transfer loop as a standalone daemon (systemd-friendly) — the
                  complete Edge for machines with no .NET app of their own: run this, and anything
                  on the box publishes durably with 'queuey edge publish'. --listen additionally
@@ -657,7 +658,10 @@ EDGE
                  HTTP one-liner becomes durable by swapping the base URL; 202 = committed to the
                  local spool. Ctrl-C/SIGTERM to stop; accepted events survive restarts.
                  --report-health (or QUEUEY_REPORT_HEALTH=1) makes the node check in to the
-                 console under Edge nodes (outbound only; reports are not events, never billed);
+                 console under Edge nodes (outbound only; reports are not events, never billed).
+                 Queuey's check-in takes an API key today: a node that signs checks in with
+                 QUEUEY_EDGE_HEALTH_API_KEY, a publish-only key in the same environment file,
+                 which nothing else uses;
                  --node-name (QUEUEY_NODE_NAME) is the label shown there, default: machine name.
                  --mqtt subscribes to a (usually local) broker and spools every message durably
                  BEFORE acking it (QoS 1); a route's @segment makes that topic level the lane

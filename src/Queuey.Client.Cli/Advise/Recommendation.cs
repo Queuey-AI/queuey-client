@@ -208,8 +208,13 @@ public static class Recommendation
                       "secrets and signs every transfer when it sends it, so a backlog never goes out with a stale signature."
                     : "Configure it with options.UseEnvironmentVariables(): Edge reads the queue's signing key from the environment, " +
                       "and in Development from .env, and signs every transfer when it sends it, so a backlog never goes out with a stale signature.";
+                // Security-review av #70 (B1): helse-nøkkelen fra miljøet eller konfigurasjonen, aldri en literal.
                 yield return "Turn on Health.ReportToCloud so the node shows up under Edge nodes and Queuey can tell you when it goes quiet. " +
-                             "Queuey's check-in takes an API key, so it also needs ApiKey set to a publish-only key.";
+                             "Queuey's check-in takes an API key today: put a publish-only key in " +
+                             (write == SecretTarget.UserSecretsWord
+                                 ? "the user secrets as QUEUEY_EDGE_HEALTH_API_KEY, which UseSettings reads"
+                                 : "the environment as QUEUEY_EDGE_HEALTH_API_KEY, which UseEnvironmentVariables reads") +
+                             ". Only the check-in uses it; events stay signed.";
                 break;
 
             case SendPath.EdgeDaemon:
@@ -217,7 +222,8 @@ public static class Recommendation
                              $"or — with no .NET — the self-contained binary for its platform from {ReleasesUrl}.";
                 yield return "Run: queuey edge run --spool /var/lib/queuey/spool.db --listen 7300, with the signing key in its " +
                              $"environment: load {DaemonEnvironmentFile} as the service's environment file (systemd EnvironmentFile=). " +
-                             "Add --report-health with a publish-only --api-key to see the node under Edge nodes; Queuey's check-in takes an API key.";
+                             $"Add --report-health to see the node under Edge nodes, with a publish-only key as QUEUEY_EDGE_HEALTH_API_KEY in {DaemonEnvironmentFile}: " +
+                             "Queuey's check-in takes an API key today, and only the check-in uses it.";
                 yield return "Publish from your code to http://localhost:7300/events/{tenant}/{queue} — same wire shape as the cloud ingress, and a 202 means it is committed locally.";
                 break;
 
