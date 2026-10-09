@@ -813,13 +813,14 @@ public sealed class ProfileCommandTests : IDisposable
         RecordingHandler api = ApplyServer();
 
         // Den ville ellers koblet til med queuey.json og QUEUEY_-variablene, ikke profilens miljø.
-        CliRun run = await Run(api, Env(("QUEUEY_PROFILE", "dev")), CliHarness.With("replay", "evt_1", "--queue", "que_orders"));
+        // replay tar en profil siden blindtest 2; metrics gjør det ikke.
+        CliRun run = await Run(api, Env(("QUEUEY_PROFILE", "dev")), CliHarness.With("metrics", "que_orders"));
         Assert.Equal(ExitCodes.Configuration, run.Exit);
         Assert.Contains("QUEUEY_PROFILE is set, and this command does not take a profile", run.Stderr);
 
-        CliRun flagged = await Run(api, Env(), CliHarness.With("replay", "evt_1", "--queue", "que_orders", "--profile", "dev"));
+        CliRun flagged = await Run(api, Env(), CliHarness.With("metrics", "que_orders", "--profile", "dev"));
         Assert.Equal(ExitCodes.Usage, flagged.Exit);
-        Assert.Contains("Unknown option --profile for queuey replay.", flagged.Stderr);
+        Assert.Contains("Unknown option --profile for queuey metrics.", flagged.Stderr);
 
         Assert.Empty(api.Requests);
     }

@@ -20,6 +20,12 @@ public class QueueyException : Exception
     /// </summary>
     public string? SuggestedAction { get; init; }
 
+    /// <summary>
+    /// The console page Queuey names for it (<c>{ "error": { …, "consoleUrl" } }</c>), such as where a person approves or
+    /// does what a key may not. Null when the API gave none.
+    /// </summary>
+    public string? ConsoleUrl { get; init; }
+
     /// <summary>Creates a <see cref="QueueyException"/>.</summary>
     public QueueyException(string message, int? statusCode = null, string? errorCode = null, Exception? innerException = null)
         : base(message, innerException)

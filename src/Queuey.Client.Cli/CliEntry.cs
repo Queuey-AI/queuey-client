@@ -67,6 +67,9 @@ internal static class CliEntry
                 "issues" => await IssuesCommand.RunAsync(rest),
                 "listen" => await ListenCommand.RunAsync(rest),
                 "replay" => await ReplayCommand.RunAsync(rest),
+                "diagnose" => await DiagnoseCommand.RunAsync(rest),
+                "resume" => await ResumeCommand.RunAsync(rest),
+                "unlock" => await UnlockCommand.RunAsync(rest),
                 "edge" => await EdgeCommand.RunAsync(rest),
                 _ => Unknown(command, json),
             };

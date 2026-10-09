@@ -31,6 +31,7 @@ internal static class QueueCommand
         {
             "plan" => Plan(rest),
             "sync" => await SyncAsync(rest),
+            "health" => await QueueHealthCommand.RunAsync(rest),
             "" or "-h" or "--help" or "help" => Help(),
             _ => Unknown(sub, rest),
         };
@@ -44,7 +45,7 @@ internal static class QueueCommand
 
     private static int Unknown(string sub, string[] rest)
         => CliErrors.Write(CliErrors.WantsJson(rest), "unknown_subcommand",
-            $"Unknown queue subcommand '{CliErrors.Shown(sub)}'. Expected 'plan' or 'sync'.", action: null, status: null, ExitCodes.Usage);
+            $"Unknown queue subcommand '{CliErrors.Shown(sub)}'. Expected 'plan', 'sync' or 'health'.", action: null, status: null, ExitCodes.Usage);
 
     private static int Plan(string[] args)
     {

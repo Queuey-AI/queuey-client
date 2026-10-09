@@ -36,9 +36,10 @@ internal static class EventsCommand
         return sub switch
         {
             "get" => await GetAsync(rest),
+            "search" => await EventsSearchCommand.RunAsync(rest),
             "" or "-h" or "--help" or "help" => Help(),
             _ => CliErrors.Write(CliErrors.WantsJson(rest), "unknown_subcommand",
-                $"Unknown events subcommand '{CliErrors.Shown(sub)}'. Expected 'get'.", action: null, status: null, ExitCodes.Usage),
+                $"Unknown events subcommand '{CliErrors.Shown(sub)}'. Expected 'get' or 'search'.", action: null, status: null, ExitCodes.Usage),
         };
     }
 

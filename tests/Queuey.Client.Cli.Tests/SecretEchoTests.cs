@@ -35,7 +35,7 @@ public sealed class SecretEchoTests : IDisposable
     [InlineData(new[] { "FAKEtok3nAbc123", "--json" }, "FAKEtok3nAbc123", "Unknown command 'FAK…'.")]
     [InlineData(new[] { "credentials", "sk_test_s3cr3t", "--json" }, "sk_test_s3cr3t", "Unknown credentials subcommand 'sk…'. Expected 'set', 'generate', 'rotate', 'request' or 'list'.")]
     [InlineData(new[] { "keys", "FAKEtok3nAbc123", "--json" }, "FAKEtok3nAbc123", "Unknown keys subcommand 'FAK…'. Expected 'mint', 'list' or 'revoke'.")]
-    [InlineData(new[] { "queue", "FAKEtok3nAbc123", "--json" }, "FAKEtok3nAbc123", "Unknown queue subcommand 'FAK…'. Expected 'plan' or 'sync'.")]
+    [InlineData(new[] { "queue", "FAKEtok3nAbc123", "--json" }, "FAKEtok3nAbc123", "Unknown queue subcommand 'FAK…'. Expected 'plan', 'sync' or 'health'.")]
     public async Task A_command_subcommand_or_argument_shows_three_characters_at_most(string[] args, string secret, string message)
     {
         CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(args));
