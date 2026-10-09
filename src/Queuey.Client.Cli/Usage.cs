@@ -51,7 +51,9 @@ LOGIN
                  --profile <name> writes the profile in ~/.queuey/config.json: the license, the
                  hosts and the workspace marked with the profile's environment (dev, test,
                  staging or prod), or --tenant's. Other profiles, and the profile's other fields,
-                 stay as they were. A profile with an apiKey keeps it, and the key wins.
+                 stay as they were. A profile with an apiKey keeps it, the key wins, and login
+                 only fills the fields it lacks. A QUEUEY_ variable that disagrees with the
+                 profile fails, as with any --profile; --api-base overrides the host.
                  The tokens are in ~/.queuey/credentials.json, next to config.json, readable only
                  by you and checked as config.json is. They renew themselves; two commands at
                  once take turns, so a refresh token is never spent twice.

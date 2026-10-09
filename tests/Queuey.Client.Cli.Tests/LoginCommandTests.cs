@@ -287,6 +287,101 @@ public sealed class LoginCommandTests : IDisposable
         Assert.Single(server.FormsTo("/connect/device"));
     }
 
+    [Theory]
+    [InlineData("issuer")]
+    [InlineData("token_endpoint")]
+    public async Task Login_metadata_that_points_away_from_the_api_host_is_not_used(string field)
+    {
+        // Security-review av #66 (KAN 3): koder og tokens sendes bare til API-ets egen opprinnelse.
+        var server = new FakeAuthServer();
+        if (field == "issuer") server.Issuer = "https://evil.test/";
+        else server.TokenEndpoint = "https://evil.test/token";
+
+        CliRun run = await Run(server, "login", "--api-base", FakeAuthServer.Api, "--json");
+
+        Assert.Equal(ExitCodes.RuntimeError, run.Exit);
+        Assert.Equal("login_metadata_invalid", Line(run.Stdout).GetProperty("error").GetProperty("code").GetString());
+        Assert.Empty(server.FormsTo("/connect/device"));
+    }
+
+    [Fact]
+    public async Task Login_over_plain_http_to_another_machine_sends_nothing()
+    {
+        var server = new FakeAuthServer();
+
+        CliRun run = await Run(server, "login", "--api-base", "http://api.test");
+
+        Assert.Equal(ExitCodes.Configuration, run.Exit);
+        Assert.Contains("is plain http on another machine", run.Stderr);
+        Assert.Empty(server.Handler.Requests);
+    }
+
+    [Fact]
+    public async Task A_lock_another_process_holds_is_reported_and_never_starts_a_new_login()
+    {
+        // Security-review av #66 (KAN 4): tidsavbruddet på låsen ble lest som en innlogging som var slutt.
+        var server = new FakeAuthServer();
+        StoreLogin(server, TimeSpan.Zero); // må fornyes, under låsen
+        TimeSpan before = LoginStore.LockTimeout;
+        LoginStore.LockTimeout = TimeSpan.FromMilliseconds(300);
+        try
+        {
+            using var held = new FileStream(CredentialsFile + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+
+            CliRun run = await Run(server, "login", "--api-base", FakeAuthServer.Api);
+
+            Assert.Equal(ExitCodes.Configuration, run.Exit);
+            Assert.Contains("Another queuey process has held the lock on your logins", run.Stderr);
+            Assert.Empty(server.FormsTo("/connect/device"));
+            Assert.Single(Stored().GetProperty("logins").EnumerateArray());
+        }
+        finally
+        {
+            LoginStore.LockTimeout = before;
+        }
+    }
+
+    [Fact]
+    public async Task A_folder_others_can_write_to_gets_no_login_written_in_it()
+    {
+        // Security-review av #66 (KAN 5): mappa sjekkes før den første skrivingen, ikke først ved neste lesing.
+        if (OperatingSystem.IsWindows())
+            return;
+        Directory.CreateDirectory(_queuey);
+        File.SetUnixFileMode(_queuey, (UnixFileMode)0x1FF); // 0777, uten sticky-bit
+        var server = new FakeAuthServer();
+
+        CliRun run = await Run(server, "login", "--api-base", FakeAuthServer.Api);
+
+        Assert.Equal(ExitCodes.Configuration, run.Exit);
+        Assert.Contains($"{_queuey} can be written by other users (mode 0777)", run.Stderr);
+        Assert.Contains("so nothing was written", run.Stderr);
+        Assert.False(File.Exists(CredentialsFile));
+    }
+
+    [Fact]
+    public async Task A_license_that_is_not_a_license_id_is_refused_and_an_unsafe_ingress_is_not_kept()
+    {
+        // Security-review av #66 (KAN 6): verdiene i token-svaret styres av serveren og vises og lagres.
+        var server = new FakeAuthServer { License = "lic_x\u001b[2Jqak_secret", IngressBase = "http://ingress.elsewhere.test" };
+        server.PollAnswers.Enqueue("approve");
+
+        CliRun refused = await Run(server, "login", "--api-base", FakeAuthServer.Api, "--wait");
+
+        Assert.Equal(ExitCodes.RuntimeError, refused.Exit);
+        Assert.Contains("without a license id (lic_…)", refused.Stderr);
+        Assert.DoesNotContain("qak_secret", refused.Stdout + refused.Stderr);
+        Assert.Empty(Stored().GetProperty("logins").EnumerateArray());
+        Assert.Empty(Stored().GetProperty("pending").EnumerateArray());
+
+        server.License = "lic_new";
+        server.PollAnswers.Enqueue("approve");
+        CliRun kept = await Run(server, "login", "--api-base", FakeAuthServer.Api, "--wait");
+        Assert.True(kept.Exit == ExitCodes.Success, kept.Stdout + kept.Stderr);
+        JsonElement login = Assert.Single(Stored().GetProperty("logins").EnumerateArray());
+        Assert.Equal(JsonValueKind.Null, login.GetProperty("ingressBase").ValueKind);
+    }
+
     // ── profilen ─────────────────────────────────────────────────────────────
 
     [Fact]
@@ -362,19 +457,50 @@ public sealed class LoginCommandTests : IDisposable
     }
 
     [Fact]
-    public async Task A_profile_with_an_api_key_keeps_it_and_login_says_the_key_wins()
+    public async Task A_profile_with_an_api_key_keeps_its_host_license_and_workspace_and_login_only_fills_what_it_lacks()
     {
+        // Security-review av #66 (BØR 2): login skrev om vert, lisens og workspace i en profil med nøkkel.
         Directory.CreateDirectory(_queuey);
-        UserProfilesTests.WriteUserConfig(_queuey, """{ "profiles": { "dev": { "apiKey": "qak_dev.key-for-dev", "apiBase": "https://api.test" } } }""");
+        UserProfilesTests.WriteUserConfig(_queuey, """
+            { "profiles": { "dev": { "apiKey": "qak_dev.key-for-dev", "apiBase": "https://api.test", "license": "lic_old", "tenant": "ten_old" } } }
+            """);
         var server = new FakeAuthServer();
+        server.Workspaces.Add(FakeAuthServer.Workspace("ten_dev1", "queuey-dev", "dev"));
         server.PollAnswers.Enqueue("approve");
 
         CliRun run = await Run(server, "login", "--profile", "dev", "--wait");
 
         Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
-        Assert.Contains("also has an apiKey, which wins over the login", run.Stderr);
-        Assert.Equal("qak_dev.key-for-dev", (string?)JsonNode.Parse(File.ReadAllText(UserFile))!["profiles"]!["dev"]!["apiKey"]);
+        Assert.Contains("has an apiKey, which wins over the login, so only the fields it lacked were filled", run.Stderr);
+        JsonNode dev = JsonNode.Parse(File.ReadAllText(UserFile))!["profiles"]!["dev"]!;
+        Assert.Equal("qak_dev.key-for-dev", (string?)dev["apiKey"]);
+        Assert.Equal("https://api.test", (string?)dev["apiBase"]);
+        Assert.Equal("lic_old", (string?)dev["license"]);
+        Assert.Equal("ten_old", (string?)dev["tenant"]);
+        Assert.Equal("https://ingress.test", (string?)dev["ingressBase"]); // manglet, og ble fylt
         Assert.DoesNotContain("key-for-dev", run.Stdout + run.Stderr);
+    }
+
+    [Fact]
+    public async Task A_queuey_variable_that_disagrees_with_the_profile_stops_login_before_anything_is_sent()
+    {
+        // Samme regel som --profile ellers (F2.7): en QUEUEY_API_BASE igjen i skallet blandes aldri inn i profilen. Flagget vinner.
+        Directory.CreateDirectory(_queuey);
+        UserProfilesTests.WriteUserConfig(_queuey, """{ "profiles": { "dev": { "license": "lic_new", "apiBase": "https://api.test" } } }""");
+        var server = new FakeAuthServer();
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "login", "--profile", "dev" }), server.Handler,
+            Env(("QUEUEY_API_BASE", "https://api.other.test")));
+
+        Assert.Equal(ExitCodes.Configuration, run.Exit);
+        Assert.Contains("QUEUEY_API_BASE is set to another API host than profile dev", run.Stderr);
+        Assert.Empty(server.Handler.Requests);
+
+        // Overstyringen er fortsatt enkel: --api-base, eller QUEUEY_API_BASE uten profil.
+        server.PollAnswers.Enqueue("approve");
+        CliRun flagged = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "login", "--wait" }), server.Handler,
+            Env(("QUEUEY_API_BASE", FakeAuthServer.Api)));
+        Assert.True(flagged.Exit == ExitCodes.Success, flagged.Stdout + flagged.Stderr);
     }
 
     // ── kommandoene med innloggingen ─────────────────────────────────────────

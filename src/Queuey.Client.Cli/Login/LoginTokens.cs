@@ -107,8 +107,10 @@ internal sealed class LoginTokens
         // Refresh-tokenet roterer: det nye lagres alltid. Uten et nytt i svaret gjelder det gamle fortsatt (RFC 6749 §6).
         login.RefreshToken = answer.RefreshToken ?? login.RefreshToken;
         login.Scope = ScopeOf(answer.Scope) ?? login.Scope;
-        login.IngressBase = answer.IngressBase ?? login.IngressBase;
-        login.User = answer.User ?? login.User;
+        // Serveren styrer verdiene (security-review av #66, KAN 6): en ingress som ikke er https eller lokal http, og en person
+        // som ikke er en kort tekst, lagres ikke.
+        login.IngressBase = SafeIngress(answer.IngressBase) ?? login.IngressBase;
+        login.User = answer.User is { Length: <= 200 } user ? TerminalText.Line(user) : login.User;
     }
 
     /// <summary>
@@ -121,6 +123,10 @@ internal sealed class LoginTokens
         return scopes.Contains("operate") ? "operate" : scopes.Contains("read") ? "read" : null;
     }
 
+    /// <summary>The ingress host Queuey gave, when it is https or http on this machine; null otherwise.</summary>
+    internal static string? SafeIngress(string? value)
+        => Uri.TryCreate(value, UriKind.Absolute, out Uri? uri) && OAuthClient.IsSafe(uri) ? value : null;
+
     private static void Forget(string path, CredentialsFile file, StoredLogin login)
     {
         file.Logins.Remove(login);
@@ -128,10 +134,22 @@ internal sealed class LoginTokens
     }
 
     internal static QueueyConfigurationException Ended(string host, string license, string why)
-        => new($"The login to {host} for license {license} has ended: {why}.")
+    {
+        var ended = new QueueyConfigurationException($"The login to {host} for license {license} has ended: {why}.")
         {
             SuggestedAction = "Run `queuey login` to log in again.",
         };
+        ended.Data[EndedMark] = true;
+        return ended;
+    }
+
+    // Security-review av #66 (KAN 4): login fanget hver QueueyConfigurationException som «slutt», også tidsavbruddet på låsen, og
+    // startet en ny device-flyt mens den gamle innloggingen fortsatt virket. Bare en innlogging som er borte for godt, er merket.
+    // (QueueyConfigurationException er sealed i kjernen, så merket står i Data i stedet for i en egen type.)
+    private const string EndedMark = "queuey.cli.loginEnded";
+
+    /// <summary>Whether <paramref name="ex"/> says the login is gone for good, so a new one is the way on.</summary>
+    internal static bool IsEnded(Exception ex) => ex.Data.Contains(EndedMark);
 }
 
 /// <summary>Finds the stored login a command connects with when it has no API key.</summary>
@@ -178,5 +196,21 @@ internal static class Logins
             };
 
         return login is null ? config : config.WithLogin(new LoginTokens(path, apiBase, login));
+    }
+}
+
+/// <summary>What a license id looks like: <c>lic_</c> and an opaque id, no more than 64 characters in all.</summary>
+internal static class LicenseIds
+{
+    internal static bool IsOne(string? value)
+    {
+        if (value is null || value.Length <= 4 || value.Length > 64 || !value.StartsWith("lic_", StringComparison.Ordinal))
+            return false;
+        foreach (char c in value)
+        {
+            if (!(c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '_' or '-'))
+                return false;
+        }
+        return true;
     }
 }

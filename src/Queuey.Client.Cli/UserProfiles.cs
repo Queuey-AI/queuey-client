@@ -154,13 +154,13 @@ internal static class UserProfiles
     /// <summary>
     /// Writes what <c>queuey login --profile</c> found into profile <paramref name="profile"/>: the license, the hosts and the
     /// workspace, or no workspace when <paramref name="tenant"/> is null. Every other profile, and every other field of this
-    /// one (an <c>apiKey</c>, a <c>source</c>), stays as it was. The file is created readable only by the user (0600) when it
-    /// is not there, and replaced whole otherwise. Returns the file, and whether the profile has an <c>apiKey</c>, which wins
-    /// over the login.
+    /// one (an <c>apiKey</c>, a <c>source</c>), stays as it was. A profile with an <c>apiKey</c> gets only the fields it lacks,
+    /// since the key wins over the login. The file is created readable only by the user (0600) when it is not there, and
+    /// replaced whole otherwise. Returns the file, whether the profile has an <c>apiKey</c>, and the workspace it names now.
     /// </summary>
     // Profilfletting (PR 4): fila leses som JSON-tre, ikke som UserConfig, så felt en nyere CLI har skrevet blir stående. Kommentarer
     // går tapt, siden System.Text.Json ikke skriver dem tilbake; det står i README.
-    internal static (string Path, bool HasApiKey) WriteLogin(
+    internal static (string Path, bool HasApiKey, string? Tenant) WriteLogin(
         string profile, Func<string, string?> env, string license, string apiBase, string? ingressBase, string? tenant)
     {
         string path = PathOf(env);
@@ -182,14 +182,34 @@ internal static class UserProfiles
         if (profiles[profile] is not JsonObject entry)
             profiles[profile] = entry = new JsonObject();
 
-        entry["license"] = license;
-        entry["apiBase"] = apiBase;
-        if (ingressBase is null) entry.Remove("ingressBase"); else entry["ingressBase"] = ingressBase;
-        if (tenant is null) entry.Remove("tenant"); else entry["tenant"] = tenant;
-        bool hasApiKey = entry["apiKey"] is JsonValue key && key.TryGetValue(out string? value) && !string.IsNullOrWhiteSpace(value);
+        // En profil med apiKey kobler til med nøkkelen, og den er skrevet av en person. Login fyller da bare felt som mangler, og
+        // flytter aldri nøkkelen til en annen vert, lisens eller et annet workspace (security-review av #66, BØR 2).
+        bool hasApiKey = Has(entry, "apiKey");
+        Set(entry, "license", license, hasApiKey);
+        Set(entry, "apiBase", apiBase, hasApiKey);
+        Set(entry, "ingressBase", ingressBase, hasApiKey);
+        Set(entry, "tenant", tenant, hasApiKey);
 
         PrivateFiles.WriteAllText(target, root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
-        return (path, hasApiKey);
+        return (path, hasApiKey, entry["tenant"] is JsonValue written && written.TryGetValue(out string? kept) ? kept : null);
+
+        static bool Has(JsonObject entry, string name)
+            => entry[name] is JsonValue value && value.TryGetValue(out string? text) && !string.IsNullOrWhiteSpace(text);
+
+        static void Set(JsonObject entry, string name, string? value, bool fillOnly)
+        {
+            if (fillOnly && Has(entry, name))
+                return;
+            if (value is null)
+            {
+                if (!fillOnly)
+                    entry.Remove(name);
+            }
+            else
+            {
+                entry[name] = value;
+            }
+        }
     }
 
     /// <summary>
@@ -233,13 +253,34 @@ internal static class UserProfiles
                 SuggestedAction = $"Let only you read and write it: chmod 600 {target}",
             };
 
+        Folders(Path.GetDirectoryName(target), home, me, shown, "it was not read");
+        return target;
+    }
+
+    /// <summary>
+    /// Throws when another user could replace a file the CLI is about to write in <paramref name="folder"/>: the folder, or one
+    /// above it up to the home folder, belongs to another user than the user or root, or others can write to it without the
+    /// sticky bit. The same rules as for a file it reads. Not on Windows.
+    /// </summary>
+    // Security-review av #66 (KAN 5): en ny credentials.json eller config.json ble skrevet uten at mappene ble sjekket, så en
+    // mappe andre kunne skrive i, ble først oppdaget ved neste lesing, etter at tokenene var der.
+    internal static void EnsureOnlyTheUserCanWriteIn(string folder)
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+        string full = Path.GetFullPath(folder);
+        Folders(full, Home(), CurrentUser(), Path.Combine(full, "…"), "nothing was written");
+    }
+
+    private static void Folders(string? start, string? home, uint me, string shown, string outcome)
+    {
         // Hver mappe over fila, som ssh: til og med hjemmemappa når fila ligger der, ellers helt til roten.
-        for (string? folder = Path.GetDirectoryName(target); folder is not null; folder = Path.GetDirectoryName(folder))
+        for (string? folder = start; folder is not null; folder = Path.GetDirectoryName(folder))
         {
             (uint folderOwner, UnixFileMode folderMode) = Inspect(folder);
             if (folderOwner != me && folderOwner != 0)
                 throw new QueueyConfigurationException(
-                    $"{folder} belongs to another user (uid {folderOwner}), who could replace {shown}, so it was not read.")
+                    $"{folder} belongs to another user (uid {folderOwner}), who could replace {shown}, so {outcome}.")
                 {
                     SuggestedAction = "Keep the file in a folder that belongs to you, such as ~/.queuey.",
                 };
@@ -247,7 +288,7 @@ internal static class UserProfiles
             // En mappe andre kan skrive i, lar dem bytte ut fila, med mindre sticky-biten hindrer det (som i /tmp).
             if ((folderMode & (UnixFileMode.GroupWrite | UnixFileMode.OtherWrite)) != 0 && (folderMode & UnixFileMode.StickyBit) == 0)
                 throw new QueueyConfigurationException(
-                    $"{folder} can be written by other users (mode {Octal(folderMode)}), who could replace {shown}, so it was not read.")
+                    $"{folder} can be written by other users (mode {Octal(folderMode)}), who could replace {shown}, so {outcome}.")
                 {
                     SuggestedAction = $"Let only you write to it: chmod go-w {folder}",
                 };
@@ -255,8 +296,6 @@ internal static class UserProfiles
             if (home is not null && string.Equals(folder, home, StringComparison.Ordinal))
                 break;
         }
-
-        return target;
     }
 
     /// <summary>The file a link at <paramref name="path"/> finally points to, as a full path; the path itself when it is no link.</summary>

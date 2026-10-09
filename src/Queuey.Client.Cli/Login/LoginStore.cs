@@ -136,7 +136,9 @@ internal static class LoginStore
     internal static async Task<IDisposable> LockAsync(string path, CancellationToken cancellationToken)
     {
         string lockPath = path + ".lock";
-        PrivateFiles.EnsureFolder(Path.GetDirectoryName(Path.GetFullPath(lockPath))!);
+        string folder = Path.GetDirectoryName(Path.GetFullPath(lockPath))!;
+        PrivateFiles.EnsureFolder(folder);
+        UserProfiles.EnsureOnlyTheUserCanWriteIn(folder);
         DateTimeOffset until = DateTimeOffset.UtcNow + LockTimeout;
         while (true)
         {
@@ -186,6 +188,7 @@ internal static class PrivateFiles
     {
         string folder = Path.GetDirectoryName(target)!;
         EnsureFolder(folder);
+        UserProfiles.EnsureOnlyTheUserCanWriteIn(folder);
         string temp = Path.Combine(folder, $".{Path.GetFileName(target)}.{Guid.NewGuid():N}.tmp");
         try
         {

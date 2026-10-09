@@ -40,8 +40,20 @@ internal sealed class OAuthClient : IDisposable
 
     public OAuthClient(Uri apiBase)
     {
+        // Tokens går bare over https, eller http på denne maskinen (en lokal Queuey).
+        if (!IsSafe(apiBase))
+            throw new QueueyConfigurationException(
+                $"{apiBase.GetLeftPart(UriPartial.Authority)} is plain http on another machine, and a login sends its tokens to it, so nothing was sent.")
+            {
+                SuggestedAction = "Use the https address of the API host, or http only for a Queuey on this machine (localhost).",
+            };
+
         _apiBase = apiBase;
-        _http = CliHost.TestHandler is { } handler ? new HttpClient(handler, disposeHandler: false) : new HttpClient();
+        // Ingen omdirigering (security-review av #66, KAN 3): et svar som peker et annet sted, skal ikke få et refresh-token sendt
+        // dit på nytt.
+        _http = CliHost.TestHandler is { } handler
+            ? new HttpClient(handler, disposeHandler: false)
+            : new HttpClient(new HttpClientHandler { AllowAutoRedirect = false });
         _http.Timeout = TimeSpan.FromSeconds(30);
         _http.DefaultRequestHeaders.UserAgent.ParseAdd($"queuey-cli/{CliVersion.Current}");
     }
@@ -66,6 +78,13 @@ internal sealed class OAuthClient : IDisposable
                 (int)response.StatusCode, "login_metadata_unavailable");
 
         JsonElement root = await ReadJsonAsync(response, cancellationToken).ConfigureAwait(false);
+
+        // Utstederen er API-ets egen opprinnelse (login-plan.md), og endepunktene ligger der. Peker metadataen et annet sted, sendes
+        // ingen kode og intet token dit (security-review av #66, KAN 3).
+        if (!SameOrigin(Text(root, "issuer")))
+            throw new QueueyException($"{Host} gives an issuer in its login metadata that is not {Host} itself, so `queuey login` does not use it.",
+                errorCode: "login_metadata_invalid");
+
         return new OAuthEndpoints(
             Endpoint(root, "device_authorization_endpoint") ?? throw NotOffered("device_authorization_endpoint"),
             Endpoint(root, "token_endpoint") ?? throw NotOffered("token_endpoint"),
@@ -207,13 +226,21 @@ internal sealed class OAuthClient : IDisposable
     {
         if (Text(root, name) is not { } value)
             return null;
-        if (Uri.TryCreate(value, UriKind.Absolute, out Uri? uri)
-            && (uri.Scheme == Uri.UriSchemeHttps || (uri.Scheme == Uri.UriSchemeHttp && uri.IsLoopback)))
+        if (Uri.TryCreate(value, UriKind.Absolute, out Uri? uri) && IsSafe(uri) && SameOrigin(value))
             return uri;
 
-        throw new QueueyException($"{Host} gives {name} as an address the CLI does not send tokens to: it must be https, or http on this machine.",
+        throw new QueueyException(
+            $"{Host} gives {name} as an address the CLI does not send tokens to: it must be on {Host} itself, over https or on this machine.",
             errorCode: "login_metadata_invalid");
     }
+
+    /// <summary>https, or http on this machine.</summary>
+    internal static bool IsSafe(Uri uri) => uri.Scheme == Uri.UriSchemeHttps || (uri.Scheme == Uri.UriSchemeHttp && uri.IsLoopback);
+
+    /// <summary>Whether <paramref name="value"/> is an absolute URL with the API host's scheme, host and port.</summary>
+    private bool SameOrigin(string? value)
+        => Uri.TryCreate(value, UriKind.Absolute, out Uri? uri)
+           && string.Equals(uri.GetLeftPart(UriPartial.Authority), _apiBase.GetLeftPart(UriPartial.Authority), StringComparison.OrdinalIgnoreCase);
 
     private QueueyException NotOffered(string name)
         => new($"{Host} offers no {name} in its login metadata, so `queuey login` cannot use it.", errorCode: "login_unavailable");

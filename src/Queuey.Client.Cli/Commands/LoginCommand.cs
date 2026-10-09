@@ -48,13 +48,12 @@ internal static class LoginCommand
                 "operate (the default) lets the login change what the person may change; read only looks.");
 
         string? profile = CliHost.Profile(map);
-        ConnectionProfile? existing = profile is null ? null : UserProfiles.TryLoad(profile, CliHost.Env, out _);
-        Uri apiBase = ApiBase(map, existing);
+        (ConnectionProfile? existing, Uri apiBase, string? license) = Connection(map, profile);
         string host = LoginStore.HostKey(apiBase);
         string path = LoginStore.PathOf(CliHost.Env);
-        string? license = Clean(map.Get("license")) ?? Clean(existing?.License);
         var run = new LoginRun(map, json, scope, profile, existing, apiBase, host, path);
 
+        DateTimeOffset started = LoginTokens.Now();
         using var oauth = new OAuthClient(apiBase);
 
         // Er tilkoblingen alt gyldig, sies det, og kommandoen avslutter med 0: en agent kan kjøre den uten å sjekke først.
@@ -62,7 +61,10 @@ internal static class LoginCommand
             return await run.FinishAsync(oauth, valid.Login, valid.Workspaces, already: true);
 
         OAuthEndpoints endpoints = await oauth.DiscoverAsync(CancellationToken.None);
-        (PendingLogin pending, bool resumed) = await PendingOrNewAsync(run, oauth, endpoints);
+        (PendingLogin? waiting, bool resumed, StoredLogin? meanwhile) = await PendingOrNewAsync(run, oauth, endpoints, started);
+        if (meanwhile is not null || waiting is null)
+            return await run.FinishAsync(oauth, meanwhile!, workspaces: null, already: false);
+        PendingLogin pending = waiting;
 
         bool interactive = !json && IsTerminal() && WorkspaceCreation.DetectedCi(CliHost.Env) is null;
         bool wait = map.Has("wait") || interactive;
@@ -114,7 +116,7 @@ internal static class LoginCommand
         {
             token = await tokens.AccessTokenAsync(CancellationToken.None);
         }
-        catch (QueueyConfigurationException)
+        catch (QueueyConfigurationException ex) when (LoginTokens.IsEnded(ex))
         {
             return null; // Tilkoblingen er slutt og fjernet; en ny innlogging følger.
         }
@@ -127,13 +129,24 @@ internal static class LoginCommand
         return null;
     }
 
-    /// <summary>The device code waiting for this host and scope, or a new one, stored so the next run can pick it up.</summary>
-    private static async Task<(PendingLogin Pending, bool Resumed)> PendingOrNewAsync(LoginRun run, OAuthClient oauth, OAuthEndpoints endpoints)
+    /// <summary>
+    /// The device code waiting for this host and scope, or a new one, stored so the next run can pick it up. Or, when another
+    /// queuey login finished one for this host and scope while this run waited for the lock, that login.
+    /// </summary>
+    private static async Task<(PendingLogin? Pending, bool Resumed, StoredLogin? Meanwhile)> PendingOrNewAsync(
+        LoginRun run, OAuthClient oauth, OAuthEndpoints endpoints, DateTimeOffset started)
     {
         using (await LoginStore.LockAsync(run.Path, CancellationToken.None))
         {
             CredentialsFile file = LoginStore.Read(run.Path);
             DateTimeOffset now = LoginTokens.Now();
+
+            // To samtidige `queuey login` (security-review av #66, BØR 1): den andre ventet på låsen mens den første løste inn koden.
+            // Den skal bruke den innloggingen, ikke be om en ny kode.
+            if (file.For(run.Host).Where(l => l.Scope == run.Scope && l.LoggedInAt >= started)
+                    .OrderByDescending(l => l.LoggedInAt).FirstOrDefault() is { } meanwhile)
+                return (null, false, meanwhile);
+
             int before = file.Pending.Count;
             file.Pending.RemoveAll(p => p.ExpiresAt <= now);
             PendingLogin? waiting = file.Pending.FirstOrDefault(p => p.ApiBase == run.Host && p.Scope == run.Scope);
@@ -141,7 +154,7 @@ internal static class LoginCommand
             {
                 if (file.Pending.Count != before)
                     LoginStore.Write(run.Path, file);
-                return (waiting, true);
+                return (waiting, true, null);
             }
 
             DeviceAuthorization device = await oauth.StartDeviceAsync(endpoints, run.Scope, CancellationToken.None);
@@ -159,59 +172,86 @@ internal static class LoginCommand
             };
             file.Pending.Add(pending);
             LoginStore.Write(run.Path, file);
-            return (pending, false);
+            return (pending, false, null);
         }
     }
 
     private sealed record PollOutcome(StoredLogin? Login, int? Failed);
 
     /// <summary>
-    /// Asks once whether the code is approved, no sooner than the interval after the last time it was asked, or after it was
-    /// made (RFC 8628 §3.5). Approved: the login, stored, and the code gone. Declined or expired: the error, written, and the
-    /// code gone. Still waiting: neither.
+    /// Asks once whether the code is approved, no sooner than the interval after the last time any process asked, or after it
+    /// was made (RFC 8628 §3.5). Approved: the login, stored, and the code gone. Declined or expired: the error, written, and
+    /// the code gone. Still waiting: neither.
     /// </summary>
+    // Security-review av #66 (BØR 1): to prosesser som spurte om samme kode, løste den inn to ganger, og OpenIddict trekker
+    // tilbake hele autorisasjonen når en device-kode brukes på nytt. Nå spørres det under låsen, etter at fila er lest på nytt: er
+    // koden borte, har en annen prosess løst den inn, og innloggingen den lagret, brukes.
     private static async Task<PollOutcome> PollAsync(LoginRun run, OAuthClient oauth, OAuthEndpoints endpoints, PendingLogin pending)
     {
         DateTimeOffset next = (pending.LastPolledAt ?? pending.CreatedAt) + TimeSpan.FromSeconds(pending.Interval);
         DateTimeOffset now = LoginTokens.Now();
         if (next > now && now < pending.ExpiresAt)
             await Delay(next - now, CancellationToken.None);
-        if (LoginTokens.Now() >= pending.ExpiresAt)
-            return new PollOutcome(null, await run.CodeEndedAsync(pending, "expired_token"));
 
-        TokenAnswer answer = await oauth.PollAsync(endpoints, pending.DeviceCode, CancellationToken.None);
-        if (answer.Succeeded)
-            return new PollOutcome(await run.StoreAsync(pending, answer), null);
-
-        switch (answer.Error)
+        string? ended = null, description = null;
+        StoredLogin? login = null, replaced = null;
+        using (await LoginStore.LockAsync(run.Path, CancellationToken.None))
         {
-            case "authorization_pending":
-                await RememberAsync(run.Path, pending, interval: pending.Interval);
-                return new PollOutcome(null, null);
-            case "slow_down":
-                // RFC 8628 §3.5: intervallet øker med 5 sekunder, for dette og hvert senere spørsmål.
-                await RememberAsync(run.Path, pending, interval: pending.Interval + 5);
-                return new PollOutcome(null, null);
-            default:
-                return new PollOutcome(null, await run.CodeEndedAsync(pending, answer.Error ?? "unknown", answer.ErrorDescription));
-        }
-    }
-
-    /// <summary>When the code was asked about, and the interval Queuey wants now, in memory and in the file.</summary>
-    private static async Task RememberAsync(string path, PendingLogin pending, int interval)
-    {
-        pending.LastPolledAt = LoginTokens.Now();
-        pending.Interval = interval;
-        using (await LoginStore.LockAsync(path, CancellationToken.None))
-        {
-            CredentialsFile file = LoginStore.Read(path);
-            if (file.Pending.FirstOrDefault(p => p.DeviceCode == pending.DeviceCode) is { } stored)
+            CredentialsFile file = LoginStore.Read(run.Path);
+            PendingLogin? stored = file.Pending.FirstOrDefault(p => p.DeviceCode == pending.DeviceCode);
+            if (stored is null)
             {
-                stored.LastPolledAt = pending.LastPolledAt;
-                stored.Interval = interval;
-                LoginStore.Write(path, file);
+                StoredLogin? theirs = file.For(run.Host)
+                    .Where(l => l.Scope == run.Scope && l.LoggedInAt >= pending.CreatedAt)
+                    .OrderByDescending(l => l.LoggedInAt).FirstOrDefault();
+                return theirs is not null
+                    ? new PollOutcome(theirs, null)
+                    : new PollOutcome(null, run.CodeEnded("code_ended",
+                        "Another queuey login ended this login code without a login: it was declined, or it expired."));
             }
+
+            // En annen prosess kan ha spurt imens: dens tidspunkt og intervall gjelder.
+            pending.LastPolledAt = stored.LastPolledAt;
+            pending.Interval = stored.Interval;
+            now = LoginTokens.Now();
+            if (now < pending.ExpiresAt && (pending.LastPolledAt ?? pending.CreatedAt) + TimeSpan.FromSeconds(pending.Interval) > now)
+                return new PollOutcome(null, null);
+
+            if (now >= pending.ExpiresAt)
+            {
+                ended = "expired_token";
+            }
+            else
+            {
+                TokenAnswer answer = await oauth.PollAsync(endpoints, pending.DeviceCode, CancellationToken.None);
+                if (answer.Succeeded)
+                {
+                    (login, replaced) = run.Store(file, pending, answer);
+                }
+                else if (answer.Error is "authorization_pending" or "slow_down")
+                {
+                    // RFC 8628 §3.5: slow_down øker intervallet med 5 sekunder, for dette og hvert senere spørsmål.
+                    stored.LastPolledAt = pending.LastPolledAt = LoginTokens.Now();
+                    stored.Interval = pending.Interval = pending.Interval + (answer.Error == "slow_down" ? 5 : 0);
+                }
+                else
+                {
+                    (ended, description) = (answer.Error ?? "unknown", answer.ErrorDescription);
+                }
+            }
+
+            if (ended is not null)
+                file.Pending.Remove(stored);
+            LoginStore.Write(run.Path, file);
         }
+
+        if (login is not null)
+        {
+            await run.RevokeReplacedAsync(replaced);
+            return new PollOutcome(login, null);
+        }
+
+        return ended is null ? new PollOutcome(null, null) : new PollOutcome(null, run.CodeEnded(ended, description));
     }
 
     /// <summary>Removes the stored login for <paramref name="license"/> on <paramref name="host"/>.</summary>
@@ -225,10 +265,27 @@ internal static class LoginCommand
         }
     }
 
-    /// <summary>The API host: <c>--api-base</c>, the profile's, <c>QUEUEY_API_BASE</c>, or Queuey's own.</summary>
-    internal static Uri ApiBase(ArgMap map, ConnectionProfile? profile)
+    /// <summary>
+    /// The profile as it is (null when it is not there yet), the API host and the license a login is for. With a profile,
+    /// by the profile's rule (F2.7): a flag, then the profile, and a <c>QUEUEY_</c> variable that disagrees with the profile is
+    /// an error, so a variable left in the shell from another environment never ends up in the profile. Without one, as
+    /// every command: <c>--api-base</c>, <c>QUEUEY_API_BASE</c>, or Queuey's own host.
+    /// </summary>
+    // Security-review av #66 (BØR 2): login tok QUEUEY_API_BASE når profilen ikke hadde noen vert, og skrev den inn i profilen.
+    internal static (ConnectionProfile? Existing, Uri ApiBase, string? License) Connection(ArgMap map, string? profile)
     {
-        string? chosen = Clean(map.Get("api-base")) ?? Clean(profile?.ApiBase) ?? Clean(CliHost.Env("QUEUEY_API_BASE"));
+        if (profile is null)
+            return (null, ApiBase(map), Clean(map.Get("license")) ?? Clean(CliHost.Env("QUEUEY_LICENSE")));
+
+        ConnectionProfile? existing = UserProfiles.TryLoad(profile, CliHost.Env, out string path);
+        ResolvedConfig resolved = CliConfig.ResolveProfile(map, CliHost.Env, profile, existing ?? new ConnectionProfile(), path);
+        return (existing, resolved.ResolvedApiBase(), resolved.LicensePublicId);
+    }
+
+    /// <summary>The API host without a profile: <c>--api-base</c>, <c>QUEUEY_API_BASE</c>, or Queuey's own.</summary>
+    internal static Uri ApiBase(ArgMap map)
+    {
+        string? chosen = Clean(map.Get("api-base")) ?? Clean(CliHost.Env("QUEUEY_API_BASE"));
         if (chosen is null)
             return new ResolvedConfig().ResolvedApiBase();
         if (!Uri.TryCreate(chosen, UriKind.Absolute, out Uri? uri))
@@ -315,12 +372,21 @@ internal static class LoginCommand
             Console.WriteLine($"{then} The code expires in {minutes} minute{(minutes == 1 ? "" : "s")}.");
         }
 
-        /// <summary>The approved login, stored in place of an earlier one for the same host and license, and the code removed.</summary>
-        public async Task<StoredLogin> StoreAsync(PendingLogin pending, TokenAnswer answer)
+        /// <summary>
+        /// The approved login, put in <paramref name="file"/> in place of an earlier one for the same host and license, with the
+        /// code removed. The caller holds the lock and writes the file. A license that is not a license id is refused.
+        /// </summary>
+        public (StoredLogin Login, StoredLogin? Replaced) Store(CredentialsFile file, PendingLogin pending, TokenAnswer answer)
         {
-            if (string.IsNullOrWhiteSpace(answer.License))
-                throw new QueueyException($"{Host} approved the login without saying which license it is for (license in the token answer).",
-                    errorCode: "login_answer_incomplete");
+            // Serveren styrer verdien, og den vises og står i profilen (security-review av #66, KAN 6).
+            if (!LicenseIds.IsOne(answer.License))
+            {
+                file.Pending.RemoveAll(p => p.DeviceCode == pending.DeviceCode);
+                LoginStore.Write(Path, file);
+                throw new QueueyException(
+                    $"{Host} approved the login without a license id (lic_…) in the token answer, so it was not stored. The value is not shown.",
+                    errorCode: "login_answer_invalid");
+            }
 
             var login = new StoredLogin
             {
@@ -331,53 +397,44 @@ internal static class LoginCommand
             };
             LoginTokens.Apply(login, answer);
 
-            StoredLogin? replaced;
-            using (await LoginStore.LockAsync(Path, CancellationToken.None))
-            {
-                CredentialsFile file = LoginStore.Read(Path);
-                replaced = file.Find(Host, login.License);
-                if (replaced is not null)
-                    file.Logins.Remove(replaced);
-                file.Logins.Add(login);
-                file.Pending.RemoveAll(p => p.DeviceCode == pending.DeviceCode);
-                LoginStore.Write(Path, file);
-            }
-
-            // Den forrige tilkoblingen for samme lisens (et annet scope, eller en som ikke lenger virket) står ellers under
-            // Connected apps til den går ut. Tilbakekallet er et forsøk: det nye er lagret uansett.
-            if (replaced?.RefreshToken is { } old)
-            {
-                try
-                {
-                    using var oauth = new OAuthClient(ApiBase);
-                    await oauth.RevokeAsync(await oauth.DiscoverAsync(CancellationToken.None), old, "refresh_token", CancellationToken.None);
-                }
-                catch (Exception ex) when (ex is QueueyException or System.Net.Http.HttpRequestException or TaskCanceledException)
-                {
-                    // Bare et forsøk.
-                }
-            }
-
-            return login;
+            StoredLogin? replaced = file.Find(Host, login.License);
+            if (replaced is not null)
+                file.Logins.Remove(replaced);
+            file.Logins.Add(login);
+            file.Pending.RemoveAll(p => p.DeviceCode == pending.DeviceCode);
+            return (login, replaced);
         }
 
-        /// <summary>The code is spent: declined, expired, or unknown to Queuey. It is removed, and the error written.</summary>
-        public async Task<int> CodeEndedAsync(PendingLogin pending, string error, string? description = null)
+        /// <summary>
+        /// Revokes the connection a new login replaced (another scope, or one that no longer worked), which would otherwise stay
+        /// under Connected apps until it expires. Only an attempt: the new one is stored either way.
+        /// </summary>
+        public async Task RevokeReplacedAsync(StoredLogin? replaced)
         {
-            using (await LoginStore.LockAsync(Path, CancellationToken.None))
+            if (replaced?.RefreshToken is not { } old)
+                return;
+            try
             {
-                CredentialsFile file = LoginStore.Read(Path);
-                if (file.Pending.RemoveAll(p => p.DeviceCode == pending.DeviceCode) > 0)
-                    LoginStore.Write(Path, file);
+                using var oauth = new OAuthClient(ApiBase);
+                await oauth.RevokeAsync(await oauth.DiscoverAsync(CancellationToken.None), old, "refresh_token", CancellationToken.None);
             }
+            catch (Exception ex) when (ex is QueueyException or System.Net.Http.HttpRequestException or TaskCanceledException)
+            {
+                // Bare et forsøk.
+            }
+        }
 
+        /// <summary>The code is spent: declined, expired, or unknown to Queuey. The caller has removed it; this writes the error.</summary>
+        public int CodeEnded(string error, string? description = null)
+        {
             (string message, string action) = error switch
             {
                 "access_denied" => ("The login was declined in the Queuey console.",
                     "Run `queuey login` again if that was a mistake."),
                 "expired_token" => ("The login code expired before anyone approved it.",
                     "Run `queuey login` for a new code, and approve it within its time."),
-                _ => ($"{Host} ended the login code ({error}){(description is null ? "." : $": {TerminalText.Line(description)}")}",
+                "code_ended" => (description!, "Run `queuey login` for a new code."),
+                _ => ($"{Host} ended the login code ({TerminalText.Line(error)}){(description is null ? "." : $": {TerminalText.Line(description)}")}",
                     "Run `queuey login` for a new code."),
             };
             return CliErrors.Write(Json, error, message, action, status: null, ExitCodes.RuntimeError, "Login failed");
@@ -407,7 +464,9 @@ internal static class LoginCommand
                         ApiBaseOverride = ApiBase,
                         IngressBaseOverride = Uri.TryCreate(login.IngressBase ?? Existing?.IngressBase, UriKind.Absolute, out Uri? given) ? given : null,
                     }.ResolvedIngressBase());
-                (profileFile, profileHasKey) = UserProfiles.WriteLogin(Profile, CliHost.Env, login.License, Host, ingress, tenant);
+                (profileFile, profileHasKey, tenant) = UserProfiles.WriteLogin(Profile, CliHost.Env, login.License, Host, ingress, tenant);
+                if (profileHasKey)
+                    (workspaceName, workspaceEnvironment, note) = (null, null, null);
             }
 
             if (Json)
@@ -443,8 +502,8 @@ internal static class LoginCommand
             }
 
             if (profileHasKey)
-                Console.Error.WriteLine($"Note: profile {Profile} in {profileFile} also has an apiKey, which wins over the login. " +
-                                        "Remove it there to use the login.");
+                Console.Error.WriteLine($"Note: profile {Profile} in {profileFile} has an apiKey, which wins over the login, so only the fields " +
+                                        "it lacked were filled. Remove the apiKey there to use the login.");
             return ExitCodes.Success;
         }
 
@@ -497,11 +556,9 @@ internal static class LogoutCommand
 
         bool json = map.Has("json");
         string? profile = CliHost.Profile(map);
-        ConnectionProfile? existing = profile is null ? null : UserProfiles.TryLoad(profile, CliHost.Env, out _);
-        Uri apiBase = LoginCommand.ApiBase(map, existing);
+        (_, Uri apiBase, string? license) = LoginCommand.Connection(map, profile);
         string host = LoginStore.HostKey(apiBase);
         string path = LoginStore.PathOf(CliHost.Env);
-        string? license = LoginCommand.Clean(map.Get("license")) ?? LoginCommand.Clean(existing?.License);
 
         // Fjernes her først, så ingen kommando bruker tokenene mens Queuey blir fortalt det.
         List<StoredLogin> removed;

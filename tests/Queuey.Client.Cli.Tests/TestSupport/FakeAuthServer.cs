@@ -23,6 +23,10 @@ internal sealed class FakeAuthServer
     /// <summary>Workspacene GET /tenants svarer med.</summary>
     public List<object> Workspaces { get; } = new();
 
+    /// <summary>Utstederen og token-endepunktet metadataen oppgir; som standard API-ets egen opprinnelse.</summary>
+    public string Issuer { get; set; } = Api + "/";
+    public string TokenEndpoint { get; set; } = Api + "/connect/token";
+
     /// <summary>Metadata-svaret, eller null for en Queuey uten innlogging (404).</summary>
     public bool OffersLogin { get; set; } = true;
 
@@ -70,9 +74,9 @@ internal sealed class FakeAuthServer
                 return OffersLogin
                     ? RecordingHandler.Json(HttpStatusCode.OK, new Dictionary<string, object>
                     {
-                        ["issuer"] = Api + "/",
+                        ["issuer"] = Issuer,
                         ["device_authorization_endpoint"] = Api + "/connect/device",
-                        ["token_endpoint"] = Api + "/connect/token",
+                        ["token_endpoint"] = TokenEndpoint,
                         ["revocation_endpoint"] = Api + "/connect/revoke",
                         ["grant_types_supported"] = new[] { "urn:ietf:params:oauth:grant-type:device_code", "refresh_token" },
                     })
