@@ -79,10 +79,11 @@ public sealed class QueueyOptions
     /// as the signing key <c>queuey keys mint --write .env</c> writes. A value set in code wins. When the signing key and its
     /// secret are both set, <c>QUEUEY_API_KEY</c> is not read: the producer signs with the key that reaches only its queue,
     /// not a license-wide one.
-    /// In Development (<c>DOTNET_ENVIRONMENT</c> or <c>ASPNETCORE_ENVIRONMENT</c>), a name the environment does not set is
-    /// also read from <c>.env</c> in the working folder: only <c>QUEUEY_*</c> names, only when it is a regular file of the
-    /// user's own (on Windows the profile's ACL protects it) that git does not track. Elsewhere <c>.env</c> is never read:
-    /// production takes its secrets from the platform's environment. Returns these options.
+    /// In Development (<c>DOTNET_ENVIRONMENT</c> or <c>ASPNETCORE_ENVIRONMENT</c>), when the environment does not hold both,
+    /// the signing key and its secret are read as a pair from <c>.env</c> in the working folder, and nothing else is: the
+    /// hosts, the tenant and the API key never come from it. Only from a regular file of the user's own (on Windows: under the
+    /// user's profile folder) that git does not track. Elsewhere <c>.env</c> is never read: production takes its secrets
+    /// from the platform's environment. Returns these options.
     /// </summary>
     /// <param name="read">Reads a variable; <see cref="System.Environment.GetEnvironmentVariable(string)"/> when null.</param>
     public QueueyOptions UseEnvironmentVariables(Func<string, string?>? read = null)
@@ -92,15 +93,16 @@ public sealed class QueueyOptions
     internal QueueyOptions UseEnvironmentVariables(Func<string, string?>? read, string? dotEnvFolder)
     {
         read ??= System.Environment.GetEnvironmentVariable;
-        // Miljøvariablene vinner; .env fyller bare et navn de ikke setter, og bare i Development (DotEnvFile).
-        IReadOnlyDictionary<string, string> dotEnv = dotEnvFolder is not null && DotEnvFile.IsDevelopment(read)
-            ? DotEnvFile.Read(dotEnvFolder)
-            : new Dictionary<string, string>();
-        string? Read(string name) => read(name) is { } value && !string.IsNullOrWhiteSpace(value) ? value.Trim()
-            : dotEnv.TryGetValue(name, out string? fromFile) ? fromFile.Trim() : null;
+        string? Read(string name) => read(name) is { } value && !string.IsNullOrWhiteSpace(value) ? value.Trim() : null;
 
-        SigningKeyId ??= Read(QueueyEnvironmentVariables.SigningKeyId);
-        SigningSecret ??= Read(QueueyEnvironmentVariables.SigningSecret);
+        // Signeringsparet tas fra ett sted: miljøet når det har begge, ellers .env (bare i Development, DotEnvFile). Ingen andre
+        // navn leses fra .env: en fil i arbeidsmappa skal ikke kunne velge vertene nøkkelen sendes til (security-review av #68, R1).
+        (string? keyId, string? secret) = (Read(QueueyEnvironmentVariables.SigningKeyId), Read(QueueyEnvironmentVariables.SigningSecret));
+        if ((keyId is null || secret is null) && dotEnvFolder is not null && DotEnvFile.IsDevelopment(read)
+            && DotEnvFile.ReadSigningPair(dotEnvFolder) is { } fromFile)
+            (keyId, secret) = fromFile;
+        SigningKeyId ??= keyId;
+        SigningSecret ??= secret;
         // Minste privilegium (security-review av #67, KAN G): med et signeringspar leses ikke QUEUEY_API_KEY, for en satt nøkkel
         // ville vunnet over signeringen ved publisering. En nøkkel satt i koden vinner fortsatt.
         if (string.IsNullOrWhiteSpace(SigningKeyId) || string.IsNullOrWhiteSpace(SigningSecret))

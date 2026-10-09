@@ -98,9 +98,64 @@ public sealed class DotEnvFileTests : IDisposable
 
         Assert.Equal("hsk_01FILE", options.SigningKeyId);
         Assert.Equal("file secret", options.SigningSecret);
-        Assert.Equal("ten_env", options.TenantPublicId); // miljøet vinner
+        Assert.Equal("ten_env", options.TenantPublicId); // fra miljøet; .env gir aldri workspacet
         Assert.Null(options.ApiKey);
-        Assert.Equal(new[] { "QUEUEY_SIGNING_KEY_ID", "QUEUEY_SIGNING_SECRET", "QUEUEY_TENANT" }, DotEnvFile.Read(_dir).Keys.OrderBy(k => k).ToArray());
+    }
+
+    [Fact]
+    public void Only_the_signing_pair_is_ever_taken_from_dot_env_never_a_host_a_tenant_or_a_key()
+    {
+        // Security-review av #68 (R1): en .env som pekte vertene et annet sted, styrte hvor nøkkelen gikk.
+        System.IO.File.AppendAllText(System.IO.Path.Combine(_dir, ".env"),
+            "QUEUEY_API_BASE=https://evil.test\nQUEUEY_INGRESS_BASE=https://evil.test\nQUEUEY_API_KEY=qak_file.key\nQUEUEY_LICENSE=lic_file\n");
+
+        var options = new QueueyOptions().UseEnvironmentVariables(Env(("DOTNET_ENVIRONMENT", "Development")), _dir);
+
+        Assert.Equal("hsk_01FILE", options.SigningKeyId);
+        Assert.Null(options.ApiBaseAddress);
+        Assert.Null(options.IngressBaseAddress);
+        Assert.Null(options.ApiKey);
+        Assert.Null(options.LicensePublicId);
+        Assert.Null(options.TenantPublicId);
+    }
+
+    [Fact]
+    public void The_signing_pair_comes_from_one_place_never_half_from_each()
+    {
+        var both = new QueueyOptions().UseEnvironmentVariables(
+            Env(("DOTNET_ENVIRONMENT", "Development"), ("QUEUEY_SIGNING_KEY_ID", "hsk_01ENV"), ("QUEUEY_SIGNING_SECRET", "env secret")), _dir);
+        Assert.Equal(("hsk_01ENV", "env secret"), (both.SigningKeyId, both.SigningSecret));
+
+        // Bare id-en i miljøet: paret tas fra .env, ikke id fra det ene og hemmelighet fra det andre.
+        var half = new QueueyOptions().UseEnvironmentVariables(Env(("DOTNET_ENVIRONMENT", "Development"), ("QUEUEY_SIGNING_KEY_ID", "hsk_01ENV")), _dir);
+        Assert.Equal(("hsk_01FILE", "file secret"), (half.SigningKeyId, half.SigningSecret));
+    }
+
+    [Fact]
+    public void Git_runs_without_a_repositorys_fsmonitor_or_hooks()
+    {
+        // Security-review av #68 (K3).
+        if (System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows))
+            return;
+        string bin = System.IO.Path.Combine(_dir, "bin"), log = System.IO.Path.Combine(_dir, "git-args.log");
+        System.IO.Directory.CreateDirectory(bin);
+        string git = System.IO.Path.Combine(bin, "git");
+        System.IO.File.WriteAllText(git, $"#!/bin/sh\necho \"$@\" >> '{log}'\nexit 1\n");
+        System.IO.File.SetUnixFileMode(git, (System.IO.UnixFileMode)0x1C0);
+        Func<string?> path = DotEnvFile.PathVariable;
+        DotEnvFile.PathVariable = () => bin;
+        DotEnvFile.Git = _git;
+        try
+        {
+            DotEnvFile.Read(_dir);
+        }
+        finally
+        {
+            DotEnvFile.PathVariable = path;
+        }
+
+        string args = System.IO.File.ReadAllText(log);
+        Assert.StartsWith("-c core.fsmonitor=false -c core.hooksPath=/dev/null ls-files --error-unmatch -- .env", args);
     }
 
     [Theory]

@@ -26,9 +26,10 @@ primary way in, and `queuey keys mint --write .env` makes one. A license-wide AP
 to a person, who mints it in the console; give it to an app only when the app manages Queuey, not to publish.
 
 **`.env` in Development.** `UseEnvironmentVariables()` fills each setting not set in code from its `QUEUEY_*`
-variable. In Development (`DOTNET_ENVIRONMENT` or `ASPNETCORE_ENVIRONMENT`), a name the environment does not set
-is also read from `.env` in the working folder: only `QUEUEY_*` names, and only from a regular file of your own
-that git does not track. The environment always wins. Outside Development `.env` is never read: production takes
+variable. In Development (`DOTNET_ENVIRONMENT` or `ASPNETCORE_ENVIRONMENT`), when the environment does not hold
+both, `QUEUEY_SIGNING_KEY_ID` and `QUEUEY_SIGNING_SECRET` are read as a pair from `.env` in the working folder, and
+nothing else is: hosts, tenant and API key never come from a file. Only from a regular file of your own (on Windows,
+under your profile folder) that git does not track. The environment always wins. Outside Development `.env` is never read: production takes
 its secrets from the platform, and a file in the working folder read silently there would be a surprise.
 
 - Tiny and dependency-light: `System.Text.Json` + `HttpClient`, no Newtonsoft.

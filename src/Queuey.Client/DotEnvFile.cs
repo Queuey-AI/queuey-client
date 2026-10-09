@@ -8,8 +8,9 @@ using System.Runtime.InteropServices;
 namespace Queuey.Client;
 
 // Blindtesten 2026-10-09 (funn 9): `queuey keys mint --write .env` skrev signeringsnøkkelen i .env, og en .NET-app leste den
-// ikke, for .NET leser ikke .env selv. UseEnvironmentVariables() leser nå QUEUEY_*-navnene derfra, med reglene `queuey publish`
-// har: bare en vanlig fil eid av brukeren, aldri en git sporer, og miljøvariablene vinner.
+// ikke, for .NET leser ikke .env selv. UseEnvironmentVariables() leser nå signeringsparet derfra, og bare det, med reglene
+// `queuey publish` har: et par fra ett sted, bare en vanlig fil eid av brukeren, aldri en git sporer, og miljøet vinner.
+// Security-review av #68 (R1): først leste den alle QUEUEY_*-navn, også vertene, så en .env kunne velge hvor nøkkelen gikk.
 //
 // Bare i Development (DOTNET_ENVIRONMENT eller ASPNETCORE_ENVIRONMENT). Valgt fordi .env er en utviklerkonvensjon: der keys
 // mint skriver den, på en utviklers maskin. I produksjon kommer hemmeligheter fra plattformens miljø eller hemmelighetslager,
@@ -42,6 +43,16 @@ internal static class DotEnvFile
     /// The <c>QUEUEY_*</c> values in <c>.env</c> in <paramref name="folder"/>: empty when there is none, or when it is not a
     /// regular file of the user's own, or git tracks it (or cannot say while it is inside a repository folder).
     /// </summary>
+    /// <summary>The signing key and its secret from <c>.env</c> in <paramref name="folder"/>, both or neither.</summary>
+    internal static (string KeyId, string Secret)? ReadSigningPair(string folder)
+    {
+        IReadOnlyDictionary<string, string> values = Read(folder);
+        return values.TryGetValue(QueueyEnvironmentVariables.SigningKeyId, out string? keyId)
+               && values.TryGetValue(QueueyEnvironmentVariables.SigningSecret, out string? secret)
+            ? (keyId.Trim(), secret.Trim())
+            : null;
+    }
+
     internal static IReadOnlyDictionary<string, string> Read(string folder)
     {
         var values = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -104,11 +115,17 @@ internal static class DotEnvFile
         var info = new FileInfo(path);
         if (!info.Exists || (info.Attributes & FileAttributes.ReparsePoint) != 0)
             return false;
+        // Windows har ingen eier å sjekke her uten ACL-er. Fail-closed (security-review av #68, R1): bare under brukerens egen
+        // profilmappe, som bare brukeren kan skrive i.
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            return true;
+            return UserProfileFolder() is { Length: > 0 } profile
+                   && info.FullName.StartsWith(profile.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
         uint? owner = OwnerOf(path), me = CurrentUser();
         return owner is not null && me is not null && owner == me;
     }
+
+    /// <summary>The user's profile folder, as Windows names it. A seam for tests.</summary>
+    internal static Func<string?> UserProfileFolder { get; set; } = () => Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
 
     /// <summary>Whether git tracks <c>.env</c> in <paramref name="folder"/>, or cannot say while the folder is inside a repository.</summary>
     private static bool TrackedByGit(string folder)
@@ -149,7 +166,8 @@ internal static class DotEnvFile
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 CreateNoWindow = true,
-                Arguments = string.Join(" ", arguments.Select(a => a.Contains(' ') ? "\"" + a + "\"" : a)),
+                // Ingen fsmonitor og ingen hooks (security-review av #68, K3): et repo kan sette en kommando der, som git kjører.
+                Arguments = string.Join(" ", SafeArguments.Concat(arguments).Select(a => a.Contains(' ') ? "\"" + a + "\"" : a)),
             };
             start.EnvironmentVariables["GIT_TERMINAL_PROMPT"] = "0";
             foreach (string key in start.EnvironmentVariables.Keys.Cast<string>()
@@ -175,9 +193,16 @@ internal static class DotEnvFile
         }
     }
 
+    /// <summary>What git is always run with, before the command: no fsmonitor and no hooks a repository could set.</summary>
+    internal static readonly string[] SafeArguments =
+        { "-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "NUL" : "/dev/null") };
+
+    /// <summary>The search path git is looked up in. A seam for tests.</summary>
+    internal static Func<string?> PathVariable { get; set; } = () => Environment.GetEnvironmentVariable("PATH");
+
     private static string? FindGit()
     {
-        string? path = Environment.GetEnvironmentVariable("PATH");
+        string? path = PathVariable();
         if (string.IsNullOrEmpty(path))
             return null;
         string name = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "git.exe" : "git";

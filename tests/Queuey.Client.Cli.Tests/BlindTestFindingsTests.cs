@@ -326,6 +326,31 @@ public sealed class BlindTestFindingsTests : IDisposable
         Assert.True(EnvFile.TrackedByGit(Path.Combine(repo, ".env")));
     }
 
+    [Fact]
+    public void The_cli_runs_git_without_a_repositorys_fsmonitor_or_hooks()
+    {
+        // Security-review av #68 (K3): core.fsmonitor i et klonet repo er en kommando git kjører.
+        if (OperatingSystem.IsWindows())
+            return;
+        string bin = Path.Combine(_dir, "bin"), log = Path.Combine(_dir, "git-args.log");
+        Directory.CreateDirectory(bin);
+        string git = Path.Combine(bin, "git");
+        File.WriteAllText(git, $"#!/bin/sh\necho \"$@\" >> '{log}'\nexit 1\n");
+        File.SetUnixFileMode(git, (UnixFileMode)0x1C0);
+        Func<string?> path = GitSource.PathVariable;
+        GitSource.PathVariable = () => bin;
+        try
+        {
+            GitSource.RunGitWithExit(_dir, "ls-files", "--error-unmatch", "--", ".env");
+        }
+        finally
+        {
+            GitSource.PathVariable = path;
+        }
+
+        Assert.StartsWith("-c core.fsmonitor=false -c core.hooksPath=/dev/null ls-files", File.ReadAllText(log));
+    }
+
     private static void Run(string folder, string program, params string[] args)
     {
         var start = new ProcessStartInfo(program) { WorkingDirectory = folder, UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true };

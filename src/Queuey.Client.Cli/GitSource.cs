@@ -32,6 +32,10 @@ internal static class GitSource
     /// <summary>The runner the CLI uses: the <c>git</c> found in <see cref="PathVariable"/>, a few seconds at most per call.</summary>
     internal static GitRunner Git { get; set; } = RunGit;
 
+    /// <summary>What git is always run with, before the command: no fsmonitor, and no hooks a repository could set.</summary>
+    internal static readonly string[] SafeArguments =
+        { "-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + (OperatingSystem.IsWindows() ? "NUL" : "/dev/null") };
+
     /// <summary>The search path git is looked up in. The process's <c>PATH</c>; tests give their own.</summary>
     internal static Func<string?> PathVariable { get; set; } = () => Environment.GetEnvironmentVariable("PATH");
 
@@ -107,7 +111,9 @@ internal static class GitSource
                 UseShellExecute = false,
                 CreateNoWindow = true,
             };
-            foreach (string argument in arguments)
+            // Ingen fsmonitor og ingen hooks (security-review av #68, K3): et repo kan sette en kommando i core.fsmonitor, som git
+            // kjører ved status og andre lesinger.
+            foreach (string argument in SafeArguments.Concat(arguments))
                 start.ArgumentList.Add(argument);
             // Ingen pager og ingen spørsmål om passord: en remote som vil ha innlogging, skal ikke stoppe en apply.
             start.Environment["GIT_TERMINAL_PROMPT"] = "0";
