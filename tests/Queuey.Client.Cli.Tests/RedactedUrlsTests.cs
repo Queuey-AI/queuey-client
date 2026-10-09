@@ -357,4 +357,16 @@ public sealed class RedactedUrlsTests
         Assert.Equal("queues.orders.delivery.url", root.GetProperty("comparedRedacted")[0].GetString());
         Assert.DoesNotContain("abc123", json.Stdout);
     }
+
+    [Fact]
+    public void A_url_change_that_reads_the_same_without_a_marker_is_a_change_in_its_hidden_part()
+    {
+        // B1: bare spørringen skilte, og den er tatt bort i begge sider.
+        static JsonElement Text(string s) => JsonDocument.Parse(JsonSerializer.Serialize(s)).RootElement;
+        var change = new Queuey.Client.Waas.PlannedChange { Path = "delivery.targets[0].url", From = Text("https://h.test/in"), To = Text("https://h.test/in") };
+        var other = new Queuey.Client.Waas.PlannedChange { Path = "delivery.authMode", From = Text("None"), To = Text("None") };
+
+        Assert.True(PlanCommand.HiddenPartChanged(change));
+        Assert.False(PlanCommand.HiddenPartChanged(other));
+    }
 }

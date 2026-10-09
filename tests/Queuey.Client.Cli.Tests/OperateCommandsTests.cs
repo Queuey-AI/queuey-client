@@ -111,8 +111,8 @@ public sealed class OperateCommandsTests
         Assert.Contains("Queue que_1: locked (high)", human.Stdout);
         Assert.Contains("required: Fix the receiver, then resume.", human.Stdout);
         Assert.Contains("response codes: 503 ×2", human.Stdout);
-        // #514: låsen venter på en person (ingen lockLiftsAtUtc), og plassholderen i 2036 vises ikke.
-        Assert.Contains("lock lifts: when a person lifts it", human.Stdout);
+        // En Queuey fra før #514 har ikke lockLiftsAtUtc: den lagrede tiden vises, men plassholderen i 2036 blir «unknown».
+        Assert.Contains("lock lifts: unknown", human.Stdout);
         Assert.DoesNotContain("2036", human.Stdout);
     }
 
@@ -614,5 +614,41 @@ public sealed class OperateCommandsTests
         Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
         Assert.Equal(new[] { "GET /events/que_1/incident-report", "GET /queues/que_1/metrics/snapshot", "GET /events/que_1", "GET /events/que_1/evt_ok" },
             api.Requests.Select(r => r.Key));
+    }
+
+    // ── K1, K2 (security-review av #72) ─────────────────────────────────────
+
+    [Fact]
+    public async Task A_lock_without_a_time_is_said_so_and_no_one_is_told_to_lift_it()
+    {
+        var api = new RecordingHandler(req => req.Key switch
+        {
+            "GET /queues/que_1/metrics/snapshot" => Ok(new { processState = "Locked", lockedReason = "target_requires_action", lockLiftsAtUtc = (string?)null }),
+            "GET /queues/que_1/targets" => Ok(Array.Empty<object>()),
+            "GET /events/que_1/lanes" => Ok(new { counts = new { total = 0 } }),
+            _ => throw new InvalidOperationException(req.Key),
+        });
+
+        CliRun run = await Run(api, "queue", "health", "que_1");
+
+        Assert.Contains("lock lifts: not on a timer", run.Stdout);
+        Assert.DoesNotContain("unlock", run.Stdout);
+    }
+
+    [Fact]
+    public async Task Diagnose_without_queue_read_shows_the_rest()
+    {
+        var api = new RecordingHandler(req => req.Key switch
+        {
+            "GET /events/que_1/incident-report" => Ok(new { incidentType = "degraded" }),
+            "GET /queues/que_1/metrics/snapshot" => RecordingHandler.Error(HttpStatusCode.Forbidden, "permission_denied", "The key lacks queue.read."),
+            "GET /events/que_1" => Ok(new { items = Array.Empty<object>() }),
+            _ => throw new InvalidOperationException(req.Key),
+        });
+
+        CliRun run = await Run(api, "diagnose", "que_1", "--json");
+
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        Assert.Equal(JsonValueKind.Null, JsonDocument.Parse(run.Stdout).RootElement.GetProperty("lockLiftsAtUtc").ValueKind);
     }
 }
