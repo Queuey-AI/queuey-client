@@ -129,9 +129,10 @@ internal sealed class EdgeTransferLoop : BackgroundService
                     claim.Envelope.TransferId, attempt.Ack.CloudEventId ?? "(none)");
                 if (attempt.Ack.Replayed)
                 {
+                    // Security-review av queuey-client #71 runde 2: Idempotency-Key-en bare på Debug, overalt.
                     _logger.LogInformation(EdgeLogEvents.SettledAsReplay,
-                        "Transfer {TransferId} settled as a replay — Cloud already held custody (a lost ACK, resolved).",
-                        claim.Envelope.TransferId);
+                        "Event {EventId} in {Queue} settled as a replay — Cloud already held custody (a lost ACK, resolved).",
+                        attempt.Ack.CloudEventId ?? "(no id)", claim.Envelope.Queue);
                 }
                 break;
 
@@ -140,10 +141,13 @@ internal sealed class EdgeTransferLoop : BackgroundService
                 // (step-aside). Exits are explicit operator retry/discard.
                 await _spool.QuarantineAsync(claim.SpoolId, outcome, ct).ConfigureAwait(false);
                 _state.RecordFailure(outcome);
+                // Cloud tok ikke imot eventet, så det har ingen event-id; spool-id-en er det edge retry og discard tar.
                 _logger.LogWarning(EdgeLogEvents.Quarantined,
-                    "Transfer {TransferId} quarantined ({Reason}, HTTP {Status}); its lane continues. " +
-                    "Use 'queuey-edge retry/discard' after remediation.",
-                    claim.Envelope.TransferId, outcome.Reason, outcome.Evidence?.StatusCode);
+                    "Spooled event #{SpoolId} in {Queue} quarantined ({Reason}, HTTP {Status}); its lane continues. " +
+                    "After remediation: queuey edge retry --spool <path> --id {SpoolId}, or queuey edge discard --spool <path> --id {SpoolId}.",
+                    claim.SpoolId, claim.Envelope.Queue, outcome.Reason, outcome.Evidence?.StatusCode, claim.SpoolId, claim.SpoolId);
+                _logger.LogDebug(EdgeLogEvents.Quarantined, "Spooled event #{SpoolId} is transfer {TransferId} (Idempotency-Key).",
+                    claim.SpoolId, claim.Envelope.TransferId);
                 break;
 
             default:

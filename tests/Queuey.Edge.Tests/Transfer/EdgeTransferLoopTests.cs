@@ -136,6 +136,28 @@ public class EdgeTransferLoopTests
         Assert.Equal(("orders", "order-10042", "evt_fresh", false), (last.Queue, last.TransferId, last.EventId, last.Replayed));
     }
 
+    [Fact]
+    public async Task No_log_above_debug_carries_the_idempotency_key_also_for_a_replay_or_a_quarantine()
+    {
+        // Security-review av #71 runde 2: Idempotency-Key-en kan bære personopplysninger, så den står bare på Debug.
+        var logger = new CapturingLogger();
+        using var fx = new LoopFixture(seen => seen == 1
+            ? Fail(TransferClass.EventRejected, TransferReason.PayloadTooLarge, 413)
+            : Accept(replayed: true), logger: logger);
+        await fx.Publish("ada@example.com-order-1", groupKey: "lane");
+        await fx.Publish("ada@example.com-order-2", groupKey: "lane");
+
+        await fx.RunUntilAsync(async () =>
+        {
+            var stats = await fx.Spool.Spool.GetStatsAsync(CancellationToken.None);
+            return stats.PendingCount == 0 && stats.QuarantinedCount == 1;
+        });
+
+        Assert.Contains(logger.Lines, l => l.Text.Contains("quarantined", StringComparison.Ordinal) && l.Text.Contains("queuey edge retry --spool <path> --id", StringComparison.Ordinal));
+        Assert.Contains(logger.Lines, l => l.Text.Contains("Event evt_original in orders settled as a replay", StringComparison.Ordinal));
+        Assert.DoesNotContain(logger.Lines, l => l.Level > Microsoft.Extensions.Logging.LogLevel.Debug && l.Text.Contains("ada@example.com", StringComparison.Ordinal));
+    }
+
     private sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger<EdgeTransferLoop>
     {
         public System.Collections.Concurrent.ConcurrentQueue<(Microsoft.Extensions.Logging.LogLevel Level, string Text)> Lines { get; } = new();
