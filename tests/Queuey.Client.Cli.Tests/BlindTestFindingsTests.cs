@@ -278,6 +278,21 @@ public sealed class BlindTestFindingsTests : IDisposable
     }
 
     [Fact]
+    public async Task Advise_says_the_scaffold_would_loosen_a_workspace_that_demands_a_key_and_a_signature()
+    {
+        // Security-review av #68 (K4).
+        string repo = Repo();
+
+        CliRun human = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "advise", repo }), env: Env());
+        string text = System.Text.RegularExpressions.Regex.Replace(human.Stdout, @"\s+", " "); // teksten er brutt over linjer
+        Assert.Contains("ApiKeyAndSignedRequest", text);
+        Assert.Contains("apply loosens it", text);
+
+        CliRun json = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "advise", repo, "--json" }), env: Env());
+        Assert.Contains("ApiKeyAndSignedRequest", JsonDocument.Parse(json.Stdout).RootElement.GetProperty("filesNote").GetString());
+    }
+
+    [Fact]
     public async Task Advise_apply_without_a_connection_says_to_log_in_not_to_mint_a_key_in_the_console()
     {
         string repo = Repo();

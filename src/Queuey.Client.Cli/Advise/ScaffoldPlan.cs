@@ -28,6 +28,17 @@ public sealed record PlannedFile(string Path, string Content, string Action, boo
 public static class ScaffoldPlan
 {
     public const string DeployFileName = "queuey.deploy.json";
+
+    /// <summary>
+    /// What a person must know before applying the scaffold to a workspace that already exists: it takes signed requests
+    /// only, which loosens a workspace that demands an API key as well.
+    /// </summary>
+    // Security-review av #68 (K4): scaffolden kunne nedgradere ApiKeyAndSignedRequest til SignedRequest uten et ord.
+    // ApiKeyAndSignedRequest som standard ville krevd en lisensbred nøkkel i hver app, så scaffolden sier fra i stedet.
+    public const string IngressNote =
+        "queuey.deploy.json sets the workspace to take signed requests only (authMode SignedRequest). If your workspace already " +
+        "demands an API key and a signature (ApiKeyAndSignedRequest), set authMode to that in the file before you apply, or " +
+        "apply loosens it. queuey plan --profile dev shows the change before anything is written.";
     private const string ConfigFileName = "queuey.json";
 
     /// <summary>

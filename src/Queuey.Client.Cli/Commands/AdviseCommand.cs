@@ -104,6 +104,7 @@ internal static class AdviseCommand
                     docs = "https://queuey.ai/llms-full.txt",
                     queue = queueName,
                     files = scaffold.Select(f => new { path = f.Path, action = f.Action, exists = f.Exists }),
+                    filesNote = ScaffoldPlan.IngressNote,
                     retentionDays,
                     retentionFrom,
                     filesRead,
@@ -450,6 +451,7 @@ internal static class AdviseCommand
         foreach (var file in scaffold)
             Console.WriteLine($"  - {file.Path}: {file.Action}");
         Console.WriteLine($"  The queue keeps events for {TerminalText.Line(retentionFrom)}.");
+        Console.WriteLine($"  {Wrap(ScaffoldPlan.IngressNote)}");
 
         if (!willApply)
         {
