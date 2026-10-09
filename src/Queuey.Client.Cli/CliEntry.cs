@@ -3,6 +3,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Threading.Tasks;
 using Queuey.Client;
+using Queuey.Client.Waas;
 
 namespace Queuey.Client.Cli;
 
@@ -36,6 +37,10 @@ internal static class CliEntry
 
         // Samme lesing av --json som kommandoene gjør, så --json=true gir JSON også her (2026-09-24).
         bool json = CliErrors.WantsJson(rest);
+
+        // Hver advarsel Queuey svarer med (X-Queuey-Warning), som would_require_approval (Queuey F3.11), står på stderr i det den
+        // kommer, i alle kommandoer. stdout er kommandoens, også med --json.
+        using IDisposable warnings = QueueyControlPlaneClient.CollectWarnings(new ServerWarnings(ServerWarningText.Write));
 
         try
         {

@@ -116,6 +116,9 @@ internal static class QueueCommand
         {
             if (r.Succeeded)
                 Console.WriteLine($"  ✓ {r.Name}\t{r.PublicId}\t{(r.Created ? "created" : "exists")}{(r.PolicyApplied ? ", policy applied" : "")}");
+            else if (r.NeedsPlan)
+                // Queuey F3.11: endringen trenger en lagret plan. Synken gikk videre; advarselen under sier hva som gjøres.
+                Console.WriteLine($"  ! {r.Name}\t{(r.PublicId is { } id ? id + "\t" : "")}{(r.Created ? "created, " : "")}needs a configuration plan — {FormatError(r.Error)}");
             else
             {
                 Console.WriteLine($"  ✗ {r.Name}\t{FormatError(r.Error)}");
@@ -133,6 +136,7 @@ internal static class QueueCommand
             Console.WriteLine($"  ! {warning}");
 
         Console.WriteLine($"{result.Succeeded} applied ({result.Created} created), {result.Failed} failed, "
+                          + (result.PlanRequired.Count > 0 ? $"{result.PlanRequired.Count} need a configuration plan, " : "")
                           + $"{result.NotAttempted.Count} not attempted"
                           + (result.NotAttempted.Count > 0 ? " — re-run to converge (applying is idempotent)" : ""));
     }
@@ -208,7 +212,10 @@ internal static class QueueCommand
         created = result.Created,
         failed = result.Failed,
         notAttempted = result.NotAttempted,
+        // De som trenger en lagret plan (Queuey F3.11): synken gikk videre uten endringen.
+        planRequired = result.PlanRequired.Select(r => r.Name),
         warnings = result.Warnings,
+        serverWarnings = result.ServerWarnings,
         queues = result.Applied.Select(r => new
         {
             r.Name,
@@ -217,8 +224,11 @@ internal static class QueueCommand
             r.PublicId,
             r.Created,
             r.PolicyApplied,
+            r.NeedsPlan,
             r.Warnings,
             error = r.Error?.Message,
+            errorCode = r.Error?.ErrorCode,
+            action = r.Error?.SuggestedAction,
         }),
     };
 }

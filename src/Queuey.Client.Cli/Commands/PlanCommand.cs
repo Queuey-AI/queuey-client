@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -9,8 +10,10 @@ namespace Queuey.Client.Cli;
 
 /// <summary>
 /// <c>queuey plan</c> — the server-side plan: every write <c>apply</c> would send goes as a dry run, so
-/// the answer is what Queuey would accept and change, not only what the file says locally. Writes
-/// nothing, and exits non-zero when any write would be refused.
+/// the answer is what Queuey would accept and change, not only what the file says locally. Queuey stores
+/// the plan (F3.11), seals it with the policy's decision, and sends it to its inbox when a person approves
+/// it; <c>--local</c> only plans. Changes no configuration, and exits non-zero when any write would be
+/// refused, 5 when the plan waits for a person.
 /// </summary>
 /// <remarks>
 /// A verb, not an <c>apply</c> flag: a CLI that predates it answers "Unknown command" instead of
@@ -18,18 +21,29 @@ namespace Queuey.Client.Cli;
 /// </remarks>
 internal static class PlanCommand
 {
-    // --adopt planlegger det en person har løsrevet, som apply --adopt ville skrevet det (Queuey F2.4).
-    internal static readonly CommandOptions Options = new("plan", flags: new[] { "json" }, values: new[] { "file", "adopt", "profile" });
+    // --adopt planlegger det en person har løsrevet, som apply --adopt ville skrevet det (Queuey F2.4). --local lager planen her,
+    // uten å lagre den i Queuey (F3.11), og --repo, --repo-path, --commit og --no-git sier hvor fila ligger, som for apply.
+    internal static readonly CommandOptions Options = new(
+        "plan", flags: new[] { "json", "local", "no-git" }, values: new[] { "file", "adopt", "profile", "repo", "repo-path", "commit" });
 
     /// <summary>
-    /// The version of <c>plan --json</c>'s shape: <c>{ schemaVersion, file, tenant, planId, planHash, wouldSucceed,
-    /// changeCount, queues, steps }</c>. A script that reads it checks this first, as it does in <c>apply --dry-run --json</c>.
+    /// The version of <c>plan --local --json</c>'s shape, and of <c>plan --json</c>'s against a Queuey that stores no plans:
+    /// <c>{ schemaVersion, file, tenant, planId, planHash, wouldSucceed, changeCount, queues, steps, skipped, applyStarted }</c>,
+    /// with <c>planId</c> null since F3.11, so it is not taken for a plan Queuey stores. A script that reads it checks this first.
     /// </summary>
     // planId, planHash, queues og hvert stegs state kom til i samme versjon (Queuey F2.3, 2026-10-06): ingen tag har sluppet
     // versjon 1 ennå, og feltene legger bare til. Det samme gjelder skipped (Queuey F2.4, 2026-10-06).
     // Samme mønster som apply --dry-run --json, der Kenneth valgte et versjonert objekt (2026-10-05). Formen er ny med
     // queuey plan, så den har en versjon fra første utgave, og ingen leser må gjette når den endres.
     internal const int JsonSchemaVersion = 1;
+
+    /// <summary>
+    /// The version of <c>plan --json</c>'s shape for a plan Queuey stores (Queuey F3.11): version 1's fields, with Queuey's
+    /// <c>planId</c> and <c>planHash</c>, and <c>stored</c>, <c>status</c>, <c>decision</c>, <c>rule</c>, <c>class</c>,
+    /// <c>approvalUrl</c>, <c>expiresAt</c> and <c>warnings</c>.
+    /// </summary>
+    // Hashen er serverens (v2, 64 hex-tegn) og id-en er Queueys, så betydningen av to felt endres: derfor en ny versjon.
+    internal const int StoredJsonSchemaVersion = 2;
 
     public static async Task<int> RunAsync(string[] args)
     {
@@ -48,39 +62,53 @@ internal static class PlanCommand
         var service = provider.GetRequiredService<IQueueyService>();
 
         // Det en person har løsrevet, planlegges ikke, med mindre --adopt tar det tilbake: planen viser det apply ville gjort.
-        DeploymentPlan plan = await service.PlanDeploymentAsync(file, new SyncOptions { Adopt = DeploymentAdopt.Parse(map.Get("adopt")) });
+        IReadOnlyList<string> adopt = DeploymentAdopt.Parse(map.Get("adopt"));
+        DeploymentPlan plan = map.Has("local")
+            ? await service.PlanDeploymentAsync(file, new SyncOptions { Adopt = adopt })
+            : await service.StorePlanAsync(file, new SyncOptions
+            {
+                Adopt = adopt,
+                Source = GitSource.Resolve(path, map.Get("repo"), map.Get("repo-path"), map.Get("commit"), map.Has("no-git")),
+            });
 
         if (map.Has("json"))
         {
-            Console.WriteLine(JsonSerializer.Serialize(new
-            {
-                schemaVersion = JsonSchemaVersion,
-                file = path,
-                tenant = plan.Tenant,
-                planId = plan.PlanId,
-                planHash = plan.PlanHash,
-                wouldSucceed = plan.WouldSucceed,
-                changeCount = plan.ChangeCount,
-                queues = plan.Queues.Select(q => new { name = q.Name, ingressUrl = q.IngressUrl, publicId = q.PublicId }),
-                steps = plan.Steps.Select(s => new
-                {
-                    target = s.Target,
-                    aspect = s.Aspect,
-                    creates = s.Creates,
-                    changes = s.Changes.Select(c => new { path = c.Path, from = c.From, to = c.To }),
-                    notes = s.Notes,
-                    state = s.State,
-                    desired = s.Desired,
-                    error = s.Error is null ? null : new { code = s.Error.ErrorCode, message = s.Error.Message, action = s.Error.SuggestedAction, status = s.Error.StatusCode },
-                }),
-                skipped = plan.Skipped.Select(ApplyCommand.ToJson),
-                applyStarted = plan.ApplyStarted,
-            }, CliHost.JsonOut));
-            return plan.WouldSucceed ? ExitCodes.Success : ExitCodes.RuntimeError;
+            Console.WriteLine(JsonSerializer.Serialize(ToJson(plan, path), CliHost.JsonOut));
+            return ExitCode(plan);
         }
 
         Console.WriteLine($"Queuey plan — {path} → {config.ResolvedApiBase()}  (tenant {plan.Tenant})");
-        Console.WriteLine($"  {plan.PlanId}  {plan.PlanHash}");
+        WriteBody(plan);
+        return ExitCode(plan);
+    }
+
+    /// <summary>
+    /// 0 when the plan can be applied now, or a local plan Queuey would accept; 5 when it waits for a person; 1 for a refusal,
+    /// and for a plan the policy refuses.
+    /// </summary>
+    internal static int ExitCode(DeploymentPlan plan)
+    {
+        if (!plan.WouldSucceed)
+            return ExitCodes.RuntimeError;
+        if (plan.Stored is not { } stored)
+            return ExitCodes.Success;
+        if (stored.IsPendingApproval)
+            return ExitCodes.PendingApproval;
+        return stored.CanBeApplied ? ExitCodes.Success : ExitCodes.RuntimeError;
+    }
+
+    /// <summary>The plan under the command's header line: its id, queues, steps and what comes next.</summary>
+    internal static void WriteBody(DeploymentPlan plan)
+    {
+        // En plan Queuey lagrer, har Queueys id og hash. En plan bare herfra (--local, eller en Queuey uten planer) har ingen id
+        // (F3.11), så den ikke tas for en lagret plan, og hashen er klientens (v1).
+        if (plan.Stored is { } stored)
+            StoredPlanText.Write(stored);
+        else
+            Console.WriteLine($"  local plan, not stored in Queuey  {plan.PlanHash}");
+        foreach (string warning in plan.Warnings.Where(w => ServerWarnings.CodeOf(w) is "plans_unsupported" or "plans_unavailable" or "plan_required"))
+            Console.WriteLine($"  ! {TerminalText.Line(warning)}");
+
         foreach (DeploymentPlanQueue queue in plan.Queues)
             Console.WriteLine($"  {queue.Name}\tingress {queue.IngressUrl}{(queue.PublicId is null ? "  (would be created)" : "")}");
         foreach (DeploymentPlanStep step in plan.Steps)
@@ -99,13 +127,69 @@ internal static class PlanCommand
 
         // Løsrevet av en person (Queuey F2.4): ingen steg, fordi apply lar det være.
         ApplyCommand.WriteDetached(plan.Skipped, "apply skips it");
-        if (!plan.ApplyStarted)
+        if (plan.Stored is null && !plan.ApplyStarted && !plan.ApplyRequiresPlan)
             Console.WriteLine("  ! Queuey started no apply for this plan (it predates managed resources): each dry run was asked "
                               + "as a write from outside a deployment file. What a person detached was skipped all the same.");
 
         int refusals = plan.Steps.Count(s => s.Error is not null);
         Console.WriteLine($"{plan.ChangeCount} change(s), {refusals} refusal(s). Nothing was changed."
                           + (refusals > 0 ? " Fix the refusals, then plan again." : ""));
-        return plan.WouldSucceed ? ExitCodes.Success : ExitCodes.RuntimeError;
+        if (plan.Stored is { } next && refusals == 0)
+            StoredPlanText.WriteNext(next);
+    }
+
+    internal static object ToJson(DeploymentPlan plan, string path)
+    {
+        var steps = plan.Steps.Select(s => new
+        {
+            target = s.Target,
+            aspect = s.Aspect,
+            creates = s.Creates,
+            changes = s.Changes.Select(c => new { path = c.Path, from = c.From, to = c.To }),
+            notes = s.Notes,
+            state = s.State,
+            desired = s.Desired,
+            error = s.Error is null ? null : new { code = s.Error.ErrorCode, message = s.Error.Message, action = s.Error.SuggestedAction, status = s.Error.StatusCode },
+        });
+        var queues = plan.Queues.Select(q => new { name = q.Name, ingressUrl = q.IngressUrl, publicId = q.PublicId });
+
+        if (plan.Stored is not { } stored)
+            return new
+            {
+                schemaVersion = JsonSchemaVersion,
+                file = path,
+                tenant = plan.Tenant,
+                planId = (string?)null,
+                planHash = plan.PlanHash,
+                wouldSucceed = plan.WouldSucceed,
+                changeCount = plan.ChangeCount,
+                queues,
+                steps,
+                skipped = plan.Skipped.Select(ApplyCommand.ToJson),
+                applyStarted = plan.ApplyStarted,
+            };
+
+        return new
+        {
+            schemaVersion = StoredJsonSchemaVersion,
+            file = path,
+            tenant = plan.Tenant,
+            planId = stored.PlanId,
+            planHash = stored.Hash,
+            stored = true,
+            version = stored.Version,
+            status = stored.Status,
+            decision = stored.Decision,
+            rule = stored.Rule,
+            @class = stored.Class,
+            approvalUrl = stored.ApprovalUrl,
+            expiresAt = stored.ExpiresAt,
+            wouldSucceed = plan.WouldSucceed,
+            changeCount = plan.ChangeCount,
+            queues,
+            steps,
+            skipped = plan.Skipped.Select(ApplyCommand.ToJson),
+            warnings = plan.Warnings,
+        };
     }
 }

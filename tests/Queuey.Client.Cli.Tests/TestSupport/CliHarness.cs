@@ -94,6 +94,15 @@ internal sealed class RecordingHandler : HttpMessageHandler
     /// <summary>The managed-resource calls the server answered itself.</summary>
     public List<RecordedRequest> ManagementRequests { get; } = new();
 
+    /// <summary>
+    /// Whether the test answers <c>POST /tenants/{t}/deployment/plans</c> itself (Queuey F3.11). Without it, the server is a
+    /// Queuey from before stored plans: 404, recorded in <see cref="ManagementRequests"/>.
+    /// </summary>
+    public bool AnswersPlans { get; init; }
+
+    public static bool IsNewPlanCall(HttpMethod method, string path)
+        => method == HttpMethod.Post && path.EndsWith("/deployment/plans", StringComparison.Ordinal);
+
     /// <summary>The headers each request carried, by its place in <see cref="Requests"/>.</summary>
     public List<Dictionary<string, string>> Headers { get; } = new();
 
@@ -105,7 +114,8 @@ internal sealed class RecordingHandler : HttpMessageHandler
     {
         string? body = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
         var recorded = new RecordedRequest(request.Method, request.RequestUri!, string.IsNullOrEmpty(body) ? null : body);
-        if (!AnswersManagement && IsManagementCall(request.Method, request.RequestUri!.AbsolutePath))
+        if ((!AnswersManagement && IsManagementCall(request.Method, request.RequestUri!.AbsolutePath))
+            || (!AnswersPlans && IsNewPlanCall(request.Method, request.RequestUri!.AbsolutePath)))
         {
             lock (ManagementRequests) ManagementRequests.Add(recorded);
             return new HttpResponseMessage(HttpStatusCode.NotFound);

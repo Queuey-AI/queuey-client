@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -16,16 +17,17 @@ namespace Queuey.Client.Cli;
 /// </summary>
 internal static class ApplyCommand
 {
-    // --plan ble et eget verb (2026-09-24): et verb en eldre CLI ikke kjenner, feiler i alle versjoner,
-    // mens `apply --plan` i en CLI fra før flagget var en ekte apply. Ordet får et hint i stedet.
     // --repo, --repo-path, --commit og --no-git sier hvor fila ligger, og --adopt hva applyen tar tilbake (Queuey F2.4).
+    // --plan plan_… applyer en plan Queuey lagrer (F3.11), og tar en verdi: planen å skrive. Visningen av hva apply ville
+    // gjort, er fortsatt verbet `queuey plan` (2026-09-24), og et --plan uten verdi avvises. --wait venter på en persons
+    // godkjenning, høyst --timeout sekunder.
     internal static readonly CommandOptions Options = new(
         "apply",
-        flags: new[] { "dry-run", "check", "continue-on-error", "json", "no-git" },
-        values: new[] { "file", "repo", "repo-path", "commit", "adopt", "profile" },
+        flags: new[] { "dry-run", "check", "continue-on-error", "json", "no-git", "wait" },
+        values: new[] { "file", "repo", "repo-path", "commit", "adopt", "profile", "plan", "timeout" },
         hints: new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            ["plan"] = "`apply --plan` is now `queuey plan`: it asks Queuey what apply would change, and writes nothing.",
+            ["plan"] = "To see what apply would change, run `queuey plan`; `queuey apply --plan plan_…` applies a plan Queuey stores.",
         });
 
     public static async Task<int> RunAsync(string[] args)
@@ -39,6 +41,8 @@ internal static class ApplyCommand
         DeploymentFile target = profile is null ? file : ForProfile(file, profile, path);
         string? fileTenant = profile is null ? file.ResolveTenant() : target.Tenant;
         bool dryRun = map.Has("dry-run");
+        if (StoredPlanOptions(map, out string? planId, out TimeSpan wait) is { } refused)
+            return refused;
 
         if (dryRun)
         {
@@ -75,13 +79,21 @@ internal static class ApplyCommand
         if (map.Has("check"))
             return await CheckAsync(service, file, path, map);
 
+        // En plan Queuey lagrer (F3.11): kilden og det den tar tilbake, er planens.
+        var run = new ApplyRun(service, file, path, config, map, wait);
+        if (planId is not null)
+            return await run.StoredAsync(await service.GetStoredPlanAsync(planId, config.TenantPublicId));
+
         // Hvor fila ligger, til merket på det applyen styrer (Queuey F2.4): flaggene først, så git, med mindre --no-git.
         DeploymentFileSource? source = GitSource.Resolve(path, map.Get("repo"), map.Get("repo-path"), map.Get("commit"), map.Has("no-git"));
         IReadOnlyList<string> adopt = DeploymentAdopt.Parse(map.Get("adopt"));
         var options = new SyncOptions { ContinueOnError = map.Has("continue-on-error"), Source = source, Adopt = adopt };
 
         // --adopt viser diffen fila vil påføre det den tar tilbake, før den skriver: planen for de samme målene, som dry runs.
+        // Krever Queuey en lagret plan for applyen (F3.11), viser den lagrede planen det samme, så denne vises ikke.
         DeploymentPlan? adoptPlan = adopt.Count > 0 ? await service.PlanDeploymentAsync(file, options) : null;
+        if (adoptPlan is { ApplyRequiresPlan: true })
+            adoptPlan = null;
         if (adoptPlan is not null && !map.Has("json"))
             WriteAdoptPlan(adoptPlan, adopt);
 
@@ -94,15 +106,189 @@ internal static class ApplyCommand
         {
             result = ex.Queues!;
         }
+        catch (QueueyPlanRequiredException required)
+        {
+            // Queuey F3.11: en nøkkel applyer til dette workspacet bare gjennom en lagret plan, og ingenting er skrevet. apply
+            // lager planen selv; kjører policyen den, applyes den med en gang (regel 3: ingen ekstra steg uten gevinst).
+            return await run.ThroughStoredPlanAsync(required, options);
+        }
 
-        string? tenant = config.TenantPublicId;
+        return run.Report(result, source, adopt, adoptPlan);
+    }
 
-        if (map.Has("json"))
-            Console.WriteLine(JsonSerializer.Serialize(ToJsonResult(result, path, config, tenant, source, adopt, adoptPlan), CliHost.JsonOut));
-        else
-            WriteHuman(result, path, config, tenant);
+    /// <summary>
+    /// Reads <c>--plan</c>, <c>--wait</c> and <c>--timeout</c>: the plan's id, and how long to wait for a person. The exit code
+    /// of the usage error, or null.
+    /// </summary>
+    private static int? StoredPlanOptions(ArgMap map, out string? planId, out TimeSpan wait)
+    {
+        planId = null;
+        wait = TimeSpan.Zero;
 
-        return result.AllSucceeded ? ExitCodes.Success : ExitCodes.RuntimeError;
+        if (map.Has("plan"))
+        {
+            string? raw = map.Get("plan")?.Trim();
+            if (!StoredPlan.IsPlanId(raw))
+                return CliErrors.Usage(map, "invalid_value",
+                    $"--plan takes the id of a plan Queuey stores, plan_…; got '{(raw is null ? "" : CliErrors.Shown(raw))}'.",
+                    "`queuey plan` makes one and says its id. To see what apply would change without storing a plan, run `queuey plan --local`.");
+            foreach (string other in new[] { "dry-run", "check", "adopt", "repo", "repo-path", "commit" })
+                if (map.Has(other))
+                    return CliErrors.Usage(map, "conflicting_options",
+                        $"--plan applies a plan Queuey stores, which already says where the file is and what it takes back, so --{other} does not go with it.");
+            planId = raw!;
+        }
+
+        if (map.Has("timeout") && !map.Has("wait"))
+            return CliErrors.Usage(map, "conflicting_options", "--timeout says how long --wait waits; give --wait too.");
+        if (!map.Has("wait"))
+            return null;
+        if (map.Has("dry-run") || map.Has("check"))
+            return CliErrors.Usage(map, "conflicting_options", "--wait waits for a person to approve a plan, and --dry-run and --check make none.");
+
+        int seconds = StoredPlanText.DefaultWaitSeconds;
+        if (map.Has("timeout")
+            && (!int.TryParse(map.Get("timeout"), NumberStyles.None, CultureInfo.InvariantCulture, out seconds) || seconds < 1))
+            return CliErrors.Usage(map, "invalid_value",
+                $"--timeout takes whole seconds, at least 1; got '{CliErrors.Shown(map.Get("timeout") ?? "")}'.",
+                $"Leave it out to wait {StoredPlanText.DefaultWaitSeconds} seconds. A plan waits 24 hours in Queuey's inbox.");
+        wait = TimeSpan.FromSeconds(seconds);
+        return null;
+    }
+
+    /// <summary>One apply from the command line: the service, the file, and how the result is written.</summary>
+    private sealed class ApplyRun
+    {
+        private readonly IQueueyService _service;
+        private readonly DeploymentFile _file;
+        private readonly string _path;
+        private readonly ResolvedConfig _config;
+        private readonly ArgMap _map;
+        private readonly TimeSpan _wait;
+
+        public ApplyRun(IQueueyService service, DeploymentFile file, string path, ResolvedConfig config, ArgMap map, TimeSpan wait)
+        {
+            _service = service;
+            _file = file;
+            _path = path;
+            _config = config;
+            _map = map;
+            _wait = wait;
+        }
+
+        private bool Json => _map.Has("json");
+
+        /// <summary>
+        /// Makes the plan Queuey asked for, and applies it once the policy runs it or a person approves it. Exit 5 while it
+        /// waits for a person, and 1 for a refusal in it.
+        /// </summary>
+        public async Task<int> ThroughStoredPlanAsync(QueueyPlanRequiredException required, SyncOptions options)
+        {
+            if (!Json)
+                Console.WriteLine($"Queuey applies to this workspace from an API key only through a configuration plan "
+                                  + $"({TerminalText.Line(required.Message)}). Making one:");
+
+            DeploymentPlan plan = await _service.StorePlanAsync(_file, new SyncOptions { Source = options.Source, Adopt = options.Adopt });
+            if (plan.Stored is not { } stored)
+                throw new QueueyException(
+                    "Queuey asked for a configuration plan, and stored none when one was made, so nothing was applied.", errorCode: "plan_not_stored")
+                {
+                    SuggestedAction = "Run `queuey plan` to see what Queuey answers.",
+                };
+
+            if (!plan.WouldSucceed)
+            {
+                if (Json)
+                    Console.WriteLine(JsonSerializer.Serialize(PlanCommand.ToJson(plan, _path), CliHost.JsonOut));
+                else
+                {
+                    Console.WriteLine($"Queuey plan — {_path} → {_config.ResolvedApiBase()}  (tenant {plan.Tenant})");
+                    PlanCommand.WriteBody(plan);
+                }
+
+                return ExitCodes.RuntimeError;
+            }
+
+            if (!Json)
+            {
+                Console.WriteLine($"Queuey plan — {_path} → {_config.ResolvedApiBase()}  (tenant {plan.Tenant})");
+                PlanCommand.WriteBody(plan);
+            }
+
+            return await StoredAsync(stored, shown: true);
+        }
+
+        /// <summary>
+        /// Applies <paramref name="plan"/>: sends it to the inbox when it was sealed for a person and not sent, waits for the
+        /// approval with <c>--wait</c>, and writes it once it may be applied.
+        /// </summary>
+        public async Task<int> StoredAsync(StoredPlan plan, bool shown = false)
+        {
+            if (plan.NeedsSubmitting)
+                plan = await _service.SubmitStoredPlanAsync(plan.PlanId, plan.Tenant);
+
+            if (!shown && !Json)
+            {
+                Console.WriteLine($"Queuey plan — {plan.PlanId}  (tenant {plan.Tenant})");
+                StoredPlanText.Write(plan);
+            }
+
+            if (plan.IsPendingApproval && _wait > TimeSpan.Zero)
+                plan = await StoredPlanText.WaitAsync(_service, plan, _wait, Json);
+
+            if (plan.IsPendingApproval)
+                return Pending(plan, shown);
+
+            if (StoredPlanText.WhyNotApplicable(plan) is { } why)
+                throw why;
+
+            QueueSyncResult result;
+            try
+            {
+                result = await _service.ApplyDeploymentAsync(_file, new SyncOptions { ContinueOnError = _map.Has("continue-on-error"), Plan = plan });
+            }
+            catch (QueueySyncException ex)
+            {
+                result = ex.Queues!;
+            }
+
+            return Report(result, source: null, adopt: plan.Adopt, adoptPlan: null, plan);
+        }
+
+        // Planen venter på en person: lenken, og exit 5. Planen som nettopp ble laget, har alt sagt hvor den godkjennes.
+        private int Pending(StoredPlan plan, bool shown)
+        {
+            if (Json)
+            {
+                Console.WriteLine(JsonSerializer.Serialize(new
+                {
+                    schemaVersion = ResultJsonSchemaVersion,
+                    file = _path,
+                    pendingApproval = true,
+                    plan = StoredPlanText.ToJson(plan),
+                }, CliHost.JsonOut));
+            }
+            else
+            {
+                if (!shown || _wait > TimeSpan.Zero)
+                    StoredPlanText.WriteNext(plan);
+                Console.WriteLine("Nothing was applied: the plan waits for a person's approval.");
+            }
+
+            return ExitCodes.PendingApproval;
+        }
+
+        public int Report(QueueSyncResult result, DeploymentFileSource? source, IReadOnlyList<string> adopt, DeploymentPlan? adoptPlan, StoredPlan? plan = null)
+        {
+            string? tenant = _config.TenantPublicId;
+
+            if (Json)
+                Console.WriteLine(JsonSerializer.Serialize(ToJsonResult(result, _path, _config, tenant, source, adopt, adoptPlan, plan), CliHost.JsonOut));
+            else
+                WriteHuman(result, _path, _config, tenant, plan);
+
+            return result.AllSucceeded ? ExitCodes.Success : ExitCodes.RuntimeError;
+        }
     }
 
     /// <summary>The version of <c>apply --json</c>'s and <c>apply --check --json</c>'s shapes, which had none before Queuey F2.4.</summary>
@@ -379,9 +565,11 @@ internal static class ApplyCommand
         }
     }
 
-    private static void WriteHuman(QueueSyncResult result, string path, ResolvedConfig config, string? tenant)
+    private static void WriteHuman(QueueSyncResult result, string path, ResolvedConfig config, string? tenant, StoredPlan? plan = null)
     {
         Console.WriteLine($"Queuey apply — {path} → {config.ResolvedApiBase()}  (tenant {tenant ?? "?"})");
+        if (plan is not null)
+            Console.WriteLine($"  plan {TerminalText.Line(plan.PlanId)}, {(plan.Status == StoredPlan.Statuses.Approved ? "approved by a person" : "run by the policy")}");
 
         foreach (QueueApplyResult r in result.Applied)
         {
@@ -415,6 +603,10 @@ internal static class ApplyCommand
         Console.WriteLine($"{result.Succeeded} applied ({result.Created} created), {result.Failed} failed, "
                           + $"{result.NotAttempted.Count} not attempted"
                           + (result.NotAttempted.Count > 0 ? " — re-run to converge (applying is idempotent)" : ""));
+
+        // Planen passet ikke lenger (Queuey F3.11): det som ble skrevet, står, og en ny plan viser resten.
+        if (plan is not null && result.Applied.Any(r => StoredPlanText.MeansPlanAgain(r.Error?.ErrorCode)))
+            Console.WriteLine(StoredPlanText.PlanAgain);
     }
 
     internal static string FormatError(QueueyException? e)
@@ -530,10 +722,12 @@ internal static class ApplyCommand
 
     private static object ToJsonResult(
         QueueSyncResult result, string path, ResolvedConfig config, string? tenant,
-        DeploymentFileSource? source, IReadOnlyList<string> adopt, DeploymentPlan? adoptPlan) => new
+        DeploymentFileSource? source, IReadOnlyList<string> adopt, DeploymentPlan? adoptPlan, StoredPlan? plan) => new
     {
         schemaVersion = ResultJsonSchemaVersion,
         file = path,
+        // Planen Queuey lagrer, som applyen skrev (F3.11); null for en apply uten plan.
+        plan = plan is null ? null : StoredPlanText.ToJson(plan),
         // Fila slik Queuey merker det applyen styrer med (F2.4): uten userinfo, query og fragment.
         source = source is null ? null : new { repo = source.Repo, path = source.Path, commit = source.Commit },
         enforcement = result.Enforcement,
@@ -555,6 +749,8 @@ internal static class ApplyCommand
         failed = result.Failed,
         notAttempted = result.NotAttempted,
         warnings = result.Warnings,
+        // Advarslene Queuey svarte med (X-Queuey-Warning), som would_require_approval (F3.11). De står også på stderr.
+        serverWarnings = result.ServerWarnings,
         queues = result.Applied.Select(r => new
         {
             r.Name, r.Succeeded, r.PublicId, r.Created, r.PolicyApplied, r.Mode,

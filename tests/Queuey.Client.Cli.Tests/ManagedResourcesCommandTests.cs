@@ -444,8 +444,9 @@ public sealed class ManagedResourcesCommandTests : IDisposable
     [Fact]
     public async Task Plan_lists_what_a_person_detached_under_skipped_and_plans_it_with_adopt()
     {
+        // --local: planen fra F2.4, uten å lagre den (F3.11), og uten git, som denne testklassen ikke slipper til.
         CliRun plan = await CliHarness.RunAsync(
-            () => CliEntry.RunAsync(CliHarness.With("plan", "--file", DeployFile(), "--json")), Server(orders: Detached()));
+            () => CliEntry.RunAsync(CliHarness.With("plan", "--file", DeployFile(), "--local", "--json")), Server(orders: Detached()));
 
         Assert.Equal(ExitCodes.Success, plan.Exit);
         JsonElement root = JsonDocument.Parse(plan.Stdout).RootElement;
@@ -453,7 +454,7 @@ public sealed class ManagedResourcesCommandTests : IDisposable
         Assert.DoesNotContain(root.GetProperty("steps").EnumerateArray(), s => s.GetProperty("target").GetString() == "queues.orders");
 
         CliRun adopted = await CliHarness.RunAsync(
-            () => CliEntry.RunAsync(CliHarness.With("plan", "--file", DeployFile(), "--adopt", "orders", "--json")), Server(orders: Detached()));
+            () => CliEntry.RunAsync(CliHarness.With("plan", "--file", DeployFile(), "--local", "--adopt", "orders", "--json")), Server(orders: Detached()));
 
         JsonElement again = JsonDocument.Parse(adopted.Stdout).RootElement;
         Assert.Empty(again.GetProperty("skipped").EnumerateArray());
