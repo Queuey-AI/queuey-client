@@ -22,17 +22,23 @@ internal static class PlanRetention
     internal const int MostDays = 30;
 
     /// <summary>
-    /// The days to scaffold, and a sentence saying where they come from. With a login or a key for the API host, the plan is
-    /// read from Queuey (<c>GET /billing/status</c> and <c>GET /billing/plans</c>); without one, or when that fails, Free's 7.
+    /// The days to scaffold, and a sentence saying where they come from. With a login for the API host, the plan is read from
+    /// Queuey (<c>GET /billing/status</c> and <c>GET /billing/plans</c>); without one, or when that fails, Free's 7. An API key
+    /// is never used here: a bare advise must not send a key anywhere, least of all to a host a repository's queuey.json names.
+    /// The login goes only to the host it was made for, and no redirect is followed.
     /// </summary>
+    // Security-review av #68 (B1): en bar advise sendte API-nøkkelen fra miljøet til verten queuey.json pekte på.
     public static async Task<(int Days, string From)> ForAsync(ResolvedConfig? config, CancellationToken cancellationToken = default)
     {
-        if (config is null || (config.Login is null && string.IsNullOrWhiteSpace(config.ApiKey)) || string.IsNullOrWhiteSpace(config.LicensePublicId))
+        if (config?.Login is null || string.IsNullOrWhiteSpace(config.LicensePublicId)
+            || !string.Equals(LoginStore.HostKey(config.ResolvedApiBase()), config.Login.Login.ApiBase, StringComparison.Ordinal))
             return (FreeDays, $"{FreeDays} days, which every plan allows (Free's limit); log in for your plan's");
 
         try
         {
-            using var http = CliHost.TestHandler is { } handler ? new HttpClient(handler, disposeHandler: false) : new HttpClient();
+            using var http = CliHost.TestHandler is { } handler
+                ? new HttpClient(handler, disposeHandler: false)
+                : new HttpClient(new HttpClientHandler { AllowAutoRedirect = false });
             http.Timeout = TimeSpan.FromSeconds(5);
             Uri api = config.ResolvedApiBase();
 
@@ -63,10 +69,7 @@ internal static class PlanRetention
     private static async Task<JsonElement> GetAsync(HttpClient http, ResolvedConfig config, Uri uri, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-        if (!string.IsNullOrWhiteSpace(config.ApiKey))
-            request.Headers.TryAddWithoutValidation(QueueyHeaders.ApiKey, config.ApiKey);
-        else if (config.Login is { } login)
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await login.AccessTokenAsync(cancellationToken).ConfigureAwait(false));
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await config.Login!.AccessTokenAsync(cancellationToken).ConfigureAwait(false));
         request.Headers.TryAddWithoutValidation(QueueyHeaders.LicensePublicId, config.LicensePublicId);
 
         using HttpResponseMessage response = await http.SendAsync(request, cancellationToken).ConfigureAwait(false);

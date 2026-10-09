@@ -163,6 +163,7 @@ internal static class CliConfig
     public static ResolvedConfig Resolve(ArgMap args, Func<string, string?> getEnv, string? configJson)
     {
         FileConfig file = ParseFile(configJson);
+        EnsureTheFileDoesNotChooseWhereAKeyGoes(args, getEnv, file);
 
         return new ResolvedConfig
         {
@@ -181,6 +182,43 @@ internal static class CliConfig
             LicensePublicId = First(args.Get("license"), getEnv("QUEUEY_LICENSE"), file.License),
             Source = First(args.Get("source"), getEnv("QUEUEY_SOURCE"), file.Source),
         };
+    }
+
+    /// <summary>
+    /// Refuses a <c>queuey.json</c> that names a host for an API key the file does not hold itself: the key from
+    /// <c>--api-key</c> or <c>QUEUEY_API_KEY</c>, the host from the file, and the host neither Queuey's own nor on this
+    /// machine. <c>queuey.json</c> sits in the repository, so whoever wrote it would choose where the key is sent.
+    /// <c>--api-base</c> or <c>--ingress-base</c> (or the variable) names the host instead, and then it is the caller's choice.
+    /// </summary>
+    // Security-review av #68 (B1, 2026-10-09): en nøkkel i miljøet gikk til verten queuey.json i et klonet repo pekte på.
+    private static void EnsureTheFileDoesNotChooseWhereAKeyGoes(ArgMap args, Func<string, string?> getEnv, FileConfig file)
+    {
+        bool keyFromOutside = string.IsNullOrWhiteSpace(file.ApiKey)
+                              && (!string.IsNullOrWhiteSpace(args.Get("api-key")) || !string.IsNullOrWhiteSpace(getEnv("QUEUEY_API_KEY")));
+        if (!keyFromOutside)
+            return;
+
+        foreach ((string? fromFile, string flag, string variable, string field, Uri own) in new[]
+                 {
+                     (file.ApiBase, "api-base", "QUEUEY_API_BASE", "apiBase", new QueueyOptions().ResolveApiBaseAddress()),
+                     (file.IngressBase, "ingress-base", "QUEUEY_INGRESS_BASE", "ingressBase", new QueueyOptions().ResolveIngressBaseAddress()),
+                 })
+        {
+            if (string.IsNullOrWhiteSpace(fromFile) || !string.IsNullOrWhiteSpace(args.Get(flag)) || !string.IsNullOrWhiteSpace(getEnv(variable)))
+                continue;
+            if (!Uri.TryCreate(fromFile!.Trim(), UriKind.Absolute, out Uri? host) || host.IsLoopback
+                || string.Equals(host.GetLeftPart(UriPartial.Authority), own.GetLeftPart(UriPartial.Authority), StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            throw new QueueyConfigurationException(
+                $"{field} in {args.Get("config") ?? "queuey.json"} names {host.GetLeftPart(UriPartial.Authority)}, and the API key comes from " +
+                "--api-key or QUEUEY_API_KEY, not from that file. A file in the repository does not choose where your key is sent, " +
+                "so nothing was sent.")
+            {
+                SuggestedAction = $"If that host is yours, name it yourself: --{flag} {host.GetLeftPart(UriPartial.Authority)} (or {variable}). " +
+                                  "Or log in with queuey login, which sends a login only to the host it was made for.",
+            };
+        }
     }
 
     /// <summary>

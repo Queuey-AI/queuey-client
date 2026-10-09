@@ -130,6 +130,86 @@ public sealed class BlindTestFindingsTests : IDisposable
         Assert.Null(PlanRetention.CapHint("queue_limit"));
     }
 
+    // ── security-review av #68, B1: en fil i repoet velger ikke hvor nøkkelen går ──
+
+    [Fact]
+    public async Task A_bare_advise_never_sends_an_api_key_even_when_queuey_json_names_a_host()
+    {
+        string repo = Repo();
+        File.WriteAllText(Path.Combine(repo, "queuey.json"), """{ "apiBase": "https://evil.test", "license": "lic_1" }""");
+        var api = new RecordingHandler(_ => throw new InvalidOperationException("A bare advise sends nothing."));
+        string before = Directory.GetCurrentDirectory();
+        Directory.SetCurrentDirectory(repo);
+        try
+        {
+            var env = Env();
+            env["QUEUEY_API_KEY"] = "qak_kid.secret";
+            CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "advise", repo, "--json" }), api, env);
+
+            Assert.Equal(ExitCodes.Success, run.Exit);
+            Assert.Empty(api.Requests);
+            Assert.Equal(7, JsonDocument.Parse(run.Stdout).RootElement.GetProperty("retentionDays").GetInt32());
+        }
+        finally
+        {
+            Directory.SetCurrentDirectory(before);
+        }
+    }
+
+    private static RecordingHandler QueueServer() => new(req => req.Key == "POST /queues"
+        ? RecordingHandler.Json(HttpStatusCode.OK, new { publicId = "que_1", tenantPublicId = "ten_1", displayName = "orders" })
+        : throw new InvalidOperationException(req.Key));
+
+    private async Task<(CliRun Run, RecordingHandler Api)> CreateQueue(string configJson, Dictionary<string, string> env, params string[] extra)
+    {
+        string config = Path.Combine(_dir, "queuey.json");
+        File.WriteAllText(config, configJson);
+        RecordingHandler api = QueueServer();
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(
+            new[] { "create-queue", "--tenant", "ten_1", "--name", "orders", "--license", "lic_1", "--config", config }.Concat(extra).ToArray()), api, env);
+        return (run, api);
+    }
+
+    [Fact]
+    public async Task A_key_from_outside_is_not_sent_to_a_host_queuey_json_chose()
+    {
+        var env = Env();
+        env["QUEUEY_API_KEY"] = "qak_kid.secret";
+
+        (CliRun fromEnv, RecordingHandler api) = await CreateQueue("""{ "apiBase": "https://evil.test" }""", env);
+        Assert.Equal(ExitCodes.Configuration, fromEnv.Exit);
+        Assert.Contains("apiBase in", fromEnv.Stderr);
+        Assert.Contains("does not choose where your key is sent", fromEnv.Stderr);
+        Assert.Contains("--api-base https://evil.test", fromEnv.Stderr);
+        Assert.Empty(api.Requests);
+
+        (CliRun fromFlag, RecordingHandler flagApi) = await CreateQueue("""{ "apiBase": "https://evil.test" }""", Env(), "--api-key", "qak_kid.secret");
+        Assert.Equal(ExitCodes.Configuration, fromFlag.Exit);
+        Assert.Empty(flagApi.Requests);
+
+        // Publiseringsverten også: ingressen får nøkkelen.
+        (CliRun ingress, _) = await CreateQueue("""{ "ingressBase": "https://evil.test" }""", env);
+        Assert.Equal(ExitCodes.Configuration, ingress.Exit);
+        Assert.Contains("ingressBase in", ingress.Stderr);
+    }
+
+    [Theory]
+    [InlineData("""{ "apiBase": "https://evil.test" }""", "--api-base", "https://evil.test")]   // verten navngitt av den som kjører
+    [InlineData("""{ "apiBase": "http://localhost:5223" }""", null, null)]                       // på denne maskinen
+    [InlineData("""{ "apiBase": "https://api.queuey.ai" }""", null, null)]                       // Queueys egen
+    [InlineData("""{ "apiBase": "https://evil.test", "apiKey": "qak_file.key" }""", null, null)] // nøkkelen står i samme fil
+    public async Task A_host_the_caller_named_or_a_safe_one_is_used(string configJson, string? flag, string? value)
+    {
+        var env = Env();
+        if (!configJson.Contains("apiKey"))
+            env["QUEUEY_API_KEY"] = "qak_kid.secret";
+
+        (CliRun run, RecordingHandler api) = await CreateQueue(configJson, env, flag is null ? Array.Empty<string>() : new[] { flag, value! });
+
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        Assert.Single(api.Requests);
+    }
+
     // ── funn 6: hvor ingress-verten kom fra ─────────────────────────────────
 
     [Fact]

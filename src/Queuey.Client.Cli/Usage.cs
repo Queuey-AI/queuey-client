@@ -82,7 +82,9 @@ ADVISE
                  how unreliable the network is. The network itself is not in the repository,
                  so it is asked rather than guessed.
                  With NO flags it changes nothing and needs no credentials — it prints the
-                 advice and the files it WOULD write. That is the default on purpose: an agent
+                 advice and the files it WOULD write. Its only call is with a login (queuey
+                 login), to the host the login is for, to read the license's plan; it never
+                 sends an API key. That is the default on purpose: an agent
                  runs a command before it reads this text.
                  --write-files writes them: queuey.deploy.json (the committable one) and
                  .gitignore lines for .env and queuey.json, which hold keys and must not be
