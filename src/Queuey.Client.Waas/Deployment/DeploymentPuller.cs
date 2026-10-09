@@ -69,7 +69,7 @@ internal sealed class DeploymentPuller
         {
             workspace.Delivery = new WorkspaceDelivery
             {
-                BaseUrl = wd.BaseUrl,
+                BaseUrl = Writable(wd.BaseUrl, WorkspaceUrlVariable, file, queue: null, queuePublicId: null),
                 AuthMode = NullIfNone(wd.AuthMode),
                 CredentialRef = NameFor(nameByRef, wd.CredentialRef),
                 AuthHeaderName = wd.AuthHeaderName,
@@ -97,12 +97,37 @@ internal sealed class DeploymentPuller
 
             QueueConfigResponse qc = await _controlPlane.GetQueueConfigAsync(id, cancellationToken).ConfigureAwait(false);
             DeploymentQueue pulled = effective ? ToEffectiveQueue(qc, nameByRef) : ToDeploymentQueue(qc, nameByRef);
+            if (!effective && pulled.Delivery?.Url is { } url)
+                pulled.Delivery.Url = Writable(url, DeploymentTemplate.QueueUrlVariable(name), file, name, id);
             pulled.Mode = effective ? EffectiveMode(queue.Mode) : DeclaredMode(queue);
             file.Queues[name] = pulled;
         }
 
         return file;
     }
+
+    /// <summary>The variable a pull writes for the workspace's endpoint when Queuey shows it redacted (Queuey #514).</summary>
+    internal const string WorkspaceUrlVariable = "QUEUEY_WORKSPACE_URL";
+
+    /// <summary>
+    /// <paramref name="url"/> as a pull may write it: as it is, or — when Queuey showed it redacted, with <c>…</c> where a part
+    /// may carry a secret (Queuey #514) — <c>${<paramref name="variable"/>}</c>, recorded on <paramref name="file"/> so the
+    /// command can say what to set. A redacted URL in the file would be applied as a URL nobody meant.
+    /// </summary>
+    // Queuey #514 (2026-10-09): en nøkkel og en innlogging leser mottakerens URL redigert. Skrevet inn i fila og applyet et annet
+    // sted, ville den gitt 400 redacted_url_written_back; der den kom fra, ville den bare holdt det lagrede. Begge er feil i en fil
+    // som skal bære miljøet videre, så verdien blir en variabel som må settes.
+    private static string Writable(string url, string variable, DeploymentFile file, string? queue, string? queuePublicId)
+    {
+        if (!CarriesRedactionMarker(url))
+            return url;
+        file.RedactedUrls.Add(new PulledRedactedUrl(variable, url, queue, queuePublicId));
+        return "${" + variable + "}";
+    }
+
+    /// <summary>Whether <paramref name="url"/> carries Queuey's redaction marker (<c>…</c>), as such or percent-encoded.</summary>
+    internal static bool CarriesRedactionMarker(string? url)
+        => url is not null && (url.IndexOf('\u2026') >= 0 || url.IndexOf("%E2%80%A6", StringComparison.OrdinalIgnoreCase) >= 0);
 
     /// <summary>
     /// The mode a pulled file writes: only what the default would get wrong. A queue that is created

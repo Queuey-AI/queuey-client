@@ -133,6 +133,12 @@ public sealed class DeploymentFile
     internal string? ProfileName { get; private set; }
 
     /// <summary>
+    /// The URLs a pull could not write, because Queuey showed them redacted (<c>…</c>, Queuey #514), and the variables it wrote
+    /// instead. Never part of the file.
+    /// </summary>
+    internal List<PulledRedactedUrl> RedactedUrls { get; } = new();
+
+    /// <summary>
     /// Parses a deployment file. Throws <see cref="QueueyConfigurationException"/> on malformed JSON, on
     /// a field the file does not have, on a top-level field it names twice, and on <c>maxAttempts</c> or
     /// <c>dlqAfterAttempts</c>, which it no longer has: the number of attempts is not a setting.
@@ -840,3 +846,10 @@ public static class DeploymentDeliveryKinds
         };
     }
 }
+
+/// <summary>
+/// A receiver's URL a pull did not write: Queuey showed it redacted (<paramref name="Shown"/>), so the file has
+/// <c>${<paramref name="Variable"/>}</c>. <paramref name="Queue"/> is the queue's name and <paramref name="QueuePublicId"/> its id,
+/// or both null for the workspace's endpoint.
+/// </summary>
+internal sealed record PulledRedactedUrl(string Variable, string Shown, string? Queue, string? QueuePublicId);
