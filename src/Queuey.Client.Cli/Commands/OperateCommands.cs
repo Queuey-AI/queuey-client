@@ -41,11 +41,28 @@ internal static class Operator
         public string Shown => QueueName is null ? QueueId : $"{QueueName} ({QueueId})";
 
         public Task<JsonElement?> GetAsync(IReadOnlyList<KeyValuePair<string, string?>>? query, params string[] segments)
-            => Management.OperateAsync(HttpMethod.Get, query, null, segments);
+            => SendAsync(HttpMethod.Get, query, null, segments);
 
-        public Task<JsonElement?> SendAsync(HttpMethod method, IReadOnlyList<KeyValuePair<string, string?>>? query, object? body,
+        /// <summary>
+        /// One call, with every receiver address in the answer and in an error redacted (security-review av #71, B2): what the
+        /// CLI prints, an agent reads.
+        /// </summary>
+        public async Task<JsonElement?> SendAsync(HttpMethod method, IReadOnlyList<KeyValuePair<string, string?>>? query, object? body,
             params string[] segments)
-            => Management.OperateAsync(method, query, body, segments);
+        {
+            try
+            {
+                return TargetUrlRedaction.RedactJson(await Management.OperateAsync(method, query, body, segments));
+            }
+            catch (QueueyException ex) when (ex is not QueueyConfigurationException)
+            {
+                throw new QueueyException(TargetUrlRedaction.RedactUrlsIn(ex.Message) ?? ex.Message, ex.StatusCode, ex.ErrorCode)
+                {
+                    SuggestedAction = TargetUrlRedaction.RedactUrlsIn(ex.SuggestedAction),
+                    ConsoleUrl = ex.ConsoleUrl,
+                };
+            }
+        }
 
         public void Dispose() => Provider.Dispose();
     }
@@ -242,7 +259,7 @@ internal static class QueueHealthCommand
             {
                 lanes = await session.GetAsync(new[] { Pair("page", "1"), Pair("pageSize", "20") }, "events", session.QueueId, "lanes");
             }
-            catch (QueueyForbiddenException ex)
+            catch (QueueyException ex) when (ex.StatusCode == 403)
             {
                 lanesUnavailable = ex.Message;
             }

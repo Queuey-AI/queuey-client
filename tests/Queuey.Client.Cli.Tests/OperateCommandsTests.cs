@@ -290,4 +290,78 @@ public sealed class OperateCommandsTests
         Assert.Equal(ExitCodes.Usage, run.Exit);
         Assert.Empty(api.Requests);
     }
+
+    // ── B2: mottakerens URL, redigert ───────────────────────────────────────
+
+    private const string SecretUrl = "https://ops:hunter2@shop.test/hooks/s3cr3t-T0ken9/orders?sig=abc123";
+
+    [Theory]
+    [InlineData(SecretUrl, "https://shop.test/hooks/…/orders")]
+    [InlineData("https://hooks.slack.com/services/T01/B02/xoxbSECRET", "https://hooks.slack.com/services/T01/B02/…")]
+    [InlineData("not a url", "…")]
+    public void A_receiver_url_keeps_its_host_and_plain_path_words_only(string url, string shown)
+        => Assert.Equal(shown, TargetUrlRedaction.Redact(url));
+
+    [Fact]
+    public void A_url_in_text_and_a_refused_redirect_are_redacted()
+    {
+        Assert.Equal("POST https://shop.test/hooks/…/orders failed.", TargetUrlRedaction.RedactUrlsIn($"POST {SecretUrl} failed."));
+        Assert.Equal("redirect_not_allowed: HTTP 302 → /login", TargetUrlRedaction.RedactUrlsIn("redirect_not_allowed: HTTP 302 → /login?session=abc123"));
+    }
+
+    [Fact]
+    public async Task No_operator_answer_shows_a_receivers_secret()
+    {
+        var api = new RecordingHandler(req => req.Key switch
+        {
+            "GET /queues/que_1/metrics/snapshot" => Ok(new { processState = "Locked" }),
+            "GET /queues/que_1/targets" => Ok(new[] { new { targetId = "tgt_1", targetName = "warehouse", state = "Down", effectiveUrl = SecretUrl } }),
+            "GET /events/que_1/lanes" => Ok(new { counts = new { total = 0 } }),
+            "GET /events/que_1/incident-report" => Ok(new
+            {
+                incidentType = "locked",
+                lastFailedEvent = new { publicId = "evt_1", targetEndpoint = SecretUrl, responseCode = 503, errorMessage = $"POST {SecretUrl} answered 503" },
+            }),
+            "GET /events/que_1" => Ok(new { items = new[] { new { publicId = "evt_1" } } }),
+            "GET /events/que_1/evt_1" => Ok(new { attempts = new[] { new { responseCode = 503, targetEndpoint = SecretUrl, errorMessage = $"POST {SecretUrl} answered 503" } } }),
+            "POST /queues/que_1/targets/tgt_1/verify-and-resume" => Ok(new
+            {
+                ok = false, probe = new { success = false, statusCode = 503, targetUrl = SecretUrl, error = $"GET {SecretUrl}: 503" },
+            }),
+            _ => throw new InvalidOperationException(req.Key),
+        });
+
+        var runs = new List<CliRun>();
+        foreach (string[] command in new[]
+        {
+            new[] { "queue", "health", "que_1" }, new[] { "queue", "health", "que_1", "--json" },
+            new[] { "diagnose", "que_1" }, new[] { "diagnose", "que_1", "--json" },
+            new[] { "resume", "que_1", "--target", "tgt_1" }, new[] { "resume", "que_1", "--target", "tgt_1", "--json" },
+        })
+            runs.Add(await Run(api, command));
+
+        string all = string.Concat(runs.Select(r => r.Stdout + r.Stderr));
+        foreach (string secret in new[] { "hunter2", "s3cr3t", "sig=", "abc123" })
+            Assert.DoesNotContain(secret, all);
+        Assert.Contains("https://shop.test/hooks/…/orders", all);
+    }
+
+    [Fact]
+    public async Task Events_get_shows_the_attempts_endpoint_redacted()
+    {
+        var api = new RecordingHandler(req => req.Key == "GET /events/que_1/evt_1"
+            ? Ok(new
+            {
+                publicId = "evt_1", queuePublicId = "que_1", status = 4,
+                attempts = new[] { new { attemptNumber = 1, responseCode = 503, targetEndpoint = SecretUrl, errorMessage = $"POST {SecretUrl} answered 503" } },
+            })
+            : throw new InvalidOperationException(req.Key));
+
+        CliRun json = await Run(api, "events", "get", "evt_1", "--queue", "que_1", "--json");
+        CliRun human = await Run(api, "events", "get", "evt_1", "--queue", "que_1");
+
+        Assert.True(json.Exit == ExitCodes.Success, json.Stdout + json.Stderr);
+        foreach (string secret in new[] { "hunter2", "s3cr3t", "sig=", "abc123" })
+            Assert.DoesNotContain(secret, json.Stdout + human.Stdout + human.Stderr);
+    }
 }

@@ -75,6 +75,14 @@ internal static class EventsCommand
         var service = provider.GetRequiredService<IQueueyService>();
 
         EventRead read = await service.GetEventAsync(queue!, eventId, revealContent: map.Has("content"));
+        // Security-review av #71 (B2): mottakerens URL i forsøkene og feiltekstene vises redigert. Innholdet (--content) er
+        // eventets eget og vises som Queuey serverer det.
+        read = new EventRead
+        {
+            QueuePublicId = read.QueuePublicId, EventPublicId = read.EventPublicId, Status = read.Status,
+            PayloadVisibility = read.PayloadVisibility, CanRevealContent = read.CanRevealContent,
+            Envelope = TargetUrlRedaction.RedactJson(read.Envelope) ?? read.Envelope, Content = read.Content,
+        };
 
         if (map.Has("json"))
             Console.WriteLine(JsonSerializer.Serialize(ToJson(read), CliHost.JsonOut));
