@@ -107,4 +107,50 @@ public sealed class BlindTest2Tests : IDisposable
         Assert.Contains("tenant in queuey.deploy.json", run.Stdout + run.Stderr);
         Assert.Empty(api.Requests);
     }
+
+    // ── #7: advise sier det samme som skillen ───────────────────────────────
+
+    private string Repo(params (string Path, string Content)[] files)
+    {
+        string repo = Path.Combine(_dir, "repo");
+        foreach ((string path, string content) in files)
+        {
+            string full = Path.Combine(repo, path);
+            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            File.WriteAllText(full, content);
+        }
+        return repo;
+    }
+
+    [Fact]
+    public void A_small_web_api_gets_Client_and_is_told_it_is_the_disk_that_rules_out_Edge_and_to_mint_the_workspace_key()
+    {
+        // shop-demo i blindtesten: et lite .NET web-API uten tegn til hvor det kjører.
+        string repo = Repo(("shop-demo.csproj", "<Project Sdk=\"Microsoft.NET.Sdk.Web\"></Project>"),
+            ("Program.cs", "var app = WebApplication.Create(); app.MapPost(\"/orders\", () => 1); app.Run();"));
+
+        var advice = Queuey.Client.Cli.Advise.Recommendation.For(Queuey.Client.Cli.Advise.RepoScan.Scan(repo));
+
+        Assert.Equal(Queuey.Client.Cli.Advise.SendPath.Client, advice.Send);
+        Assert.Contains(advice.Reasons, r => r.Contains("shows disk that survives a restart", StringComparison.Ordinal)
+                                             && r.Contains("Queuey.Edge fits instead", StringComparison.Ordinal));
+        Assert.Contains(Queuey.Client.Cli.Advise.Recommendation.DiskQuestion, advice.Questions);
+        Assert.Contains(advice.NextSteps, s => s.Contains("queuey keys mint --profile dev --write .env", StringComparison.Ordinal)
+                                               && s.Contains("add --queue <queue> only to limit it to one", StringComparison.Ordinal));
+        Assert.DoesNotContain(advice.NextSteps, s => s.Contains("keys mint --queue <queue> --profile dev --write .env", StringComparison.Ordinal));
+        Assert.Contains(advice.NextSteps, s => s.Contains("workspace's signing key", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void The_same_api_on_a_server_with_a_systemd_unit_gets_Edge()
+    {
+        string repo = Repo(("shop-demo.csproj", "<Project Sdk=\"Microsoft.NET.Sdk.Web\"></Project>"),
+            ("Program.cs", "var app = WebApplication.Create(); app.Run();"),
+            ("deploy/shop.service", "[Unit]\nDescription=Shop\n[Service]\nExecStart=/opt/shop/shop"));
+
+        var advice = Queuey.Client.Cli.Advise.Recommendation.For(Queuey.Client.Cli.Advise.RepoScan.Scan(repo));
+
+        Assert.Equal(Queuey.Client.Cli.Advise.SendPath.Edge, advice.Send);
+        Assert.Contains(advice.NextSteps, s => s.Contains("queuey keys mint --profile dev --write .env", StringComparison.Ordinal));
+    }
 }

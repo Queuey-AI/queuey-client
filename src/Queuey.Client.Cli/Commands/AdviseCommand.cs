@@ -458,7 +458,8 @@ internal static class AdviseCommand
         {
             Console.WriteLine();
             Console.WriteLine($"--apply would create the queue \"{queueName}\" in your workspace, with your login. The app's signing key " +
-                              $"comes from queuey keys mint --queue {queueName} --write .env, which needs a login that may manage keys.");
+                              $"is the workspace's: queuey keys mint --write {SecretTarget.SuggestedFor(root)} (add --queue {queueName} only to " +
+                              "limit it to one queue), which needs a login that may manage keys.");
         }
 
         Console.WriteLine();

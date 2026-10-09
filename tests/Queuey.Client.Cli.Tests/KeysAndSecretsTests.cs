@@ -391,7 +391,7 @@ public sealed class KeysAndSecretsTests : IDisposable
         JsonElement json = JsonDocument.Parse(run.Stdout).RootElement;
         string next = string.Join("\n", json.GetProperty("nextSteps").EnumerateArray().Select(s => s.GetString()));
         string receiving = string.Join("\n", json.GetProperty("receivingSteps").EnumerateArray().Select(s => s.GetString()));
-        Assert.Contains("queuey keys mint --queue <queue> --profile dev --write user-secrets", next);
+        Assert.Contains("queuey keys mint --profile dev --write user-secrets", next);
         Assert.Contains("queuey credentials generate <queue>-signing --profile dev --write user-secrets", receiving);
         Assert.Contains("QueueyDeliveryVerifier.FromEnvironment()", receiving);
 

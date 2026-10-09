@@ -81,7 +81,7 @@ public static class ScaffoldPlan
     /// "leave alone", so a scaffold that says little changes little — and it carries no secrets by construction.
     ///
     /// The workspace takes signed requests with Queuey's own template, so every queue in it inherits that: a producer signs
-    /// with the key <c>queuey keys mint --queue … --write .env</c> writes, and nothing else gets in. The template is named,
+    /// with the workspace key <c>queuey keys mint --write .env</c> writes, and nothing else gets in. The template is named,
     /// since the file needs one. The environment comes from the profile, so <c>queuey apply --profile dev</c> creates a dev
     /// workspace secured that way, and production is one more profile (docs agent, 2026-10-09).
     ///
