@@ -55,7 +55,7 @@ internal static class Operator
         {
             try
             {
-                return TargetUrlRedaction.RedactJson(await Management.OperateAsync(method, query, body, segments), Config);
+                return AnswerRedaction.RedactJson(await Management.OperateAsync(method, query, body, segments), Config);
             }
             catch (QueueyException ex) when (ex is not QueueyConfigurationException)
             {
