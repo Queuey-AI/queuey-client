@@ -59,6 +59,8 @@ public enum TransferReason
     QueuePaused = 33,
     BillingBlocked = 34,
     TlsFailure = 35,
+    /// <summary>The ingress refused the signature's timestamp (<c>timestamp_out_of_range</c>): this machine's clock is off.</summary>
+    ClockSkew = 36,
 
     MalformedRequest = 40,
     PayloadTooLarge = 41,

@@ -40,6 +40,7 @@ public class FrozenEnumTests
         Assert.Equal(33, (int)TransferReason.QueuePaused);
         Assert.Equal(34, (int)TransferReason.BillingBlocked);
         Assert.Equal(35, (int)TransferReason.TlsFailure);
+        Assert.Equal(36, (int)TransferReason.ClockSkew); // security-review av #70 (K2), lagt til bakerst
         Assert.Equal(40, (int)TransferReason.MalformedRequest);
         Assert.Equal(41, (int)TransferReason.PayloadTooLarge);
         Assert.Equal(42, (int)TransferReason.UnsupportedContentType);
