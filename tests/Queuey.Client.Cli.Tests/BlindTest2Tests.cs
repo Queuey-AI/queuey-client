@@ -210,4 +210,28 @@ public sealed class BlindTest2Tests : IDisposable
         Assert.Contains("Add the --profile you logged in with", run.Stderr);
         Assert.DoesNotContain("No ingress credential", run.Stderr);
     }
+
+    // ── #1: templateKey i forslagene ────────────────────────────────────────
+
+    [Fact]
+    public async Task Credentials_generate_and_the_receiving_recipe_suggest_templateKey_queuey()
+    {
+        var api = new RecordingHandler(req => req.Key == "POST /tenants/ten_1/credentials"
+            ? RecordingHandler.Json(HttpStatusCode.OK, new { publicId = "cred_1", name = "orders-signing", type = "HmacSigning", created = true })
+            : throw new InvalidOperationException(req.Key));
+        string env = Path.Combine(_dir, ".env");
+
+        CliRun json = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("credentials", "generate", "orders-signing", "--tenant", "ten_1", "--write", env, "--json")), api);
+        File.Delete(env);
+        CliRun human = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("credentials", "generate", "orders-signing", "--tenant", "ten_1", "--write", env)), api);
+
+        Assert.True(json.Exit == ExitCodes.Success, json.Stdout + json.Stderr);
+        Assert.Equal("queuey", JsonDocument.Parse(json.Stdout).RootElement.GetProperty("deliverySigning").GetProperty("templateKey").GetString());
+        Assert.Contains("\"credentialRef\": \"orders-signing\", \"templateKey\": \"queuey\"", human.Stdout);
+
+        string repo = Repo(("Api.csproj", "<Project Sdk=\"Microsoft.NET.Sdk.Web\"></Project>"),
+            ("Program.cs", "var app = WebApplication.Create(); app.MapPost(\"/webhooks/orders\", (HttpRequest r) => 1); app.Run();"));
+        var advice = Queuey.Client.Cli.Advise.Recommendation.For(Queuey.Client.Cli.Advise.RepoScan.Scan(repo));
+        Assert.Contains(advice.ReceivingSteps, s => s.Contains("\"templateKey\": \"queuey\"", StringComparison.Ordinal));
+    }
 }

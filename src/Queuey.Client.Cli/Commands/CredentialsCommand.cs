@@ -362,7 +362,8 @@ internal static class CredentialsCommand
                 "secret for both.", status: null, ExitCodes.Configuration, "Error");
         }
 
-        string reference = $"\"delivery\": {{ \"signing\": {{ \"enabled\": true, \"credentialRef\": \"{stored.Name}\" }} }}";
+        // Blindtest 2 (2026-10-09, funn 1): templateKey "queuey" står alltid med, så leveringen signeres slik verifikatoren sjekker.
+        string reference = $"\"delivery\": {{ \"signing\": {{ \"enabled\": true, \"credentialRef\": \"{stored.Name}\", \"templateKey\": \"queuey\" }} }}";
         if (json)
         {
             Console.WriteLine(JsonSerializer.Serialize(new
@@ -375,7 +376,7 @@ internal static class CredentialsCommand
                 replacedLocally = localExists,
                 tightenedFrom,
                 workspaceFrom,
-                deliverySigning = new { enabled = true, credentialRef = stored.Name },
+                deliverySigning = new { enabled = true, credentialRef = stored.Name, templateKey = "queuey" },
             }, CliHost.JsonOut));
             return ExitCodes.Success;
         }

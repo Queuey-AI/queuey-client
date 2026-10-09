@@ -357,7 +357,7 @@ public static class Recommendation
         // Mottakerens hemmelighet lages én gang, og samme verdi står i Queuey og der mottakeren leser den (Kenneth 2026-10-09).
         yield return $"Make the delivery secret: queuey credentials generate <queue>-signing --profile dev --write {write}. It stores the " +
                      "value in Queuey and as QUEUEY_DELIVERY_SECRET here, never shown; point the queue's delivery at it with " +
-                     "\"delivery\": { \"signing\": { \"enabled\": true, \"credentialRef\": \"<queue>-signing\" } }.";
+                     "\"delivery\": { \"signing\": { \"enabled\": true, \"credentialRef\": \"<queue>-signing\", \"templateKey\": \"queuey\" } }.";
         if (facts.IsDotNet)
         {
             yield return "Verify the signature over the RAW body, before anything deserializes it, with QueueyDeliveryVerifier.FromEnvironment() " +

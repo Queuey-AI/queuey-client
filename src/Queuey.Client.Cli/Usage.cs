@@ -463,7 +463,9 @@ CREDENTIALS
                  value in both places, never shown. --write takes .env (or another file git
                  ignores) or user-secrets, as for keys mint. The answer says how the queue's
                  delivery points at it: ""delivery"": { ""signing"": { ""enabled"": true,
-                 ""credentialRef"": ""<name>"" } } in queuey.deploy.json, then apply. In .NET the
+                 ""credentialRef"": ""<name>"", ""templateKey"": ""queuey"" } } in queuey.deploy.json,
+                 then apply. templateKey ""queuey"" is Queuey's own signature, which the verifier
+                 checks. In .NET the
                  receiver verifies with QueueyDeliveryVerifier.FromEnvironment(). A name Queuey
                  already holds is refused unless --replace, which makes a new value for both, used
                  by every queue and ingress that names it. So is a target that already holds a
