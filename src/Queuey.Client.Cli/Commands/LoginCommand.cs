@@ -143,8 +143,7 @@ internal static class LoginCommand
 
             // To samtidige `queuey login` (security-review av #66, BØR 1): den andre ventet på låsen mens den første løste inn koden.
             // Den skal bruke den innloggingen, ikke be om en ny kode.
-            if (file.For(run.Host).Where(l => l.Scope == run.Scope && l.LoggedInAt >= started)
-                    .OrderByDescending(l => l.LoggedInAt).FirstOrDefault() is { } meanwhile)
+            if (FinishedMeanwhile(file, run.Host, started) is { } meanwhile)
                 return (null, false, meanwhile);
 
             int before = file.Pending.Count;
@@ -179,6 +178,15 @@ internal static class LoginCommand
     private sealed record PollOutcome(StoredLogin? Login, int? Failed);
 
     /// <summary>
+    /// The newest login for <paramref name="host"/> stored at or after <paramref name="since"/>: the one another queuey login
+    /// finished meanwhile, whatever scope Queuey granted it. Null when there is none.
+    /// </summary>
+    // Security-review av #66, runde 2: en innlogging Queuey ga et smalere scope (read for operate), ble meldt som «ended without a
+    // login». Den gjelder; scopet står i svaret.
+    internal static StoredLogin? FinishedMeanwhile(CredentialsFile file, string host, DateTimeOffset since)
+        => file.For(host).Where(l => l.LoggedInAt >= since).OrderByDescending(l => l.LoggedInAt).FirstOrDefault();
+
+    /// <summary>
     /// Asks once whether the code is approved, no sooner than the interval after the last time any process asked, or after it
     /// was made (RFC 8628 §3.5). Approved: the login, stored, and the code gone. Declined or expired: the error, written, and
     /// the code gone. Still waiting: neither.
@@ -201,9 +209,7 @@ internal static class LoginCommand
             PendingLogin? stored = file.Pending.FirstOrDefault(p => p.DeviceCode == pending.DeviceCode);
             if (stored is null)
             {
-                StoredLogin? theirs = file.For(run.Host)
-                    .Where(l => l.Scope == run.Scope && l.LoggedInAt >= pending.CreatedAt)
-                    .OrderByDescending(l => l.LoggedInAt).FirstOrDefault();
+                StoredLogin? theirs = FinishedMeanwhile(file, run.Host, pending.CreatedAt);
                 return theirs is not null
                     ? new PollOutcome(theirs, null)
                     : new PollOutcome(null, run.CodeEnded("code_ended",
@@ -490,6 +496,8 @@ internal static class LoginCommand
             else
             {
                 string who = login.User is null ? "" : $" as {TerminalText.Line(login.User)}";
+                if (login.Scope != Scope)
+                    Console.Error.WriteLine($"Note: Queuey granted scope {login.Scope}, not {Scope}.");
                 Console.WriteLine($"{(already ? "Already logged in" : "Logged in")} to {Host}{who}, license {login.License}, scope {login.Scope}.");
                 if (Profile is not null)
                     Console.WriteLine(tenant is null

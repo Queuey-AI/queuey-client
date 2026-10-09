@@ -24,8 +24,12 @@ internal sealed class FakeAuthServer
     public List<object> Workspaces { get; } = new();
 
     /// <summary>Utstederen og token-endepunktet metadataen oppgir; som standard API-ets egen opprinnelse.</summary>
-    public string Issuer { get; set; } = Api + "/";
-    public string TokenEndpoint { get; set; } = Api + "/connect/token";
+    /// <remarks>Null: vertens egen opprinnelse, den forespørselen kom til, så en test kan logge inn på en annen vert.</remarks>
+    public string? Issuer { get; set; }
+    public string? TokenEndpoint { get; set; }
+
+    /// <summary>Scopet serveren gir, i stedet for det som ble bedt om, når satt.</summary>
+    public string? GrantedScope { get; set; }
 
     /// <summary>Metadata-svaret, eller null for en Queuey uten innlogging (404).</summary>
     public bool OffersLogin { get; set; } = true;
@@ -71,13 +75,14 @@ internal sealed class FakeAuthServer
         switch (req.Key)
         {
             case "GET /.well-known/oauth-authorization-server":
+                string origin = req.Uri.GetLeftPart(UriPartial.Authority);
                 return OffersLogin
                     ? RecordingHandler.Json(HttpStatusCode.OK, new Dictionary<string, object>
                     {
-                        ["issuer"] = Issuer,
-                        ["device_authorization_endpoint"] = Api + "/connect/device",
-                        ["token_endpoint"] = TokenEndpoint,
-                        ["revocation_endpoint"] = Api + "/connect/revoke",
+                        ["issuer"] = Issuer ?? origin + "/",
+                        ["device_authorization_endpoint"] = origin + "/connect/device",
+                        ["token_endpoint"] = TokenEndpoint ?? origin + "/connect/token",
+                        ["revocation_endpoint"] = origin + "/connect/revoke",
                         ["grant_types_supported"] = new[] { "urn:ietf:params:oauth:grant-type:device_code", "refresh_token" },
                     })
                     : new HttpResponseMessage(HttpStatusCode.NotFound);
@@ -149,7 +154,7 @@ internal sealed class FakeAuthServer
             ["expires_in"] = 3600,
             ["refresh_token"] = refresh,
             // Som OpenIddict: scopet som ble gitt, pluss et eget for refresh-tokenet.
-            ["scope"] = $"{_scope} offline_access",
+            ["scope"] = $"{GrantedScope ?? _scope} offline_access",
             ["license"] = License,
             ["ingress_base"] = IngressBase,
             ["user"] = User,

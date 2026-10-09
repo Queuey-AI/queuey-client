@@ -52,7 +52,7 @@ LOGIN
                  hosts and the workspace marked with the profile's environment (dev, test,
                  staging or prod), or --tenant's. Other profiles, and the profile's other fields,
                  stay as they were. A profile with an apiKey keeps it, the key wins, and login
-                 only fills the fields it lacks. A QUEUEY_ variable that disagrees with the
+                 never writes its hosts; it adds a license or workspace only where none is. A QUEUEY_ variable that disagrees with the
                  profile fails, as with any --profile; --api-base overrides the host.
                  The tokens are in ~/.queuey/credentials.json, next to config.json, readable only
                  by you and checked as config.json is. They renew themselves; two commands at
