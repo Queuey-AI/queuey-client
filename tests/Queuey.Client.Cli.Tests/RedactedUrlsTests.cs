@@ -211,4 +211,15 @@ public sealed class RedactedUrlsTests
             .SelectMany(s => s.GetProperty("changes").EnumerateArray()).Single();
         Assert.True(change.GetProperty("hiddenPartChanged").GetBoolean());
     }
+
+    // ── K3: listen bruker Queuey sine regler ────────────────────────────────
+
+    [Fact]
+    public void Listen_prints_addresses_by_queueys_rules_from_514()
+    {
+        // Et token av bokstaver ble vist med den gamle porten; #514 skjuler det.
+        Assert.Equal("https://h.test/in/…", UrlRedaction.Redact("https://h.test/in/AbCdEfGhIjKlMn"));
+        Assert.Equal("/in/…", UrlRedaction.EndpointPath(null, "/in/AbCdEfGhIjKlMn?token=x"));
+        Assert.Equal("/services/T1/B2/…", UrlRedaction.EndpointPath("https://hooks.slack.com/services/T1/B2/xoxb", "/ignored"));
+    }
 }
