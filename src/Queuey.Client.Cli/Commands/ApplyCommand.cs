@@ -616,6 +616,9 @@ internal static class ApplyCommand
                 inSync = drift.Count == 0,
                 drift = drift.Select(d => new { d.Path, d.Declared, d.Actual }),
                 detached = check.Detached.Select(ToJson),
+                // Queuey #514: URL-er Queuey viser redigert, sammenlignet slik filens URL leses redigert.
+                comparedRedacted = check.ComparedRedacted,
+                comparedRedactedNote = check.ComparedRedacted.Count == 0 ? null : RedactedCheckNote,
             }, CliHost.JsonOut));
         }
         else
@@ -633,10 +636,17 @@ internal static class ApplyCommand
             }
 
             WriteDetached(check.Detached, "apply skips it");
+            if (check.ComparedRedacted.Count > 0)
+                Console.WriteLine($"  Note: {string.Join(", ", check.ComparedRedacted)} — {RedactedCheckNote}");
         }
 
         return drift.Count == 0 ? ExitCodes.Success : ExitCodes.RuntimeError;
     }
+
+    /// <summary>What <c>apply --check</c> says about URLs Queuey shows redacted (Queuey #514).</summary>
+    internal const string RedactedCheckNote =
+        "Queuey shows these URLs redacted to a key or a login, so the file's URL was compared as it reads redacted. A change only " +
+        "in the hidden part is not seen here; queuey plan shows it.";
 
     // Hvert løsrevne mål, med hvem, når og hvorfor, og hvordan det tas tilbake.
     internal static void WriteDetached(IReadOnlyList<SkippedResource> detached, string consequence)

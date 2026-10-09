@@ -143,4 +143,39 @@ public sealed class RedactedUrlsTests
         Assert.Contains("redacted_url_written_back", json.Stdout);
         Assert.Contains("Send the full URL", json.Stdout);
     }
+
+    // ── apply --check: en redigert URL sammenlignes slik den leses ──────────
+
+    private static RecordingHandler CheckServer() => new(req => req.Key switch
+    {
+        "GET /tenants/ten_abc/credentials" => RecordingHandler.Json(HttpStatusCode.OK, Array.Empty<object>()),
+        "GET /tenants/ten_abc/config" => RecordingHandler.Json(HttpStatusCode.OK, new { }),
+        "GET /tenants/ten_abc/queues" => RecordingHandler.Json(HttpStatusCode.OK, new[] { new { publicId = "que_orders", displayName = "orders", mode = "Deliver", hasDeliveryTarget = true } }),
+        "GET /queues/que_orders/config" => RecordingHandler.Json(HttpStatusCode.OK, new
+        {
+            delivery = new { baseUrl = RedactedQueue },
+            inherited = new { destination = false, auth = true, signing = true, rateLimit = true, behavior = true },
+        }),
+        _ => RecordingHandler.Error(HttpStatusCode.NotFound, "not_found", "Not found."),
+    });
+
+    [Theory]
+    [InlineData("https://warehouse.test/orders/s3cr3t-T0ken", true)]     // bare den skjulte delen kan være annerledes: ingen drift her
+    [InlineData("https://elsewhere.test/orders/s3cr3t-T0ken", false)]    // verten er synlig: drift
+    public async Task Check_compares_a_redacted_url_as_the_files_url_reads_redacted_and_says_plan_sees_the_rest(string url, bool inSync)
+    {
+        string dir = Directory.CreateTempSubdirectory("queuey-redacted-check-").FullName;
+        string path = Path.Combine(dir, "queuey.deploy.json");
+        File.WriteAllText(path, $$"""{ "tenant": "ten_abc", "queues": { "orders": { "delivery": { "url": "{{url}}" } } } }""");
+
+        CliRun json = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path, "--check", "--json")), CheckServer());
+        CliRun human = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path, "--check")), CheckServer());
+
+        JsonElement root = JsonDocument.Parse(json.Stdout).RootElement;
+        Assert.Equal(inSync, root.GetProperty("inSync").GetBoolean());
+        Assert.Equal("queues.orders.delivery.url", root.GetProperty("comparedRedacted")[0].GetString());
+        Assert.Contains("queuey plan shows it", human.Stdout);
+        // Filens hemmelighet vises aldri i driften: den sammenlignes redigert.
+        Assert.DoesNotContain("s3cr3t", json.Stdout + human.Stdout);
+    }
 }

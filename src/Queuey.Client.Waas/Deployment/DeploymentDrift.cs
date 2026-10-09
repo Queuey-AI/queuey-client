@@ -42,13 +42,29 @@ public sealed class DriftItem
 /// </remarks>
 public static class DeploymentDrift
 {
+    /// <summary>
+    /// How a receiver's URL reads redacted (Queuey's TargetUrlRedaction.Redact): set by the <c>queuey</c> CLI, which carries a
+    /// verbatim copy of the rules. Without it, a URL Queuey shows redacted is not compared, and is listed as such.
+    /// </summary>
+    // Queuey #514 (2026-10-09): en nøkkel og en innlogging leser mottakerens URL redigert. Reglene krever net7+ (NonBacktracking),
+    // og denne pakken bygger også for netstandard2.0, så de ligger i CLI-en, som setter dem her.
+    internal static Func<string, string?>? RedactUrl { get; set; }
+
     /// <summary>Every difference between <paramref name="declared"/> and <paramref name="actual"/>.</summary>
     public static IReadOnlyList<DriftItem> Compare(DeploymentFile declared, DeploymentFile actual)
+        => Compare(declared, actual, new List<string>());
+
+    /// <summary>
+    /// As <see cref="Compare(DeploymentFile, DeploymentFile)"/>, and <paramref name="comparedRedacted"/> gets each URL Queuey
+    /// showed redacted: the file's URL was compared as it reads redacted, so a change only in the hidden part is not seen here.
+    /// </summary>
+    internal static IReadOnlyList<DriftItem> Compare(DeploymentFile declared, DeploymentFile actual, List<string> comparedRedacted)
     {
         if (declared is null) throw new ArgumentNullException(nameof(declared));
         if (actual is null) throw new ArgumentNullException(nameof(actual));
 
         var drift = new List<DriftItem>();
+        _comparedRedacted = comparedRedacted;
 
         CompareWorkspace(declared.Workspace, actual.Workspace, drift);
 
@@ -84,7 +100,7 @@ public static class DeploymentDrift
             if (want.Delivery is { } wd)
             {
                 QueueDelivery hd = have.Delivery ?? new QueueDelivery();
-                Compare(prefix + ".delivery.url", wd.Url, hd.Url, drift);
+                CompareUrl(prefix + ".delivery.url", wd.Url, hd.Url, drift);
                 Compare(prefix + ".delivery.authMode", wd.AuthMode, hd.AuthMode, drift);
                 Compare(prefix + ".delivery.credentialRef", wd.CredentialRef, hd.CredentialRef, drift);
                 // Typen i filas ord (Queuey F2.3): "LocalForward" og "localForward" er samme type.
@@ -115,7 +131,7 @@ public static class DeploymentDrift
         if (want.Delivery is { } wd)
         {
             WorkspaceDelivery hd = actual.Delivery ?? new WorkspaceDelivery();
-            Compare("workspace.delivery.baseUrl", wd.BaseUrl, hd.BaseUrl, drift);
+            CompareUrl("workspace.delivery.baseUrl", wd.BaseUrl, hd.BaseUrl, drift);
             Compare("workspace.delivery.authMode", wd.AuthMode, hd.AuthMode, drift);
             Compare("workspace.delivery.credentialRef", wd.CredentialRef, hd.CredentialRef, drift);
             Compare("workspace.delivery.authHeaderName", wd.AuthHeaderName, hd.AuthHeaderName, drift);
@@ -209,6 +225,29 @@ public static class DeploymentDrift
 
         // Queuey skriver kilden med små bokstaver; fila kan skrive Body.
         static string? Word(string? from) => from?.Trim().ToLowerInvariant();
+    }
+
+    [ThreadStatic] private static List<string>? _comparedRedacted;
+
+    /// <summary>
+    /// A URL: as any field, unless Queuey showed it redacted (with <c>…</c>, #514). Then the file's URL is compared as it reads
+    /// redacted, and the path is listed, since a change in the hidden part does not show here (plan sees it).
+    /// </summary>
+    private static void CompareUrl(string path, string? want, string? have, List<DriftItem> drift)
+    {
+        if (want is null) return;
+        if (!DeploymentPuller.CarriesRedactionMarker(have))
+        {
+            Compare(path, want, have, drift);
+            return;
+        }
+
+        _comparedRedacted?.Add(path);
+        if (RedactUrl is not { } redact)
+            return;
+        string? asRead = redact(want);
+        if (!string.Equals(asRead, have, StringComparison.Ordinal))
+            drift.Add(new DriftItem(path, asRead, have));
     }
 
     /// <summary>A field the file does not declare is never drift — see the type's remarks.</summary>

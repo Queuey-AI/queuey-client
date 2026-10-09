@@ -19,6 +19,8 @@ internal static class CliEntry
         // `queuey --json apply` betyr det samme som `queuey apply --json` (review 2026-10-05). Før ble --json lest som
         // kommandoen, og svaret var «Unknown command» som prosa.
         args = MoveLeadingJsonAfterTheCommand(args);
+        // Queuey #514: apply --check sammenligner en redigert URL med reglene CLI-en har kopiert (Waas bygger også for netstandard).
+        DeploymentDrift.RedactUrl ??= TargetUrlRedaction.Redact;
 
         string command = args.Length > 0 ? args[0] : string.Empty;
         string[] rest = args.Length > 1 ? args[1..] : Array.Empty<string>();

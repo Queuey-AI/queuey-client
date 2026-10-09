@@ -707,7 +707,8 @@ public sealed class QueueyService : IQueueyService, IQueueyPlans
         DeploymentFile actual = await new DeploymentPuller(_controlPlane, Management)
             .PullAsync(tenant, cancellationToken, effective: true).ConfigureAwait(false);
 
-        IReadOnlyList<DriftItem> drift = DeploymentDrift.Compare(declared, actual);
+        var comparedRedacted = new List<string>();
+        IReadOnlyList<DriftItem> drift = DeploymentDrift.Compare(declared, actual, comparedRedacted);
 
         // Det en person har løsrevet (Queuey F2.4), hopper apply over: det er ikke drift, men det meldes, med hvem og når.
         var detached = new List<SkippedResource>();
@@ -726,6 +727,7 @@ public sealed class QueueyService : IQueueyService, IQueueyPlans
         {
             Drift = drift.Where(d => !detached.Any(s => Covers(s, d.Path))).ToList(),
             Detached = detached,
+            ComparedRedacted = comparedRedacted,
         };
     }
 
