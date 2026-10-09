@@ -101,7 +101,8 @@ public sealed class ManagedResourcesCommandTests : IDisposable
                 "remote get-url origin" => remote is null ? null : remote + "\n",
                 "rev-parse --show-prefix" => "deploy/\n",
                 "rev-parse HEAD" => "0123456789ABCDEF0123456789abcdef01234567\n",
-                "status --porcelain --ignored -- queuey.deploy.json" => dirty ? " M queuey.deploy.json\n" : "",
+                "rev-parse HEAD:./queuey.deploy.json" => "1111111111111111111111111111111111111111\n",
+                "hash-object --no-filters -- queuey.deploy.json" => dirty ? "2222222222222222222222222222222222222222\n" : "1111111111111111111111111111111111111111\n",
                 _ => throw new InvalidOperationException("git " + call),
             };
         };
@@ -209,7 +210,8 @@ public sealed class ManagedResourcesCommandTests : IDisposable
 
         Assert.Null(source!.Commit);
         Assert.Equal("deploy/queuey.deploy.json", source.Path);
-        Assert.Contains("status --porcelain --ignored -- queuey.deploy.json", calls);
+        Assert.Contains("hash-object --no-filters -- queuey.deploy.json", calls);
+        Assert.DoesNotContain(calls, c => c.StartsWith("status", StringComparison.Ordinal)); // status kan starte filterdrivere
         // En commit fra flagget sjekkes ikke: den som ga den, står for den.
         Assert.Equal("abcdef1", GitSource.Resolve(Path.Combine(_dir, "deploy", "queuey.deploy.json"), null, null, "abcdef1", noGit: false)!.Commit);
     }
@@ -319,7 +321,8 @@ public sealed class ManagedResourcesCommandTests : IDisposable
 
         Assert.Equal("https://gitlab.example.com/acme/app", source!.Repo);
         Assert.Equal("infra/queuey/queuey.deploy.json", source.Path);
-        Assert.Equal(head, source.Commit);
+        // Fila finnes verken her eller i HEAD, så ingen commit har den (#68 runde 2: blob-en i HEAD sammenlignes, ikke status).
+        Assert.Null(source.Commit);
 
         // En fil git ikke har committet, er ikke det commit-en sier, så commit-en sendes ikke (sikkerhetsreviewen 2026-10-06).
         File.WriteAllText(file, "{}");
@@ -335,6 +338,31 @@ public sealed class ManagedResourcesCommandTests : IDisposable
         Git(repo, "add", ".gitignore");
         Git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "ignore");
         Assert.Null(GitSource.Resolve(ignored, null, null, null, noGit: false)!.Commit);
+    }
+
+    [Fact]
+    public void Reading_where_the_file_lives_runs_no_filter_driver_the_repository_configures()
+    {
+        // Security-review av #68 runde 2 (R2-K2): `git status` kunne kjøre en clean-filterdriver fra repoets config.
+        if (OperatingSystem.IsWindows()) return;
+        GitSource.Git = _realGit;
+        string repo = Path.Combine(_dir, "filtered");
+        Directory.CreateDirectory(repo);
+        Git(repo, "init", "-q");
+        string file = Path.Combine(repo, "queuey.deploy.json");
+        File.WriteAllText(file, "{}");
+        Git(repo, "add", ".");
+        Git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-q", "-m", "file");
+
+        string trap = Path.Combine(_dir, "filter-ran");
+        File.WriteAllText(Path.Combine(repo, ".gitattributes"), "*.json filter=trap\n");
+        Git(repo, "config", "filter.trap.clean", $"touch '{trap}'; cat");
+        File.SetLastWriteTimeUtc(file, DateTime.UtcNow.AddMinutes(1)); // så en status må lese fila på nytt
+
+        DeploymentFileSource? source = GitSource.Resolve(file, null, null, null, noGit: false);
+
+        Assert.False(File.Exists(trap), "a filter driver ran");
+        Assert.Equal(Git(repo, "rev-parse", "HEAD").Trim(), source!.Commit);
     }
 
     private static string Git(string directory, params string[] arguments)
