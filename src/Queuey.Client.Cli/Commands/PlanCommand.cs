@@ -147,7 +147,9 @@ internal static class PlanCommand
             if (step.Creates)
                 Console.WriteLine("      + would be created");
             foreach (PlannedChange change in step.Changes)
-                Console.WriteLine($"      ~ {change}");
+                Console.WriteLine($"      ~ {change}" + (HiddenPartChanged(change)
+                    ? "  (the hidden part of the URL changes: Queuey shows it redacted to a key or a login, so both sides read the same)"
+                    : ""));
             foreach (string note in step.Notes)
                 Console.WriteLine($"      · {note}");
             if (step.Error is { } error)
@@ -167,6 +169,15 @@ internal static class PlanCommand
             StoredPlanText.WriteNext(next);
     }
 
+    /// <summary>
+    /// Whether <paramref name="change"/> is a URL whose change lies only in the part Queuey hides (Queuey #514): both sides read
+    /// the same, redacted, yet Queuey computed the plan on the whole values and found them different.
+    /// </summary>
+    internal static bool HiddenPartChanged(PlannedChange change)
+        => change.From is { ValueKind: JsonValueKind.String } from && change.To is { ValueKind: JsonValueKind.String } to
+           && string.Equals(from.GetString(), to.GetString(), StringComparison.Ordinal)
+           && DeploymentPuller.CarriesRedactionMarker(from.GetString());
+
     internal static object ToJson(DeploymentPlan plan, string path, string ingressFrom)
     {
         var steps = plan.Steps.Select(s => new
@@ -174,7 +185,7 @@ internal static class PlanCommand
             target = s.Target,
             aspect = s.Aspect,
             creates = s.Creates,
-            changes = s.Changes.Select(c => new { path = c.Path, from = c.From, to = c.To }),
+            changes = s.Changes.Select(c => new { path = c.Path, from = c.From, to = c.To, hiddenPartChanged = HiddenPartChanged(c) ? true : (bool?)null }),
             notes = s.Notes,
             state = s.State,
             desired = s.Desired,

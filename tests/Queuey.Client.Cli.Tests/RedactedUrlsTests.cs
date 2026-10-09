@@ -178,4 +178,37 @@ public sealed class RedactedUrlsTests
         // Filens hemmelighet vises aldri i driften: den sammenlignes redigert.
         Assert.DoesNotContain("s3cr3t", json.Stdout + human.Stdout);
     }
+
+    // ── plan: en endring i den skjulte delen ────────────────────────────────
+
+    [Fact]
+    public async Task Plan_shows_a_change_that_reads_the_same_on_both_sides_as_a_change_in_the_hidden_part()
+    {
+        string dir = Directory.CreateTempSubdirectory("queuey-redacted-plan-").FullName;
+        string path = Path.Combine(dir, "queuey.deploy.json");
+        File.WriteAllText(path, """{ "tenant": "ten_abc", "queues": { "orders": { "delivery": { "url": "https://warehouse.test/orders/n3w-s3cr3t" } } } }""");
+        var api = new RecordingHandler(req => req switch
+        {
+            { Method.Method: "GET" } when req.Path.EndsWith("/queues", StringComparison.Ordinal)
+                => RecordingHandler.Json(HttpStatusCode.OK, new[] { new { publicId = "que_orders", displayName = "orders", mode = "Deliver", hasDeliveryTarget = true } }),
+            { Method.Method: "PUT", Path: "/queues" }
+                => RecordingHandler.Json(HttpStatusCode.OK, new { dryRun = true, publicId = "que_orders", displayName = "orders", created = false, hasDeliveryTarget = true }),
+            _ when req.Path.Contains("delivery", StringComparison.Ordinal) => RecordingHandler.Json(HttpStatusCode.OK, new
+            {
+                dryRun = true, target = "queue que_orders",
+                changes = new object[] { new { path = "delivery.targets[0].url", from = RedactedQueue, to = RedactedQueue } },
+                notes = Array.Empty<string>(),
+            }),
+            _ => RecordingHandler.Json(HttpStatusCode.OK, new { dryRun = true, target = "queue que_orders", changes = Array.Empty<object>(), notes = Array.Empty<string>() }),
+        });
+
+        CliRun human = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("plan", "--file", path)), api);
+        CliRun json = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("plan", "--file", path, "--json")), api);
+
+        Assert.True(human.Exit == ExitCodes.Success, human.Stdout + human.Stderr);
+        Assert.Contains("the hidden part of the URL changes", human.Stdout);
+        JsonElement change = JsonDocument.Parse(json.Stdout).RootElement.GetProperty("steps").EnumerateArray()
+            .SelectMany(s => s.GetProperty("changes").EnumerateArray()).Single();
+        Assert.True(change.GetProperty("hiddenPartChanged").GetBoolean());
+    }
 }
