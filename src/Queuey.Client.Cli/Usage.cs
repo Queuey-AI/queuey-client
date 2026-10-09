@@ -494,6 +494,10 @@ PUBLISH
                  event type and the group key for a queue that reads them, as a stream does.
                  The answer has the event's id: follow it with
                  `queuey verify <queue> --event <evt_…>`.
+                 Without an API key (as with a login, which the ingress does not take), it
+                 signs with QUEUEY_SIGNING_KEY_ID and QUEUEY_SIGNING_SECRET from the
+                 environment, else from ./.env, where `queuey keys mint` writes them (see
+                 KEYS). Only those two are read from .env, and a key that is set wins.
                  When the key may read the queue, what its ingress requires is read first.
                  An ingress that verifies a provider's signature (such as Stripe's) or
                  Queuey's own, or wants a key and a signature together, is refused before

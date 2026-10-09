@@ -951,6 +951,8 @@ secret, not in `--json` either.
 - The producer reads them from the environment: `options.UseEnvironmentVariables()` in .NET fills each
   setting that is not set in code, from `QUEUEY_SIGNING_KEY_ID`, `QUEUEY_SIGNING_SECRET`,
   `QUEUEY_TENANT`, `QUEUEY_INGRESS_BASE` and `QUEUEY_API_KEY`.
+- `queuey publish` reads them too, from the environment or else from `./.env`, when no API key is set,
+  as with a login. Only those two names are read from `.env`, and a key that is set wins.
 - Without `--write`, the secret is shown once.
 
 Minting needs a login (`queuey login`) for a person who may manage keys, or a credential with

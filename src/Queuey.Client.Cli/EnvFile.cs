@@ -88,6 +88,50 @@ internal static class EnvFile
         return previous;
     }
 
+    /// <summary>
+    /// The values <paramref name="names"/> are set to in the dotenv file at <paramref name="path"/>: the first line that sets
+    /// each, with or without <c>export</c>, unquoted. Every other line is skipped, never read into anything. A file that
+    /// cannot be read gives nothing.
+    /// </summary>
+    public static IReadOnlyDictionary<string, string> Read(string path, params string[] names)
+    {
+        var found = new Dictionary<string, string>(StringComparer.Ordinal);
+        string[] lines;
+        try
+        {
+            lines = File.ReadAllLines(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return found;
+        }
+
+        foreach (string line in lines)
+        {
+            Match match = Setter.Match(line);
+            if (!match.Success || !names.Contains(match.Groups[2].Value, StringComparer.Ordinal) || found.ContainsKey(match.Groups[2].Value))
+                continue;
+            string value = Value(match.Groups[3].Value.Trim());
+            if (value.Length > 0)
+                found[match.Groups[2].Value] = value;
+        }
+
+        return found;
+    }
+
+    private static readonly Regex Setter = new(@"^\s*(export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$", RegexOptions.CultureInvariant);
+
+    /// <summary>A dotenv value: single quotes as written, double quotes unescaped, otherwise up to a <c> #</c> comment.</summary>
+    private static string Value(string raw)
+    {
+        if (raw.Length >= 2 && raw[0] == '\'' && raw[^1] == '\'')
+            return raw[1..^1];
+        if (raw.Length >= 2 && raw[0] == '"' && raw[^1] == '"')
+            return raw[1..^1].Replace("\\\"", "\"").Replace("\\$", "$").Replace("\\\\", "\\");
+        int comment = raw.IndexOf(" #", StringComparison.Ordinal);
+        return (comment >= 0 ? raw[..comment] : raw).Trim();
+    }
+
     /// <summary>Whether others than the user can read the file at <paramref name="full"/>. Never on Windows.</summary>
     public static bool OthersCanRead(string full)
         => !OperatingSystem.IsWindows() && File.Exists(full)

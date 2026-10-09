@@ -82,8 +82,9 @@ public sealed class QueueyClient : IDisposable
             => throw new QueueyConfigurationException(
                 "Publishing needs an API key or a signing key: the ingress does not take a login's access token. Nothing was published.")
             {
-                SuggestedAction = "Set QueueyOptions.ApiKey, or SigningKeyId and SigningSecret. In the CLI: --api-key, QUEUEY_API_KEY or " +
-                                  "apiKey in the profile, with a key from the Queuey console that may publish to the queue.",
+                SuggestedAction = "Set QueueyOptions.ApiKey, or SigningKeyId and SigningSecret. In the CLI: `queuey keys mint --queue <queue> " +
+                                  "--write .env` makes a signing key that publish reads from .env, or set --api-key, QUEUEY_API_KEY or " +
+                                  "apiKey in the profile.",
             };
     }
 
