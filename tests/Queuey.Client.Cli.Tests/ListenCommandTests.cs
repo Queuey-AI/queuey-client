@@ -280,7 +280,7 @@ public sealed class ListenCommandTests
 
         JsonElement line = Assert.Single(Lines(stdout));
         Assert.Equal("/hooks/…", line.GetProperty("path").GetString());
-        Assert.Equal("http://localhost:5000/hooks/…", line.GetProperty("localUrl").GetString());
+        Assert.Equal("http://localhost:5000/hooks/…?…", line.GetProperty("localUrl").GetString());
         Assert.Equal("http://localhost:5000/hooks/s3cr3t-t0k3n?sig=abc", result.LocalUrl.ToString());
         Assert.Equal("/services/T0001/B0001/…", UrlRedaction.EndpointPath("https://hooks.slack.com/services/T0001/B0001/XXXXsecret", "/services/T0001/B0001/XXXXsecret"));
     }

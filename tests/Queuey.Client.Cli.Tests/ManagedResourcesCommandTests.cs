@@ -461,7 +461,9 @@ public sealed class ManagedResourcesCommandTests : IDisposable
         CliRun json = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path, "--check", "--json")), Check());
 
         JsonElement root = JsonDocument.Parse(json.Stdout).RootElement;
-        Assert.Equal(new[] { "schemaVersion", "file", "inSync", "drift", "detached" }, root.EnumerateObject().Select(p => p.Name).ToArray());
+        // comparedRedacted og notatet kom til med Queuey #514 (2026-10-09), som tillegg i samme versjon.
+        Assert.Equal(new[] { "schemaVersion", "file", "inSync", "drift", "detached", "comparedRedacted", "comparedRedactedNote" },
+            root.EnumerateObject().Select(p => p.Name).ToArray());
         Assert.Equal(1, root.GetProperty("schemaVersion").GetInt32());
         Assert.True(root.GetProperty("inSync").GetBoolean());
         JsonElement detached = Assert.Single(root.GetProperty("detached").EnumerateArray());

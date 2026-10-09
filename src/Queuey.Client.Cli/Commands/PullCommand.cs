@@ -50,6 +50,7 @@ internal static class PullCommand
         {
             Console.WriteLine(json);
             WarnAboutRefusedFilters(file);
+            SayWhatToSet(file, config, Console.Error);
             return ExitCodes.Success;
         }
 
@@ -69,6 +70,8 @@ internal static class PullCommand
         Console.WriteLine("No secrets are in it: credentials appear by name only. Safe to commit "
                           + "(keep it separate from queuey.json, which holds your API key).");
 
+        SayWhatToSet(file, config, Console.Out);
+
         IReadOnlyList<string> variables = file.ReferencedVariables();
         if (variables.Count > 0)
         {
@@ -79,6 +82,22 @@ internal static class PullCommand
 
         WarnAboutRefusedFilters(file);
         return ExitCodes.Success;
+    }
+
+    /// <summary>
+    /// For each receiver URL Queuey showed redacted (Queuey #514): the variable the file has instead, that it must be set, and the
+    /// console page where a person reads the full URL.
+    /// </summary>
+    private static void SayWhatToSet(DeploymentFile file, ResolvedConfig config, TextWriter to)
+    {
+        foreach (PulledRedactedUrl url in file.RedactedUrls)
+        {
+            string where = url.Queue is null ? "The workspace's endpoint" : $"Queue {url.Queue}'s URL";
+            to.WriteLine($"{where} may carry a secret, and reads {TerminalText.Line(url.Shown)} redacted, so the file has " +
+                         $"${{{url.Variable}}} instead. Set {url.Variable} to the full URL before you apply it.");
+            if (ConsolePages.Delivery(config, file.Tenant, url.QueuePublicId) is { } page)
+                to.WriteLine($"  A person reads the full URL in the console: {TerminalText.Line(page)}");
+        }
     }
 
     /// <summary>

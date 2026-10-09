@@ -55,7 +55,7 @@ internal static class Operator
         {
             try
             {
-                return TargetUrlRedaction.RedactJson(await Management.OperateAsync(method, query, body, segments), Config);
+                return AnswerRedaction.RedactJson(await Management.OperateAsync(method, query, body, segments), Config);
             }
             catch (QueueyException ex) when (ex is not QueueyConfigurationException)
             {
@@ -337,7 +337,8 @@ internal static class QueueHealthCommand
             Console.WriteLine($"Queue {TerminalText.Line(session.Shown)}");
             Operator.Lines(snapshot, ("state", "processState"), ("received", "received"), ("delivered", "delivered"), ("failed", "failed"),
                 ("success rate", "successRate"), ("depth", "depthSample"), ("in flight", "inFlightSample"), ("dlq", "dlqSample"),
-                ("locked until", "lockedUntilUtc"), ("locked because", "lockedReason"), ("failure streak", "deliveryFailureStreak"));
+                ("locked because", "lockedReason"), ("failure streak", "deliveryFailureStreak"));
+            LockLifts(snapshot);
 
             JsonElement[] receivers = targets is { ValueKind: JsonValueKind.Array } t ? t.EnumerateArray().ToArray() : Array.Empty<JsonElement>();
             Console.WriteLine(receivers.Length == 0 ? "  receivers: none" : $"  receivers: {receivers.Length}");
@@ -370,6 +371,30 @@ internal static class QueueHealthCommand
     }
 
     internal static KeyValuePair<string, string?> Pair(string key, string? value) => new(key, value);
+
+    /// <summary>
+    /// When the queue's lock lifts. <c>lockLiftsAtUtc</c> (Queuey #514) is the time when it lifts on its own; <c>null</c> there
+    /// means it does not lift on a timer (LockReason.LiftsAt in Queuey). A Queuey from before #514 has no such field: then the
+    /// stored end is shown, unless it is the placeholder about ten years out, which reads «unknown». Nothing for a queue that
+    /// is not locked, and never an invitation to lift a lock: some locks protect a receiver.
+    /// </summary>
+    // Security-review av #72 (K1): et manglende felt og null er ikke det samme, og ingen tekst ber agenten låse opp.
+    internal static void LockLifts(JsonElement? snapshot)
+    {
+        if (snapshot is not { ValueKind: JsonValueKind.Object } s || Operator.Text(s, "lockedReason") is null) return;
+        if (s.TryGetProperty("lockLiftsAtUtc", out JsonElement lifts))
+        {
+            Console.WriteLine(lifts.ValueKind == JsonValueKind.String
+                ? $"  lock lifts: {TerminalText.Line(lifts.GetString()!)}"
+                : "  lock lifts: not on a timer; Queuey gives no time for it");
+            return;
+        }
+
+        string? until = Operator.Text(s, "lockedUntilUtc");
+        bool placeholder = until is not null && DateTimeOffset.TryParse(until, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out DateTimeOffset at)
+                           && at - DateTimeOffset.UtcNow > TimeSpan.FromDays(365);
+        Console.WriteLine($"  lock lifts: {(until is null || placeholder ? "unknown" : TerminalText.Line(until))}");
+    }
 }
 
 /// <summary>
@@ -391,6 +416,17 @@ internal static class DiagnoseCommand
         using (session)
         {
             JsonElement? report = await session.GetAsync(null, "events", session.QueueId, "incident-report");
+            // Når låsen løfter seg, står i snapshot-en (lockLiftsAtUtc, #514). Rapportens lockedUntilUtc er den lagrede tiden, som
+            // for en lås en person må løfte er en plassholder rundt ti år ut.
+            // Security-review av #72 (K2): snapshot-en krever queue.read; uten den står resten.
+            JsonElement? snapshot = null;
+            try
+            {
+                snapshot = await session.GetAsync(null, "queues", session.QueueId, "metrics", "snapshot");
+            }
+            catch (QueueyException ex) when (ex.StatusCode == 403)
+            {
+            }
             JsonElement? failed = await session.GetAsync(new[]
             {
                 QueueHealthCommand.Pair("hasFailures", "true"), QueueHealthCommand.Pair("page", "1"),
@@ -436,6 +472,7 @@ internal static class DiagnoseCommand
                     queuePublicId = session.QueueId,
                     queueName = session.QueueName,
                     report,
+                    lockLiftsAtUtc = snapshot is { } lockState ? Operator.Text(lockState, "lockLiftsAtUtc") : null,
                     summary,
                     inspectedEvents = inspected,
                 }, CliHost.JsonOut));
@@ -445,7 +482,8 @@ internal static class DiagnoseCommand
             Console.WriteLine($"Queue {TerminalText.Line(session.Shown)}: " +
                               TerminalText.Line($"{(report is { } r ? Operator.Text(r, "incidentType") : null) ?? "unknown"}" +
                                                 $"{(report is { } s && Operator.Text(s, "severity") is { } sev ? $" ({sev})" : "")}"));
-            Operator.Lines(report, ("locked because", "lockedReason"), ("locked until", "lockedUntilUtc"));
+            Operator.Lines(report, ("locked because", "lockedReason"));
+            QueueHealthCommand.LockLifts(snapshot);
             if (report is { ValueKind: JsonValueKind.Object } rep && rep.TryGetProperty("lastFailedEvent", out JsonElement last) && last.ValueKind == JsonValueKind.Object)
             {
                 Console.WriteLine(TerminalText.Line($"  last failed event: {Operator.Text(last, "publicId")} → {Operator.Text(last, "targetEndpoint") ?? "?"}, " +

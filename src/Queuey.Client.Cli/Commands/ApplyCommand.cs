@@ -40,6 +40,9 @@ internal static class ApplyCommand
         if (!TryReadDeploymentFile(map, out string path, out DeploymentFile file, out failure, profile)) return failure;
         DeploymentFile target = profile is null ? file : ForProfile(file, profile, path);
         string? fileTenant = profile is null ? file.ResolveTenant() : target.Tenant;
+        // En fil som ikke kan utvides, feiler der den feilet før; advarselen gjelder bare en fil som kan sendes.
+        try { WarnAboutRedactedUrls(profile is null ? file.Expand() : target); }
+        catch (QueueyConfigurationException) { }
         bool dryRun = map.Has("dry-run");
         if (StoredPlanOptions(map, out string? planId, out TimeSpan wait) is { } refused)
             return refused;
@@ -229,6 +232,27 @@ internal static class ApplyCommand
         }
         Console.Error.WriteLine($"  → Name it, or the next apply creates another: {DeploymentWorkspaceRecord.Variable} for profile {profile}, or --tenant {tenant}.");
         return null;
+    }
+
+    /// <summary>
+    /// Says on stderr which URLs in the file are a redacted reading (with <c>…</c>, Queuey #514): Queuey keeps the stored URL
+    /// only when the file has exactly the reading it showed, and refuses any other with 400 <c>redacted_url_written_back</c>.
+    /// The file goes as it is; the server decides.
+    /// </summary>
+    private static void WarnAboutRedactedUrls(DeploymentFile file)
+    {
+        var redacted = new List<(string Field, string Variable)>();
+        if (DeploymentPuller.CarriesRedactionMarker(file.Workspace?.Delivery?.BaseUrl))
+            redacted.Add(("workspace.delivery.baseUrl", DeploymentPuller.WorkspaceUrlVariable));
+        foreach (KeyValuePair<string, DeploymentQueue> queue in file.Queues)
+        {
+            if (DeploymentPuller.CarriesRedactionMarker(queue.Value.Delivery?.Url))
+                redacted.Add(($"queues.{queue.Key}.delivery.url", DeploymentTemplate.QueueUrlVariable(queue.Key)));
+        }
+        foreach ((string field, string variable) in redacted)
+            Console.Error.WriteLine($"Warning: {field} in the file is a redacted reading ('…' stands for a part Queuey does not show to keys " +
+                                    $"and logins). Queuey keeps the stored URL only if it reads exactly so; write the full URL instead, " +
+                                    $"from a variable such as ${{{variable}}}.");
     }
 
     /// <summary>A workspace apply created because nothing named one and the file says its environment.</summary>
@@ -592,6 +616,9 @@ internal static class ApplyCommand
                 inSync = drift.Count == 0,
                 drift = drift.Select(d => new { d.Path, d.Declared, d.Actual }),
                 detached = check.Detached.Select(ToJson),
+                // Queuey #514: URL-er Queuey viser redigert, sammenlignet slik filens URL leses redigert.
+                comparedRedacted = check.ComparedRedacted,
+                comparedRedactedNote = check.ComparedRedacted.Count == 0 ? null : RedactedCheckNote,
             }, CliHost.JsonOut));
         }
         else
@@ -609,10 +636,17 @@ internal static class ApplyCommand
             }
 
             WriteDetached(check.Detached, "apply skips it");
+            if (check.ComparedRedacted.Count > 0)
+                Console.WriteLine($"  Note: {string.Join(", ", check.ComparedRedacted)} — {RedactedCheckNote}");
         }
 
         return drift.Count == 0 ? ExitCodes.Success : ExitCodes.RuntimeError;
     }
+
+    /// <summary>What <c>apply --check</c> says about URLs Queuey shows redacted (Queuey #514).</summary>
+    internal const string RedactedCheckNote =
+        "Queuey shows these URLs redacted to a key or a login, so the file's URL was compared as it reads redacted. A change only " +
+        "in the hidden part is not seen here; queuey plan shows it.";
 
     // Hvert løsrevne mål, med hvem, når og hvorfor, og hvordan det tas tilbake.
     internal static void WriteDetached(IReadOnlyList<SkippedResource> detached, string consequence)

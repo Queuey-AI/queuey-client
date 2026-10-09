@@ -27,7 +27,11 @@ public sealed class OperateCommandsTests
         var api = new RecordingHandler(req => req.Key switch
         {
             "GET /tenants/ten_1/queues" => FlowAnswers.Queues(),
-            "GET /queues/que_orders/metrics/snapshot" => Ok(new { processState = "Locked", received = 12, delivered = 8, failed = 4, lockedReason = "receiver_down" }),
+            "GET /queues/que_orders/metrics/snapshot" => Ok(new
+            {
+                processState = "Locked", received = 12, delivered = 8, failed = 4, lockedReason = "rate_limited",
+                lockedUntilUtc = "2026-10-09T12:05:00Z", lockLiftsAtUtc = "2026-10-09T12:05:00Z",
+            }),
             "GET /queues/que_orders/targets" => Ok(OneTarget),
             "GET /events/que_orders/lanes" => Ok(new
             {
@@ -42,7 +46,8 @@ public sealed class OperateCommandsTests
 
         Assert.True(human.Exit == ExitCodes.Success, human.Stdout + human.Stderr);
         Assert.Contains("Queue orders (que_orders)", human.Stdout);
-        Assert.Contains("locked because: receiver_down", human.Stdout);
+        Assert.Contains("locked because: rate_limited", human.Stdout);
+        Assert.Contains("lock lifts: 2026-10-09T12:05:00Z", human.Stdout);
         Assert.Contains("warehouse: RequiresAction, 4 failure(s) in a row, last failure Http5xx (target tgt_1)", human.Stdout);
         Assert.Contains("unit-7: Blocked, blocked by evt_9, 5 waiting", human.Stdout);
         JsonElement root = JsonDocument.Parse(json.Stdout).RootElement;
@@ -86,6 +91,7 @@ public sealed class OperateCommandsTests
                 incidentType = "locked", severity = "high", lockedReason = "receiver_down",
                 requiredActions = new[] { "Fix the receiver, then resume." },
             }),
+            "GET /queues/que_1/metrics/snapshot" => Ok(new { lockedReason = "receiver_down", lockedUntilUtc = "2036-10-09T10:00:00Z" }),
             "GET /events/que_1" => Ok(new { items = new[] { new { publicId = "evt_1" }, new { publicId = "evt_2" } }, totalCount = 2 }),
             "GET /events/que_1/evt_1" => Ok(Detail(503)),
             "GET /events/que_1/evt_2" => Ok(Detail(503)),
@@ -105,6 +111,9 @@ public sealed class OperateCommandsTests
         Assert.Contains("Queue que_1: locked (high)", human.Stdout);
         Assert.Contains("required: Fix the receiver, then resume.", human.Stdout);
         Assert.Contains("response codes: 503 ×2", human.Stdout);
+        // En Queuey fra før #514 har ikke lockLiftsAtUtc: den lagrede tiden vises, men plassholderen i 2036 blir «unknown».
+        Assert.Contains("lock lifts: unknown", human.Stdout);
+        Assert.DoesNotContain("2036", human.Stdout);
     }
 
     // ── events search ───────────────────────────────────────────────────────
@@ -299,7 +308,7 @@ public sealed class OperateCommandsTests
     private const string SecretUrl = "https://ops:hunter2@shop.test/hooks/s3cr3t-T0ken9/orders?sig=abc123";
 
     [Theory]
-    [InlineData(SecretUrl, "https://shop.test/hooks/…/orders")]
+    [InlineData(SecretUrl, "https://…@shop.test/hooks/…/orders?…")]                 // #517: det som tas bort, synes
     [InlineData("https://hooks.slack.com/services/T01/B02/xoxbSECRET", "https://hooks.slack.com/services/T01/B02/…")]
     [InlineData("not a url", "…")]
     public void A_receiver_url_keeps_its_host_and_plain_path_words_only(string url, string shown)
@@ -308,8 +317,8 @@ public sealed class OperateCommandsTests
     [Fact]
     public void A_url_in_text_and_a_refused_redirect_are_redacted()
     {
-        Assert.Equal("POST https://shop.test/hooks/…/orders failed.", TargetUrlRedaction.RedactUrlsIn($"POST {SecretUrl} failed."));
-        Assert.Equal("redirect_not_allowed: HTTP 302 → /login", TargetUrlRedaction.RedactUrlsIn("redirect_not_allowed: HTTP 302 → /login?session=abc123"));
+        Assert.Equal("POST https://…@shop.test/hooks/…/orders?… failed.", TargetUrlRedaction.RedactUrlsIn($"POST {SecretUrl} failed."));
+        Assert.Equal("redirect_not_allowed: HTTP 302 → /login?…", TargetUrlRedaction.RedactUrlsIn("redirect_not_allowed: HTTP 302 → /login?session=abc123"));
     }
 
     [Fact]
@@ -346,7 +355,7 @@ public sealed class OperateCommandsTests
         string all = string.Concat(runs.Select(r => r.Stdout + r.Stderr));
         foreach (string secret in new[] { "hunter2", "s3cr3t", "sig=", "abc123" })
             Assert.DoesNotContain(secret, all);
-        Assert.Contains("https://shop.test/hooks/…/orders", all);
+        Assert.Contains("https://…@shop.test/hooks/…/orders?…", all);
     }
 
     [Fact]
@@ -594,6 +603,7 @@ public sealed class OperateCommandsTests
         var api = new RecordingHandler(req => req.Key switch
         {
             "GET /events/que_1/incident-report" => Ok(new { incidentType = "degraded" }),
+            "GET /queues/que_1/metrics/snapshot" => Ok(new { processState = "Running" }),
             "GET /events/que_1" => Ok(new { items = new[] { new { publicId = "../../admin" }, new { publicId = "evt_ok" } } }),
             "GET /events/que_1/evt_ok" => Ok(new { attempts = Array.Empty<object>() }),
             _ => throw new InvalidOperationException(req.Key),
@@ -602,6 +612,43 @@ public sealed class OperateCommandsTests
         CliRun run = await Run(api, "diagnose", "que_1", "--json");
 
         Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
-        Assert.Equal(new[] { "GET /events/que_1/incident-report", "GET /events/que_1", "GET /events/que_1/evt_ok" }, api.Requests.Select(r => r.Key));
+        Assert.Equal(new[] { "GET /events/que_1/incident-report", "GET /queues/que_1/metrics/snapshot", "GET /events/que_1", "GET /events/que_1/evt_ok" },
+            api.Requests.Select(r => r.Key));
+    }
+
+    // ── K1, K2 (security-review av #72) ─────────────────────────────────────
+
+    [Fact]
+    public async Task A_lock_without_a_time_is_said_so_and_no_one_is_told_to_lift_it()
+    {
+        var api = new RecordingHandler(req => req.Key switch
+        {
+            "GET /queues/que_1/metrics/snapshot" => Ok(new { processState = "Locked", lockedReason = "target_requires_action", lockLiftsAtUtc = (string?)null }),
+            "GET /queues/que_1/targets" => Ok(Array.Empty<object>()),
+            "GET /events/que_1/lanes" => Ok(new { counts = new { total = 0 } }),
+            _ => throw new InvalidOperationException(req.Key),
+        });
+
+        CliRun run = await Run(api, "queue", "health", "que_1");
+
+        Assert.Contains("lock lifts: not on a timer", run.Stdout);
+        Assert.DoesNotContain("unlock", run.Stdout);
+    }
+
+    [Fact]
+    public async Task Diagnose_without_queue_read_shows_the_rest()
+    {
+        var api = new RecordingHandler(req => req.Key switch
+        {
+            "GET /events/que_1/incident-report" => Ok(new { incidentType = "degraded" }),
+            "GET /queues/que_1/metrics/snapshot" => RecordingHandler.Error(HttpStatusCode.Forbidden, "permission_denied", "The key lacks queue.read."),
+            "GET /events/que_1" => Ok(new { items = Array.Empty<object>() }),
+            _ => throw new InvalidOperationException(req.Key),
+        });
+
+        CliRun run = await Run(api, "diagnose", "que_1", "--json");
+
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        Assert.Equal(JsonValueKind.Null, JsonDocument.Parse(run.Stdout).RootElement.GetProperty("lockLiftsAtUtc").ValueKind);
     }
 }

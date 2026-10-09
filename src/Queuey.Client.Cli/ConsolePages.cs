@@ -39,6 +39,17 @@ internal static class ConsolePages
             : $"{console}/console/t";
     }
 
+    /// <summary>
+    /// The page where a person sees a queue's delivery, or the workspace's when <paramref name="queue"/> is null: where the full
+    /// receiver URL a key or a login reads redacted can be read (Queuey #514). Null when the console is not known.
+    /// </summary>
+    internal static string? Delivery(ResolvedConfig config, string? tenant, string? queue)
+    {
+        if (Base(config) is not { } console || !IsId(tenant, "ten_"))
+            return null;
+        return IsId(queue, "que_") ? $"{console}/console/t/{tenant}/q/{queue}" : $"{console}/console/t/{tenant}";
+    }
+
     private static bool IsId(string? value, string prefix)
         => value is { Length: > 4 and <= 64 } && value.StartsWith(prefix, StringComparison.Ordinal)
            && value.Substring(prefix.Length).All(c => c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '_');

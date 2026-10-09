@@ -81,7 +81,7 @@ internal static class EventsCommand
         {
             QueuePublicId = read.QueuePublicId, EventPublicId = read.EventPublicId, Status = read.Status,
             PayloadVisibility = read.PayloadVisibility, CanRevealContent = read.CanRevealContent,
-            Envelope = TargetUrlRedaction.RedactJson(read.Envelope, config) ?? read.Envelope, Content = read.Content,
+            Envelope = AnswerRedaction.RedactJson(read.Envelope, config) ?? read.Envelope, Content = read.Content,
         };
 
         if (map.Has("json"))
