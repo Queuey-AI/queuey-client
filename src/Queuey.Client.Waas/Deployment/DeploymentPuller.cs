@@ -84,6 +84,10 @@ internal sealed class DeploymentPuller
 
         IReadOnlyList<QueueListItem> queues = await _management.ListQueuesAsync(tenantPublicId, cancellationToken).ConfigureAwait(false);
 
+        Dictionary<string, string> urlVariables = UrlVariables(queues
+            .Where(q => q.DisplayName is { } n && q.PublicId is not null && QueueyName.IsValid(n))
+            .Select(q => (q.DisplayName!, q.PublicId!)));
+
         foreach (QueueListItem queue in queues.OrderBy(q => q.DisplayName, StringComparer.Ordinal))
         {
             if (queue.DisplayName is not { } name || queue.PublicId is not { } id)
@@ -98,7 +102,7 @@ internal sealed class DeploymentPuller
             QueueConfigResponse qc = await _controlPlane.GetQueueConfigAsync(id, cancellationToken).ConfigureAwait(false);
             DeploymentQueue pulled = effective ? ToEffectiveQueue(qc, nameByRef) : ToDeploymentQueue(qc, nameByRef);
             if (!effective && pulled.Delivery?.Url is { } url)
-                pulled.Delivery.Url = Writable(url, DeploymentTemplate.QueueUrlVariable(name), file, name, id);
+                pulled.Delivery.Url = Writable(url, urlVariables[name], file, name, id);
             pulled.Mode = effective ? EffectiveMode(queue.Mode) : DeclaredMode(queue);
             file.Queues[name] = pulled;
         }
@@ -110,24 +114,48 @@ internal sealed class DeploymentPuller
     internal const string WorkspaceUrlVariable = "QUEUEY_WORKSPACE_URL";
 
     /// <summary>
-    /// <paramref name="url"/> as a pull may write it: as it is, or — when Queuey showed it redacted, with <c>…</c> where a part
-    /// may carry a secret (Queuey #514) — <c>${<paramref name="variable"/>}</c>, recorded on <paramref name="file"/> so the
-    /// command can say what to set. A redacted URL in the file would be applied as a URL nobody meant.
+    /// <paramref name="url"/> as a pull may write it: as it is, or — when it is a redacted reading (Queuey #514), or would read
+    /// differently redacted because it carries a query, user info or a path part that may be a secret — <c>${<paramref name="variable"/>}</c>,
+    /// recorded on <paramref name="file"/> with how it reads redacted, so the command can say what to set. The file stays safe
+    /// to commit, also when a person, or a Queuey from before #514, gave the whole URL.
     /// </summary>
-    // Queuey #514 (2026-10-09): en nøkkel og en innlogging leser mottakerens URL redigert. Skrevet inn i fila og applyet et annet
-    // sted, ville den gitt 400 redacted_url_written_back; der den kom fra, ville den bare holdt det lagrede. Begge er feil i en fil
-    // som skal bære miljøet videre, så verdien blir en variabel som må settes.
+    // Security-review av #72 (N2, B1): også en hel URL med en hemmelighet blir en variabel, ikke bare en med markøren.
     private static string Writable(string url, string variable, DeploymentFile file, string? queue, string? queuePublicId)
     {
-        if (!CarriesRedactionMarker(url))
+        if (!DeploymentUrls.HidesSomething(url))
             return url;
-        file.RedactedUrls.Add(new PulledRedactedUrl(variable, url, queue, queuePublicId));
+        file.RedactedUrls.Add(new PulledRedactedUrl(variable, DeploymentUrls.Shown(url) ?? DeploymentUrls.Marker, queue, queuePublicId));
         return "${" + variable + "}";
     }
 
     /// <summary>Whether <paramref name="url"/> carries Queuey's redaction marker (<c>…</c>), as such or percent-encoded.</summary>
-    internal static bool CarriesRedactionMarker(string? url)
-        => url is not null && (url.IndexOf('\u2026') >= 0 || url.IndexOf("%E2%80%A6", StringComparison.OrdinalIgnoreCase) >= 0);
+    internal static bool CarriesRedactionMarker(string? url) => DeploymentUrls.CarriesMarker(url);
+
+    /// <summary>
+    /// The variable each queue's URL is written as, when it has to be: <c>QUEUEY_&lt;QUEUE&gt;_URL</c>, or — when two queue
+    /// names give the same variable (<c>orders-eu</c>, <c>orders.eu</c>), or one gives the workspace's — that with the
+    /// queue's id in it, so no two URLs share a variable.
+    /// </summary>
+    // Security-review av #72 (N3): to køer med samme variabel ville fått samme URL ved apply.
+    internal static Dictionary<string, string> UrlVariables(IEnumerable<(string Name, string Id)> queues)
+    {
+        var list = queues.ToList();
+        var counts = list.GroupBy(q => DeploymentTemplate.QueueUrlVariable(q.Name), StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.Count(), StringComparer.Ordinal);
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach ((string name, string id) in list)
+        {
+            string variable = DeploymentTemplate.QueueUrlVariable(name);
+            if (counts[variable] > 1 || variable == WorkspaceUrlVariable)
+            {
+                string idPart = new string((id.StartsWith("que_", StringComparison.Ordinal) ? id.Substring(4) : id)
+                    .Select(c => char.IsLetterOrDigit(c) ? char.ToUpperInvariant(c) : '_').ToArray());
+                variable = variable.Substring(0, variable.Length - "_URL".Length) + "_" + idPart + "_URL";
+            }
+            result[name] = variable;
+        }
+        return result;
+    }
 
     /// <summary>
     /// The mode a pulled file writes: only what the default would get wrong. A queue that is created

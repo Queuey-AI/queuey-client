@@ -42,13 +42,12 @@ public sealed class DriftItem
 /// </remarks>
 public static class DeploymentDrift
 {
-    /// <summary>
-    /// How a receiver's URL reads redacted (Queuey's TargetUrlRedaction.Redact): set by the <c>queuey</c> CLI, which carries a
-    /// verbatim copy of the rules. Without it, a URL Queuey shows redacted is not compared, and is listed as such.
-    /// </summary>
-    // Queuey #514 (2026-10-09): en nøkkel og en innlogging leser mottakerens URL redigert. Reglene krever net7+ (NonBacktracking),
-    // og denne pakken bygger også for netstandard2.0, så de ligger i CLI-en, som setter dem her.
-    internal static Func<string, string?>? RedactUrl { get; set; }
+    /// <summary>How a receiver's URL reads redacted; see <see cref="DeploymentUrls.Redact"/>, which the <c>queuey</c> CLI sets.</summary>
+    internal static Func<string, string?>? RedactUrl
+    {
+        get => DeploymentUrls.Redact;
+        set => DeploymentUrls.Redact = value;
+    }
 
     /// <summary>Every difference between <paramref name="declared"/> and <paramref name="actual"/>.</summary>
     public static IReadOnlyList<DriftItem> Compare(DeploymentFile declared, DeploymentFile actual)
@@ -230,24 +229,32 @@ public static class DeploymentDrift
     [ThreadStatic] private static List<string>? _comparedRedacted;
 
     /// <summary>
-    /// A URL: as any field, unless Queuey showed it redacted (with <c>…</c>, #514). Then the file's URL is compared as it reads
-    /// redacted, and the path is listed, since a change in the hidden part does not show here (plan sees it).
+    /// A URL. Equal is in sync. When Queuey showed it redacted (Queuey #514: the marker, or a query or user info left out),
+    /// the file's URL is compared as it reads redacted, and the path is listed: a change only in the hidden part does not show
+    /// here (plan sees it). Without the rules (an SDK outside the CLI), a redacted URL is compared by its scheme and host, and
+    /// any other difference is drift: never «in sync» by silence. Both sides are always shown redacted: the file's URL may be a
+    /// secret from a variable.
     /// </summary>
+    // Security-review av #72 (B1, B2, N4).
     private static void CompareUrl(string path, string? want, string? have, List<DriftItem> drift)
     {
         if (want is null) return;
-        if (!DeploymentPuller.CarriesRedactionMarker(have))
-        {
-            Compare(path, want, have, drift);
-            return;
-        }
+        if (string.Equals(want, have, StringComparison.Ordinal)) return;
 
-        _comparedRedacted?.Add(path);
-        if (RedactUrl is not { } redact)
+        bool redactedReading = DeploymentUrls.CarriesMarker(have)
+                               || (have is not null && DeploymentUrls.Redact is { } r && string.Equals(r(want), have, StringComparison.Ordinal));
+        if (redactedReading)
+            _comparedRedacted?.Add(path);
+
+        if (DeploymentUrls.Redact is { } redact)
+        {
+            if (have is not null && string.Equals(redact(want), have, StringComparison.Ordinal))
+                return;
+        }
+        else if (redactedReading && DeploymentUrls.SameOrigin(want, have))
             return;
-        string? asRead = redact(want);
-        if (!string.Equals(asRead, have, StringComparison.Ordinal))
-            drift.Add(new DriftItem(path, asRead, have));
+
+        drift.Add(new DriftItem(path, DeploymentUrls.Shown(want), DeploymentUrls.Shown(have)));
     }
 
     /// <summary>A field the file does not declare is never drift — see the type's remarks.</summary>

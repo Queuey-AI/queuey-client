@@ -173,10 +173,12 @@ internal static class PlanCommand
     /// Whether <paramref name="change"/> is a URL whose change lies only in the part Queuey hides (Queuey #514): both sides read
     /// the same, redacted, yet Queuey computed the plan on the whole values and found them different.
     /// </summary>
+    // Security-review av #72 (B1): en URL der bare spørringen eller brukerinfoen er skjult, har ingen markør. Like sider på et
+    // adressefelt er nok: Queuey fant en endring i hele verdiene.
     internal static bool HiddenPartChanged(PlannedChange change)
         => change.From is { ValueKind: JsonValueKind.String } from && change.To is { ValueKind: JsonValueKind.String } to
            && string.Equals(from.GetString(), to.GetString(), StringComparison.Ordinal)
-           && DeploymentPuller.CarriesRedactionMarker(from.GetString());
+           && (RestTargetUrlRedaction.NamesAnAddress(change.Path) || DeploymentPuller.CarriesRedactionMarker(from.GetString()));
 
     internal static object ToJson(DeploymentPlan plan, string path, string ingressFrom)
     {

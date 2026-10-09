@@ -269,7 +269,7 @@ public sealed class DeploymentCheck
     /// The URLs Queuey showed redacted (Queuey #514), compared as the file's URL reads redacted: a change only in the hidden
     /// part is not drift here, and <c>queuey plan</c> shows it.
     /// </summary>
-    internal IReadOnlyList<string> ComparedRedacted { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<string> ComparedRedacted { get; init; } = Array.Empty<string>();
 }
 
 /// <summary>What an apply or a plan takes back from a detach (<c>queuey apply --adopt</c>).</summary>

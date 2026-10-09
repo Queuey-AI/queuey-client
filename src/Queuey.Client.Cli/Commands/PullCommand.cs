@@ -93,7 +93,7 @@ internal static class PullCommand
         foreach (PulledRedactedUrl url in file.RedactedUrls)
         {
             string where = url.Queue is null ? "The workspace's endpoint" : $"Queue {url.Queue}'s URL";
-            to.WriteLine($"{where} reads redacted for a key or a login ({TerminalText.Line(url.Shown)}), so the file has " +
+            to.WriteLine($"{where} may carry a secret, and reads {TerminalText.Line(url.Shown)} redacted, so the file has " +
                          $"${{{url.Variable}}} instead. Set {url.Variable} to the full URL before you apply it.");
             if (ConsolePages.Delivery(config, file.Tenant, url.QueuePublicId) is { } page)
                 to.WriteLine($"  A person reads the full URL in the console: {TerminalText.Line(page)}");

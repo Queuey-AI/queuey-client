@@ -245,4 +245,116 @@ public sealed class RedactedUrlsTests
         foreach (string leak in new[] { "hunter2", "s3cr3t", "abc123" })
             Assert.DoesNotContain(leak, json.Stdout);
     }
+
+    // ── runde 1 av #72: B1, B2, N2, N3 ──────────────────────────────────────
+
+    private static RecordingHandler QueuesServer(object workspaceDelivery, params (string Name, string Id, string Url)[] queues) => new(req =>
+    {
+        if (req.Key == "GET /tenants/ten_abc/credentials") return RecordingHandler.Json(HttpStatusCode.OK, Array.Empty<object>());
+        if (req.Key == "GET /tenants/ten_abc/config") return RecordingHandler.Json(HttpStatusCode.OK, new { delivery = workspaceDelivery });
+        if (req.Key == "GET /tenants/ten_abc/queues")
+            return RecordingHandler.Json(HttpStatusCode.OK, queues.Select(q => new { publicId = q.Id, displayName = q.Name, mode = "Deliver", hasDeliveryTarget = true }).ToArray());
+        foreach ((string name, string id, string url) in queues)
+        {
+            if (req.Key == $"GET /queues/{id}/config")
+                return RecordingHandler.Json(HttpStatusCode.OK, new
+                {
+                    delivery = new { baseUrl = url },
+                    inherited = new { destination = false, auth = true, signing = true, rateLimit = true, behavior = true },
+                });
+        }
+        return RecordingHandler.Error(HttpStatusCode.NotFound, "not_found", "Not found.");
+    });
+
+    private static async Task<(CliRun Run, JsonElement File)> Pull(RecordingHandler api)
+    {
+        string dir = Directory.CreateTempSubdirectory("queuey-redacted-n2-").FullName;
+        string path = Path.Combine(dir, "queuey.deploy.json");
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("pull", "--file", path, "--tenant", "ten_abc")), api);
+        return (run, File.Exists(path) ? JsonDocument.Parse(File.ReadAllText(path)).RootElement : default);
+    }
+
+    [Theory]
+    [InlineData("https://h.test/in?token=abc123")]                 // B1: bare en spørring
+    [InlineData("https://ops:abc123@h.test/in")]                   // bare brukerinfo
+    [InlineData("https://h.test/in/s3cr3t-abc123")]                // en hel URL med en hemmelig del (N2: en person, en eldre Queuey)
+    public async Task Pull_writes_a_variable_for_any_url_that_reads_differently_redacted(string url)
+    {
+        (CliRun run, JsonElement file) = await Pull(QueuesServer(new { baseUrl = url }, ("orders", "que_orders", url)));
+
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        Assert.Equal("${QUEUEY_WORKSPACE_URL}", file.GetProperty("workspace").GetProperty("delivery").GetProperty("baseUrl").GetString());
+        Assert.Equal("${QUEUEY_ORDERS_URL}", file.GetProperty("queues").GetProperty("orders").GetProperty("delivery").GetProperty("url").GetString());
+        Assert.DoesNotContain("abc123", file.GetRawText() + run.Stdout + run.Stderr);
+    }
+
+    [Fact]
+    public async Task A_url_without_anything_to_hide_is_written_as_it_is()
+    {
+        (CliRun run, JsonElement file) = await Pull(QueuesServer(new { baseUrl = "https://h.test/in" }, ("orders", "que_orders", "https://h.test/orders")));
+
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        Assert.Equal("https://h.test/in", file.GetProperty("workspace").GetProperty("delivery").GetProperty("baseUrl").GetString());
+        Assert.Equal("https://h.test/orders", file.GetProperty("queues").GetProperty("orders").GetProperty("delivery").GetProperty("url").GetString());
+    }
+
+    [Fact]
+    public async Task Queues_whose_names_give_the_same_variable_get_one_each_from_their_ids()
+    {
+        // N3: orders-eu, orders.eu og orders_eu gir alle QUEUEY_ORDERS_EU_URL, og en kø som heter workspace gir workspacets.
+        (CliRun run, JsonElement file) = await Pull(QueuesServer(new { baseUrl = RedactedWorkspace },
+            ("orders-eu", "que_a1", RedactedQueue), ("orders.eu", "que_b2", RedactedQueue), ("orders_eu", "que_c3", RedactedQueue),
+            ("workspace", "que_d4", RedactedQueue)));
+
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        JsonElement queues = file.GetProperty("queues");
+        string[] variables = new[] { "orders-eu", "orders.eu", "orders_eu", "workspace" }
+            .Select(q => queues.GetProperty(q).GetProperty("delivery").GetProperty("url").GetString()!).ToArray();
+        Assert.Equal(new[] { "${QUEUEY_ORDERS_EU_A1_URL}", "${QUEUEY_ORDERS_EU_B2_URL}", "${QUEUEY_ORDERS_EU_C3_URL}", "${QUEUEY_WORKSPACE_D4_URL}" }, variables);
+        Assert.Equal("${QUEUEY_WORKSPACE_URL}", file.GetProperty("workspace").GetProperty("delivery").GetProperty("baseUrl").GetString());
+    }
+
+    [Theory]
+    [InlineData("https://warehouse.test/orders/other")]                   // en person eller en eldre Queuey gir hel URL
+    [InlineData(RedactedQueue)]
+    public async Task Check_never_shows_the_files_url_from_a_variable(string serverUrl)
+    {
+        // B2: Declared var filens hele URL, med variabelen utvidet.
+        string dir = Directory.CreateTempSubdirectory("queuey-redacted-b2-").FullName;
+        string path = Path.Combine(dir, "queuey.deploy.json");
+        File.WriteAllText(path, """{ "tenant": "ten_abc", "queues": { "orders": { "delivery": { "url": "${QUEUEY_B2_ORDERS_URL}" } } } }""");
+        Environment.SetEnvironmentVariable("QUEUEY_B2_ORDERS_URL", "https://elsewhere.test/orders/s3cr3t-T0ken?sig=abc123");
+        try
+        {
+            RecordingHandler api = QueuesServer(new { }, ("orders", "que_orders", serverUrl));
+            CliRun json = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path, "--check", "--json")), api);
+            CliRun human = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path, "--check")), api);
+
+            Assert.False(JsonDocument.Parse(json.Stdout).RootElement.GetProperty("inSync").GetBoolean());
+            foreach (string leak in new[] { "s3cr3t", "abc123", "sig=" })
+                Assert.DoesNotContain(leak, json.Stdout + human.Stdout + human.Stderr);
+            Assert.Contains("https://elsewhere.test/orders/…", json.Stdout);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("QUEUEY_B2_ORDERS_URL", null);
+        }
+    }
+
+    [Fact]
+    public async Task Check_takes_a_url_queuey_read_without_its_query_as_the_files_url_read_redacted()
+    {
+        // B1: uten markør, men spørringen er tatt bort. Sammenlignet redigert: i synk, og stien er listet.
+        string dir = Directory.CreateTempSubdirectory("queuey-redacted-b1-").FullName;
+        string path = Path.Combine(dir, "queuey.deploy.json");
+        File.WriteAllText(path, """{ "tenant": "ten_abc", "queues": { "orders": { "delivery": { "url": "https://h.test/in?token=abc123" } } } }""");
+
+        CliRun json = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("apply", "--file", path, "--check", "--json")),
+            QueuesServer(new { }, ("orders", "que_orders", "https://h.test/in")));
+
+        JsonElement root = JsonDocument.Parse(json.Stdout).RootElement;
+        Assert.True(root.GetProperty("inSync").GetBoolean());
+        Assert.Equal("queues.orders.delivery.url", root.GetProperty("comparedRedacted")[0].GetString());
+        Assert.DoesNotContain("abc123", json.Stdout);
+    }
 }
