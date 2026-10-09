@@ -158,6 +158,18 @@ internal static class Operator
 
     internal static bool IsApprovalRequired(QueueyException ex) => ex.StatusCode == 403 && ex.ErrorCode == "approval_required";
 
+    /// <summary>
+    /// Whether <paramref name="value"/> is an id with <paramref name="prefix"/> and then letters, digits, <c>_</c> and <c>-</c>, at most
+    /// 64 characters: a path segment that cannot be <c>.</c>, <c>..</c> or anything else a URL resolves.
+    /// </summary>
+    /// <summary>Whether <paramref name="value"/> is one path segment of letters, digits, <c>_</c> and <c>-</c>, at most 128 characters.</summary>
+    internal static bool IsSegment(string? value)
+        => value is { Length: > 0 and <= 128 } && value.All(c => c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '_' or '-');
+
+    internal static bool IsId(string? value, string prefix)
+        => value is { Length: <= 64 } && value.Length > prefix.Length && value.StartsWith(prefix, StringComparison.Ordinal)
+           && value.Skip(prefix.Length).All(c => c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '_' or '-');
+
     /// <summary>A string property, or null.</summary>
     internal static string? Text(JsonElement e, string name)
         => e.ValueKind == JsonValueKind.Object && e.TryGetProperty(name, out JsonElement v)
@@ -510,11 +522,14 @@ internal static class ResumeCommand
         using (session)
         {
             string? target = map.Get("target")?.Trim();
+            // Security-review av #71 (K1): målet havner i stien, så det må være én id, aldri . eller ..
+            if (!string.IsNullOrWhiteSpace(target) && !Operator.IsSegment(target))
+                return CliErrors.Usage(map, "invalid_value", "--target takes a receiver's id, as queuey queue health lists it. The value is not shown.");
             if (string.IsNullOrWhiteSpace(target))
             {
                 JsonElement? targets = await session.GetAsync(null, "queues", session.QueueId, "targets");
                 string[] ids = targets is { ValueKind: JsonValueKind.Array } t
-                    ? t.EnumerateArray().Select(e => Operator.Text(e, "targetId")).OfType<string>().ToArray()
+                    ? t.EnumerateArray().Select(e => Operator.Text(e, "targetId")).OfType<string>().Where(Operator.IsSegment).ToArray()
                     : Array.Empty<string>();
                 if (ids.Length != 1)
                     return CliErrors.Write(json, ids.Length == 0 ? "no_target" : "several_targets",
@@ -637,7 +652,17 @@ internal static class Redeliver
                 "replay sends again either one event (queuey replay <evt_…> --queue <q> --redeliver) or the events with a status " +
                 "(queuey replay --queue <q> --status dlq).");
         if (eventId is not null && statuses.Length > 0)
-            return CliErrors.Usage(map, "invalid_value", "replay takes one event or --status, not both.");
+            return CliErrors.Usage(map, "invalid_value", "replay takes one event or --status, not both. Nothing was sent.");
+        // Security-review av #71 (B1): Queuey har ingen tørrkjøring for én hendelse, så --dry-run der ville sendt den.
+        if (statuses.Length == 0 && (map.Has("max") || map.Has("dry-run")))
+            return CliErrors.Usage(map, "invalid_value",
+                "--max and --dry-run go with --status; Queuey has no dry run for one event. Nothing was sent.",
+                "queuey events get <evt_…> --queue <q> shows the event without sending it.");
+        if (eventId is null && map.Has("redeliver"))
+            return CliErrors.Usage(map, "missing_argument", "--redeliver sends one event again: queuey replay <evt_…> --queue <q> --redeliver.");
+        // K1: en id i stien er en evt_-id, så . og .. aldri blir en annen sti.
+        if (eventId is not null && !Operator.IsId(eventId, "evt_"))
+            return CliErrors.Usage(map, "invalid_value", "replay takes an event's id (evt_…). The value is not shown, since it is not one.");
 
         (Operator.Session? session, int exit) = await Operator.OpenAsync(map, "replay", queue);
         if (session is null) return exit;

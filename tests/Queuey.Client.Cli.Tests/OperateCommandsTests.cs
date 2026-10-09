@@ -267,4 +267,27 @@ public sealed class OperateCommandsTests
         Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
         Assert.DoesNotContain(api.Requests, r => r.Key.EndsWith("/evt_1/replay", StringComparison.Ordinal));
     }
+
+    // ── security-review av #71 ──────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("replay evt_1 --queue que_1 --dry-run")]                 // B1: ingen tørrkjøring for én hendelse
+    [InlineData("replay evt_1 --queue que_1 --redeliver --dry-run")]
+    [InlineData("replay evt_1 --queue que_1 --redeliver --max 5")]
+    [InlineData("replay --queue que_1 --max 5")]                           // --max uten --status
+    [InlineData("replay --queue que_1 --dry-run")]
+    [InlineData("replay --queue que_1 --redeliver")]                       // --redeliver uten hendelse
+    [InlineData("replay ../x --queue que_1 --redeliver")]                  // K1
+    [InlineData("replay evt_1/.. --queue que_1 --redeliver")]
+    [InlineData("resume que_1 --target ..")]
+    [InlineData("resume que_1 --target a/b")]
+    public async Task A_replay_or_resume_that_could_reach_the_receiver_by_mistake_is_refused_and_sends_nothing(string command)
+    {
+        var api = new RecordingHandler(req => throw new InvalidOperationException("Nothing is sent: " + req.Key));
+
+        CliRun run = await Run(api, command.Split(' '));
+
+        Assert.Equal(ExitCodes.Usage, run.Exit);
+        Assert.Empty(api.Requests);
+    }
 }

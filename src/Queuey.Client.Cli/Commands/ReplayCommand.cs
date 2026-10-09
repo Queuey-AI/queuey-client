@@ -44,8 +44,14 @@ internal static class ReplayCommand
 
         // Blindtest 2 (2026-10-09, funn 3): replay til mottakeren, som MCP kan. Uten --redeliver eller --status er det som før:
         // én hendelse til lytteren (queuey listen), som aldri når den ekte mottakeren.
-        if (map.Has("redeliver") || map.Has("status") || map.Has("max") || map.Has("dry-run"))
+        // Security-review av #71 (B1): mottakeren nås bare med --redeliver eller --status. --max og --dry-run alene ga en ekte
+        // sending til mottakeren, med dryRun: true i svaret.
+        if (map.Has("redeliver") || map.Has("status"))
             return await Redeliver.RunAsync(map, string.IsNullOrWhiteSpace(eventId) ? null : eventId!.Trim(), queue);
+        if (map.Has("max") || map.Has("dry-run"))
+            return CliErrors.Usage(map, "invalid_value",
+                "--max and --dry-run go with --status: queuey replay --queue <q> --status dlq --dry-run. Nothing was sent.",
+                "Without --redeliver or --status, replay sends one event to your listener (queuey listen), never to the receiver.");
         if (string.IsNullOrWhiteSpace(eventId))
             return CliErrors.Usage(map, "missing_argument", "replay requires an event id: queuey replay <event-id> --queue <que_...>");
         if (string.IsNullOrWhiteSpace(queue))
