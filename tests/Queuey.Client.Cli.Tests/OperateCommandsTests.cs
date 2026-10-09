@@ -27,7 +27,11 @@ public sealed class OperateCommandsTests
         var api = new RecordingHandler(req => req.Key switch
         {
             "GET /tenants/ten_1/queues" => FlowAnswers.Queues(),
-            "GET /queues/que_orders/metrics/snapshot" => Ok(new { processState = "Locked", received = 12, delivered = 8, failed = 4, lockedReason = "receiver_down" }),
+            "GET /queues/que_orders/metrics/snapshot" => Ok(new
+            {
+                processState = "Locked", received = 12, delivered = 8, failed = 4, lockedReason = "rate_limited",
+                lockedUntilUtc = "2026-10-09T12:05:00Z", lockLiftsAtUtc = "2026-10-09T12:05:00Z",
+            }),
             "GET /queues/que_orders/targets" => Ok(OneTarget),
             "GET /events/que_orders/lanes" => Ok(new
             {
@@ -42,7 +46,8 @@ public sealed class OperateCommandsTests
 
         Assert.True(human.Exit == ExitCodes.Success, human.Stdout + human.Stderr);
         Assert.Contains("Queue orders (que_orders)", human.Stdout);
-        Assert.Contains("locked because: receiver_down", human.Stdout);
+        Assert.Contains("locked because: rate_limited", human.Stdout);
+        Assert.Contains("lock lifts: 2026-10-09T12:05:00Z", human.Stdout);
         Assert.Contains("warehouse: RequiresAction, 4 failure(s) in a row, last failure Http5xx (target tgt_1)", human.Stdout);
         Assert.Contains("unit-7: Blocked, blocked by evt_9, 5 waiting", human.Stdout);
         JsonElement root = JsonDocument.Parse(json.Stdout).RootElement;
@@ -86,6 +91,7 @@ public sealed class OperateCommandsTests
                 incidentType = "locked", severity = "high", lockedReason = "receiver_down",
                 requiredActions = new[] { "Fix the receiver, then resume." },
             }),
+            "GET /queues/que_1/metrics/snapshot" => Ok(new { lockedReason = "receiver_down", lockedUntilUtc = "2036-10-09T10:00:00Z" }),
             "GET /events/que_1" => Ok(new { items = new[] { new { publicId = "evt_1" }, new { publicId = "evt_2" } }, totalCount = 2 }),
             "GET /events/que_1/evt_1" => Ok(Detail(503)),
             "GET /events/que_1/evt_2" => Ok(Detail(503)),
@@ -105,6 +111,9 @@ public sealed class OperateCommandsTests
         Assert.Contains("Queue que_1: locked (high)", human.Stdout);
         Assert.Contains("required: Fix the receiver, then resume.", human.Stdout);
         Assert.Contains("response codes: 503 ×2", human.Stdout);
+        // #514: låsen venter på en person (ingen lockLiftsAtUtc), og plassholderen i 2036 vises ikke.
+        Assert.Contains("lock lifts: when a person lifts it", human.Stdout);
+        Assert.DoesNotContain("2036", human.Stdout);
     }
 
     // ── events search ───────────────────────────────────────────────────────
@@ -594,6 +603,7 @@ public sealed class OperateCommandsTests
         var api = new RecordingHandler(req => req.Key switch
         {
             "GET /events/que_1/incident-report" => Ok(new { incidentType = "degraded" }),
+            "GET /queues/que_1/metrics/snapshot" => Ok(new { processState = "Running" }),
             "GET /events/que_1" => Ok(new { items = new[] { new { publicId = "../../admin" }, new { publicId = "evt_ok" } } }),
             "GET /events/que_1/evt_ok" => Ok(new { attempts = Array.Empty<object>() }),
             _ => throw new InvalidOperationException(req.Key),
@@ -602,6 +612,7 @@ public sealed class OperateCommandsTests
         CliRun run = await Run(api, "diagnose", "que_1", "--json");
 
         Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
-        Assert.Equal(new[] { "GET /events/que_1/incident-report", "GET /events/que_1", "GET /events/que_1/evt_ok" }, api.Requests.Select(r => r.Key));
+        Assert.Equal(new[] { "GET /events/que_1/incident-report", "GET /queues/que_1/metrics/snapshot", "GET /events/que_1", "GET /events/que_1/evt_ok" },
+            api.Requests.Select(r => r.Key));
     }
 }

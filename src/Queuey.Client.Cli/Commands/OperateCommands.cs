@@ -337,7 +337,8 @@ internal static class QueueHealthCommand
             Console.WriteLine($"Queue {TerminalText.Line(session.Shown)}");
             Operator.Lines(snapshot, ("state", "processState"), ("received", "received"), ("delivered", "delivered"), ("failed", "failed"),
                 ("success rate", "successRate"), ("depth", "depthSample"), ("in flight", "inFlightSample"), ("dlq", "dlqSample"),
-                ("locked until", "lockedUntilUtc"), ("locked because", "lockedReason"), ("failure streak", "deliveryFailureStreak"));
+                ("locked because", "lockedReason"), ("failure streak", "deliveryFailureStreak"));
+            LockLifts(snapshot);
 
             JsonElement[] receivers = targets is { ValueKind: JsonValueKind.Array } t ? t.EnumerateArray().ToArray() : Array.Empty<JsonElement>();
             Console.WriteLine(receivers.Length == 0 ? "  receivers: none" : $"  receivers: {receivers.Length}");
@@ -370,6 +371,19 @@ internal static class QueueHealthCommand
     }
 
     internal static KeyValuePair<string, string?> Pair(string key, string? value) => new(key, value);
+
+    /// <summary>
+    /// When the queue's lock lifts (<c>lockLiftsAtUtc</c>, Queuey #514), or that a person lifts it: a locked queue without that
+    /// time waits for one. Nothing for a queue that is not locked.
+    /// </summary>
+    internal static void LockLifts(JsonElement? snapshot)
+    {
+        if (snapshot is not { ValueKind: JsonValueKind.Object } s) return;
+        if (Operator.Text(s, "lockLiftsAtUtc") is { } at)
+            Console.WriteLine($"  lock lifts: {TerminalText.Line(at)}");
+        else if (Operator.Text(s, "lockedReason") is not null)
+            Console.WriteLine("  lock lifts: when a person lifts it (queuey resume, or queuey unlock)");
+    }
 }
 
 /// <summary>
@@ -391,6 +405,9 @@ internal static class DiagnoseCommand
         using (session)
         {
             JsonElement? report = await session.GetAsync(null, "events", session.QueueId, "incident-report");
+            // Når låsen løfter seg, står i snapshot-en (lockLiftsAtUtc, #514). Rapportens lockedUntilUtc er den lagrede tiden, som
+            // for en lås en person må løfte er en plassholder rundt ti år ut.
+            JsonElement? snapshot = await session.GetAsync(null, "queues", session.QueueId, "metrics", "snapshot");
             JsonElement? failed = await session.GetAsync(new[]
             {
                 QueueHealthCommand.Pair("hasFailures", "true"), QueueHealthCommand.Pair("page", "1"),
@@ -436,6 +453,7 @@ internal static class DiagnoseCommand
                     queuePublicId = session.QueueId,
                     queueName = session.QueueName,
                     report,
+                    lockLiftsAtUtc = snapshot is { } lockState ? Operator.Text(lockState, "lockLiftsAtUtc") : null,
                     summary,
                     inspectedEvents = inspected,
                 }, CliHost.JsonOut));
@@ -445,7 +463,8 @@ internal static class DiagnoseCommand
             Console.WriteLine($"Queue {TerminalText.Line(session.Shown)}: " +
                               TerminalText.Line($"{(report is { } r ? Operator.Text(r, "incidentType") : null) ?? "unknown"}" +
                                                 $"{(report is { } s && Operator.Text(s, "severity") is { } sev ? $" ({sev})" : "")}"));
-            Operator.Lines(report, ("locked because", "lockedReason"), ("locked until", "lockedUntilUtc"));
+            Operator.Lines(report, ("locked because", "lockedReason"));
+            QueueHealthCommand.LockLifts(snapshot);
             if (report is { ValueKind: JsonValueKind.Object } rep && rep.TryGetProperty("lastFailedEvent", out JsonElement last) && last.ValueKind == JsonValueKind.Object)
             {
                 Console.WriteLine(TerminalText.Line($"  last failed event: {Operator.Text(last, "publicId")} → {Operator.Text(last, "targetEndpoint") ?? "?"}, " +
