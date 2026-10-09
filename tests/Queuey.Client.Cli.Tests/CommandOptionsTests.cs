@@ -220,7 +220,7 @@ public sealed class CommandOptionsTests : IDisposable
         var missing = new List<string>();
         foreach ((string section, CommandOptions[] commands) in sections)
         {
-            foreach (string option in OptionsIn(Section(section)))
+            foreach (string option in OptionsIn(WithoutOtherCommands(Section(section), section)))
             {
                 if (!commands.Any(c => c.Accepts(option)))
                     missing.Add($"{section}: --{option}");
@@ -248,6 +248,35 @@ public sealed class CommandOptionsTests : IDisposable
         return text.Substring(start, end + name.Length + 2);
     }
 
+    /// <summary>
+    /// The section without the quoted invocations of other commands, such as `queuey keys mint --write .env` in ADVISE: their
+    /// options are checked in their own section.
+    /// </summary>
+    private static string WithoutOtherCommands(string text, string section)
+        => Regex.Replace(text, @"`queuey ([a-z-]+)[^`]*`",
+            m => string.Equals(m.Groups[1].Value, section, StringComparison.OrdinalIgnoreCase) ? m.Value : "");
+
     private static IEnumerable<string> OptionsIn(string text)
         => Regex.Matches(text, @"(?<![\w-])--([a-z][a-z-]*)").Select(m => m.Groups[1].Value).Distinct();
+
+    [Fact]
+    public void The_command_list_and_advise_apply_name_keys_and_credentials_as_they_are_now()
+    {
+        // Docs-agenten 2026-10-09: kommandolisten og advise --apply beskrev fortsatt en kø-nøkkel i .env, uten generate.
+        string text = Usage.Text.Replace("\r\n", "\n");
+        string commands = text.Substring(0, text.IndexOf("\nLOGIN\n", StringComparison.Ordinal));
+        string advise = text.Substring(text.IndexOf("  queuey advise [<path>]", StringComparison.Ordinal));
+        advise = advise.Substring(0, advise.IndexOf("--intent starts from", StringComparison.Ordinal));
+
+        Assert.Contains("credentials set | generate | rotate | request", commands);
+        Assert.Contains("for the workspace or one queue (--queue)", commands);
+        Assert.Contains("--type signing (default) or api-key", commands);
+        Assert.Contains("--write .env|user-secrets", commands);
+        Assert.DoesNotContain("Mint an ingress signing key for a queue", commands);
+
+        Assert.Contains("`queuey keys mint --write user-secrets`", advise);
+        Assert.Contains("`queuey keys mint --write .env`", advise);
+        Assert.Contains("The app's signing key is\n                 the workspace's", advise);
+        Assert.DoesNotContain("keys mint --queue <queue>", advise);
+    }
 }

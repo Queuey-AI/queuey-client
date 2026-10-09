@@ -20,8 +20,10 @@ COMMANDS
   verify         Verify a queue's flow with Queuey, step by step from the ingress to the final state.
   schema         Print the JSON Schema for queuey.deploy.json, or a Desired Flow's. Reads nothing, needs no credentials.
   pull           Read a workspace back into a deployment file (the inverse of apply).
-  credentials    Store delivery secrets a deployment file refers to: credentials set | rotate | request | list.
-  keys           Mint an ingress signing key for a queue: keys mint.
+  credentials    Store delivery secrets a deployment file refers to: credentials set | generate | rotate | request
+                 | list. generate makes a receiver's secret and writes it with --write, never shown.
+  keys           Mint the key a producer publishes with, for the workspace or one queue (--queue), as
+                 --type signing (default) or api-key, written with --write .env|user-secrets: keys mint | list | revoke.
   publish        Publish one event to a queue the way a producer does, and print its id for verify.
   events         Read one event's status and attempts as Queuey serves them: events get.
   create-tenant  Create a tenant under the current license.
@@ -94,10 +96,11 @@ ADVISE
                  a dev profile: `queuey apply --profile dev` makes a dev workspace from it. An
                  existing deployment file is kept unless --force.
                  --apply converges the workspace down the same path `queuey apply` takes, and
-                 needs a login (queuey login). It creates the queue. The app's signing key
-                 comes from `queuey keys mint --queue <queue>` with .env as its file (see KEYS),
-                 which needs a login that may manage keys and never shows the secret; a license-wide API
-                 key is a person's, minted in the console.
+                 needs a login (queuey login). It creates the queue. The app's signing key is
+                 the workspace's: `queuey keys mint --write user-secrets` in a .NET project with
+                 a UserSecretsId, else `queuey keys mint --write .env` (see KEYS; --queue limits it
+                 to one queue). It needs a login that may manage keys and never shows the secret;
+                 a license-wide API key is a person's, minted in the console.
                  The two flags are separate on purpose: a file lands in git diff and is undone
                  with git, while a workspace change is invisible from the repo and is undone in
                  the console. In a .NET project, adding the package stays a step you run
