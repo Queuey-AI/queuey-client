@@ -9,7 +9,7 @@ namespace Queuey.Edge;
 /// <code>
 /// services.AddQueueyEdge(o =>
 /// {
-///     o.ApiKey = "...";            // publish-only, tenant-scoped Edge key
+///     o.UseEnvironmentVariables(); // QUEUEY_SIGNING_KEY_ID + QUEUEY_SIGNING_SECRET from `queuey keys mint --write`
 ///     o.TenantPublicId = "ten_...";
 /// });
 /// ...

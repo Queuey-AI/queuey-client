@@ -19,10 +19,25 @@ public sealed class QueueyEdgeOptions
     public Uri? IngressBaseAddress { get; set; }
 
     /// <summary>
-    /// API key (<c>qak_…</c>), sent as <c>X-Api-Key</c>. Use a PUBLISH-ONLY,
-    /// TENANT-SCOPED key for Edge nodes — the key lives on a machine Queuey
-    /// does not control, and must not be able to do anything but publish to
-    /// its own tenant.
+    /// The signing key id (<c>hsk_…</c>), sent as <c>X-Queuey-Key-Id</c>. With <see cref="SigningSecret"/>, Edge signs
+    /// every transfer with the same HMAC as <c>Queuey.Client</c>, at the moment it sends, so the timestamp and nonce are
+    /// fresh even for an event that waited in the spool through an outage. <c>queuey keys mint --write …</c> makes the
+    /// pair; the key reaches only its queue or workspace, and the workspace may take signed requests only. When the pair
+    /// is set, events are signed, and <see cref="ApiKey"/> is not used for them.
+    /// </summary>
+    public string? SigningKeyId { get; set; }
+
+    /// <summary>
+    /// The signing secret for <see cref="SigningKeyId"/>. It stays in memory: the spool never holds it, and no header
+    /// carries it.
+    /// </summary>
+    public string? SigningSecret { get; set; }
+
+    /// <summary>
+    /// API key (<c>qak_…</c>), sent as <c>X-Api-Key</c>: the alternative to the signing pair. Use a PUBLISH-ONLY key,
+    /// scoped to the workspace — the key lives on a machine Queuey does not control, and must not be able to do anything
+    /// but publish. With the signing pair set, events are signed and this key is used only for
+    /// <see cref="EdgeHealthReportOptions.ReportToCloud"/>, since Queuey's check-in takes an API key.
     /// </summary>
     public string? ApiKey { get; set; }
 
@@ -63,6 +78,71 @@ public sealed class QueueyEdgeOptions
             ? new System.Net.Http.HttpClient(factory() ?? throw new QueueyConfigurationException("HttpMessageHandlerFactory returned null."))
             : new System.Net.Http.HttpClient();
 
+    /// <summary>Whether events are signed: both halves of the signing pair are set.</summary>
+    internal bool Signs => !string.IsNullOrWhiteSpace(SigningKeyId) && !string.IsNullOrWhiteSpace(SigningSecret);
+
+    /// <summary>
+    /// What authenticates one transfer: Client's <see cref="HmacRequestSigner"/> with the pair, else its
+    /// <see cref="ApiKeyAuthenticator"/>. The signer reads <paramref name="clock"/> when it signs, which is when Edge sends.
+    /// </summary>
+    // Edge-signering (Kenneth 2026-10-09): samme autentikator som klienten, ikke en kopi. Signaturen lages per sending.
+    internal IQueueyAuthenticator CreateEventAuthenticator(IEdgeClock clock)
+        => Signs
+            ? new HmacRequestSigner(SigningKeyId!, SigningSecret!, () => clock.UtcNow)
+            : new ApiKeyAuthenticator(ApiKey!);
+
+    /// <summary>
+    /// Fills each setting that is not set yet from its environment variable, by the same names and rules as
+    /// <see cref="QueueyOptions.UseEnvironmentVariables(Func{string, string?}?)"/>: <c>QUEUEY_SIGNING_KEY_ID</c> and
+    /// <c>QUEUEY_SIGNING_SECRET</c> (in Development also from <c>.env</c> in the working folder, as a pair),
+    /// <c>QUEUEY_API_KEY</c> only when the pair is not set, <c>QUEUEY_TENANT</c> and <c>QUEUEY_INGRESS_BASE</c>. A value
+    /// set in code wins. Returns these options.
+    /// </summary>
+    /// <param name="read">Reads a variable; <see cref="System.Environment.GetEnvironmentVariable(string)"/> when null.</param>
+    public QueueyEdgeOptions UseEnvironmentVariables(Func<string, string?>? read = null)
+        => UseEnvironmentVariables(read, Directory.GetCurrentDirectory());
+
+    /// <summary>
+    /// Fills each setting that is not set yet from <paramref name="read"/>, by the same <c>QUEUEY_*</c> names as
+    /// <see cref="UseEnvironmentVariables(Func{string, string?}?)"/>, and no <c>.env</c>: for .NET configuration, which
+    /// holds user secrets, environment variables and appsettings, as <c>options.UseSettings(key =&gt; configuration[key])</c>.
+    /// A value set in code wins. Returns these options.
+    /// </summary>
+    public QueueyEdgeOptions UseSettings(Func<string, string?> read)
+    {
+        if (read is null) throw new ArgumentNullException(nameof(read));
+        return UseEnvironmentVariables(read, dotEnvFolder: null);
+    }
+
+    /// <summary><see cref="UseSettings(Func{string, string?})"/> over a .NET configuration.</summary>
+    public QueueyEdgeOptions UseSettings(Microsoft.Extensions.Configuration.IConfiguration configuration)
+    {
+        if (configuration is null) throw new ArgumentNullException(nameof(configuration));
+        return UseSettings(key => configuration[key]);
+    }
+
+    /// <summary>The environment rules, with the folder whose <c>.env</c> is read given (null: none).</summary>
+    // Reglene bor i QueueyOptions, så Edge og klienten aldri kan lese forskjellig: Edge låner dem og tar tilbake det den bruker.
+    internal QueueyEdgeOptions UseEnvironmentVariables(Func<string, string?>? read, string? dotEnvFolder)
+    {
+        var client = new QueueyOptions
+        {
+            Environment = Environment,
+            IngressBaseAddress = IngressBaseAddress,
+            TenantPublicId = TenantPublicId,
+            ApiKey = ApiKey,
+            SigningKeyId = SigningKeyId,
+            SigningSecret = SigningSecret,
+        }.UseEnvironmentVariables(read, dotEnvFolder);
+
+        IngressBaseAddress = client.IngressBaseAddress;
+        TenantPublicId = client.TenantPublicId;
+        ApiKey = client.ApiKey;
+        SigningKeyId = client.SigningKeyId;
+        SigningSecret = client.SigningSecret;
+        return this;
+    }
+
     /// <summary>The effective ingress base address (override or environment default).</summary>
     public Uri ResolveIngressBaseAddress()
         => new QueueyOptions { Environment = Environment, IngressBaseAddress = IngressBaseAddress }
@@ -71,8 +151,13 @@ public sealed class QueueyEdgeOptions
     /// <summary>Throws <see cref="QueueyConfigurationException"/> when required settings are missing.</summary>
     public void Validate()
     {
-        if (string.IsNullOrWhiteSpace(ApiKey))
-            throw new QueueyConfigurationException("QueueyEdgeOptions.ApiKey is required.");
+        if (string.IsNullOrWhiteSpace(SigningKeyId) != string.IsNullOrWhiteSpace(SigningSecret))
+            throw new QueueyConfigurationException(
+                "QueueyEdgeOptions.SigningKeyId and SigningSecret go together: set both, or neither.");
+        if (!Signs && string.IsNullOrWhiteSpace(ApiKey))
+            throw new QueueyConfigurationException(
+                "QueueyEdgeOptions needs a signing key (SigningKeyId and SigningSecret, which `queuey keys mint --write .env` " +
+                "makes) or an ApiKey. UseEnvironmentVariables() reads QUEUEY_SIGNING_KEY_ID and QUEUEY_SIGNING_SECRET.");
         if (string.IsNullOrWhiteSpace(TenantPublicId))
             throw new QueueyConfigurationException("QueueyEdgeOptions.TenantPublicId is required.");
         if (string.IsNullOrWhiteSpace(Storage.Path))

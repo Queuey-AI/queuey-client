@@ -96,6 +96,17 @@ internal sealed class EdgeHealthReporter : BackgroundService
         if (!_options.Health.ReportToCloud)
             return; // opt-in only
 
+        // Queuey's check-in tar bare X-Api-Key (EdgeNodeResolveMiddleware, 2026-10-09). En node med bare signeringsnøkkel
+        // ville fått 401 hvert intervall, med et råd om å sjekke ApiKey; den sier det én gang i stedet og sender ingenting.
+        if (string.IsNullOrWhiteSpace(_options.ApiKey))
+        {
+            _logger.LogWarning(EdgeLogEvents.HealthReportFailed,
+                "Health.ReportToCloud is on, but this node has only a signing key, and Queuey's check-in takes an API key. " +
+                "Events are signed and flow as before; the node does not appear under Edge nodes until ApiKey is set to a " +
+                "publish-only key as well.");
+            return;
+        }
+
         string nodeId;
         try
         {
