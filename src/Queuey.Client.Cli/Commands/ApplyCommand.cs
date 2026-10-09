@@ -80,12 +80,15 @@ internal static class ApplyCommand
             return await CheckAsync(service, file, path, map);
 
         // En plan Queuey lagrer (F3.11): kilden og det den tar tilbake, er planens.
-        var run = new ApplyRun(service, file, path, config, map, wait);
+        var storedPlans = provider.GetRequiredService<IQueueyPlans>();
+        var run = new ApplyRun(service, storedPlans, file, path, config, map, wait);
         if (planId is not null)
-            return await run.StoredAsync(await service.GetStoredPlanAsync(planId, config.TenantPublicId));
+            return await run.StoredAsync(await storedPlans.GetStoredPlanAsync(planId, config.TenantPublicId));
 
-        // Hvor fila ligger, til merket på det applyen styrer (Queuey F2.4): flaggene først, så git, med mindre --no-git.
-        DeploymentFileSource? source = GitSource.Resolve(path, map.Get("repo"), map.Get("repo-path"), map.Get("commit"), map.Has("no-git"));
+        // Hvor fila ligger, til merket på det applyen styrer (Queuey F2.4): flaggene først, så git, med mindre --no-git. En plan
+        // apply lager, får også ref, workflow og PR fra CI (F3.11); starten av en apply sender bare repo, sti og commit.
+        DeploymentFileSource? source = CiSource.With(
+            GitSource.Resolve(path, map.Get("repo"), map.Get("repo-path"), map.Get("commit"), map.Has("no-git")), CliHost.Env);
         IReadOnlyList<string> adopt = DeploymentAdopt.Parse(map.Get("adopt"));
         var options = new SyncOptions { ContinueOnError = map.Has("continue-on-error"), Source = source, Adopt = adopt };
 
@@ -160,15 +163,17 @@ internal static class ApplyCommand
     private sealed class ApplyRun
     {
         private readonly IQueueyService _service;
+        private readonly IQueueyPlans _plans;
         private readonly DeploymentFile _file;
         private readonly string _path;
         private readonly ResolvedConfig _config;
         private readonly ArgMap _map;
         private readonly TimeSpan _wait;
 
-        public ApplyRun(IQueueyService service, DeploymentFile file, string path, ResolvedConfig config, ArgMap map, TimeSpan wait)
+        public ApplyRun(IQueueyService service, IQueueyPlans plans, DeploymentFile file, string path, ResolvedConfig config, ArgMap map, TimeSpan wait)
         {
             _service = service;
+            _plans = plans;
             _file = file;
             _path = path;
             _config = config;
@@ -179,7 +184,8 @@ internal static class ApplyCommand
         private bool Json => _map.Has("json");
 
         /// <summary>
-        /// Makes the plan Queuey asked for, and applies it once the policy runs it or a person approves it. Exit 5 while it
+        /// Makes the plan Queuey asked for, sends it to the inbox when a person approves it, and applies it once the policy runs
+        /// it or a person approved it. Exit 5 while it
         /// waits for a person, and 1 for a refusal in it.
         /// </summary>
         public async Task<int> ThroughStoredPlanAsync(QueueyPlanRequiredException required, SyncOptions options)
@@ -188,7 +194,8 @@ internal static class ApplyCommand
                 Console.WriteLine($"Queuey applies to this workspace from an API key only through a configuration plan "
                                   + $"({TerminalText.Line(required.Message)}). Making one:");
 
-            DeploymentPlan plan = await _service.StorePlanAsync(_file, new SyncOptions { Source = options.Source, Adopt = options.Adopt });
+            // apply sender planen til innboksen selv når policyen gir den til en person: det er applyen som trenger den.
+            DeploymentPlan plan = await _plans.StorePlanAsync(_file, new SyncOptions { Source = options.Source, Adopt = options.Adopt }, submit: true);
             if (plan.Stored is not { } stored)
                 throw new QueueyException(
                     "Queuey asked for a configuration plan, and stored none when one was made, so nothing was applied.", errorCode: "plan_not_stored")
@@ -225,7 +232,7 @@ internal static class ApplyCommand
         public async Task<int> StoredAsync(StoredPlan plan, bool shown = false)
         {
             if (plan.NeedsSubmitting)
-                plan = await _service.SubmitStoredPlanAsync(plan.PlanId, plan.Tenant);
+                plan = await _plans.SubmitStoredPlanAsync(plan.PlanId, plan.Tenant);
 
             if (!shown && !Json)
             {
@@ -234,7 +241,7 @@ internal static class ApplyCommand
             }
 
             if (plan.IsPendingApproval && _wait > TimeSpan.Zero)
-                plan = await StoredPlanText.WaitAsync(_service, plan, _wait, Json);
+                plan = await StoredPlanText.WaitAsync(_plans, plan, _wait, Json);
 
             if (plan.IsPendingApproval)
                 return Pending(plan, shown);

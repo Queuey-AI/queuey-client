@@ -5,8 +5,9 @@ using Queuey.Client.Cli;
 namespace Queuey.Client.Cli.Tests;
 
 /// <summary>
-/// Planer Queuey lagrer, fra kommandolinjen (Queuey F3.11, beslutning 6 i plan-approval-f311). queuey plan bygger og forsegler
-/// planen og sender den til innboksen når en person skal godkjenne den; queuey apply lager den selv når Queuey krever den,
+/// Planer Queuey lagrer, fra kommandolinjen (Queuey F3.11, beslutning 6 i plan-approval-f311). queuey plan lagrer ingenting uten
+/// --store, som forsegler planen, eller --submit, som også sender den til innboksen når en person skal godkjenne den (BØR 2 fra
+/// reviewen av #64); queuey apply lager den selv når Queuey krever den,
 /// applyer den med en gang når policyen kjører den, og avslutter med 5 mens den venter på en person. apply --plan applyer en
 /// godkjent plan, --wait venter på godkjenningen, og plan --local er planen fra før, uten id hos Queuey.
 /// </summary>
@@ -145,11 +146,11 @@ public sealed class StoredPlanCommandTests : IDisposable
     // ── queuey plan ──────────────────────────────────────────────────────────
 
     [Fact]
-    public async Task Plan_stores_the_plan_and_exits_0_when_the_policy_runs_it()
+    public async Task Plan_store_stores_the_plan_and_exits_0_when_the_policy_runs_it()
     {
         var server = new Server();
 
-        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("plan", "--file", DeployFile(), "--no-git")), server.Handler);
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("plan", "--file", DeployFile(), "--no-git", "--store")), server.Handler);
 
         Assert.Equal(ExitCodes.Success, run.Exit);
         Assert.Contains($"  {PlanId}  stored in Queuey, hash {Hash} (version 1)", run.Stdout);
@@ -164,11 +165,11 @@ public sealed class StoredPlanCommandTests : IDisposable
     }
 
     [Fact]
-    public async Task Plan_that_a_person_approves_goes_to_the_inbox_and_exits_5_with_where_it_is_approved()
+    public async Task Plan_submit_that_a_person_approves_goes_to_the_inbox_and_exits_5_with_where_it_is_approved()
     {
         var server = new Server { Decision = "requires_approval" };
 
-        CliRun human = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("plan", "--file", DeployFile(), "--no-git")), server.Handler);
+        CliRun human = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("plan", "--file", DeployFile(), "--no-git", "--submit")), server.Handler);
 
         Assert.Equal(ExitCodes.PendingApproval, human.Exit);
         Assert.Equal(5, ExitCodes.PendingApproval);
@@ -176,7 +177,7 @@ public sealed class StoredPlanCommandTests : IDisposable
         Assert.Contains($"It waits for a person's approval in Queuey's inbox: https://app.queuey.test/approvals/{PlanId}", human.Stdout);
         Assert.Contains($"Apply it once approved: queuey apply --plan {PlanId}", human.Stdout);
 
-        CliRun json = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("plan", "--file", DeployFile(), "--no-git", "--json")),
+        CliRun json = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("plan", "--file", DeployFile(), "--no-git", "--submit", "--json")),
             new Server { Decision = "requires_approval" }.Handler);
 
         Assert.Equal(ExitCodes.PendingApproval, json.Exit);
@@ -193,11 +194,91 @@ public sealed class StoredPlanCommandTests : IDisposable
     }
 
     [Fact]
+    public async Task Plan_stores_nothing_unless_asked_so_a_pull_request_job_fills_no_inbox()
+    {
+        // BØR 2 fra reviewen av #64: queuey plan i en PR-jobb skal ikke lagre planer eller sende dem til innboksen.
+        var server = new Server { Decision = "requires_approval" };
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("plan", "--file", DeployFile(), "--no-git")), server.Handler);
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.DoesNotContain(server.Handler.Requests, r => r.Path.Contains("/deployment/plans", StringComparison.Ordinal));
+        Assert.Contains("  local plan, not stored in Queuey  sha256:", run.Stdout);
+    }
+
+    [Fact]
+    public async Task Plan_store_seals_a_plan_for_a_person_without_sending_it_and_exits_0()
+    {
+        var server = new Server { Decision = "requires_approval" };
+
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("plan", "--file", DeployFile(), "--no-git", "--store")), server.Handler);
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.DoesNotContain(server.Handler.Requests, r => r.Path.EndsWith("/submit", StringComparison.Ordinal));
+        Assert.Contains($"A person approves it: queuey apply --plan {PlanId} sends it to Queuey's inbox", run.Stdout);
+    }
+
+    [Theory]
+    [InlineData("--store")]
+    [InlineData("--submit")]
+    public async Task Plan_local_with_store_or_submit_is_a_usage_error(string option)
+    {
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("plan", "--file", DeployFile(), "--local", option)));
+
+        Assert.Equal(ExitCodes.Usage, run.Exit);
+        Assert.Contains("--local makes the plan here and stores nothing", run.Stderr);
+    }
+
+    [Fact]
+    public async Task A_stored_plan_from_a_pull_request_in_github_actions_says_its_branch_workflow_and_number()
+    {
+        var server = new Server();
+        var env = new Dictionary<string, string>
+        {
+            ["GITHUB_REF"] = "refs/pull/12/merge",
+            ["GITHUB_HEAD_REF"] = "feature/retention",
+            ["GITHUB_WORKFLOW_REF"] = "acme/app/.github/workflows/plan.yml@refs/pull/12/merge",
+            ["QUEUEY_USER_CONFIG"] = CliHarness.NoUserConfig,
+        };
+
+        CliRun run = await CliHarness.RunAsync(
+            () => CliEntry.RunAsync(CliHarness.With("plan", "--file", DeployFile(), "--no-git", "--store")), server.Handler, env);
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        JsonElement source = server.Handler.Requests.Single(r => r.Key == "POST /tenants/ten_abc/deployment/plans").Json.GetProperty("source");
+        Assert.Equal("refs/heads/feature/retention", source.GetProperty("ref").GetString());
+        Assert.Equal("12", source.GetProperty("pullRequest").GetString());
+        Assert.Equal("acme/app/.github/workflows/plan.yml@refs/pull/12/merge", source.GetProperty("workflow").GetString());
+    }
+
+    [Fact]
+    public async Task A_pull_request_target_job_names_the_pull_requests_branch_and_number_from_the_event_not_the_base_ref()
+    {
+        // pull_request_target kjører med base-branchen i GITHUB_REF; kilden skal ikke se ut som main.
+        string eventFile = Path.Combine(_dir, "event.json");
+        File.WriteAllText(eventFile, """{ "pull_request": { "number": 34 } }""");
+        var server = new Server();
+        var env = new Dictionary<string, string>
+        {
+            ["GITHUB_REF"] = "refs/heads/main",
+            ["GITHUB_HEAD_REF"] = "feature/retention",
+            ["GITHUB_EVENT_PATH"] = eventFile,
+            ["QUEUEY_USER_CONFIG"] = CliHarness.NoUserConfig,
+        };
+
+        await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("plan", "--file", DeployFile(), "--no-git", "--store")), server.Handler, env);
+
+        JsonElement source = server.Handler.Requests.Single(r => r.Key == "POST /tenants/ten_abc/deployment/plans").Json.GetProperty("source");
+        Assert.Equal("refs/heads/feature/retention", source.GetProperty("ref").GetString());
+        Assert.Equal("34", source.GetProperty("pullRequest").GetString());
+    }
+
+    [Fact]
     public async Task Plan_the_policy_refuses_exits_1()
     {
         var server = new Server { Decision = "denied" };
 
-        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("plan", "--file", DeployFile(), "--no-git")), server.Handler);
+        CliRun run = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("plan", "--file", DeployFile(), "--no-git", "--submit")), server.Handler);
 
         Assert.Equal(ExitCodes.RuntimeError, run.Exit);
         Assert.Contains("The policy refuses it, so nothing applies it.", run.Stdout);
@@ -436,7 +517,7 @@ public sealed class StoredPlanCommandTests : IDisposable
         }) { AnswersManagement = true };
 
         RecordingHandler planServer = Old();
-        CliRun plan = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("plan", "--file", DeployFile(), "--no-git")), planServer);
+        CliRun plan = await CliHarness.RunAsync(() => CliEntry.RunAsync(CliHarness.With("plan", "--file", DeployFile(), "--no-git", "--store")), planServer);
 
         Assert.Equal(ExitCodes.Success, plan.Exit);
         Assert.Contains("local plan, not stored in Queuey  sha256:", plan.Stdout);

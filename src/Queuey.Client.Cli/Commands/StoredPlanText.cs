@@ -40,6 +40,11 @@ internal static class StoredPlanText
                               + (plan.ExpiresAt is { } until ? $" It expires {until.UtcDateTime:yyyy-MM-dd HH:mm:ss}Z." : ""));
             Console.WriteLine($"  Apply it once approved: queuey apply --plan {plan.PlanId}  (--wait waits for the approval)");
         }
+        else if (plan.NeedsSubmitting)
+        {
+            Console.WriteLine($"  A person approves it: queuey apply --plan {plan.PlanId} sends it to Queuey's inbox (--wait waits for the "
+                              + "approval), or queuey plan --submit makes and sends a new one.");
+        }
         else if (plan.CanBeApplied)
         {
             Console.WriteLine($"  The policy runs it: queuey apply --plan {plan.PlanId} applies it.");
@@ -68,7 +73,7 @@ internal static class StoredPlanText
     /// Reads <paramref name="plan"/> again until it no longer waits for a person, or <paramref name="timeout"/> has passed.
     /// The plan as it stood last.
     /// </summary>
-    internal static async Task<StoredPlan> WaitAsync(IQueueyService service, StoredPlan plan, TimeSpan timeout, bool json)
+    internal static async Task<StoredPlan> WaitAsync(IQueueyPlans service, StoredPlan plan, TimeSpan timeout, bool json)
     {
         if (!json)
             Console.WriteLine($"Waiting up to {(int)timeout.TotalSeconds} s for a person to approve {plan.PlanId}…");

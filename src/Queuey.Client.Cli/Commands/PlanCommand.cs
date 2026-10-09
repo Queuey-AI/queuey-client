@@ -10,10 +10,10 @@ namespace Queuey.Client.Cli;
 
 /// <summary>
 /// <c>queuey plan</c> — the server-side plan: every write <c>apply</c> would send goes as a dry run, so
-/// the answer is what Queuey would accept and change, not only what the file says locally. Queuey stores
-/// the plan (F3.11), seals it with the policy's decision, and sends it to its inbox when a person approves
-/// it; <c>--local</c> only plans. Changes no configuration, and exits non-zero when any write would be
-/// refused, 5 when the plan waits for a person.
+/// the answer is what Queuey would accept and change, not only what the file says locally. Stores nothing
+/// unless asked: <c>--store</c> stores the plan in Queuey (F3.11) and seals it with the policy's decision,
+/// and <c>--submit</c> also sends it to Queuey's inbox when a person approves it. Changes no configuration,
+/// and exits non-zero when any write would be refused, 5 when a submitted plan waits for a person.
 /// </summary>
 /// <remarks>
 /// A verb, not an <c>apply</c> flag: a CLI that predates it answers "Unknown command" instead of
@@ -21,13 +21,17 @@ namespace Queuey.Client.Cli;
 /// </remarks>
 internal static class PlanCommand
 {
-    // --adopt planlegger det en person har løsrevet, som apply --adopt ville skrevet det (Queuey F2.4). --local lager planen her,
-    // uten å lagre den i Queuey (F3.11), og --repo, --repo-path, --commit og --no-git sier hvor fila ligger, som for apply.
+    // --adopt planlegger det en person har løsrevet, som apply --adopt ville skrevet det (Queuey F2.4). Planen lages her og
+    // lagres ingen steder, som før (BØR 2 fra reviewen av #64: en PR-jobb som kjører queuey plan, skal ikke fylle innboksen).
+    // --store lagrer og forsegler den i Queuey (F3.11), og --submit sender den også til innboksen når en person skal godkjenne
+    // den. --local sier standarden uttrykkelig. --repo, --repo-path, --commit og --no-git sier hvor fila ligger, som for apply.
     internal static readonly CommandOptions Options = new(
-        "plan", flags: new[] { "json", "local", "no-git" }, values: new[] { "file", "adopt", "profile", "repo", "repo-path", "commit" });
+        "plan", flags: new[] { "json", "local", "store", "submit", "no-git" },
+        values: new[] { "file", "adopt", "profile", "repo", "repo-path", "commit" });
 
     /// <summary>
-    /// The version of <c>plan --local --json</c>'s shape, and of <c>plan --json</c>'s against a Queuey that stores no plans:
+    /// The version of <c>plan --json</c>'s shape for a plan only this client made (the default, and <c>--store</c> against a
+    /// Queuey that stores no plans):
     /// <c>{ schemaVersion, file, tenant, planId, planHash, wouldSucceed, changeCount, queues, steps, skipped, applyStarted }</c>,
     /// with <c>planId</c> null since F3.11, so it is not taken for a plan Queuey stores. A script that reads it checks this first.
     /// </summary>
@@ -38,7 +42,7 @@ internal static class PlanCommand
     internal const int JsonSchemaVersion = 1;
 
     /// <summary>
-    /// The version of <c>plan --json</c>'s shape for a plan Queuey stores (Queuey F3.11): version 1's fields, with Queuey's
+    /// The version of <c>plan --store --json</c>'s shape, a plan Queuey stores (Queuey F3.11): version 1's fields, with Queuey's
     /// <c>planId</c> and <c>planHash</c>, and <c>stored</c>, <c>status</c>, <c>decision</c>, <c>rule</c>, <c>class</c>,
     /// <c>approvalUrl</c>, <c>expiresAt</c> and <c>warnings</c>.
     /// </summary>
@@ -49,6 +53,10 @@ internal static class PlanCommand
     {
         if (!Options.TryParse(args, out ArgMap map, out int failure)) return failure;
         if (map.Has("help") || map.Has("h")) { Console.WriteLine(Usage.Text); return ExitCodes.Success; }
+
+        if (map.Has("local") && (map.Has("store") || map.Has("submit")))
+            return CliErrors.Usage(map, "conflicting_options",
+                $"--local makes the plan here and stores nothing, and --{(map.Has("store") ? "store" : "submit")} stores it in Queuey: give one.");
 
         // Samme profil som apply (F2.7): fila med profilens verdier, og tilkoblingen hos brukeren.
         string? profile = CliHost.Profile(map);
@@ -63,13 +71,15 @@ internal static class PlanCommand
 
         // Det en person har løsrevet, planlegges ikke, med mindre --adopt tar det tilbake: planen viser det apply ville gjort.
         IReadOnlyList<string> adopt = DeploymentAdopt.Parse(map.Get("adopt"));
-        DeploymentPlan plan = map.Has("local")
+        bool submit = map.Has("submit");
+        DeploymentPlan plan = !submit && !map.Has("store")
             ? await service.PlanDeploymentAsync(file, new SyncOptions { Adopt = adopt })
-            : await service.StorePlanAsync(file, new SyncOptions
+            : await provider.GetRequiredService<IQueueyPlans>().StorePlanAsync(file, new SyncOptions
             {
                 Adopt = adopt,
-                Source = GitSource.Resolve(path, map.Get("repo"), map.Get("repo-path"), map.Get("commit"), map.Has("no-git")),
-            });
+                Source = CiSource.With(
+                    GitSource.Resolve(path, map.Get("repo"), map.Get("repo-path"), map.Get("commit"), map.Has("no-git")), CliHost.Env),
+            }, submit);
 
         if (map.Has("json"))
         {
@@ -83,8 +93,8 @@ internal static class PlanCommand
     }
 
     /// <summary>
-    /// 0 when the plan can be applied now, or a local plan Queuey would accept; 5 when it waits for a person; 1 for a refusal,
-    /// and for a plan the policy refuses.
+    /// 1 for a refusal, and for a plan the policy refuses; 5 when a submitted plan waits for a person; 0 otherwise, also for a
+    /// stored plan sealed for a person and not submitted (<c>--store</c>).
     /// </summary>
     internal static int ExitCode(DeploymentPlan plan)
     {
@@ -94,7 +104,7 @@ internal static class PlanCommand
             return ExitCodes.Success;
         if (stored.IsPendingApproval)
             return ExitCodes.PendingApproval;
-        return stored.CanBeApplied ? ExitCodes.Success : ExitCodes.RuntimeError;
+        return stored.Decision == StoredPlan.Decisions.Denied ? ExitCodes.RuntimeError : ExitCodes.Success;
     }
 
     /// <summary>The plan under the command's header line: its id, queues, steps and what comes next.</summary>
