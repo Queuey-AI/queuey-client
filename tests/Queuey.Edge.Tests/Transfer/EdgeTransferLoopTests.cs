@@ -114,6 +114,32 @@ public class EdgeTransferLoopTests
 
     // ── fixture ─────────────────────────────────────────────────────────
 
+    [Fact]
+    public async Task An_accepted_transfer_logs_its_event_id_and_idempotency_key_and_the_health_shows_them()
+    {
+        // Blindtest 2 (2026-10-09, funn 13): uten event-id-en kunne hendelsen ikke slås opp med events get.
+        var logger = new CapturingLogger();
+        using var fx = new LoopFixture(_ => Accept(), logger: logger);
+        await fx.Publish("order-10042");
+
+        await fx.RunUntilAsync(async () =>
+            (await fx.Spool.Spool.GetStatsAsync(CancellationToken.None)).PendingCount == 0);
+
+        Assert.Contains(logger.Lines, l => l.Contains("Transfer order-10042 (Idempotency-Key) to orders accepted as event evt_fresh", StringComparison.Ordinal)
+                                           && l.Contains("queuey events get evt_fresh --queue orders", StringComparison.Ordinal));
+        AcceptedTransfer last = fx.State.LastAcceptedTransfer!;
+        Assert.Equal(("orders", "order-10042", "evt_fresh", false), (last.Queue, last.TransferId, last.EventId, last.Replayed));
+    }
+
+    private sealed class CapturingLogger : Microsoft.Extensions.Logging.ILogger<EdgeTransferLoop>
+    {
+        public System.Collections.Concurrent.ConcurrentQueue<string> Lines { get; } = new();
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+        public void Log<TState>(Microsoft.Extensions.Logging.LogLevel logLevel, Microsoft.Extensions.Logging.EventId eventId, TState state,
+            Exception? exception, Func<TState, Exception?, string> formatter) => Lines.Enqueue(formatter(state, exception));
+    }
+
     private sealed class LoopFixture : IDisposable
     {
         public SpoolFixture Spool { get; }
@@ -125,7 +151,8 @@ public class EdgeTransferLoopTests
 
         public LoopFixture(
             Func<int, TransferAttempt> script,
-            Action<QueueyEdgeOptions>? configure = null)
+            Action<QueueyEdgeOptions>? configure = null,
+            Microsoft.Extensions.Logging.ILogger<EdgeTransferLoop>? logger = null)
         {
             Spool = new SpoolFixture();
             // Loop tests run on the REAL clock with tight timings — the
@@ -146,7 +173,7 @@ public class EdgeTransferLoopTests
             _publisher = new QueueyEdgePublisher(_options, spool, clock, wake);
             _loop = new EdgeTransferLoop(
                 spool, Channel, new BackoffPolicy(_options.Transfer), State, wake,
-                _options, clock, NullLogger<EdgeTransferLoop>.Instance);
+                _options, clock, logger ?? NullLogger<EdgeTransferLoop>.Instance);
         }
 
         public Task Publish(string idempotencyKey, string? groupKey = null)

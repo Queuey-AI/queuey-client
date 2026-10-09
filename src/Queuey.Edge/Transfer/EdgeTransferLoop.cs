@@ -113,7 +113,18 @@ internal sealed class EdgeTransferLoop : BackgroundService
         {
             case TransferClass.Accepted:
                 await _spool.SettleAsync(claim.SpoolId, attempt.Ack!, ct).ConfigureAwait(false);
-                _state.RecordSuccess(attempt.Ack!.AtUtc, attempt.Ack.Replayed);
+                _state.RecordAccepted(new AcceptedTransfer(claim.Envelope.Queue, claim.Envelope.TransferId, attempt.Ack!.CloudEventId,
+                    attempt.Ack.Replayed, attempt.Ack.AtUtc));
+                // Blindtest 2 (2026-10-09, funn 13): event-id-en Cloud ga, så hendelsen kan slås opp med events get.
+                if (attempt.Ack.CloudEventId is { } eventId)
+                    _logger.LogInformation(EdgeLogEvents.Accepted,
+                        "Transfer {TransferId} (Idempotency-Key) to {Queue} accepted as event {EventId}; look it up with " +
+                        "queuey events get {EventId} --queue {Queue}.",
+                        claim.Envelope.TransferId, claim.Envelope.Queue, eventId, eventId, claim.Envelope.Queue);
+                else
+                    _logger.LogInformation(EdgeLogEvents.Accepted,
+                        "Transfer {TransferId} (Idempotency-Key) to {Queue} accepted; the queue answers without a body, so there is no event id.",
+                        claim.Envelope.TransferId, claim.Envelope.Queue);
                 if (attempt.Ack.Replayed)
                 {
                     _logger.LogInformation(EdgeLogEvents.SettledAsReplay,
@@ -198,4 +209,5 @@ internal static class EdgeLogEvents
     public static readonly EventId LocalEndpointError = new(7312, "queuey.edge.local_endpoint_error");
     public static readonly EventId HealthReportStarted = new(7313, "queuey.edge.health_report_started");
     public static readonly EventId HealthReportFailed = new(7314, "queuey.edge.health_report_failed");
+    public static readonly EventId Accepted = new(7315, "queuey.edge.accepted");
 }
