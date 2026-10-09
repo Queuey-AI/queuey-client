@@ -462,7 +462,11 @@ CREDENTIALS
                  delivery points at it: ""delivery"": { ""signing"": { ""enabled"": true,
                  ""credentialRef"": ""<name>"" } } in queuey.deploy.json, then apply. In .NET the
                  receiver verifies with QueueyDeliveryVerifier.FromEnvironment(). A name Queuey
-                 already holds is refused unless --replace, which makes a new value for both.
+                 already holds is refused unless --replace, which makes a new value for both, used
+                 by every queue and ingress that names it. So is a target that already holds a
+                 QUEUEY_DELIVERY_SECRET: it is read first, and only --replace overwrites it.
+                 When Queuey gives the store to a person, it exits 5 with the link, and nothing
+                 is written.
   queuey credentials set --name <name> --from-env <ENV_VAR> [--type <type>]
                 [--key-id <id>] [--username <u>] [--replace] [--profile <name>] [--json]
                  Stores a delivery secret under the workspace and names it, so a deployment

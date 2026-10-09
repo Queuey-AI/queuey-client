@@ -311,4 +311,117 @@ public sealed class KeysAndSecretsTests : IDisposable
         CliRun plain = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "advise", repo, "--json" }));
         Assert.Contains("--write .env", JsonDocument.Parse(plain.Stdout).RootElement.GetProperty("nextSteps").ToString());
     }
+
+    // ── credentials generate: det som står der fra før (#69 B1, B3, K5) ────
+
+    [Fact]
+    public async Task A_delivery_secret_already_in_the_target_is_not_overwritten_without_replace()
+    {
+        string env = Path.Combine(_dir, ".env");
+        File.WriteAllText(env, "QUEUEY_DELIVERY_SECRET=the-old-one\n");
+        var api = new RecordingHandler(req => throw new InvalidOperationException("Nothing is stored: " + req.Key));
+
+        CliRun run = await Run(api, "credentials", "generate", "orders-signing", "--tenant", "ten_1", "--write", env);
+
+        Assert.Equal(ExitCodes.Configuration, run.Exit);
+        Assert.Contains("already holds QUEUEY_DELIVERY_SECRET", run.Stderr);
+        Assert.Contains("--replace", run.Stderr);
+        Assert.Empty(api.Requests);
+        Assert.Equal("QUEUEY_DELIVERY_SECRET=the-old-one\n", File.ReadAllText(env));
+        Assert.DoesNotContain("the-old-one", run.Stdout + run.Stderr);
+    }
+
+    [Fact]
+    public async Task With_replace_the_new_value_goes_to_both_and_the_answer_says_what_it_replaced_and_tightened()
+    {
+        string env = Path.Combine(_dir, ".env");
+        File.WriteAllText(env, "QUEUEY_DELIVERY_SECRET=the-old-one\n");
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(env, (UnixFileMode)0x1A4); // 0644
+        var api = new RecordingHandler(req => req.Key == "POST /tenants/ten_1/credentials"
+            ? RecordingHandler.Json(HttpStatusCode.OK, new
+            {
+                publicId = "cred_1", name = "orders-signing", type = "HmacSigning", version = 2, created = false, secretReplaced = true,
+                boundQueues = new[] { "orders" },
+            })
+            : throw new InvalidOperationException(req.Key));
+
+        CliRun json = await Run(api, "credentials", "generate", "orders-signing", "--tenant", "ten_1", "--write", env, "--replace", "--json");
+
+        Assert.True(json.Exit == ExitCodes.Success, json.Stdout + json.Stderr);
+        Assert.True(api.Requests[0].Json.GetProperty("replace").GetBoolean());
+        JsonElement root = JsonDocument.Parse(json.Stdout).RootElement;
+        Assert.True(root.GetProperty("replacedLocally").GetBoolean());
+        Assert.True(root.GetProperty("secretReplaced").GetBoolean());
+        if (!OperatingSystem.IsWindows())
+            Assert.Equal("0644", root.GetProperty("tightenedFrom").GetString());
+        Assert.Equal($"QUEUEY_DELIVERY_SECRET={api.Requests[0].Json.GetProperty("secret").GetString()}\n", File.ReadAllText(env));
+
+        File.WriteAllText(env, "QUEUEY_DELIVERY_SECRET=again\n");
+        CliRun human = await Run(api, "credentials", "generate", "orders-signing", "--tenant", "ten_1", "--write", env, "--replace");
+        Assert.Contains("used by every queue and ingress that names it", human.Stdout);
+        Assert.Contains("The ingress of orders waited for this name", human.Stdout);
+        Assert.Contains("in place of the value there", human.Stdout);
+    }
+
+    [Fact]
+    public async Task A_name_queuey_holds_is_refused_with_what_a_new_value_would_hit()
+    {
+        CliRun run = await Run(CredentialServer(exists: true), "credentials", "generate", "orders-signing", "--tenant", "ten_1",
+            "--write", Path.Combine(_dir, ".env"));
+
+        Assert.Contains("used by every queue and ingress that names it", run.Stderr);
+    }
+
+    [Fact]
+    public async Task A_store_queuey_gives_to_a_person_exits_5_and_writes_nothing()
+    {
+        string env = Path.Combine(_dir, ".env");
+        var api = new RecordingHandler(_ => RecordingHandler.Json(HttpStatusCode.Accepted, new
+        {
+            status = "pending_approval", approvalUrl = "https://app.test/console/t/ten_1/credential-requests/creq_1",
+            message = "A person stores secrets in a prod workspace.",
+        }));
+
+        CliRun run = await Run(api, "credentials", "generate", "orders-signing", "--tenant", "ten_1", "--write", env, "--json");
+
+        Assert.Equal(ExitCodes.PendingApproval, run.Exit);
+        Assert.Equal("pending_approval", JsonDocument.Parse(run.Stdout).RootElement.GetProperty("status").GetString());
+        Assert.False(File.Exists(env));
+    }
+
+    [Fact]
+    public async Task A_delivery_secret_in_the_user_secrets_is_found_before_anything_is_stored()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+        FakeDotnet(existing: "QUEUEY_DELIVERY_SECRET = the-old-one\n");
+        Project();
+        var api = new RecordingHandler(req => throw new InvalidOperationException("Nothing is stored: " + req.Key));
+
+        CliRun run = await Run(api, "credentials", "generate", "orders-signing", "--tenant", "ten_1", "--write", "user-secrets");
+
+        Assert.Equal(ExitCodes.Configuration, run.Exit);
+        Assert.Contains("already holds QUEUEY_DELIVERY_SECRET", run.Stderr);
+        Assert.Empty(api.Requests);
+    }
+
+    [Fact]
+    public async Task A_write_that_fails_after_replace_says_the_receiver_now_rejects_deliveries()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+        FakeDotnet(exit: 1, existing: "QUEUEY_DELIVERY_SECRET = the-old-one\n");
+        Project();
+        var api = new RecordingHandler(_ => RecordingHandler.Json(HttpStatusCode.OK, new
+        {
+            publicId = "cred_1", name = "orders-signing", type = "HmacSigning", version = 2, created = false, secretReplaced = true,
+        }));
+
+        CliRun run = await Run(api, "credentials", "generate", "orders-signing", "--tenant", "ten_1", "--write", "user-secrets", "--replace");
+
+        Assert.Equal(ExitCodes.Configuration, run.Exit);
+        Assert.Contains("Queuey now has the new secret", run.Stderr);
+        Assert.Contains("will reject deliveries", run.Stderr);
+    }
 }

@@ -178,6 +178,11 @@ internal static class CredentialsCommand
                 tenant!, name!, type, secret,
                 keyId: map.Get("key-id"), username: map.Get("username"), replace: map.Has("replace"));
         }
+        catch (CredentialRotationPendingException pending)
+        {
+            // Security-review av #69 (K5): 202 er ingen lagret verdi.
+            return GeneratePending(map.Has("json"), pending);
+        }
         catch (QueueyConflictException ex) when (ex.ErrorCode == "credential_exists")
         {
             // Navnet er sjekket over (FitsShape, ikke en hemmelighet), og går likevel gjennom Showable og TerminalText (CliErrors).
@@ -251,6 +256,17 @@ internal static class CredentialsCommand
                 $"--write {SecretTarget.SuggestedFor(Directory.GetCurrentDirectory())} fits this folder; --write takes .env (or another file git ignores) or user-secrets.");
         SecretTarget target = SecretTarget.Parse(map.Get("write")!);
 
+        // Security-review av #69 (B1): målet leses før noe lagres i Queuey. En annen verdi der er hemmeligheten en mottaker her
+        // verifiserer med; å bytte den er et valg, som --replace gjør uttrykkelig, for Queuey og for målet.
+        bool localExists = target.Current(DeliverySecretVariable).ContainsKey(DeliverySecretVariable);
+        if (localExists && !map.Has("replace"))
+            return CliErrors.Write(json, "secret_exists_locally",
+                $"{target.Shown} already holds {DeliverySecretVariable}, the secret a receiver here verifies deliveries with. Nothing was " +
+                "stored or written.",
+                $"To give that receiver a new secret, run again with --replace: it stores a new value under '{CredentialNameRules.Showable(name) ?? "the name"}' " +
+                "in Queuey and writes the same value here. Or write to another target.",
+                status: null, ExitCodes.Configuration, "Error");
+
         ResolvedConfig config = ListenCommand.Connection(map);
         string? tenant = config.TenantPublicId;
         if (string.IsNullOrWhiteSpace(tenant))
@@ -261,30 +277,42 @@ internal static class CredentialsCommand
         var service = provider.GetRequiredService<IQueueyService>();
 
         // Som `credentials set` med HmacSigning, og navnet som key id: det Queuey signerer leveringene med.
+        string holder = CredentialNameRules.Showable(name) is { } shownName ? $"'{shownName}'" : "The credential";
         CredentialResult stored;
         try
         {
             stored = await service.Management.CreateCredentialAsync(tenant!, name!, "HmacSigning", secret, keyId: name, username: null,
                 replace: map.Has("replace"));
         }
+        catch (CredentialRotationPendingException pending)
+        {
+            // Security-review av #69 (K5): en person lagrer den. Ingenting er lagret, og ingenting skrives her.
+            return GeneratePending(json, pending);
+        }
         catch (QueueyConflictException ex) when (ex.ErrorCode == "credential_exists")
         {
-            string holder = CredentialNameRules.Showable(name) is { } shown ? $"'{shown}'" : "The name";
+            // Samme ordlyd som `credentials set` (security-review av #69, B3): et bytte rammer alt som navngir den.
             return CliErrors.Write(json, "credential_exists",
-                $"{holder} already holds a different secret in Queuey, and nothing was written here.",
-                "Replacing it is a decision for a person: run again with --replace to make a new secret for both sides, or choose "
-                + "another name.", status: 409, ExitCodes.RuntimeError, "Queuey error");
+                $"{holder} already holds a different secret, used by every queue and ingress that names it. Nothing was written here.",
+                "Replacing it is a decision for a person: if that is intended, run again with --replace, which makes a new value for "
+                + "Queuey and for the receiver; to keep it, choose another name.",
+                status: 409, ExitCodes.RuntimeError, "Queuey error");
         }
 
+        bool replacedInQueuey = stored.Created == false && stored.SecretReplaced != false;
+        string? tightenedFrom;
         try
         {
-            target.Write(new[] { (DeliverySecretVariable, secret) });
+            (_, tightenedFrom) = target.Write(new[] { (DeliverySecretVariable, secret) });
         }
         catch (CliFileException ex)
         {
             // Lagret i Queuey, men ikke her: verdien er tapt, siden den aldri vises. En ny generate med --replace lager en ny for begge.
             return CliErrors.Write(json, ex.Code,
-                $"Stored '{stored.Name}' in Queuey, but could not write it to {target.Shown}: {ex.Message} The secret is not shown.",
+                (replacedInQueuey || localExists
+                    ? $"Queuey now has the new secret for {holder}; the receiver still has the old one and will reject deliveries until it " +
+                      $"has the new one. Could not write it to {target.Shown}: {ex.Message}"
+                    : $"Stored {holder} in Queuey, but could not write it to {target.Shown}: {ex.Message}") + " The secret is not shown.",
                 $"Fix where it goes, and run queuey credentials generate {name} --replace --write {map.Get("write")}, which makes a new " +
                 "secret for both.", status: null, ExitCodes.Configuration, "Error");
         }
@@ -295,19 +323,52 @@ internal static class CredentialsCommand
             Console.WriteLine(JsonSerializer.Serialize(new
             {
                 stored.PublicId, stored.Name, stored.Type, stored.KeyId, stored.Version, stored.Created, stored.SecretReplaced,
+                stored.BoundWorkspace, stored.BoundQueues,
                 target = target.Kind,
                 written = target.Shown,
                 variable = DeliverySecretVariable,
+                replacedLocally = localExists,
+                tightenedFrom,
                 deliverySigning = new { enabled = true, credentialRef = stored.Name },
             }, CliHost.JsonOut));
             return ExitCodes.Success;
         }
 
-        Console.WriteLine(TerminalText.Line($"Generated the delivery secret '{stored.Name}', stored it in Queuey (HmacSigning) and wrote it to "
-                                            + $"{target.Shown} as {DeliverySecretVariable}. The value is not shown."));
+        Console.WriteLine(TerminalText.Line(replacedInQueuey
+            ? $"Generated a new secret for '{stored.Name}' (HmacSigning): it replaced the one in Queuey, version {stored.Version} now, used by "
+              + "every queue and ingress that names it, and the previous one stopped verifying."
+            : $"Generated the delivery secret '{stored.Name}' and stored it in Queuey (HmacSigning)."));
+        Console.WriteLine(TerminalText.Line($"Wrote it to {target.Shown} as {DeliverySecretVariable}{(localExists ? ", in place of the value there" : "")}. "
+                                            + "The value is not shown."));
+        WriteBinding(stored.BoundWorkspace == true, stored.BoundQueues);
+        if (tightenedFrom is not null)
+            Console.Error.WriteLine($"Note: {target.Shown} had mode {tightenedFrom}; it is 0600 now, readable and writable only by you.");
         Console.WriteLine(TerminalText.Line($"Point the queue's (or the workspace's) delivery at it in queuey.deploy.json, then apply: {reference}"));
         Console.WriteLine("The receiver verifies each delivery with QueueyDeliveryVerifier.FromEnvironment() in .NET.");
         return ExitCodes.Success;
+    }
+
+    /// <summary>A generate Queuey gave to a person (202): nothing stored, nothing written, and exit 5 with the link.</summary>
+    private static int GeneratePending(bool json, CredentialRotationPendingException pending)
+    {
+        if (json)
+        {
+            Console.WriteLine(JsonSerializer.Serialize(new
+            {
+                status = CredentialRotationPendingException.PendingApproval,
+                approvalUrl = pending.ApprovalUrl,
+                credentialRequest = pending.CredentialRequest,
+                expiresAt = pending.ExpiresAt,
+                message = pending.Message,
+            }, CliHost.JsonOut));
+            return ExitCodes.PendingApproval;
+        }
+
+        Console.WriteLine("Nothing was stored or written: a person stores this secret.");
+        if (pending.ApprovalUrl is { } url)
+            Console.WriteLine($"  Give this link to a person who may manage the workspace's credentials: {TerminalText.Line(url)}");
+        Console.Error.WriteLine(TerminalText.Line(pending.Message));
+        return ExitCodes.PendingApproval;
     }
 
     /// <summary>A new delivery secret: <see cref="GeneratedSecretBytes"/> random bytes, base64url without padding.</summary>

@@ -144,6 +144,12 @@ internal sealed class QueueyManagement : IQueueyManagement
             Replace = replace ? true : null,
         }, cancellationToken).ConfigureAwait(false);
 
+        // Som rotasjonen (Queuey #511): gir policyen lagringen til en person, svarer Queuey 202, og ingenting er lagret. Sjekket
+        // defensivt (security-review av #69, K5), så den som kaller, aldri tar et 202 for en lagret verdi.
+        if (string.Equals(r.Status, CredentialRotationPendingException.PendingApproval, StringComparison.Ordinal))
+            throw new CredentialRotationPendingException(r.Message ?? "A person stores this secret; nothing was stored.",
+                r.CredentialRequest, r.ApprovalUrl, r.ExpiresAt, r.PolicyRule);
+
         return ToResult(r);
     }
 
