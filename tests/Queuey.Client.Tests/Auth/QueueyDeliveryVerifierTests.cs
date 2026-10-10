@@ -181,15 +181,18 @@ public class QueueyDeliveryVerifierTests
     }
 
     [Fact]
-    public void The_event_id_comes_back_so_the_receiver_can_be_idempotent_on_it()
+    public void A_v1_delivery_verifies_with_accept_v1_but_its_event_id_is_not_vouched_for()
     {
+        // v1 dekker ikke event-id-en (Queuey #521): den gis bare tilbake når v2 holder.
         var v = First();
         var headers = Override(HeadersFor(v), QueueyHeaders.EventId, "evt_01H8XK");
 
         var result = VerifierFor(v).Verify(v.Method, new Uri(v.Url), headers, Encoding.UTF8.GetBytes(v.BodyUtf8));
 
         Assert.True(result.IsValid);
-        Assert.Equal("evt_01H8XK", result.EventId);
+        Assert.Equal(1, result.SignatureVersion);
+        Assert.Null(result.EventId);
+        Assert.Null(result.IdempotencyKey);
     }
 
     [Fact]
@@ -211,10 +214,11 @@ public class QueueyDeliveryVerifierTests
 
     private static Vector First() => Doc.Vectors.Single(x => x.Name == "post_json_no_query");
 
+    // De gylne vektorene er v1 (backendens referansesignerer), så de sjekkes med AcceptV1. v2 testes i QueueyDeliveryVerifierV2Tests.
     private static QueueyDeliveryVerifierOptions OptionsAt(Vector v, DateTimeOffset? at = null)
     {
         var now = at ?? DateTimeOffset.FromUnixTimeSeconds(v.Timestamp);
-        return new QueueyDeliveryVerifierOptions { Clock = () => now };
+        return new QueueyDeliveryVerifierOptions { Clock = () => now, AcceptV1 = true };
     }
 
     private static QueueyDeliveryVerifier VerifierFor(Vector v, DateTimeOffset? at = null)

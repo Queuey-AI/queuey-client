@@ -29,9 +29,19 @@ namespace Queuey.Client;
 /// taking the body as <c>byte[]</c>/<c>string</c> rather than a typed model.</para>
 ///
 /// <para><b>What the signature covers:</b> the HTTP method, the path, the query
-/// string, the body (through the content hash header) and the signing headers
-/// Queuey generates. It deliberately does NOT cover other request headers, so
-/// never trust an unsigned header as if verification vouched for it.</para>
+/// string, the body (through the content hash header), the signing headers
+/// Queuey generates, and — in v2, which this verifier requires — the event id
+/// (<c>X-Queuey-Event-Id</c>) and the idempotency key (<c>Idempotency-Key</c>).
+/// Those two are what a receiver deduplicates on, so a verified
+/// <see cref="QueueyVerificationResult.EventId"/> and
+/// <see cref="QueueyVerificationResult.IdempotencyKey"/> are safe to be
+/// idempotent on. It does NOT cover other request headers, so never trust an
+/// unsigned header as if verification vouched for it.</para>
+///
+/// <para><b>v2 is required.</b> A delivery without a v2 signature
+/// (<c>X-Queuey-Signatures: v2=…</c>) is refused, also when it carries a valid
+/// v1, so stripping v2 cannot downgrade it. For a Queuey that does not sign v2
+/// yet, set <see cref="QueueyDeliveryVerifierOptions.AcceptV1"/>.</para>
 /// </summary>
 public sealed class QueueyDeliveryVerifier
 {
@@ -55,7 +65,8 @@ public sealed class QueueyDeliveryVerifier
     /// A verifier for the secret <see cref="QueueyOptions.UseEnvironmentVariables(Func{string, string?}?)"/> finds:
     /// <c>QUEUEY_DELIVERY_SECRET</c> from the environment, or in Development from <c>.env</c>, as
     /// <c>queuey credentials generate --write</c> writes it. For .NET configuration (user secrets), build it from
-    /// <c>new QueueyOptions().UseSettings(key =&gt; configuration[key]).DeliverySecret</c>.
+    /// <c>new QueueyOptions().UseSettings(key =&gt; configuration[key]).DeliverySecret</c>. It requires v2 as any verifier does;
+    /// <see cref="QueueyDeliveryVerifierOptions.AcceptV1"/> in <paramref name="options"/> accepts v1 too.
     /// </summary>
     /// <exception cref="QueueyConfigurationException">No delivery secret is set.</exception>
     public static QueueyDeliveryVerifier FromEnvironment(QueueyDeliveryVerifierOptions? options = null)
@@ -102,11 +113,19 @@ public sealed class QueueyDeliveryVerifier
         var timestamp = Trimmed(header(QueueyHeaders.Timestamp));
         var nonce = Trimmed(header(QueueyHeaders.Nonce));
         var contentHash = Trimmed(header(QueueyHeaders.ContentSha256));
-        var signature = Trimmed(header(QueueyHeaders.Signature));
+        var signatureV1 = Trimmed(header(QueueyHeaders.Signature));
+        var signaturesV2 = V2Signatures(header(QueueyHeaders.Signatures));
+        // Leses for loggen ved en feil; i et gyldig resultat bare når v2 dekket dem (2026-10-10, Queuey #521).
         var eventId = Trimmed(header(QueueyHeaders.EventId));
+        var idempotencyKey = Trimmed(header(QueueyHeaders.IdempotencyKey));
 
-        if (keyId is null || timestamp is null || nonce is null || contentHash is null || signature is null)
+        if (keyId is null || timestamp is null || nonce is null || contentHash is null || (signaturesV2.Count == 0 && signatureV1 is null))
             return QueueyVerificationResult.Fail(QueueyVerificationFailure.MissingHeaders, keyId, eventId);
+
+        // Ingen nedgradering: uten v2 godtas en levering bare når mottakeren uttrykkelig tar v1 (AcceptV1). Er v2 der, avgjør den
+        // alene, også om v1 er gyldig, så en fjernet eller endret v2 aldri faller tilbake til v1.
+        if (signaturesV2.Count == 0 && !_options.AcceptV1)
+            return QueueyVerificationResult.Fail(QueueyVerificationFailure.MissingV2Signature, keyId, eventId);
 
         // Timestamp first: it is the cheapest check, and it turns a captured
         // delivery replayed tomorrow into a rejection before we spend a hash on it.
@@ -126,23 +145,56 @@ public sealed class QueueyDeliveryVerifier
         if (!FixedTimeEqualsHex(contentHash, actualHash))
             return QueueyVerificationResult.Fail(QueueyVerificationFailure.BodyHashMismatch, keyId, eventId, signedAt);
 
-        var canonical = QueueyCanonicalRequest.Build(
-            method,
-            requestUri,
-            timestamp,
-            nonce,
-            contentHash.ToLowerInvariant());
-
-        var expected = QueueyHash.HmacSha256HexLower(_secretBytes, canonical);
-        if (!FixedTimeEqualsHex(signature, expected))
-            return QueueyVerificationResult.Fail(QueueyVerificationFailure.SignatureMismatch, keyId, eventId, signedAt);
+        bool v2 = signaturesV2.Count > 0;
+        if (v2)
+        {
+            var canonical = QueueyCanonicalRequest.BuildV2(
+                method, requestUri, timestamp, nonce, contentHash.ToLowerInvariant(), eventId, idempotencyKey);
+            var expected = QueueyHash.HmacSha256HexLower(_secretBytes, canonical);
+            var matched = false;
+            foreach (var candidate in signaturesV2)
+                matched |= FixedTimeEqualsHex(candidate, expected);
+            if (!matched)
+                return QueueyVerificationResult.Fail(QueueyVerificationFailure.SignatureMismatch, keyId, eventId, signedAt);
+        }
+        else
+        {
+            var canonical = QueueyCanonicalRequest.Build(method, requestUri, timestamp, nonce, contentHash.ToLowerInvariant());
+            var expected = QueueyHash.HmacSha256HexLower(_secretBytes, canonical);
+            if (!FixedTimeEqualsHex(signatureV1!, expected))
+                return QueueyVerificationResult.Fail(QueueyVerificationFailure.SignatureMismatch, keyId, eventId, signedAt);
+        }
 
         // Replay last: it is the only check that can touch storage, and an
         // invalid delivery should never get to write a nonce.
         if (_options.NonceAlreadySeen is { } seen && seen(nonce))
             return QueueyVerificationResult.Fail(QueueyVerificationFailure.ReplayedNonce, keyId, eventId, signedAt);
 
-        return QueueyVerificationResult.Ok(keyId, eventId, signedAt, nonce);
+        // Event-id-en og nøkkelen er verdt å stole på bare når signaturen dekket dem: v2. Med v1 er de ikke med.
+        return v2
+            ? QueueyVerificationResult.Ok(keyId, signedAt, nonce, 2, eventId, idempotencyKey)
+            : QueueyVerificationResult.Ok(keyId, signedAt, nonce, 1, eventId: null, idempotencyKey: null);
+    }
+
+    /// <summary>
+    /// The <c>v2</c> values of <c>X-Queuey-Signatures</c>: split on <c>,</c>, each element on its first <c>=</c>, names compared
+    /// without regard to case. Empty when the header is absent or has none.
+    /// </summary>
+    private static List<string> V2Signatures(string? header)
+    {
+        var found = new List<string>();
+        if (string.IsNullOrWhiteSpace(header))
+            return found;
+        foreach (var element in header!.Split(','))
+        {
+            var at = element.IndexOf('=');
+            if (at <= 0)
+                continue;
+            if (string.Equals(element.Substring(0, at).Trim(), "v2", StringComparison.OrdinalIgnoreCase)
+                && element.Substring(at + 1).Trim() is { Length: > 0 } value)
+                found.Add(value);
+        }
+        return found;
     }
 
     private static string? Trimmed(string? value)
@@ -219,6 +271,16 @@ public sealed class QueueyDeliveryVerifierOptions
     /// </summary>
     public Func<string, bool>? NonceAlreadySeen { get; set; }
 
+    /// <summary>
+    /// Accept a delivery signed only with v1 (<c>X-Queuey-Signature</c>), for a Queuey that does not sign v2 yet. Off by
+    /// default. v1 does NOT cover the event id or the idempotency key: a delivery captured and replayed inside the timestamp
+    /// window with another id or key still verifies, so it can slip past a deduplication on them. A verified v1 delivery
+    /// therefore leaves <see cref="QueueyVerificationResult.EventId"/> and <see cref="QueueyVerificationResult.IdempotencyKey"/>
+    /// null. A delivery that carries v2 is verified by v2 alone, also with this set: a v2 that does not hold never falls back
+    /// to v1.
+    /// </summary>
+    public bool AcceptV1 { get; set; }
+
     /// <summary>The clock, injectable so timestamp handling is testable. Defaults to <see cref="DateTimeOffset.UtcNow"/>.</summary>
     public Func<DateTimeOffset> Clock { get; set; } = () => DateTimeOffset.UtcNow;
 }
@@ -246,6 +308,12 @@ public enum QueueyVerificationFailure
 
     /// <summary>Your replay guard had seen this nonce before.</summary>
     ReplayedNonce,
+
+    /// <summary>
+    /// The delivery had no v2 signature (<c>X-Queuey-Signatures: v2=…</c>), and v1 is not accepted
+    /// (<see cref="QueueyDeliveryVerifierOptions.AcceptV1"/>). A Queuey that does not sign v2 yet, or v2 stripped in transit.
+    /// </summary>
+    MissingV2Signature,
 }
 
 /// <summary>The outcome of verifying one delivery.</summary>
@@ -257,7 +325,9 @@ public readonly struct QueueyVerificationResult
         string? keyId,
         string? eventId,
         DateTimeOffset? signedAt,
-        string? nonce)
+        string? nonce,
+        int signatureVersion = 0,
+        string? idempotencyKey = null)
     {
         IsValid = isValid;
         Failure = failure;
@@ -265,6 +335,8 @@ public readonly struct QueueyVerificationResult
         EventId = eventId;
         SignedAtUtc = signedAt;
         Nonce = nonce;
+        SignatureVersion = signatureVersion;
+        IdempotencyKey = idempotencyKey;
     }
 
     /// <summary>True when the signature, the body hash and the timestamp all held.</summary>
@@ -277,11 +349,21 @@ public readonly struct QueueyVerificationResult
     public string? KeyId { get; }
 
     /// <summary>
-    /// The Queuey event id, when the delivery carried one. This is the value to
-    /// be idempotent on: the same event redelivered after a timeout carries the
-    /// same id, and processing it twice is the failure mode retries create.
+    /// The Queuey event id (<c>X-Queuey-Event-Id</c>), on a valid result only when the v2 signature covered it. This is the
+    /// value to be idempotent on: the same event redelivered after a timeout carries the same id, and processing it twice is
+    /// the failure mode retries create. Null on a delivery verified by v1 (<see cref="QueueyDeliveryVerifierOptions.AcceptV1"/>).
+    /// On a failed result it is the header as it came, for your logs, and not to be trusted.
     /// </summary>
     public string? EventId { get; }
+
+    /// <summary>
+    /// The delivery's idempotency key (<c>Idempotency-Key</c>), only when the v2 signature covered it; null otherwise. A
+    /// patched resend keeps the event id and gets a key of its own, so dedupe on the one your handler means.
+    /// </summary>
+    public string? IdempotencyKey { get; }
+
+    /// <summary>The signature version that verified: 2, or 1 with <see cref="QueueyDeliveryVerifierOptions.AcceptV1"/>; 0 on a failure.</summary>
+    public int SignatureVersion { get; }
 
     /// <summary>When Queuey signed the delivery.</summary>
     public DateTimeOffset? SignedAtUtc { get; }
@@ -289,8 +371,9 @@ public readonly struct QueueyVerificationResult
     /// <summary>The delivery's nonce. Remember it if you are guarding against replays.</summary>
     public string? Nonce { get; }
 
-    internal static QueueyVerificationResult Ok(string keyId, string? eventId, DateTimeOffset signedAt, string nonce)
-        => new(true, QueueyVerificationFailure.None, keyId, eventId, signedAt, nonce);
+    internal static QueueyVerificationResult Ok(
+        string keyId, DateTimeOffset signedAt, string nonce, int signatureVersion, string? eventId, string? idempotencyKey)
+        => new(true, QueueyVerificationFailure.None, keyId, eventId, signedAt, nonce, signatureVersion, idempotencyKey);
 
     internal static QueueyVerificationResult Fail(
         QueueyVerificationFailure failure,

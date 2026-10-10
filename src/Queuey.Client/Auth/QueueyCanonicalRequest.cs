@@ -13,6 +13,17 @@ namespace Queuey.Client;
 /// </summary>
 public static class QueueyCanonicalRequest
 {
+    /// <summary>
+    /// The canonical string of a delivery's v2 signature (<c>X-Queuey-Signatures: v2=…</c>): the six lines of
+    /// <see cref="Build"/>, then the event id (<c>X-Queuey-Event-Id</c>) and the idempotency key (<c>Idempotency-Key</c>),
+    /// each trimmed and empty when the delivery has none. The line breaks are there either way.
+    /// </summary>
+    public static string BuildV2(
+        string method, Uri requestUri, string timestamp, string nonce, string contentSha256, string? eventId, string? idempotencyKey)
+        => Build(method, requestUri, timestamp, nonce, contentSha256)
+           + "\n" + (eventId ?? string.Empty).Trim()
+           + "\n" + (idempotencyKey ?? string.Empty).Trim();
+
     /// <summary>Builds the canonical string from a request's method, URI, and the signed header values.</summary>
     public static string Build(string method, Uri requestUri, string timestamp, string nonce, string contentSha256)
     {
