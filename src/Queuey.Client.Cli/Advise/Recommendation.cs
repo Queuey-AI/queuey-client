@@ -371,7 +371,11 @@ public static class Recommendation
                          "shows — the SDK is .NET-only, so copy the documented check rather than improvising one.";
         }
 
-        yield return "Be idempotent on the event id (X-Queuey-Event-Id). A redelivery after a timeout carries the same id.";
+        // Signatur v2 (Queuey #521, 2026-10-10) dekker event-id-en og nøkkelen, så det er de mottakeren dedupliserer på.
+        yield return "Be idempotent on the event id (X-Queuey-Event-Id), or the Idempotency-Key when your handler means that: a " +
+                     "redelivery after a timeout carries the same id. Signature v2 (X-Queuey-Signatures: v2=…) covers both, so " +
+                     "deduplicating on them is safe once it verifies" +
+                     (facts.IsDotNet ? "; QueueyDeliveryVerifier requires v2 and gives them back as result.EventId and result.IdempotencyKey." : ".");
         yield return "While developing, run: queuey listen --queue <name> --forward-to http://localhost:<port> — real deliveries at the path of the queue's endpoint, no inbound port open.";
     }
 

@@ -293,9 +293,10 @@ app.MapPost("/webhooks/queuey", async (HttpRequest request) =>
         return Results.Unauthorized();
     }
 
-    // result.EventId is the value to be idempotent on — a redelivery after a
-    // timeout carries the same id, and processing it twice is the failure mode
-    // retries create.
+    // result.EventId (and result.IdempotencyKey) is the value to be idempotent
+    // on — a redelivery after a timeout carries the same id, and processing it
+    // twice is the failure mode retries create. Signature v2 covers both, so a
+    // captured delivery replayed with another id or key does not verify.
     await Handle(body, result.EventId);
     return Results.Ok();
 });
@@ -308,8 +309,20 @@ byte sequence even when it is the same JSON, so a typed parameter like
 body as `byte[]` or `string`.
 
 **What the signature covers:** the method, the path, the query string, the body,
-and the signing headers Queuey generates. It does not cover your other request
-headers, so never treat an unsigned header as vouched for.
+the signing headers Queuey generates, and — in signature v2 — the event id
+(`X-Queuey-Event-Id`) and the idempotency key (`Idempotency-Key`). That is what
+makes deduplicating on them safe. It does not cover your other request headers,
+so never treat an unsigned header as vouched for.
+
+**v2 is required.** Queuey signs each delivery twice over the same timestamp and
+nonce: v1 in `X-Queuey-Signature` (six lines) and v2 in `X-Queuey-Signatures` as
+`v2=<hex>` (the same six lines, then the event id and the idempotency key, each
+trimmed and empty when absent). The verifier refuses a delivery without v2
+(`MissingV2Signature`), also when its v1 holds, so stripping v2 cannot downgrade
+it, and a v2 that does not hold never falls back to v1. For a Queuey that does
+not sign v2 yet, set `AcceptV1 = true` in the options: then the event id and the
+idempotency key are not covered, and `result.EventId` and `result.IdempotencyKey`
+stay null.
 
 The verifier also rejects a delivery whose timestamp sits more than five minutes
 from your clock, which is what stops a captured request from being replayed
