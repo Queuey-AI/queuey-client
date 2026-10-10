@@ -523,6 +523,66 @@ public sealed class LoginCommandTests : IDisposable
 
     // ── profilen ─────────────────────────────────────────────────────────────
 
+    // Testrunden 2026-10-09: profilen får verten først etter godkjenning, så --wait må finne den i den ventende koden.
+    private const string LocalApi = "http://localhost:5223";
+
+    [Fact]
+    public async Task Wait_without_api_base_finishes_the_login_against_the_host_it_was_started_against()
+    {
+        var server = new FakeAuthServer { IngressBase = null };
+
+        CliRun started = await Run(server, "login", "--profile", "dev", "--api-base", LocalApi, "--ingress-base", "http://localhost:5084");
+        Assert.Equal(ExitCodes.PendingApproval, started.Exit);
+
+        server.PollAnswers.Enqueue("approve");
+        int before = server.Handler.Requests.Count;
+        CliRun waited = await Run(server, "login", "--profile", "dev", "--wait");
+
+        Assert.True(waited.Exit == ExitCodes.Success, waited.Stdout + waited.Stderr);
+        Assert.All(server.Handler.Requests.Skip(before), r => Assert.Equal("localhost:5223", r.Uri.Authority));
+        Assert.Single(server.FormsTo("/connect/device"));   // samme kode, ingen ny
+        JsonNode dev = JsonNode.Parse(File.ReadAllText(UserFile))!["profiles"]!["dev"]!;
+        Assert.Equal(LocalApi, (string?)dev["apiBase"]);
+        Assert.Equal("http://localhost:5084", (string?)dev["ingressBase"]);   // --ingress-base fra starten
+        Assert.Empty(Stored().GetProperty("pending").EnumerateArray());
+    }
+
+    [Fact]
+    public async Task With_codes_waiting_at_two_hosts_wait_asks_which_and_sends_nothing()
+    {
+        var server = new FakeAuthServer();
+        await Run(server, "login", "--profile", "dev", "--api-base", LocalApi);
+        await Run(server, "login", "--profile", "dev", "--api-base", FakeAuthServer.Api);
+        int before = server.Handler.Requests.Count;
+
+        CliRun run = await Run(server, "login", "--profile", "dev", "--wait");
+
+        Assert.Equal(ExitCodes.Usage, run.Exit);
+        Assert.Contains($"Logins for profile dev wait at 2 hosts: {LocalApi}, {FakeAuthServer.Api}.", run.Stderr);
+        Assert.Contains("--api-base", run.Stderr);
+        Assert.Equal(before, server.Handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task An_explicit_other_host_starts_its_own_login_and_never_uses_the_waiting_code()
+    {
+        var server = new FakeAuthServer();
+        await Run(server, "login", "--profile", "dev", "--api-base", LocalApi);
+        server.PollAnswers.Enqueue("approve");
+        int before = server.Handler.Requests.Count;
+
+        CliRun run = await Run(server, "login", "--profile", "dev", "--api-base", FakeAuthServer.Api, "--wait");
+
+        Assert.True(run.Exit == ExitCodes.Success, run.Stdout + run.Stderr);
+        Assert.All(server.Handler.Requests.Skip(before), r => Assert.Equal("api.test", r.Uri.Authority));
+        Assert.Equal(2, server.FormsTo("/connect/device").Count());
+        Assert.DoesNotContain(server.FormsTo("/connect/token"), f => f.TryGetValue("device_code", out string? code) && code == "dc1-secret");
+        // Koden for den lokale verten venter fortsatt.
+        JsonElement pending = Assert.Single(Stored().GetProperty("pending").EnumerateArray());
+        Assert.Equal(LocalApi, pending.GetProperty("apiBase").GetString());
+    }
+
+
     [Fact]
     public async Task Login_with_a_profile_writes_the_license_hosts_and_its_environments_workspace_and_leaves_other_profiles()
     {

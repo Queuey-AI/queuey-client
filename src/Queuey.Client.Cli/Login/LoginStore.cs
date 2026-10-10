@@ -62,6 +62,15 @@ internal sealed class PendingLogin
     public string VerificationUri { get; set; } = "";
     public string? VerificationUriComplete { get; set; }
 
+    /// <summary>
+    /// The profile the login was started for, or null. <c>queuey login --profile p --wait</c> finds the code, and its API host,
+    /// by it: the profile gets the host only after approval.
+    /// </summary>
+    public string? Profile { get; set; }
+
+    /// <summary>The <c>--ingress-base</c> the login was started with, or null; the run that finishes it keeps it.</summary>
+    public string? IngressBase { get; set; }
+
     /// <summary>Seconds to wait between polls, as Queuey last asked (raised by 5 on each <c>slow_down</c>).</summary>
     public int Interval { get; set; } = 5;
 

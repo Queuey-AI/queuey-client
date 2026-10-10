@@ -56,9 +56,25 @@ internal static class LoginCommand
                 "Such as http://localhost:5084 for a Queuey on this machine.");
 
         string? profile = CliHost.Profile(map);
-        (ConnectionProfile? existing, Uri apiBase, string? license) = Connection(map, profile);
-        string host = LoginStore.HostKey(apiBase);
         string path = LoginStore.PathOf(CliHost.Env);
+        (ConnectionProfile? existing, Uri apiBase, string? license) = Connection(map, profile);
+
+        // Testrunden 2026-10-09: `login --profile dev --api-base <lokal>` startet mot den lokale verten, men `login --profile dev
+        // --wait` gikk mot queuey.ai, for profilen får verten først etter godkjenning. En ventende kode for profilen bestemmer
+        // verten når --api-base ikke er gitt. Er det flere verter, velger --api-base; et --api-base som er en annen vert,
+        // starter en ny innlogging der (PendingOrNewAsync matcher alltid på vert, så en kode brukes aldri mot feil vert).
+        if (profile is not null && Clean(map.Get("api-base")) is null)
+        {
+            string[] waitingHosts = WaitingHosts(path, profile);
+            if (waitingHosts.Length > 1)
+                return CliErrors.Usage(map, "several_pending_logins",
+                    $"Logins for profile {profile} wait at {waitingHosts.Length} hosts: {string.Join(", ", waitingHosts)}.",
+                    $"Name the one to finish with --api-base, such as queuey login --profile {profile} --api-base {waitingHosts[0]} --wait.");
+            if (waitingHosts.Length == 1 && Uri.TryCreate(waitingHosts[0], UriKind.Absolute, out Uri? waitingHost))
+                apiBase = waitingHost;
+        }
+
+        string host = LoginStore.HostKey(apiBase);
         var run = new LoginRun(map, json, scope, profile, existing, apiBase, host, path);
 
         DateTimeOffset started = LoginTokens.Now();
@@ -73,6 +89,9 @@ internal static class LoginCommand
         if (meanwhile is not null || waiting is null)
             return await run.FinishAsync(oauth, meanwhile!, workspaces: null, already: false);
         PendingLogin pending = waiting;
+        // Den ventende kodens --ingress-base gjelder når denne kjøringen ikke gir en selv.
+        if (resumed && run.IngressFlag is null && Clean(pending.IngressBase) is { } startedWith)
+            run.IngressFlag = startedWith;
 
         bool interactive = !json && IsTerminal() && WorkspaceCreation.DetectedCi(CliHost.Env) is null;
         bool wait = map.Has("wait") || interactive;
@@ -156,7 +175,8 @@ internal static class LoginCommand
 
             int before = file.Pending.Count;
             file.Pending.RemoveAll(p => p.ExpiresAt <= now);
-            PendingLogin? waiting = file.Pending.FirstOrDefault(p => p.ApiBase == run.Host && p.Scope == run.Scope);
+            PendingLogin? waiting = file.Pending.FirstOrDefault(p => p.ApiBase == run.Host && p.Scope == run.Scope
+                                                                      && (p.Profile is null || run.Profile is null || p.Profile == run.Profile));
             if (waiting is not null)
             {
                 if (file.Pending.Count != before)
@@ -176,6 +196,8 @@ internal static class LoginCommand
                 Interval = device.Interval,
                 CreatedAt = now,
                 ExpiresAt = now + TimeSpan.FromSeconds(device.ExpiresIn),
+                Profile = run.Profile,
+                IngressBase = run.IngressFlag,
             };
             file.Pending.Add(pending);
             LoginStore.Write(run.Path, file);
@@ -184,6 +206,20 @@ internal static class LoginCommand
     }
 
     private sealed record PollOutcome(StoredLogin? Login, int? Failed);
+
+    /// <summary>The API hosts with an unexpired code waiting for <paramref name="profile"/>, in the order they were started.</summary>
+    internal static string[] WaitingHosts(string path, string profile)
+    {
+        if (!File.Exists(path))
+            return Array.Empty<string>();
+        DateTimeOffset now = LoginTokens.Now();
+        return LoginStore.Read(path).Pending
+            .Where(p => p.Profile == profile && p.ExpiresAt > now && !string.IsNullOrWhiteSpace(p.ApiBase))
+            .OrderBy(p => p.CreatedAt)
+            .Select(p => p.ApiBase)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+    }
 
     /// <summary>
     /// The newest login for <paramref name="host"/> stored at or after <paramref name="since"/> with no more than the
@@ -353,7 +389,11 @@ internal static class LoginCommand
             ApiBase = apiBase;
             Host = host;
             Path = path;
+            IngressFlag = Clean(map.Get("ingress-base"));
         }
+
+        /// <summary>The <c>--ingress-base</c> of this run, or of the waiting code it finishes.</summary>
+        public string? IngressFlag { get; set; }
 
         public ArgMap Map { get; }
         public bool Json { get; }
@@ -490,7 +530,7 @@ internal static class LoginCommand
             string? tenant = null, note = null, workspaceName = null, workspaceEnvironment = null, profileFile = null;
             bool profileHasKey = false;
 
-            if (Clean(Map.Get("ingress-base")) is { } flaggedIngress)
+            if (IngressFlag is { } flaggedIngress)
                 login = await KeepIngressAsync(login, LoginStore.HostKey(new Uri(flaggedIngress, UriKind.Absolute)));
             if (IngressElsewhere(ApiBase, login.IngressBase) is { } elsewhere)
                 Console.Error.WriteLine($"Warning: Queuey is on this machine ({Host}), and its ingress host is {TerminalText.Line(elsewhere)}, " +
@@ -505,7 +545,7 @@ internal static class LoginCommand
                 if (tenant is not null && workspaces.FirstOrDefault(w => w.PublicId == tenant) is { } chosen)
                     (workspaceName, workspaceEnvironment) = (chosen.DisplayName, chosen.EffectiveEnvironment);
 
-                string ingress = LoginStore.HostKey(Clean(Map.Get("ingress-base")) is { } flagged && Uri.TryCreate(flagged, UriKind.Absolute, out Uri? i)
+                string ingress = LoginStore.HostKey(IngressFlag is { } flagged && Uri.TryCreate(flagged, UriKind.Absolute, out Uri? i)
                     ? i
                     : new ResolvedConfig
                     {
