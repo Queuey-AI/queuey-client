@@ -171,4 +171,75 @@ public class QueueyDeliveryVerifierV2Tests
         Assert.True(result.IsValid, result.Failure.ToString());
         Assert.Equal("evt_01J9", result.EventId);
     }
+
+    // ── security-review av #74 (KAN-2, KAN-4) ───────────────────────────────
+
+    private static string ValidV2(Dictionary<string, string?> headers) => headers[QueueyHeaders.Signatures]!.Substring(3);
+
+    [Fact]
+    public void Several_v2_values_verify_when_one_of_them_holds()
+    {
+        var headers = Delivery();
+        headers[QueueyHeaders.Signatures] = $"v2={new string('0', 64)},v2={ValidV2(headers)},v2={new string('f', 64)}";
+
+        Assert.True(Verify(headers).IsValid);
+    }
+
+    [Theory]
+    [InlineData("v2=")]          // uten verdi
+    [InlineData("v2")]           // uten =
+    [InlineData(" , ")]          // bare skilletegn
+    public void A_v2_header_without_a_v2_value_counts_as_no_v2(string header)
+    {
+        var headers = Delivery();
+        headers[QueueyHeaders.Signatures] = header;
+
+        Assert.Equal(QueueyVerificationFailure.MissingV2Signature, Verify(headers).Failure);
+    }
+
+    [Fact]
+    public void An_equals_sign_inside_the_value_belongs_to_the_value()
+    {
+        var headers = Delivery();
+        headers[QueueyHeaders.Signatures] = $"v2={ValidV2(headers)}=";
+
+        Assert.Equal(QueueyVerificationFailure.SignatureMismatch, Verify(headers).Failure);
+    }
+
+    [Theory]
+    [InlineData("v2=zz")]                          // ikke hex
+    [InlineData("v2=abc=def")]
+    public void An_invalid_v2_with_accept_v1_is_refused_and_never_falls_back_to_v1(string header)
+    {
+        var headers = Delivery();
+        headers[QueueyHeaders.Signatures] = header;
+
+        Assert.Equal(QueueyVerificationFailure.SignatureMismatch, Verify(headers, acceptV1: true).Failure);
+    }
+
+    [Fact]
+    public void Only_v2_without_the_v1_header_verifies()
+    {
+        var headers = Delivery();
+        headers.Remove(QueueyHeaders.Signature);
+
+        QueueyVerificationResult result = Verify(headers);
+
+        Assert.True(result.IsValid, result.Failure.ToString());
+        Assert.Equal(2, result.SignatureVersion);
+    }
+
+    [Fact]
+    public void A_failed_result_has_no_event_id_only_the_claimed_one_for_the_logs()
+    {
+        var headers = Delivery();
+        headers[QueueyHeaders.EventId] = "evt_OTHER";
+
+        QueueyVerificationResult result = Verify(headers);
+
+        Assert.False(result.IsValid);
+        Assert.Null(result.EventId);
+        Assert.Null(result.IdempotencyKey);
+        Assert.Equal("evt_OTHER", result.ClaimedEventId);
+    }
 }

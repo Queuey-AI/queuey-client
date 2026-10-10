@@ -172,8 +172,8 @@ public sealed class QueueyDeliveryVerifier
 
         // Event-id-en og nøkkelen er verdt å stole på bare når signaturen dekket dem: v2. Med v1 er de ikke med.
         return v2
-            ? QueueyVerificationResult.Ok(keyId, signedAt, nonce, 2, eventId, idempotencyKey)
-            : QueueyVerificationResult.Ok(keyId, signedAt, nonce, 1, eventId: null, idempotencyKey: null);
+            ? QueueyVerificationResult.Ok(keyId, signedAt, nonce, 2, eventId, idempotencyKey, eventId)
+            : QueueyVerificationResult.Ok(keyId, signedAt, nonce, 1, eventId: null, idempotencyKey: null, claimedEventId: eventId);
     }
 
     /// <summary>
@@ -273,11 +273,12 @@ public sealed class QueueyDeliveryVerifierOptions
 
     /// <summary>
     /// Accept a delivery signed only with v1 (<c>X-Queuey-Signature</c>), for a Queuey that does not sign v2 yet. Off by
-    /// default. v1 does NOT cover the event id or the idempotency key: a delivery captured and replayed inside the timestamp
-    /// window with another id or key still verifies, so it can slip past a deduplication on them. A verified v1 delivery
-    /// therefore leaves <see cref="QueueyVerificationResult.EventId"/> and <see cref="QueueyVerificationResult.IdempotencyKey"/>
-    /// null. A delivery that carries v2 is verified by v2 alone, also with this set: a v2 that does not hold never falls back
-    /// to v1.
+    /// default. With it on, anyone in the path can strip v2 and send v1 alone, so the protection is v1's whatever Queuey
+    /// sends: v1 does NOT cover the event id or the idempotency key, and a delivery captured and replayed inside the timestamp
+    /// window with another id or key still verifies. A verified v1 delivery therefore leaves
+    /// <see cref="QueueyVerificationResult.EventId"/> and <see cref="QueueyVerificationResult.IdempotencyKey"/> null. A
+    /// delivery that carries v2 is verified by v2 alone, also with this set: a v2 that does not hold never falls back to v1.
+    /// Turn it off once your deliveries carry v2.
     /// </summary>
     public bool AcceptV1 { get; set; }
 
@@ -291,7 +292,11 @@ public enum QueueyVerificationFailure
     /// <summary>Verification succeeded.</summary>
     None = 0,
 
-    /// <summary>One or more of the five signing headers was absent. Usually means the request did not come from Queuey at all.</summary>
+    /// <summary>
+    /// A signing header was absent: <c>X-Queuey-Key-Id</c>, <c>X-Queuey-Timestamp</c>, <c>X-Queuey-Nonce</c>,
+    /// <c>X-Queuey-Content-SHA256</c>, or every signature (neither <c>X-Queuey-Signatures</c> nor <c>X-Queuey-Signature</c>).
+    /// Usually means the request did not come from Queuey at all. A delivery with v1 alone is <see cref="MissingV2Signature"/>.
+    /// </summary>
     MissingHeaders,
 
     /// <summary>The timestamp header was not an integer number of Unix seconds.</summary>
@@ -327,9 +332,11 @@ public readonly struct QueueyVerificationResult
         DateTimeOffset? signedAt,
         string? nonce,
         int signatureVersion = 0,
-        string? idempotencyKey = null)
+        string? idempotencyKey = null,
+        string? claimedEventId = null)
     {
         IsValid = isValid;
+        ClaimedEventId = claimedEventId;
         Failure = failure;
         KeyId = keyId;
         EventId = eventId;
@@ -351,10 +358,16 @@ public readonly struct QueueyVerificationResult
     /// <summary>
     /// The Queuey event id (<c>X-Queuey-Event-Id</c>), on a valid result only when the v2 signature covered it. This is the
     /// value to be idempotent on: the same event redelivered after a timeout carries the same id, and processing it twice is
-    /// the failure mode retries create. Null on a delivery verified by v1 (<see cref="QueueyDeliveryVerifierOptions.AcceptV1"/>).
-    /// On a failed result it is the header as it came, for your logs, and not to be trusted.
+    /// the failure mode retries create. Null on a delivery verified by v1 (<see cref="QueueyDeliveryVerifierOptions.AcceptV1"/>),
+    /// and on a failed result: <see cref="ClaimedEventId"/> has the header as it came, for your logs.
     /// </summary>
     public string? EventId { get; }
+
+    /// <summary>
+    /// The <c>X-Queuey-Event-Id</c> header as the request carried it, verified or not. For your logs only; never deduplicate on
+    /// it. <see cref="EventId"/> is the one to trust.
+    /// </summary>
+    public string? ClaimedEventId { get; }
 
     /// <summary>
     /// The delivery's idempotency key (<c>Idempotency-Key</c>), only when the v2 signature covered it; null otherwise. A
@@ -372,13 +385,15 @@ public readonly struct QueueyVerificationResult
     public string? Nonce { get; }
 
     internal static QueueyVerificationResult Ok(
-        string keyId, DateTimeOffset signedAt, string nonce, int signatureVersion, string? eventId, string? idempotencyKey)
-        => new(true, QueueyVerificationFailure.None, keyId, eventId, signedAt, nonce, signatureVersion, idempotencyKey);
+        string keyId, DateTimeOffset signedAt, string nonce, int signatureVersion, string? eventId, string? idempotencyKey,
+        string? claimedEventId)
+        => new(true, QueueyVerificationFailure.None, keyId, eventId, signedAt, nonce, signatureVersion, idempotencyKey, claimedEventId);
 
+    // Security-review av #74 (KAN-2): ved en feil er EventId null; den rå verdien står bare i ClaimedEventId.
     internal static QueueyVerificationResult Fail(
         QueueyVerificationFailure failure,
         string? keyId = null,
         string? eventId = null,
         DateTimeOffset? signedAt = null)
-        => new(false, failure, keyId, eventId, signedAt, null);
+        => new(false, failure, keyId, eventId: null, signedAt, null, claimedEventId: eventId);
 }
