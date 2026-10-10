@@ -90,8 +90,16 @@ internal static class LoginCommand
             return await run.FinishAsync(oauth, meanwhile!, workspaces: null, already: false);
         PendingLogin pending = waiting;
         // Den ventende kodens --ingress-base gjelder når denne kjøringen ikke gir en selv.
+        // Security-review av #73: verdien kommer fra credentials.json og får samme sjekk som flagget (https, eller http på denne
+        // maskinen). En verdi som ikke holder, brukes ikke.
         if (resumed && run.IngressFlag is null && Clean(pending.IngressBase) is { } startedWith)
-            run.IngressFlag = startedWith;
+        {
+            if (Uri.TryCreate(startedWith, UriKind.Absolute, out Uri? startedUri) && OAuthClient.IsSafe(startedUri))
+                run.IngressFlag = startedWith;
+            else
+                Console.Error.WriteLine("Warning: the waiting login's --ingress-base is not an https URL, or http on this machine, so it " +
+                                        "is not used. Its value is not shown. Give --ingress-base again to set one.");
+        }
 
         bool interactive = !json && IsTerminal() && WorkspaceCreation.DetectedCi(CliHost.Env) is null;
         bool wait = map.Has("wait") || interactive;

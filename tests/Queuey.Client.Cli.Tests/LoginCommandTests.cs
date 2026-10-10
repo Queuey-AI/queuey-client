@@ -547,6 +547,30 @@ public sealed class LoginCommandTests : IDisposable
         Assert.Empty(Stored().GetProperty("pending").EnumerateArray());
     }
 
+    [Theory]
+    [InlineData("http://evil.example:5084")]     // http utenfor denne maskinen
+    [InlineData("not a url")]                      // ingen absolutt URL: kastet før
+    public async Task A_waiting_codes_ingress_base_that_is_not_safe_is_not_used(string tampered)
+    {
+        // Security-review av #73: verdien i credentials.json får samme sjekk som --ingress-base.
+        var server = new FakeAuthServer { IngressBase = null };
+        CliRun started = await Run(server, "login", "--profile", "dev", "--api-base", LocalApi, "--ingress-base", "http://localhost:5084");
+        Assert.Equal(ExitCodes.PendingApproval, started.Exit);
+        JsonNode stored = JsonNode.Parse(File.ReadAllText(CredentialsFile))!;
+        stored["pending"]![0]!["ingressBase"] = tampered;
+        File.WriteAllText(CredentialsFile, stored.ToJsonString());
+
+        server.PollAnswers.Enqueue("approve");
+        CliRun waited = await Run(server, "login", "--profile", "dev", "--wait");
+
+        Assert.True(waited.Exit == ExitCodes.Success, waited.Stdout + waited.Stderr);
+        Assert.Contains("the waiting login's --ingress-base is not an https URL", waited.Stderr);
+        Assert.DoesNotContain(tampered, waited.Stdout + waited.Stderr);
+        JsonNode dev = JsonNode.Parse(File.ReadAllText(UserFile))!["profiles"]!["dev"]!;
+        Assert.NotEqual(tampered, (string?)dev["ingressBase"]);
+        Assert.DoesNotContain("evil.example", File.ReadAllText(UserFile) + File.ReadAllText(CredentialsFile));
+    }
+
     [Fact]
     public async Task With_codes_waiting_at_two_hosts_wait_asks_which_and_sends_nothing()
     {
