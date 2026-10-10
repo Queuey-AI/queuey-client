@@ -24,6 +24,7 @@
 
   <ItemGroup>
     <EmbeddedResource Include="GoldenVectors\hmac-vectors.json" />
+    <EmbeddedResource Include="GoldenVectors\queuey-delivery-signature-v2.json" />
   </ItemGroup>
 
 </Project>

@@ -89,6 +89,9 @@ internal sealed class ListenOutput
         Out(tookOver ? "Took the queue over from the session that listened on it." : null,
             $"Listening on {what} → forwarding to {forwardTo}",
             "Only a queue set to forward to a local listener (Local forward) sends events here. Press Ctrl-C to stop.",
+            // Signatur v2 (Queuey #521): det mottakeren dedupliserer på, er signert.
+            "An event can come more than once: deduplicate on X-Queuey-Event-Id or Idempotency-Key, which signature v2 " +
+            "(X-Queuey-Signatures) covers, after verifying it.",
             string.Empty);
     }
 

@@ -638,7 +638,9 @@ LISTEN
                  ingress route. --queue takes the queue's name (its workspace from --tenant or
                  QUEUEY_TENANT) or its id; without --queue the session listens on the workspace.
                  Your local response is the delivery's outcome; the app gets 18 s, then it is a
-                 504. The same event can come more than once, as after a listener went away.
+                 504. The same event can come more than once, as after a listener went away:
+                 deduplicate on the event id (X-Queuey-Event-Id) or the Idempotency-Key, which
+                 signature v2 (X-Queuey-Signatures: v2=…) covers, so verify v2 first.
                  One session listens on a queue at a time: the first one. Another is refused
                  (listener_already_connected) until it stops, or takes the queue over with
                  --take-over, and the session it took over from stops. A queue under a workspace

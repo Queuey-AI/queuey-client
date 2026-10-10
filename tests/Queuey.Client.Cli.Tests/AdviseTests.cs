@@ -413,6 +413,20 @@ public sealed class AdviseTests : IDisposable
 
         Assert.Single(facts.Durability, e => e.What == "MassTransit");
     }
+
+    [Fact]
+    public void The_receiving_recipe_says_to_dedupe_on_what_signature_v2_covers()
+    {
+        // Queuey #521: v2 dekker event-id-en og idempotensnøkkelen.
+        File_("Api.csproj", "<Project Sdk=\"Microsoft.NET.Sdk.Web\"></Project>");
+        File_("Program.cs", "var app = WebApplication.Create(); app.MapPost(\"/webhooks/orders\", (HttpRequest r) => 1); app.Run();");
+
+        var advice = Advise();
+
+        Assert.Contains(advice.ReceivingSteps, s => s.Contains("Signature v2 (X-Queuey-Signatures: v2=…) covers both", StringComparison.Ordinal)
+                                                    && s.Contains("Idempotency-Key", StringComparison.Ordinal)
+                                                    && s.Contains("QueueyDeliveryVerifier requires v2", StringComparison.Ordinal));
+    }
 }
 
 /// <summary>

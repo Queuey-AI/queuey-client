@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Compares the test vectors the CLI shares with Queuey: the addresses Queuey's egress guard blocks and lets through
-# (SsrfEgressPolicy, mirrored by DeploymentDestinations) and the rules for a credential name (CredentialNameRules, the
-# same class on both sides). Each side tests its own code against its own vectors; this script fails when the two sets
+# (SsrfEgressPolicy, mirrored by DeploymentDestinations), the rules for a credential name (CredentialNameRules, the
+# same class on both sides), and the golden vectors of the signature on a delivery (v1 and v2). Each side tests its own code against its own vectors; this script fails when the two sets
 # differ, so a range or a rule added on one side fails here until the other side has it too.
 #
 # Run it before a v* tag (CLAUDE.md, Release). It reads Queuey's files from a git ref, without touching that checkout:
@@ -127,6 +127,22 @@ methods="$( (printf '%s\n' "$names_queuey"; printf '%s\n' "$names_client") | inl
 for method in $methods; do
   compare "Credential names, $method" "$(vectors "$names_queuey" "^$method\$")" "$(vectors "$names_client" "^$method\$")"
 done
+
+# The golden vectors of the signature on a delivery, v1 and v2 (Queuey #521): the server's signer made them, and the client's
+# verifier is tested against its copy. The copy has to be Queuey's file as it is on the ref, byte for byte. Until v2 is in
+# production, Queuey's origin/main has no such file, and a tag stops here, which is the point: a client that requires v2 must
+# not ship before the server signs it.
+signature_path="tests/Api/Queuey.Api.Tests/GoldenVectors/queuey-delivery-signature-v2.json"
+signature_client="tests/Queuey.Client.Tests/GoldenVectors/queuey-delivery-signature-v2.json"
+if ! git -C "$repo" cat-file -e "$ref:$signature_path" 2>/dev/null; then
+  echo "✗ Delivery signature vectors: Queuey at $ref has no $signature_path. Signature v2 is not there yet; the CLI requires it."
+  failed=1
+elif ! cmp -s <(git -C "$repo" show "$ref:$signature_path") "$client/$signature_client"; then
+  echo "✗ Delivery signature vectors differ: $signature_client is not Queuey's $signature_path at $ref. Copy it again, and run the tests."
+  failed=1
+else
+  echo "✓ Delivery signature vectors (v1 and v2): the same file on both sides."
+fi
 
 if [[ $failed -ne 0 ]]; then
   echo "The CLI and Queuey ($ref) test different vectors. Bring the side that lacks one up to the other, code and tests." >&2

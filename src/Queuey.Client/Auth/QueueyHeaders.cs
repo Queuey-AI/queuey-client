@@ -21,8 +21,14 @@ public static class QueueyHeaders
     /// <summary>Lowercase-hex SHA-256 of the raw request body.</summary>
     public const string ContentSha256 = "X-Queuey-Content-SHA256";
 
-    /// <summary>Lowercase-hex HMAC-SHA256 request signature.</summary>
+    /// <summary>Lowercase-hex HMAC-SHA256 request signature (v1: the six signed lines).</summary>
     public const string Signature = "X-Queuey-Signature";
+
+    /// <summary>
+    /// The versioned signatures on a delivery, as <c>v2=&lt;hex&gt;</c> (comma-separated when there are several). v2 covers
+    /// the six lines of v1, the event id and the idempotency key.
+    /// </summary>
+    public const string Signatures = "X-Queuey-Signatures";
 
     /// <summary>License scope header for control-plane calls.</summary>
     public const string LicensePublicId = "X-License-PublicId";
