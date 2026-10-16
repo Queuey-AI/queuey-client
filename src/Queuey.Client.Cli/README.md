@@ -20,6 +20,13 @@ curl -fsSL https://github.com/Queuey-AI/queuey-client/releases/latest/download/q
 ./queuey --version
 ```
 
+The binary carries SQLite's native library, which `queuey edge` needs, and
+unpacks it at every start under `~/.net` (`%TEMP%\.net` on Windows). An account
+without a home it can write to, such as a system user or a container user, sets
+`DOTNET_BUNDLE_EXTRACT_BASE_DIR` to a directory of its own; the
+[Edge runbook](https://github.com/Queuey-AI/queuey-client/blob/main/docs/edge-operations.md)
+shows it for systemd.
+
 ## What it is for
 
 Three jobs, in the order most people meet them:

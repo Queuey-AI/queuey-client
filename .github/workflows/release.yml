@@ -32,13 +32,15 @@ name: Release
 # Required variable: NUGET_USER (the nuget.org account name that registered the
 # policy — a profile name, never an email address).
 #
-# --profile is smoke-tested before anything of its kind is published
-# (scripts/smoke-profile.sh): the tool on the newest .NET runtime before the
-# NuGet push, and each self-contained binary on a runner of its own platform
-# before the binaries are attached. The connections file's owner is read
-# through the runtime's native shim, which a single-file binary carries inside
-# itself, so a build in which --profile does not work fails the release
-# instead of the user.
+# --profile and the Edge spool are smoke-tested before anything of their kind
+# is published (scripts/smoke-profile.sh, scripts/smoke-edge.sh): the tool on
+# the newest .NET runtime before the NuGet push, and each self-contained binary,
+# as archived, on a runner of its own platform before the binaries are attached.
+# The connections file's owner is read through the runtime's native shim, which
+# a single-file binary carries inside itself. The spool needs SQLite's native
+# library, which is not part of the runtime: the binary carries it only because
+# Queuey.Client.Cli.csproj sets IncludeNativeLibrariesForSelfExtract. A build in
+# which either does not work fails the release instead of the user.
 
 on:
   push:
@@ -86,6 +88,9 @@ jobs:
           dotnet tool install Queuey.Cli --tool-path "$RUNNER_TEMP/queuey-tool" --add-source artifacts --version "$VERSION"
           scripts/smoke-profile.sh "$RUNNER_TEMP/queuey-tool/queuey"
 
+      - name: Smoke-test the Edge spool in the tool on the newest runtime
+        run: scripts/smoke-edge.sh "$RUNNER_TEMP/queuey-tool/queuey"
+
       # The key expires an hour after it is issued, so it is fetched here —
       # after the slow test and pack steps — rather than at the top of the job.
       - name: NuGet login (OIDC exchange)
@@ -129,8 +134,17 @@ jobs:
       - name: Archive
         # The published binary carries the assembly name (Queuey.Client.Cli);
         # ship it as `queuey` — the name every doc and script uses.
+        # The archive holds the binary alone, so the publish must leave nothing
+        # beside it but symbols and XML docs: a native library left there works
+        # in this folder and fails on the user's machine, as SQLite's did in
+        # every release through 0.1.0-preview.9.
         run: |
           cd publish/${{ matrix.rid }}
+          left="$(find . -maxdepth 1 -type f ! -name 'Queuey.Client.Cli' ! -name 'Queuey.Client.Cli.exe' ! -name '*.pdb' ! -name '*.xml')"
+          if [[ -n "$left" ]]; then
+            echo "::error::The publish left files beside the binary that the archive would drop: $left"
+            exit 1
+          fi
           if [[ "${{ matrix.rid }}" == win-* ]]; then
             mv Queuey.Client.Cli.exe queuey.exe
             zip -q "../../queuey-$VERSION-${{ matrix.rid }}.zip" queuey.exe
@@ -151,11 +165,12 @@ jobs:
           if-no-files-found: error
 
   cli-smoke:
-    # Each binary runs where it is meant to run before it is attached, with
-    # --profile against a test profile (scripts/smoke-profile.sh). A binary in
-    # which --profile does not work fails the release here. The publish job
-    # cross-compiles every RID on Linux; only a runner of the binary's own
-    # platform can run it.
+    # Each binary runs where it is meant to run before it is attached, as it
+    # was archived: with --profile against a test profile
+    # (scripts/smoke-profile.sh), and with edge publish and edge status against
+    # a temp spool (scripts/smoke-edge.sh). A binary in which either does not
+    # work fails the release here. The publish job cross-compiles every RID on
+    # Linux; only a runner of the binary's own platform can run it.
     needs: cli-binaries
     strategy:
       matrix:
@@ -193,6 +208,10 @@ jobs:
       - name: Smoke-test --profile in the binary
         shell: bash
         run: scripts/smoke-profile.sh "bin/queuey${{ runner.os == 'Windows' && '.exe' || '' }}"
+
+      - name: Smoke-test the Edge spool in the binary
+        shell: bash
+        run: scripts/smoke-edge.sh "bin/queuey${{ runner.os == 'Windows' && '.exe' || '' }}"
 
   cli-release:
     # Only binaries that passed their smoke test are attached.

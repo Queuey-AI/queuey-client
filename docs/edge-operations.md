@@ -32,7 +32,8 @@ runtime needed on the device:
 # on your build machine (linux-arm64 for Pi-class, linux-x64 for industrial PCs)
 dotnet publish src/Queuey.Client.Cli -c Release -r linux-arm64 \
   --self-contained -p:PublishSingleFile=true
-scp bin/Release/net8.0/linux-arm64/publish/queuey device:/opt/queuey/queuey
+scp src/Queuey.Client.Cli/bin/Release/net8.0/linux-arm64/publish/Queuey.Client.Cli \
+  device:/opt/queuey/queuey
 ```
 
 (On devices that have the SDK, `dotnet tool install -g Queuey.Cli --prerelease`
@@ -52,10 +53,12 @@ Wants=network-online.target time-sync.target
 [Service]
 ExecStart=/opt/queuey/queuey edge run --spool /var/lib/queuey/spool.db --listen 7311
 EnvironmentFile=/etc/queuey/edge.env
+Environment=DOTNET_BUNDLE_EXTRACT_BASE_DIR=/var/cache/queuey
 Restart=always
 RestartSec=2
 User=queuey
 StateDirectory=queuey
+CacheDirectory=queuey
 
 [Install]
 WantedBy=multi-user.target
@@ -73,6 +76,23 @@ QUEUEY_SIGNING_SECRET=...
 
 `sudo systemctl enable --now queuey-edge` — done. `StateDirectory` gives
 the spool a durable home at `/var/lib/queuey` with the right ownership.
+
+`CacheDirectory` and `DOTNET_BUNDLE_EXTRACT_BASE_DIR` give the binary
+somewhere to unpack SQLite's native library. The binary carries the library
+inside itself and writes it out at every start, before any command runs, to
+`/var/cache/queuey/queuey/<build id>/`. Without the variable it unpacks under
+the user's home (`~/.net`), and a system user's home usually does not exist:
+the binary then exits before it runs anything, with `Failure processing
+application bundle` and exit code 159. Wherever the variable points, the
+directory must be writable by the service user and nobody else, and on a
+filesystem that allows running code — not a `noexec` `/tmp`. Hardening the
+unit does not change this: `ProtectSystem=strict` leaves `CacheDirectory`
+writable, and unpacking needs no home, so `ProtectHome=yes` is fine. Each
+version unpacks into a folder of its own; `sudo systemctl clean --what=cache
+queuey-edge` removes the old ones while the service is stopped. Any other
+account that runs the binary on the device, such as the cron job in step 4,
+needs the same: a home it can write to, or `DOTNET_BUNDLE_EXTRACT_BASE_DIR`
+set for it.
 
 **The clock matters.** Edge signs each transfer when it sends it, with this
 machine's clock, and Queuey refuses a signature more than 5 minutes off its
