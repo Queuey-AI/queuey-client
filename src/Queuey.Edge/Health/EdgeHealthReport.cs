@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json.Serialization;
 
 namespace Queuey.Edge;
@@ -25,7 +27,9 @@ public sealed record EdgeHealthReport(
     [property: JsonPropertyName("storageDurabilityWarning")] bool StorageDurabilityWarning,
     [property: JsonPropertyName("lastSuccessfulCloudContactUtc")] DateTimeOffset? LastSuccessfulCloudContactUtc,
     [property: JsonPropertyName("nextTransferAttemptUtc")] DateTimeOffset? NextTransferAttemptUtc,
-    [property: JsonPropertyName("lastFailure")] EdgeHealthReportFailure? LastFailure)
+    [property: JsonPropertyName("lastFailure")] EdgeHealthReportFailure? LastFailure,
+    [property: JsonPropertyName("storageLimitBytes")] long? StorageLimitBytes = null,
+    [property: JsonPropertyName("intakes")] IReadOnlyList<EdgeHealthReportIntake>? Intakes = null)
 {
     public static EdgeHealthReport From(
         EdgeHealth health, string nodeName, string edgeVersion, string platform,
@@ -46,6 +50,10 @@ public sealed record EdgeHealthReport(
             NextTransferAttemptUtc: health.NextTransferAttemptUtc,
             LastFailure: health.LastTransferFailure is { } f
                 ? new EdgeHealthReportFailure(f.Class.ToString(), f.Reason.ToString(), f.StatusCode, f.AtUtc, f.Message)
+                : null,
+            StorageLimitBytes: health.StorageLimitBytes,
+            Intakes: health.Intakes is { Count: > 0 } intakes
+                ? intakes.Select(EdgeHealthReportIntake.From).ToArray()
                 : null);
 }
 
@@ -55,3 +63,28 @@ public sealed record EdgeHealthReportFailure(
     [property: JsonPropertyName("statusCode")] int? StatusCode,
     [property: JsonPropertyName("atUtc")] DateTimeOffset AtUtc,
     [property: JsonPropertyName("message")] string? Message);
+
+/// <summary>
+/// One intake in a health report: whether its source is connected, whether it
+/// stepped back because the spool was full, and what happened to the messages.
+/// </summary>
+public sealed record EdgeHealthReportIntake(
+    [property: JsonPropertyName("name")] string Name,
+    [property: JsonPropertyName("connected")] bool Connected,
+    [property: JsonPropertyName("paused")] bool Paused,
+    [property: JsonPropertyName("lastMessageAtUtc")] DateTimeOffset? LastMessageAtUtc,
+    [property: JsonPropertyName("lastConnectedAtUtc")] DateTimeOffset? LastConnectedAtUtc,
+    [property: JsonPropertyName("lastError")] string? LastError,
+    [property: JsonPropertyName("received")] long Received,
+    [property: JsonPropertyName("accepted")] long Accepted,
+    [property: JsonPropertyName("deferred")] long Deferred,
+    [property: JsonPropertyName("rejected")] long Rejected,
+    [property: JsonPropertyName("unrouted")] long Unrouted,
+    [property: JsonPropertyName("retainedSkipped")] long RetainedSkipped,
+    [property: JsonPropertyName("lost")] long Lost)
+{
+    internal static EdgeHealthReportIntake From(EdgeIntakeHealth intake)
+        => new(intake.Name, intake.Connected, intake.Paused, intake.LastMessageAtUtc, intake.LastConnectedAtUtc,
+            intake.LastError, intake.Counters.Received, intake.Counters.Accepted, intake.Counters.Deferred,
+            intake.Counters.Rejected, intake.Counters.Unrouted, intake.Counters.RetainedSkipped, intake.Counters.Lost);
+}

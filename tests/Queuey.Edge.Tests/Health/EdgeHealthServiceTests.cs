@@ -147,8 +147,85 @@ public class EdgeHealthServiceTests
             "queuey.edge.cloud.last_contact_seconds",
             "queuey.edge.state",
             "queuey.edge.transfer.accepted",
-            "queuey.edge.transfer.failed"
+            "queuey.edge.transfer.failed",
+            "queuey.edge.intake.connected",
+            "queuey.edge.intake.paused",
+            "queuey.edge.intake.last_message_age_seconds",
+            "queuey.edge.intake.messages"
         }, seen);
+    }
+
+    [Fact]
+    public void An_intake_shows_in_the_snapshot_and_on_the_meter_by_name()
+    {
+        var intake = new FixedIntake(new EdgeIntakeHealth("mqtt:localhost:1883", Connected: false, Paused: true,
+            LastMessageAtUtc: null, LastConnectedAtUtc: null, LastError: "spool full",
+            new EdgeIntakeCounters(Received: 5, Accepted: 3, Deferred: 2, Rejected: 0, Unrouted: 0, RetainedSkipped: 0, Lost: 0)));
+        using var fx = new HealthFixture(intake: intake);
+
+        var snapshot = Assert.Single(fx.Health.Snapshot().Intakes!);
+        Assert.Equal("mqtt:localhost:1883", snapshot.Name);
+        Assert.True(snapshot.Paused);
+
+        var measured = new List<(string Instrument, double Value, Dictionary<string, object?> Tags)>();
+        using var listener = new MeterListener
+        {
+            InstrumentPublished = (instrument, l) =>
+            {
+                if (instrument.Meter.Name == EdgeHealthService.MeterName && instrument.Name.StartsWith("queuey.edge.intake."))
+                    l.EnableMeasurementEvents(instrument);
+            }
+        };
+        listener.SetMeasurementEventCallback<long>((i, v, tags, _) => measured.Add((i.Name, v, Tags(tags))));
+        listener.SetMeasurementEventCallback<double>((i, v, tags, _) => measured.Add((i.Name, v, Tags(tags))));
+        listener.Start();
+        listener.RecordObservableInstruments();
+
+        Assert.Contains(measured, m => m.Instrument == "queuey.edge.intake.connected" && m.Value == 0 && (string?)m.Tags["intake"] == "mqtt:localhost:1883");
+        Assert.Contains(measured, m => m.Instrument == "queuey.edge.intake.paused" && m.Value == 1);
+        Assert.Contains(measured, m => m.Instrument == "queuey.edge.intake.last_message_age_seconds" && m.Value == -1);
+        Assert.Contains(measured, m => m.Instrument == "queuey.edge.intake.messages" && m.Value == 2 && (string?)m.Tags["outcome"] == "deferred");
+        Assert.Contains(measured, m => m.Instrument == "queuey.edge.intake.messages" && m.Value == 3 && (string?)m.Tags["outcome"] == "accepted");
+
+        static Dictionary<string, object?> Tags(ReadOnlySpan<KeyValuePair<string, object?>> tags)
+        {
+            var d = new Dictionary<string, object?>();
+            foreach (var t in tags) d[t.Key] = t.Value;
+            return d;
+        }
+    }
+
+    [Fact]
+    public void The_storage_limit_is_the_ceiling_the_spool_accepts_up_to()
+    {
+        using var fx = new HealthFixture(o =>
+        {
+            o.MaxSpoolBytes = 96 * 1024;
+            o.HeadroomBytes = 32 * 1024;
+        });
+
+        Assert.Equal(64 * 1024, fx.Health.Snapshot().StorageLimitBytes);
+    }
+
+    [Theory]
+    [InlineData(EdgeState.Healthy, 60, 40, true)]
+    [InlineData(EdgeState.Backlogged, 60, 41, false)]
+    [InlineData(EdgeState.StorageFull, 100, 0, true)]
+    [InlineData(EdgeState.StorageFaulted, 0, 1, false)]
+    public void Room_for_a_payload_follows_the_spools_accept_rule(EdgeState state, long usage, long payload, bool room)
+    {
+        var health = new EdgeHealth(state, 0, null, usage, null, null, 0, false, StorageLimitBytes: 100);
+
+        Assert.Equal(room, health.HasRoomFor(payload));
+    }
+
+    [Fact]
+    public void Without_a_known_limit_room_is_decided_by_state_alone()
+    {
+        var health = new EdgeHealth(EdgeState.Healthy, 0, null, long.MaxValue, null, null, 0, false);
+
+        Assert.True(health.HasRoomFor(1));
+        Assert.False((health with { State = EdgeState.StorageFaulted }).HasRoomFor(1));
     }
 
     [Fact]
@@ -177,15 +254,17 @@ public class EdgeHealthServiceTests
         public EdgeRuntimeState State { get; } = new();
         public EdgeHealthService Health { get; }
 
-        public HealthFixture(Action<EdgeStorageOptions>? configure = null)
+        public HealthFixture(Action<EdgeStorageOptions>? configure = null, IEdgeIntake? intake = null)
         {
             Spool = new SpoolFixture(configure);
             var options = new QueueyEdgeOptions { ApiKey = "qak_id.secret", TenantPublicId = "ten_test" };
             options.Storage.Path = Spool.Options.Path;
             options.Storage.MaxSpoolBytes = Spool.Options.MaxSpoolBytes;
             options.Storage.HeadroomBytes = Spool.Options.HeadroomBytes;
+            var intakes = new EdgeIntakeRegistry();
+            if (intake is not null) intakes.Register(intake);
             Health = new EdgeHealthService(
-                Spool.Spool, State, options, Spool.Clock, NullLogger<EdgeHealthService>.Instance);
+                Spool.Spool, State, options, Spool.Clock, NullLogger<EdgeHealthService>.Instance, intakes);
         }
 
         /// <summary>Stats carry a 1 s cache keyed on the monotonic clock — advance it past the TTL.</summary>
@@ -196,5 +275,10 @@ public class EdgeHealthServiceTests
             Health.Dispose();
             Spool.Dispose();
         }
+    }
+
+    private sealed class FixedIntake(EdgeIntakeHealth health) : IEdgeIntake
+    {
+        public EdgeIntakeHealth Snapshot() => health;
     }
 }

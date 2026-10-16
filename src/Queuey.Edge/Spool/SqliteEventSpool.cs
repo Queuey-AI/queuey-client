@@ -777,7 +777,7 @@ public sealed class SqliteEventSpool : IEventSpool
         // Headroom stays reserved for BOOKKEEPING (settling transfers): a
         // spool that cannot record success re-sends forever. Accepting new
         // events stops before that margin is touched.
-        if (currentBytes + incomingPayloadBytes > _options.MaxSpoolBytes - _options.HeadroomBytes)
+        if (currentBytes + incomingPayloadBytes > _options.AcceptCeilingBytes)
         {
             throw new QueueySpoolFullException(
                 $"The Edge spool at '{_options.Path}' has reached its configured limit " +

@@ -31,6 +31,7 @@ internal sealed class EdgeHealthService : IQueueyEdgeHealth, IHostedService, IDi
     private readonly QueueyEdgeOptions _options;
     private readonly IEdgeClock _clock;
     private readonly ILogger<EdgeHealthService> _logger;
+    private readonly EdgeIntakeRegistry _intakes;
     private readonly Meter _meter = new(MeterName);
     private readonly bool _ephemeralPath;
 
@@ -42,13 +43,15 @@ internal sealed class EdgeHealthService : IQueueyEdgeHealth, IHostedService, IDi
         EdgeRuntimeState state,
         QueueyEdgeOptions options,
         IEdgeClock clock,
-        ILogger<EdgeHealthService> logger)
+        ILogger<EdgeHealthService> logger,
+        EdgeIntakeRegistry? intakes = null)
     {
         _spool = spool;
         _state = state;
         _options = options;
         _clock = clock;
         _logger = logger;
+        _intakes = intakes ?? new EdgeIntakeRegistry();
         _ephemeralPath = LooksEphemeral(options.Storage.Path);
 
         _meter.CreateObservableGauge("queuey.edge.spool.pending",
@@ -75,6 +78,21 @@ internal sealed class EdgeHealthService : IQueueyEdgeHealth, IHostedService, IDi
         _meter.CreateObservableCounter("queuey.edge.transfer.failed",
             () => _state.FailureMeasurements(),
             description: "Failed transfer attempts by class (what Edge did) and reason (what happened).");
+
+        // Intakes, one series per intake (tag "intake"). The spool cannot see
+        // a source that stopped delivering, so these are the signals for it.
+        _meter.CreateObservableGauge("queuey.edge.intake.connected",
+            () => IntakeMeasurements(i => i.Connected ? 1L : 0L),
+            description: "1 while the intake holds a live connection to its source (an MQTT broker, for one).");
+        _meter.CreateObservableGauge("queuey.edge.intake.paused",
+            () => IntakeMeasurements(i => i.Paused ? 1L : 0L),
+            description: "1 while the intake has stepped back from its source because the spool cannot take its messages.");
+        _meter.CreateObservableGauge("queuey.edge.intake.last_message_age_seconds",
+            () => IntakeMeasurements(i => i.LastMessageAtUtc is { } at ? (_clock.UtcNow - at).TotalSeconds : -1d), unit: "s",
+            description: "Seconds since the source last handed the intake a message; -1 before the first.");
+        _meter.CreateObservableCounter("queuey.edge.intake.messages",
+            () => IntakeMessageMeasurements(),
+            description: "Messages each intake was handed, by outcome: accepted, deferred, rejected, unrouted, retained_skipped, lost.");
     }
 
     public EdgeHealth Snapshot()
@@ -86,7 +104,7 @@ internal sealed class EdgeHealthService : IQueueyEdgeHealth, IHostedService, IDi
             ? EdgeState.StorageFaulted
             : stats is null
                 ? EdgeState.StorageFaulted
-                : stats.StorageUsageBytes >= _options.Storage.MaxSpoolBytes - _options.Storage.HeadroomBytes
+                : stats.StorageUsageBytes >= _options.Storage.AcceptCeilingBytes
                     ? EdgeState.StorageFull
                     : _state.Degraded && _state.LastTransferFailure?.Class == TransferClass.RequiresAction
                         ? EdgeState.RequiresAction
@@ -105,7 +123,9 @@ internal sealed class EdgeHealthService : IQueueyEdgeHealth, IHostedService, IDi
             StorageDurabilityWarning: _ephemeralPath,
             NextTransferAttemptUtc: stats?.NextAttemptUtc,
             HealthReportRejection: _state.HealthReportRejection,
-            LastAcceptedTransfer: _state.LastAcceptedTransfer);
+            LastAcceptedTransfer: _state.LastAcceptedTransfer,
+            StorageLimitBytes: _options.Storage.AcceptCeilingBytes,
+            Intakes: _intakes.Snapshot());
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -153,6 +173,31 @@ internal sealed class EdgeHealthService : IQueueyEdgeHealth, IHostedService, IDi
         }
         _cachedAtMono = nowMono;
         return _cachedStats;
+    }
+
+    private IEnumerable<Measurement<T>> IntakeMeasurements<T>(Func<EdgeIntakeHealth, T> value) where T : struct
+    {
+        foreach (var intake in _intakes.Snapshot())
+            yield return new Measurement<T>(value(intake), new KeyValuePair<string, object?>("intake", intake.Name));
+    }
+
+    private IEnumerable<Measurement<long>> IntakeMessageMeasurements()
+    {
+        foreach (var intake in _intakes.Snapshot())
+        {
+            var c = intake.Counters;
+            yield return Outcome(intake.Name, "accepted", c.Accepted);
+            yield return Outcome(intake.Name, "deferred", c.Deferred);
+            yield return Outcome(intake.Name, "rejected", c.Rejected);
+            yield return Outcome(intake.Name, "unrouted", c.Unrouted);
+            yield return Outcome(intake.Name, "retained_skipped", c.RetainedSkipped);
+            yield return Outcome(intake.Name, "lost", c.Lost);
+        }
+
+        static Measurement<long> Outcome(string intake, string outcome, long count)
+            => new(count,
+                new KeyValuePair<string, object?>("intake", intake),
+                new KeyValuePair<string, object?>("outcome", outcome));
     }
 
     private static bool LooksEphemeral(string path)

@@ -73,6 +73,47 @@ public class EdgeHealthReporterTests
     }
 
     [Fact]
+    public void Report_carries_the_storage_limit_and_each_intake()
+    {
+        var at = new DateTimeOffset(2026, 10, 16, 12, 0, 0, TimeSpan.Zero);
+        var health = Healthy() with
+        {
+            StorageLimitBytes = 532_676_608,
+            Intakes = new[]
+            {
+                new EdgeIntakeHealth("mqtt:localhost:1883", Connected: false, Paused: true,
+                    LastMessageAtUtc: at, LastConnectedAtUtc: at.AddMinutes(-5), LastError: "test: spool full",
+                    new EdgeIntakeCounters(Received: 10, Accepted: 7, Deferred: 2, Rejected: 0, Unrouted: 0, RetainedSkipped: 1, Lost: 0))
+            }
+        };
+
+        var json = JsonSerializer.Serialize(EdgeHealthReport.From(health, "pole-gw-3", "1.2.3", "linux-arm64", at, TimeSpan.FromMinutes(5)));
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        Assert.Equal(532_676_608, root.GetProperty("storageLimitBytes").GetInt64());
+        var intake = Assert.Single(root.GetProperty("intakes").EnumerateArray());
+        Assert.Equal("mqtt:localhost:1883", intake.GetProperty("name").GetString());
+        Assert.False(intake.GetProperty("connected").GetBoolean());
+        Assert.True(intake.GetProperty("paused").GetBoolean());
+        Assert.Equal("test: spool full", intake.GetProperty("lastError").GetString());
+        Assert.Equal(10, intake.GetProperty("received").GetInt64());
+        Assert.Equal(7, intake.GetProperty("accepted").GetInt64());
+        Assert.Equal(2, intake.GetProperty("deferred").GetInt64());
+        Assert.Equal(1, intake.GetProperty("retainedSkipped").GetInt64());
+        Assert.Equal(0, intake.GetProperty("lost").GetInt64());
+    }
+
+    [Fact]
+    public void A_node_without_intakes_reports_none()
+    {
+        var json = JsonSerializer.Serialize(EdgeHealthReport.From(
+            Healthy(), "pole-gw-3", "1.2.3", "linux-arm64", DateTimeOffset.UtcNow, TimeSpan.FromMinutes(5)));
+
+        Assert.Equal(JsonValueKind.Null, JsonDocument.Parse(json).RootElement.GetProperty("intakes").ValueKind);
+    }
+
+    [Fact]
     public async Task A_rejected_or_unreachable_cloud_never_throws()
     {
         using var fx = new SpoolFixture();
