@@ -32,7 +32,8 @@ runtime needed on the device:
 # on your build machine (linux-arm64 for Pi-class, linux-x64 for industrial PCs)
 dotnet publish src/Queuey.Client.Cli -c Release -r linux-arm64 \
   --self-contained -p:PublishSingleFile=true
-scp bin/Release/net8.0/linux-arm64/publish/queuey device:/opt/queuey/queuey
+scp src/Queuey.Client.Cli/bin/Release/net8.0/linux-arm64/publish/Queuey.Client.Cli \
+  device:/opt/queuey/queuey
 ```
 
 (On devices that have the SDK, `dotnet tool install -g Queuey.Cli --prerelease`
