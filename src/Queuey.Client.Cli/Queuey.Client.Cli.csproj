@@ -12,6 +12,13 @@
          Every parse and format in the tool already names InvariantCulture,
          so invariant mode changes no output — it only removes the dependency. -->
     <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- A single-file publish otherwise leaves SQLite's native library
+         (libe_sqlite3.so / .dylib, e_sqlite3.dll) beside the binary, and a
+         binary copied on alone cannot open an Edge spool. Bundled, the host
+         extracts it on first start under DOTNET_BUNDLE_EXTRACT_BASE_DIR, or
+         ~/.net (%TEMP%\.net on Windows) when that is not set. Only a
+         single-file publish reads this; the tool package is unchanged. -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
 
     <IsPackable>true</IsPackable>
     <PackAsTool>true</PackAsTool>

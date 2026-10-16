@@ -14,7 +14,7 @@ Versions are those resolved for release **v0.1.0-preview.9**.
 |---|---|---|
 | `Queuey.Client`, `Queuey.Client.Waas`, `Queuey.Edge`, `Queuey.Edge.Mqtt` | NuGet.org | None. Their third-party components are NuGet dependencies, which NuGet restores from nuget.org under each component's own licence. |
 | `Queuey.Cli` (a .NET tool package) | NuGet.org | Every managed assembly the tool runs on, and the native SQLite library for each platform SQLitePCLRaw builds it for. It does not contain the .NET runtime; the tool runs on the runtime installed on the machine. |
-| Self-contained `queuey` binaries (`linux-x64`, `linux-arm64`, `osx-arm64`, `osx-x64`, `win-x64`) | GitHub Releases | The same managed assemblies as `Queuey.Cli`, plus the .NET runtime. |
+| Self-contained `queuey` binaries (`linux-x64`, `linux-arm64`, `osx-arm64`, `osx-x64`, `win-x64`) | GitHub Releases | The same managed assemblies as `Queuey.Cli`, the native SQLite library for the binary's own platform, and the .NET runtime. |
 
 The tables below use two columns for this:
 
@@ -36,7 +36,7 @@ Public domain; see <https://sqlite.org/copyright.html>. Source:
 
 | Component | Version | Licence | Dependency of | Inside |
 |---|---|---|---|---|
-| SQLite, compiled as the `e_sqlite3` native library and shipped in `SQLitePCLRaw.lib.e_sqlite3` | 3.53.3 | Public domain | `Edge` | `Queuey.Cli` |
+| SQLite, compiled as the `e_sqlite3` native library and shipped in `SQLitePCLRaw.lib.e_sqlite3` | 3.53.3 | Public domain | `Edge` | `Queuey.Cli`, binaries |
 
 ### SQLitePCLRaw
 
@@ -52,7 +52,7 @@ SQLitePCLRaw's NOTICE file are reproduced under
 | SQLitePCLRaw.bundle_e_sqlite3 | 2.1.13 | Apache-2.0 | `Edge` | `Queuey.Cli`, binaries |
 | SQLitePCLRaw.core | 2.1.13 | Apache-2.0 | `Edge` | `Queuey.Cli`, binaries |
 | SQLitePCLRaw.provider.e_sqlite3 | 2.1.13 | Apache-2.0 | `Edge` | `Queuey.Cli`, binaries |
-| SQLitePCLRaw.lib.e_sqlite3 (packages the SQLite native library above) | 2.1.13 | Apache-2.0 | `Edge` | `Queuey.Cli` |
+| SQLitePCLRaw.lib.e_sqlite3 (packages the SQLite native library above) | 2.1.13 | Apache-2.0 | `Edge` | `Queuey.Cli`, binaries |
 
 `Queuey.Edge` pins `SQLitePCLRaw.bundle_e_sqlite3` 2.1.13 explicitly, above the
 version `Microsoft.Data.Sqlite` 8.0.10 would select on its own; see
