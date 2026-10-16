@@ -85,7 +85,8 @@ public sealed class MosquittoTests : IAsyncDisposable
         await Task.Delay(300); // the subscribe follows the connect
 
         await PublishRetainedAsync($"{_prefix}/pole-1/state", "off");
-        await WaitUntil(() => publisher.Accepted.Count == 1, TimeSpan.FromSeconds(10));
+        await WaitUntil(() => publisher.Accepted.Count >= 1, TimeSpan.FromSeconds(10));
+        await Task.Delay(300);
         await source.StopAsync(CancellationToken.None);
 
         Assert.Equal(new[] { "off" }, publisher.Accepted);
@@ -103,7 +104,8 @@ public sealed class MosquittoTests : IAsyncDisposable
         await WaitUntil(() => source.Snapshot().Paused, TimeSpan.FromSeconds(10));
         publisher.Full = false;
         health.UsageBytes = 0;
-        await WaitUntil(() => publisher.Accepted.Count == 1, TimeSpan.FromSeconds(10));
+        await WaitUntil(() => publisher.Accepted.Count >= 1, TimeSpan.FromSeconds(10));
+        await Task.Delay(500); // Mosquitto sends the DUP re-send, then the re-subscribe's fresh copy: one event
         await source.StopAsync(CancellationToken.None);
 
         Assert.Equal(new[] { "on" }, publisher.Accepted);

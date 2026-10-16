@@ -317,7 +317,10 @@ public sealed class MqttSource : BackgroundService, IEdgeIntake
         // state Edge has seen, except when it is a re-send of a copy Edge
         // meant to take and left unacknowledged: marked DUP by brokers that
         // follow the spec, and remembered here for the ones that do not.
-        _ => !_sessionPresent || message.Dup || TakeDeferredRetained(topic, payload)
+        // The memory is consulted first and always, so a DUP re-send also
+        // clears it; otherwise the fresh copy the re-subscribe brings next
+        // would match it and be taken a second time.
+        _ => TakeDeferredRetained(topic, payload) | message.Dup | !_sessionPresent
     };
 
     private void RememberDeferredRetained(string topic, byte[] payload)

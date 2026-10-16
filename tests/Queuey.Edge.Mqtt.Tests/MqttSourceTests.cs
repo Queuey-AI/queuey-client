@@ -249,10 +249,11 @@ public class MqttSourceTests
 
         publisher.Full = false;
         health.UsageBytes = 0;
-        await WaitUntil(() => publisher.Accepted.Count == 1, TimeSpan.FromSeconds(10));
+        await WaitUntil(() => publisher.Accepted.Count >= 1, TimeSpan.FromSeconds(10));
+        await Task.Delay(500); // the re-subscribe's fresh copy follows the re-send: it must not count twice
         await source.StopAsync(CancellationToken.None);
 
-        Assert.Equal("on", Assert.Single(publisher.Accepted));
+        Assert.Equal(new[] { "on" }, publisher.Accepted);
     }
 
     [Fact]
