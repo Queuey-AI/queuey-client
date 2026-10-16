@@ -695,7 +695,8 @@ UNLOCK
 EDGE
   queuey edge run     --spool <path> --tenant <ten_...>
                 [--listen <port>] [--report-health] [--node-name <name>] [--ingress-base <uri>] [--source <s>]
-                [--mqtt <host[:port]> --mqtt-routes ""filter=queue[@segment];…"" [--mqtt-user <u>] [--mqtt-tls]]
+                [--mqtt <host[:port]> --mqtt-routes ""filter=queue[@segment];…"" [--mqtt-user <u>] [--mqtt-tls]
+                 [--mqtt-retained first|skip|all]]
                  Signs every transfer with the queue's signing key, read from the environment
                  as QUEUEY_SIGNING_KEY_ID and QUEUEY_SIGNING_SECRET (queuey keys mint writes
                  them into the service's environment file). Without the pair it publishes with
@@ -717,8 +718,14 @@ EDGE
                  --node-name (QUEUEY_NODE_NAME) is the label shown there, default: machine name.
                  --mqtt subscribes to a (usually local) broker and spools every message durably
                  BEFORE acking it (QoS 1); a route's @segment makes that topic level the lane
-                 (FIFO per machine). Env: QUEUEY_MQTT, QUEUEY_MQTT_ROUTES, QUEUEY_MQTT_USER; the
-                 broker's password only as QUEUEY_MQTT_PASSWORD, never in argv.
+                 (FIFO per machine). When the spool cannot take a message, the intake leaves it
+                 unacknowledged, disconnects, and reconnects once there is room, so the broker
+                 re-sends it first; size the broker's session queue for that wait.
+                 --mqtt-retained: the retained copies a broker re-sends on every subscribe.
+                 first (default) takes them only on a new broker session, skip never, all every
+                 time (each reconnect repeats them as new events). Env: QUEUEY_MQTT,
+                 QUEUEY_MQTT_ROUTES, QUEUEY_MQTT_USER, QUEUEY_MQTT_RETAINED; the broker's
+                 password only as QUEUEY_MQTT_PASSWORD, never in argv.
   queuey edge publish <queue> --spool <path> --tenant <ten_...>
                 (--data '<json>' | --file <path>) [--content-type <ct>]
                 [--idempotency-key <k>] [--event-type <t>] [--group-key <k>]

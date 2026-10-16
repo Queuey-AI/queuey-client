@@ -36,7 +36,7 @@ internal static class EdgeCommand
         ["publish"] = new("edge publish", flags: new[] { "json" },
             values: new[] { "spool", "data", "file", "content-type", "idempotency-key", "event-type", "group-key", "occurred-at" }),
         ["run"] = new("edge run", flags: new[] { "report-health", "mqtt-tls" },
-            values: new[] { "spool", "listen", "node-name", "mqtt", "mqtt-routes", "mqtt-user", "mqtt-password" }),
+            values: new[] { "spool", "listen", "node-name", "mqtt", "mqtt-routes", "mqtt-user", "mqtt-password", "mqtt-retained" }),
         ["kick"] = new("edge kick", values: new[] { "spool" }),
         ["drain"] = new("edge drain", values: new[] { "spool", "timeout" }),
         ["retry"] = new("edge retry", flags: new[] { "all" }, values: new[] { "spool", "id" }),
@@ -299,8 +299,8 @@ internal static class EdgeCommand
         // MQTT intake: --mqtt host[:port] --mqtt-routes "filter=queue[@segment];…"
         // (or QUEUEY_MQTT / QUEUEY_MQTT_ROUTES). The broker is normally on this
         // same gateway; every message is fsync'd into the spool before it is acked.
-        var mqtt = map.Get("mqtt") ?? Environment.GetEnvironmentVariable("QUEUEY_MQTT");
-        var mqttRoutes = map.Get("mqtt-routes") ?? Environment.GetEnvironmentVariable("QUEUEY_MQTT_ROUTES");
+        var mqtt = map.Get("mqtt") ?? CliHost.Env("QUEUEY_MQTT");
+        var mqttRoutes = map.Get("mqtt-routes") ?? CliHost.Env("QUEUEY_MQTT_ROUTES");
         if (!string.IsNullOrWhiteSpace(mqtt) || !string.IsNullOrWhiteSpace(mqttRoutes))
         {
             if (string.IsNullOrWhiteSpace(mqtt) || string.IsNullOrWhiteSpace(mqttRoutes))
@@ -309,11 +309,15 @@ internal static class EdgeCommand
                 return ExitCodes.Configuration;
             }
             var hostPort = mqtt.Split(':', 2);
-            var mqttUser = map.Get("mqtt-user") ?? Environment.GetEnvironmentVariable("QUEUEY_MQTT_USER");
-            var mqttPass = map.Get("mqtt-password") ?? Environment.GetEnvironmentVariable("QUEUEY_MQTT_PASSWORD");
+            var mqttUser = map.Get("mqtt-user") ?? CliHost.Env("QUEUEY_MQTT_USER");
+            var mqttPass = map.Get("mqtt-password") ?? CliHost.Env("QUEUEY_MQTT_PASSWORD");
+            var mqttRetained = map.Get("mqtt-retained") ?? CliHost.Env("QUEUEY_MQTT_RETAINED");
             try
             {
                 var routes = Queuey.Edge.Mqtt.MqttRoute.ParseMany(mqttRoutes);
+                var retained = string.IsNullOrWhiteSpace(mqttRetained)
+                    ? Queuey.Edge.Mqtt.MqttRetainedMessages.FirstSubscribe
+                    : Queuey.Edge.Mqtt.MqttSourceOptions.ParseRetained(mqttRetained);
                 builder.Services.AddQueueyEdgeMqttSource(m =>
                 {
                     m.Server = hostPort[0];
@@ -322,6 +326,7 @@ internal static class EdgeCommand
                     m.UseTls = map.Has("mqtt-tls");
                     m.Username = mqttUser;
                     m.Password = mqttPass;
+                    m.RetainedMessages = retained;
                     m.Routes.AddRange(routes);
                 });
             }
@@ -343,7 +348,8 @@ internal static class EdgeCommand
         }
         if (!string.IsNullOrWhiteSpace(mqtt))
         {
-            Console.WriteLine($"MQTT intake: {mqtt} → {mqttRoutes} (QoS 1; a message is acked only after it is durably in the spool).");
+            Console.WriteLine($"MQTT intake: {mqtt} → {mqttRoutes} (QoS 1; a message is acked only after it is durably in the spool; " +
+                              "a full spool makes the intake step back from the broker until there is room).");
         }
         if (listenPort is { } lp)
         {
