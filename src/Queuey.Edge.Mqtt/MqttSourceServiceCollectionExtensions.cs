@@ -1,6 +1,7 @@
 using System;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 
 namespace Queuey.Edge.Mqtt;
 
@@ -27,7 +28,15 @@ public static class MqttSourceServiceCollectionExtensions
             o.Validate(); // die at composition, where the operator is looking
             return o;
         });
-        services.AddHostedService<MqttSource>();
+        // Health lets a source that stepped back resume the moment the spool
+        // has room; the registry puts its side in the node's health. Both come
+        // from AddQueueyEdge, and the source still runs without them.
+        services.AddHostedService(sp => new MqttSource(
+            sp.GetRequiredService<MqttSourceOptions>(),
+            sp.GetRequiredService<IQueueyPublisher>(),
+            sp.GetRequiredService<ILogger<MqttSource>>(),
+            sp.GetService<IQueueyEdgeHealth>(),
+            sp.GetService<EdgeIntakeRegistry>()));
         return services;
     }
 }

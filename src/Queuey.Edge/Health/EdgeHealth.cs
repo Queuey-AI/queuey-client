@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace Queuey.Edge;
 
@@ -31,6 +32,11 @@ public enum EdgeState
 /// Queuey EXPOSES health; the customer operates monitoring (the boundary
 /// from plan rev 4 D6). The one signal worth alerting on, if only one is
 /// wired: <see cref="OldestPendingAge"/>.
+/// <para><see cref="StorageLimitBytes"/> is the live bytes new events may
+/// fill (<c>MaxSpoolBytes</c> minus the bookkeeping headroom), which
+/// <see cref="StorageUsageBytes"/> is measured against. <see cref="Intakes"/>
+/// are the sources feeding the spool from outside the application (an MQTT
+/// broker, for one), each with its own side of the story.</para>
 /// </summary>
 public sealed record EdgeHealth(
     EdgeState State,
@@ -43,7 +49,20 @@ public sealed record EdgeHealth(
     bool StorageDurabilityWarning,
     DateTimeOffset? NextTransferAttemptUtc = null,
     HealthReportRejection? HealthReportRejection = null,
-    AcceptedTransfer? LastAcceptedTransfer = null);
+    AcceptedTransfer? LastAcceptedTransfer = null,
+    long? StorageLimitBytes = null,
+    IReadOnlyList<EdgeIntakeHealth>? Intakes = null)
+{
+    /// <summary>
+    /// Whether the spool would accept a payload of this size right now, by the
+    /// same rule the spool applies when it accepts. An intake that had to
+    /// refuse a message asks this before it takes messages again. A snapshot
+    /// without a known limit answers by state alone.
+    /// </summary>
+    public bool HasRoomFor(long payloadBytes)
+        => State != EdgeState.StorageFaulted
+           && (StorageLimitBytes is not { } limit || StorageUsageBytes + payloadBytes <= limit);
+}
 
 /// <summary>
 /// The last transfer Queuey Cloud accepted: the event id it gave the event, which <c>queuey events get &lt;id&gt; --queue

@@ -121,6 +121,13 @@ Edge resumes by itself when the cause clears.
 | `cloud.last_contact_seconds` | seconds since the last successful transfer |
 | `state` | 0 Healthy · 1 Backlogged · 2 RequiresAction · 3 StorageFull · 4 StorageFaulted |
 | `transfer.accepted{replayed}` / `transfer.failed{class,reason}` | throughput and diagnosis |
+| `intake.connected{intake}` | 1 while an intake (the MQTT source, for one) holds its broker connection |
+| `intake.paused{intake}` | 1 while an intake stands back from its broker because the spool is full |
+| `intake.last_message_age_seconds{intake}` | seconds since the broker last handed over a message; -1 before the first |
+| `intake.messages{intake,outcome}` | accepted · deferred · rejected · unrouted · retained_skipped · lost |
+
+With an MQTT intake, also alert on `intake.connected` = 0: a broker that went
+away leaves an empty spool, which looks exactly like a quiet, healthy node.
 
 ### Fleet view: let the node check in (opt-in)
 
@@ -159,10 +166,18 @@ queuey edge run --spool /var/lib/queuey/spool.db --tenant ten_… \
 The separate `Queuey.Edge.Mqtt` package (`services.AddQueueyEdgeMqttSource(…)` in code)
 subscribes at QoS 1 and hands every message to the spool; **the broker is acked only
 after the fsync'd commit**, so a message the broker gave us is never lost between
-broker and Edge, and a full spool pushes back on the broker instead of dropping.
+broker and Edge. When the spool is full, the source **steps back**: it leaves the
+message unacknowledged, disconnects, and reconnects once the spool has room, so the
+broker re-sends it first and nothing overtakes it. Meanwhile the broker holds the
+backlog in Edge's persistent session — within the broker's own queue limits, so size
+those for the outage you plan for (see the
+[operations notes](https://github.com/Queuey-AI/queuey-client/blob/main/docs/edge-operations.md#the-mqtt-broker-in-front-of-edge)).
 `@1` makes topic level 1 (the machine) the lane, so per-machine order survives all
-the way to Cloud. Intake only: no transformation, no fan-out, no delivery — that is
-Cloud. At-least-once from broker to spool (MQTT has no message identity to dedupe on).
+the way to Cloud. Retained copies a broker re-sends on every subscribe are taken once
+per broker session, not once per reconnect (`--mqtt-retained first|skip|all`).
+Intake only: no transformation, no fan-out, no delivery — that is Cloud.
+At-least-once from broker to spool (MQTT has no message identity to dedupe on);
+devices must publish at QoS 1 for the guarantee, since QoS 0 has no redelivery.
 
 ## No .NET app? Shell, Python, cron — the IoT path
 

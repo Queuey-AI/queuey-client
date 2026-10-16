@@ -178,6 +178,46 @@ background (`queuey edge status` reports live bytes, not file size).
   AV locks can stall accepts. The spool is not a backup target — Cloud is
   the system of record once events transfer.
 
+## The MQTT broker in front of Edge
+
+With an MQTT intake (`--mqtt`), the broker is part of the chain, and only the
+spool is Edge's. Edge acknowledges a message only after the spool has it on
+disk. When the spool is full, the intake steps back: it leaves the message
+unacknowledged, disconnects, and reconnects once there is room, so the broker
+re-sends it first. Until then the backlog sits on the broker, under the
+broker's rules. Three things follow:
+
+- **Size the spool for the outage; the broker queue is only the overflow.**
+  The broker holds messages only after the spool is full.
+- **Devices publish at QoS 1.** A QoS 0 message has no redelivery: if Edge
+  cannot take it at that moment, it is gone (counted as `lost`). Mosquitto
+  also does not queue QoS 0 for a client that is away (`queue_qos0_messages`
+  is off by default).
+- **The broker's own durability is not Edge's.** Mosquitto, for one, writes
+  its persistence file every `autosave_interval` seconds (default 1800). A
+  power cut loses what it queued since then.
+
+A Mosquitto configuration for a gateway where Edge is the only subscriber:
+
+```conf
+# /etc/mosquitto/conf.d/queuey-edge.conf
+listener 1883 127.0.0.1
+allow_anonymous true              # loopback only; use password_file once the broker leaves the machine
+
+persistence true
+persistence_location /var/lib/mosquitto/
+autosave_interval 60              # seconds; how much a power cut can cost the broker's queue
+
+persistent_client_expiration 30d  # keep Edge's session across long Edge downtime, not forever
+max_queued_messages 100000        # default 1000, then the broker drops; size for the overflow you accept
+max_queued_bytes 0                # no byte cap; set one if the gateway's disk is small
+```
+
+Watch `queuey.edge.intake.paused` (the intake stands back because the spool is
+full) and `queuey.edge.intake.connected` (0 when the broker is unreachable),
+next to `queuey.edge.spool.oldest_age_seconds`. A broker that went away leaves
+an empty spool, which reads exactly like a quiet, healthy node.
+
 ## Data at rest on the device
 
 The spool holds event payloads until Cloud has acknowledged them — on the

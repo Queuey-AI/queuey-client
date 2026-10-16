@@ -209,6 +209,13 @@ public sealed class EdgeStorageOptions
     public long HeadroomBytes { get; set; } = 4L * 1024 * 1024;
 
     /// <summary>
+    /// The live bytes new events may fill: the limit minus the bookkeeping
+    /// headroom. One expression for the spool that refuses, the health that
+    /// reports full, and an intake deciding whether a refused message fits now.
+    /// </summary>
+    internal long AcceptCeilingBytes => MaxSpoolBytes - HeadroomBytes;
+
+    /// <summary>
     /// Health-only age threshold: a pending event older than this raises
     /// <c>StorageDurabilityWarning</c>-adjacent health signals. IT NEVER
     /// DELETES — age alone never deletes an accepted event (rev 4 F4/D1).

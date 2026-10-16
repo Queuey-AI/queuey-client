@@ -63,6 +63,9 @@ public static class QueueyEdgeServiceCollectionExtensions
         // Health: the in-process snapshot and the OpenTelemetry meter
         // "Queuey.Edge". Hosted so the meter publishes eagerly and the
         // ephemeral-path warning lands at startup.
+        // Sources outside the application (Queuey.Edge.Mqtt, for one)
+        // register here, so their side shows up next to the spool's.
+        services.TryAddSingleton<EdgeIntakeRegistry>();
         services.TryAddSingleton<EdgeHealthService>();
         services.TryAddSingleton<IQueueyEdgeHealth>(sp => sp.GetRequiredService<EdgeHealthService>());
         services.AddHostedService(sp => sp.GetRequiredService<EdgeHealthService>());

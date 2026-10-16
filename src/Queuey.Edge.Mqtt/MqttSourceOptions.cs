@@ -31,7 +31,20 @@ public sealed class MqttSourceOptions
     /// <summary>Topic filter → queue routes. At least one is required.</summary>
     public List<MqttRoute> Routes { get; } = new();
 
-    /// <summary>Reconnect delay ladder start (doubles up to <see cref="ReconnectDelayCap"/>).</summary>
+    /// <summary>
+    /// What to do with the retained copies a broker sends when Edge subscribes.
+    /// A broker re-sends every retained message on every subscribe, and Edge
+    /// subscribes on every connect, so taking them all turns each reconnect
+    /// into one more event per retained topic. Defaults to
+    /// <see cref="MqttRetainedMessages.FirstSubscribe"/>.
+    /// </summary>
+    public MqttRetainedMessages RetainedMessages { get; set; } = MqttRetainedMessages.FirstSubscribe;
+
+    /// <summary>
+    /// Reconnect delay ladder start (doubles up to <see cref="ReconnectDelayCap"/>).
+    /// The same ladder spaces the resumes after the source stepped back because
+    /// the spool could not take a message.
+    /// </summary>
     public TimeSpan ReconnectDelay { get; set; } = TimeSpan.FromSeconds(1);
 
     public TimeSpan ReconnectDelayCap { get; set; } = TimeSpan.FromMinutes(1);
@@ -42,10 +55,43 @@ public sealed class MqttSourceOptions
             throw new QueueyConfigurationException("MqttSourceOptions.Server is required.");
         if (Port is < 1 or > 65535)
             throw new QueueyConfigurationException("MqttSourceOptions.Port must be 1–65535.");
+        if (!Enum.IsDefined(typeof(MqttRetainedMessages), RetainedMessages))
+            throw new QueueyConfigurationException($"MqttSourceOptions.RetainedMessages '{RetainedMessages}' is not a known value.");
         if (Routes.Count == 0)
             throw new QueueyConfigurationException("MqttSourceOptions.Routes needs at least one topic filter → queue route.");
         foreach (var r in Routes) r.Validate();
     }
+
+    /// <summary>Parses the CLI value for <see cref="RetainedMessages"/>: <c>first</c>, <c>skip</c> or <c>all</c>.</summary>
+    public static MqttRetainedMessages ParseRetained(string value) => (value ?? string.Empty).Trim().ToLowerInvariant() switch
+    {
+        "first" => MqttRetainedMessages.FirstSubscribe,
+        "skip" => MqttRetainedMessages.Skip,
+        "all" => MqttRetainedMessages.All,
+        _ => throw new QueueyConfigurationException($"MQTT retained mode '{value}' must be first, skip or all.")
+    };
+}
+
+/// <summary>
+/// The retained copies a broker sends because Edge subscribed. Live messages
+/// are never affected: MQTT 3.1.1 marks a message retained toward a
+/// subscriber only when it is sent because of the subscribe itself.
+/// </summary>
+public enum MqttRetainedMessages
+{
+    /// <summary>
+    /// Take retained copies only when the broker has no session for Edge's
+    /// client id: the first start, or after the broker lost the session. That
+    /// gives the current state of each retained topic once, and reconnects
+    /// never repeat it. A route added later starts from its next live message.
+    /// </summary>
+    FirstSubscribe = 0,
+
+    /// <summary>Never take retained copies; acknowledge and count them.</summary>
+    Skip = 1,
+
+    /// <summary>Take every retained copy, on every subscribe. Each reconnect repeats them as new events.</summary>
+    All = 2
 }
 
 /// <summary>
@@ -79,6 +125,8 @@ public sealed class MqttRoute
             throw new QueueyConfigurationException($"MqttRoute for '{TopicFilter}' needs a Queue.");
         if (GroupKeySegment is < 0)
             throw new QueueyConfigurationException($"MqttRoute for '{TopicFilter}': GroupKeySegment must be ≥ 0.");
+        if (string.IsNullOrWhiteSpace(DefaultContentType))
+            throw new QueueyConfigurationException($"MqttRoute for '{TopicFilter}' needs a DefaultContentType.");
     }
 
     /// <summary>
