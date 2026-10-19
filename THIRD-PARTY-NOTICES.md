@@ -6,7 +6,7 @@ licence and source. It also reproduces the licence texts and notices those
 licences require. Queuey's own code is licensed under the MIT License; see
 [LICENSE](LICENSE).
 
-Versions are those resolved for release **v0.1.0-preview.12**.
+Versions are those resolved for release **v0.1.0-preview.13**.
 
 ## What each artefact contains
 
@@ -150,14 +150,14 @@ except the four packages marked `corefx`, which were built from
 ### .NET runtime
 
 MIT License. Copyright (c) .NET Foundation and Contributors. Source:
-<https://github.com/dotnet/runtime>, tag `v8.0.32` for v0.1.0-preview.12.
+<https://github.com/dotnet/runtime>, tag `v8.0.32` for v0.1.0-preview.13.
 
 | Component | Version | Licence | Dependency of | Inside |
 |---|---|---|---|---|
 | .NET runtime (`Microsoft.NETCore.App`: the runtime, the base class libraries and the single-file host) | 8.0.32 | MIT | — | binaries |
 
 Each release's binaries carry the newest .NET 8 servicing release that the
-release build's .NET SDK publishes for `net8.0`. v0.1.0-preview.12 was built
+release build's .NET SDK publishes for `net8.0`. v0.1.0-preview.13 was built
 with SDK 9.0.319, which publishes 8.0.32.
 
 ### Not distributed
