@@ -120,7 +120,8 @@ public sealed class SqliteEventSpool : IEventSpool
                 {
                     // Same (queue, transfer id) already accepted — the caller
                     // supplied their own idempotency key twice. One spool row,
-                    // one identity: return the ORIGINAL accept.
+                    // one identity: return the ORIGINAL accept, marked as such
+                    // so an intake can count the repeat instead of a new event.
                     tx.Rollback();
                     return LookupExistingAccept(conn, envelope);
                 }
@@ -795,7 +796,7 @@ public sealed class SqliteEventSpool : IEventSpool
         cmd.Parameters.AddWithValue("@transferId", envelope.TransferId);
         using var reader = cmd.ExecuteReader();
         reader.Read();
-        return new SpoolAccept(reader.GetInt64(0), envelope.TransferId, Parse(reader.GetString(1)));
+        return new SpoolAccept(reader.GetInt64(0), envelope.TransferId, Parse(reader.GetString(1)), AlreadyAccepted: true);
     }
 
     private static void AddOutcomeParameters(SqliteCommand cmd, TransferOutcome outcome)

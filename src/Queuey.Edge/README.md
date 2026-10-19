@@ -124,7 +124,8 @@ Edge resumes by itself when the cause clears.
 | `intake.connected{intake}` | 1 while an intake (the MQTT source, for one) holds its broker connection |
 | `intake.paused{intake}` | 1 while an intake stands back from its broker because the spool is full |
 | `intake.last_message_age_seconds{intake}` | seconds since the broker last handed over a message; -1 before the first |
-| `intake.messages{intake,outcome}` | accepted · deferred · rejected · unrouted · retained_skipped · lost |
+| `intake.messages{intake,outcome}` | accepted · duplicate · deferred · rejected · unrouted · retained_skipped · lost |
+| `intake.without_id{intake}` | messages on a route that deduplicates on an event id, whose payload had none |
 
 With an MQTT intake, also alert on `intake.connected` = 0: a broker that went
 away leaves an empty spool, which looks exactly like a quiet, healthy node.
@@ -176,8 +177,15 @@ those for the outage you plan for (see the
 the way to Cloud. Retained copies a broker re-sends on every subscribe are taken once
 per broker session, not once per reconnect (`--mqtt-retained first|skip|all`).
 Intake only: no transformation, no fan-out, no delivery — that is Cloud.
-At-least-once from broker to spool (MQTT has no message identity to dedupe on);
-devices must publish at QoS 1 for the guarantee, since QoS 0 has no redelivery.
+At-least-once from broker to spool: MQTT has no message identity, so a device
+re-sending at QoS 1, or the broker re-sending after Edge crashed between its
+commit and the ack, reaches Edge twice. When the payload carries a stable event
+id, `--mqtt-id-field eventId` (`MqttRoute.IdempotencyKeyField` in code) makes
+that one event: the id and a hash of the payload become the idempotency key,
+and a copy Edge already holds is acked as a duplicate. The same id with new
+content stays a new event, and a message without an id is taken as before
+([details](https://github.com/Queuey-AI/queuey-client/blob/main/src/Queuey.Edge.Mqtt/README.md#deduplication-on-the-producers-event-id)).
+Devices must publish at QoS 1 for the guarantee, since QoS 0 has no redelivery.
 
 ## No .NET app? Shell, Python, cron — the IoT path
 
@@ -251,8 +259,10 @@ queuey edge reset   --spool <path> --accept-data-loss # start clean; the old fil
   persistent volume (a temp/overlay path is detected and warned about).
 - **Exclude `spool.db*` from antivirus and file-copy backups** — copying a
   WAL-mode SQLite database mid-write produces a corrupt copy.
-- Size `Storage.MaxSpoolBytes` (default 512 MB) from your rate: at
+- Size `Storage.MaxSpoolBytes` (default 512 MB; the daemon's `--spool-max-mb`) from your rate: at
   1 event/minute × 1 KB that is roughly **a year** of offline autonomy.
+  Up to 4 MB of it is kept for bookkeeping, and a quarter of a spool smaller
+  than 16 MB, so a 1 MB test spool takes 768 KB of events.
   A spool that hit the limit accepts again the moment its backlog has
   transferred — the limit counts live events, not the file's size.
 

@@ -101,7 +101,8 @@ internal sealed class QueueyEdgePublisher : IQueueyPublisher
             TransferId = accept.TransferId,
             Queue = envelope.Queue,
             AcceptedAtUtc = accept.AcceptedAtUtc,
-            OccurredAtUtc = envelope.OccurredAtUtc
+            OccurredAtUtc = envelope.OccurredAtUtc,
+            AlreadyAccepted = accept.AlreadyAccepted
         };
     }
 }

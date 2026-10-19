@@ -111,6 +111,35 @@ public sealed class MosquittoTests : IAsyncDisposable
         Assert.Equal(new[] { "on" }, publisher.Accepted);
     }
 
+    [MosquittoFact]
+    public async Task A_message_the_producer_publishes_twice_is_one_event()
+    {
+        // The device re-sends at QoS 1 because its PUBACK was lost: Mosquitto delivers both, and the event id makes them one.
+        await using var edge = RealEdge.Create();
+        var options = Options(_port, new MqttRoute
+        {
+            TopicFilter = $"{_prefix}/+/telemetry", Queue = "telemetry", GroupKeySegment = 2, IdempotencyKeyField = "eventId"
+        }, _host);
+        options.ClientId = $"queuey-edge-test-id-dedup-{_prefix[^8..]}";
+        var source = new MqttSource(options, edge.Publisher, NullLogger<MqttSource>.Instance);
+        await source.StartAsync(CancellationToken.None);
+        await WaitUntil(() => source.Snapshot().Connected, TimeSpan.FromSeconds(10));
+        await Task.Delay(300); // the subscribe follows the connect
+
+        await using (var producer = await Producer.ConnectAsync(_port, _host))
+        {
+            await producer.PublishAsync($"{_prefix}/node-07/telemetry", """{"eventId":"node-07-000123","temp":21.5}""");
+            await producer.PublishAsync($"{_prefix}/node-07/telemetry", """{"eventId":"node-07-000123","temp":21.5}""");
+        }
+        await WaitUntil(() => source.Snapshot().Counters.Received >= 2, TimeSpan.FromSeconds(10));
+        await source.StopAsync(CancellationToken.None);
+
+        var counters = source.Snapshot().Counters;
+        Assert.Equal(1, counters.Accepted);
+        Assert.Equal(1, counters.Duplicates);
+        Assert.Equal(1, await edge.PendingAsync());
+    }
+
     private MqttSource Source(SpoolDouble publisher, HealthDouble? health, string filter, string name,
         MqttRetainedMessages retained = MqttRetainedMessages.FirstSubscribe)
     {

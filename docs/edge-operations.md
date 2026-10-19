@@ -158,7 +158,8 @@ your event rate:
 | 86 400 (1/s) | 1 KB | ~85 MB | ~6 days |
 
 (Plus modest per-row overhead. Round down; leave the 4 MB headroom alone —
-it is what lets Edge keep *recording* successes at the limit.)
+it is what lets Edge keep *recording* successes at the limit. A spool smaller
+than 16 MB keeps a quarter instead, see below.)
 
 The limit counts **live** events. A transfer settles by blanking its payload
 on the device, which frees that space for the next accept at once, so a spool
@@ -196,6 +197,15 @@ broker's rules. Three things follow:
 - **The broker's own durability is not Edge's.** Mosquitto, for one, writes
   its persistence file every `autosave_interval` seconds (default 1800). A
   power cut loses what it queued since then.
+- **A message can reach Edge twice.** A device re-sends at QoS 1 when its
+  acknowledgement is lost, and the broker re-sends what Edge had not yet
+  acknowledged when it stopped. With a stable event id in the payload,
+  `--mqtt-id-field eventId` (`QUEUEY_MQTT_ID_FIELD`) makes such a copy one event:
+  Edge acknowledges it to the broker and counts it as `duplicate`. The key is
+  the id plus a hash of the payload, so a device that reuses an id with new
+  content still gets a new event. A message without the id is taken as its own
+  event and counted in `queuey.edge.intake.without_id`; watch that counter after
+  a firmware change.
 
 A Mosquitto configuration for a gateway where Edge is the only subscriber:
 
@@ -217,6 +227,38 @@ Watch `queuey.edge.intake.paused` (the intake stands back because the spool is
 full) and `queuey.edge.intake.connected` (0 when the broker is unreachable),
 next to `queuey.edge.spool.oldest_age_seconds`. A broker that went away leaves
 an empty spool, which reads exactly like a quiet, healthy node.
+
+## Spool limit and backoff cap for the daemon
+
+Two settings for `queuey edge run`, as a flag or in the service's environment
+file:
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `--spool-max-mb <n>` / `QUEUEY_SPOOL_MAX_MB` | 512 | The spool's limit in whole megabytes, 1 or more. |
+| `--backoff-cap-seconds <n>` / `QUEUEY_BACKOFF_CAP_SECONDS` | 300 | The longest wait between transfer attempts while Queuey cannot be reached, 1 to 3600. |
+
+**The spool limit.** Up to 4 MB of the limit is kept for bookkeeping, so that
+Edge can still record a transfer when the spool is full. A spool smaller than
+16 MB keeps a quarter instead: at `--spool-max-mb 1` the spool takes 768 KB of
+events, and then refuses. The health snapshot's `storageLimitBytes` (786432 in
+that case) is what the spool accepts up to, and the node reports `StorageFull`
+once it is reached. A small limit is how a test shows backpressure within a
+short outage: with an MQTT intake, the intake steps back from the broker, and
+the broker holds the rest. `queuey edge publish` writes the same spool and must
+have the same limit: give it the same `--spool-max-mb`, or keep
+`QUEUEY_SPOOL_MAX_MB` in the environment both run in.
+
+**The backoff cap.** While Queuey cannot be reached, the wait between attempts
+grows to the cap. After a long outage, the backlog starts to drain at most one
+cap after the network is back: five minutes by default. A lower cap starts the
+drain sooner, for one more attempt per cap while the network is down. It does
+not change the probes after Queuey refuses the credentials (five minutes, then
+up to an hour) or a paused queue (every minute). `queuey edge kick` starts the
+drain at once.
+
+An invalid value stops `edge run` and `edge publish` at startup with a message
+and exit code 2, as an invalid `--listen` does.
 
 ## Data at rest on the device
 

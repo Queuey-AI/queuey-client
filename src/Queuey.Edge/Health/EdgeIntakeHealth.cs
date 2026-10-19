@@ -41,10 +41,16 @@ public sealed record EdgeIntakeHealth(
 
 /// <summary>
 /// Every message an intake was handed, by outcome. <see cref="Received"/> is
-/// the sum of the others. Counts start at zero with the process.
+/// the sum of the outcomes: <see cref="Accepted"/>, <see cref="Duplicates"/>,
+/// <see cref="Deferred"/>, <see cref="Rejected"/>, <see cref="Unrouted"/>,
+/// <see cref="RetainedSkipped"/> and <see cref="Lost"/>.
+/// <see cref="WithoutId"/> is not an outcome: it counts, across all of them,
+/// the messages that carried no producer id to deduplicate on. Counts start at
+/// zero with the process, and a message the source delivers again is counted
+/// again.
 /// </summary>
 /// <param name="Received">Messages the source handed over.</param>
-/// <param name="Accepted">Durably in the spool, then acknowledged to the source.</param>
+/// <param name="Accepted">Durably in the spool as a new event, then acknowledged to the source.</param>
 /// <param name="Deferred">
 /// Left unacknowledged so the source delivers them again: the spool could not
 /// take them, or the intake was stepping back from its source.
@@ -60,6 +66,16 @@ public sealed record EdgeIntakeHealth(
 /// Messages the source sent without delivery guarantee (MQTT QoS 0) that the
 /// spool could not take. The source will not send them again.
 /// </param>
+/// <param name="Duplicates">
+/// Acknowledged without a new event: the message carried the producer id and
+/// content of an event the spool already holds (a device or broker sending it
+/// again), so it is the same event.
+/// </param>
+/// <param name="WithoutId">
+/// Messages on a route that deduplicates on a producer id, whose payload had
+/// no usable id there. They are handled as before (each one its own event) and
+/// counted under their outcome as well.
+/// </param>
 public sealed record EdgeIntakeCounters(
     long Received,
     long Accepted,
@@ -67,7 +83,9 @@ public sealed record EdgeIntakeCounters(
     long Rejected,
     long Unrouted,
     long RetainedSkipped,
-    long Lost);
+    long Lost,
+    long Duplicates = 0,
+    long WithoutId = 0);
 
 /// <summary>
 /// The intakes running in this process. A source registers itself when it is

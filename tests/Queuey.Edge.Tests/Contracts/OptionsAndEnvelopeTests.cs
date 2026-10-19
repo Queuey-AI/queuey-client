@@ -26,9 +26,33 @@ public class OptionsAndEnvelopeTests
     public void Max_spool_bytes_must_exceed_headroom()
     {
         var o = new QueueyEdgeOptions { ApiKey = "qak_id.secret", TenantPublicId = "ten_x" };
+        o.Storage.HeadroomBytes = 4 * 1024 * 1024;
         o.Storage.MaxSpoolBytes = o.Storage.HeadroomBytes;
 
         Assert.Throws<QueueyConfigurationException>(o.Validate);
+    }
+
+    [Theory]
+    [InlineData(512L * 1024 * 1024, 4L * 1024 * 1024)] // the default spool keeps the fixed 4 MB
+    [InlineData(16L * 1024 * 1024, 4L * 1024 * 1024)]
+    [InlineData(8L * 1024 * 1024, 2L * 1024 * 1024)]
+    [InlineData(1L * 1024 * 1024, 256L * 1024)]        // a 1 MB test spool still takes 768 KB of events
+    public void The_default_headroom_shrinks_to_a_quarter_of_a_small_spool(long maxSpoolBytes, long headroomBytes)
+    {
+        var o = new QueueyEdgeOptions { ApiKey = "qak_id.secret", TenantPublicId = "ten_x" };
+        o.Storage.MaxSpoolBytes = maxSpoolBytes;
+
+        Assert.Equal(headroomBytes, o.Storage.HeadroomBytes);
+        Assert.Equal(maxSpoolBytes - headroomBytes, o.Storage.AcceptCeilingBytes);
+        o.Validate();
+    }
+
+    [Fact]
+    public void A_headroom_that_is_set_is_kept_whatever_the_limit()
+    {
+        var storage = new EdgeStorageOptions { HeadroomBytes = 32 * 1024, MaxSpoolBytes = 1024 * 1024 };
+
+        Assert.Equal(32 * 1024, storage.HeadroomBytes);
     }
 
     [Fact]

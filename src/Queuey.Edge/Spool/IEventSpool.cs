@@ -121,7 +121,14 @@ public interface IEventSpool
 }
 
 /// <summary>The durable-accept receipt the publisher builds its <see cref="PublishReceipt"/> from.</summary>
-public sealed record SpoolAccept(long SpoolId, string TransferId, DateTimeOffset AcceptedAtUtc);
+/// <param name="SpoolId">The spool row that holds the event.</param>
+/// <param name="TransferId">The event's transfer identity.</param>
+/// <param name="AcceptedAtUtc">When the spool first accepted the event.</param>
+/// <param name="AlreadyAccepted">
+/// The spool already held an event under this queue and transfer identity, so nothing new was written; the other fields
+/// describe that original accept.
+/// </param>
+public sealed record SpoolAccept(long SpoolId, string TransferId, DateTimeOffset AcceptedAtUtc, bool AlreadyAccepted = false);
 
 /// <summary>A leased row handed to the transfer loop.</summary>
 public sealed record ClaimedEvent(long SpoolId, EventEnvelope Envelope, int Attempts, TimeSpan LastDelay);

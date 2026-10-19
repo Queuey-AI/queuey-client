@@ -695,8 +695,9 @@ UNLOCK
 EDGE
   queuey edge run     --spool <path> --tenant <ten_...>
                 [--listen <port>] [--report-health] [--node-name <name>] [--ingress-base <uri>] [--source <s>]
+                [--spool-max-mb <n>] [--backoff-cap-seconds <n>]
                 [--mqtt <host[:port]> --mqtt-routes ""filter=queue[@segment];…"" [--mqtt-user <u>] [--mqtt-tls]
-                 [--mqtt-retained first|skip|all]]
+                 [--mqtt-retained first|skip|all] [--mqtt-id-field <path>]]
                  Signs every transfer with the queue's signing key, read from the environment
                  as QUEUEY_SIGNING_KEY_ID and QUEUEY_SIGNING_SECRET (queuey keys mint writes
                  them into the service's environment file). Without the pair it publishes with
@@ -723,10 +724,21 @@ EDGE
                  re-sends it first; size the broker's session queue for that wait.
                  --mqtt-retained: the retained copies a broker re-sends on every subscribe.
                  first (default) takes them only on a new broker session, skip never, all every
-                 time (each reconnect repeats them as new events). Env: QUEUEY_MQTT,
-                 QUEUEY_MQTT_ROUTES, QUEUEY_MQTT_USER, QUEUEY_MQTT_RETAINED; the broker's
-                 password only as QUEUEY_MQTT_PASSWORD, never in argv.
-  queuey edge publish <queue> --spool <path> --tenant <ten_...>
+                 time (each reconnect repeats them as new events).
+                 --mqtt-id-field: where the producer's event id sits in the JSON payload (eventId,
+                 meta.id), for every route. A message Edge already holds with the same id and the
+                 same payload (a device or broker re-sending it) is acked as a duplicate, not a
+                 new event; the same id with new content is a new event. A message without an id
+                 is taken as before and counted (queuey.edge.intake.without_id). Env: QUEUEY_MQTT,
+                 QUEUEY_MQTT_ROUTES, QUEUEY_MQTT_USER, QUEUEY_MQTT_RETAINED, QUEUEY_MQTT_ID_FIELD;
+                 the broker's password only as QUEUEY_MQTT_PASSWORD, never in argv.
+                 --spool-max-mb (QUEUEY_SPOOL_MAX_MB, whole MB, 1 or more; default 512): the spool's
+                 limit. A small spool keeps a quarter for bookkeeping (at most 4 MB), so 1 MB takes
+                 768 KB of events before the spool is full. Give edge publish the same value.
+                 --backoff-cap-seconds (QUEUEY_BACKOFF_CAP_SECONDS, 1-3600; default 300): the longest
+                 wait between transfer attempts while Queuey cannot be reached, so also the longest
+                 wait after the network is back before the backlog starts to drain.
+  queuey edge publish <queue> --spool <path> --tenant <ten_...> [--spool-max-mb <n>]
                 (--data '<json>' | --file <path>) [--content-type <ct>]
                 [--idempotency-key <k>] [--event-type <t>] [--group-key <k>]
                 [--occurred-at <iso8601>] [--source <s>] [--json]
@@ -741,7 +753,8 @@ EDGE
                  host). publish DURABLY enqueues one event into the local spool — the shell/IoT
                  path: any program on the machine (bash, Python, cron) hands events to the
                  co-resident Edge host, which transfers them with full retry/offline handling;
-                 no host running means the event waits durably for the next one. status shows
+                 no host running means the event waits durably for the next one. publish holds
+                 the spool to the same limit as edge run: --spool-max-mb or QUEUEY_SPOOL_MAX_MB. status shows
                  pending/quarantined/oldest-age; drain waits until a running host has emptied
                  the backlog (the uninstall gate — never delete a spool with pending events);
                  retry returns a quarantined event to the drain after remediation; discard drops

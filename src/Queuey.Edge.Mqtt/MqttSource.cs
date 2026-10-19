@@ -28,9 +28,14 @@ namespace Queuey.Edge.Mqtt;
 /// published meanwhile on the broker, within the broker's own queue
 /// limits.</para>
 ///
-/// <para>Semantics are at-least-once from broker to spool: a redelivery
-/// after a crash between fsync and ack becomes a second event. MQTT has no
-/// message identity to dedupe on, so this is documented, not hidden.</para>
+/// <para>Semantics are at-least-once from broker to spool: MQTT has no
+/// message identity, so a redelivery after a crash between fsync and ack, or a
+/// device re-sending at QoS 1, reaches Edge twice. A route with
+/// <see cref="MqttRoute.IdempotencyKeyField"/> makes those one event: the
+/// producer's id and the payload hash become the idempotency key
+/// (<see cref="MqttIdempotencyKey"/>), the spool recognises the repeat, and the
+/// source acknowledges it as a duplicate. Without that field a repeat becomes a
+/// second event; this is documented, not hidden.</para>
 ///
 /// <para>Ordering: messages are handled one at a time in arrival order (the
 /// client invokes the handler sequentially), a topic segment can become the
@@ -62,6 +67,7 @@ public sealed class MqttSource : BackgroundService, IEdgeIntake
     private volatile bool _connected;
     private volatile bool _sessionPresent;
     private volatile bool _lossWarned;
+    private int _withoutIdWarned;
     private volatile string? _lastError;
     private long _refusedBytes;
     private long _resumeDelayTicks;
@@ -75,6 +81,8 @@ public sealed class MqttSource : BackgroundService, IEdgeIntake
     private long _unrouted;
     private long _retainedSkipped;
     private long _lost;
+    private long _duplicates;
+    private long _withoutId;
 
     /// <summary>A source without health access: after a refusal it resumes on the reconnect ladder alone.</summary>
     public MqttSource(MqttSourceOptions options, IQueueyPublisher publisher, ILogger<MqttSource> logger)
@@ -119,7 +127,9 @@ public sealed class MqttSource : BackgroundService, IEdgeIntake
             Rejected: Interlocked.Read(ref _rejected),
             Unrouted: Interlocked.Read(ref _unrouted),
             RetainedSkipped: Interlocked.Read(ref _retainedSkipped),
-            Lost: Interlocked.Read(ref _lost)));
+            Lost: Interlocked.Read(ref _lost),
+            Duplicates: Interlocked.Read(ref _duplicates),
+            WithoutId: Interlocked.Read(ref _withoutId)));
 
     /// <inheritdoc />
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -233,6 +243,8 @@ public sealed class MqttSource : BackgroundService, IEdgeIntake
             ? Array.Empty<byte>()
             : message.Payload.ToArray();
         var takesRetained = message.Retain && TakesRetained(message, topic, payload);
+        var route = MqttTopics.Resolve(_options, topic);
+        var idempotencyKey = IdempotencyKeyFor(route, topic, payload);
 
         if (_paused)
         {
@@ -252,7 +264,6 @@ public sealed class MqttSource : BackgroundService, IEdgeIntake
             return;
         }
 
-        var route = MqttTopics.Resolve(_options, topic);
         if (route is null)
         {
             // A subscription we asked for that no route claims (overlapping
@@ -269,14 +280,18 @@ public sealed class MqttSource : BackgroundService, IEdgeIntake
 
         try
         {
-            await _publisher.PublishAsync(route.Queue, payload, contentType, new PublishOptions
+            var receipt = await _publisher.PublishAsync(route.Queue, payload, contentType, new PublishOptions
             {
                 GroupKey = MqttTopics.GroupKey(route, topic),
                 EventType = route.EventType ?? topic,
-                Source = "mqtt:" + topic
+                Source = "mqtt:" + topic,
+                IdempotencyKey = idempotencyKey
             }, ct).ConfigureAwait(false);
 
-            Interlocked.Increment(ref _accepted);
+            // A repeat of an event the spool holds is acked like an accept:
+            // the event is safe, and the broker must stop sending it.
+            if (receipt.AlreadyAccepted) Interlocked.Increment(ref _duplicates);
+            else Interlocked.Increment(ref _accepted);
             Interlocked.Exchange(ref _resumeDelayTicks, _options.ReconnectDelay.Ticks);
             await e.AcknowledgeAsync(ct).ConfigureAwait(false); // AFTER the durable commit — the whole point
         }
@@ -307,6 +322,30 @@ public sealed class MqttSource : BackgroundService, IEdgeIntake
             Defer(atMostOnce, topic);
             RequestStepBack(payload.Length, topic, ex);
         }
+    }
+
+    /// <summary>
+    /// The producer's id as an idempotency key, when the route asks for one.
+    /// A message without a usable id is never held up: it publishes under
+    /// Edge's own identity as before, is counted, and the first one is logged.
+    /// </summary>
+    private string? IdempotencyKeyFor(MqttRoute? route, string topic, byte[] payload)
+    {
+        if (route?.IdempotencyKeyField is not { } field) return null;
+
+        var key = MqttIdempotencyKey.From(field, payload);
+        if (key is not null) return key;
+
+        Interlocked.Increment(ref _withoutId);
+        if (Interlocked.Exchange(ref _withoutIdWarned, 1) == 0)
+        {
+            _logger.LogWarning(MqttLogEvents.WithoutId,
+                "MQTT message on {Topic} has no usable event id at '{Field}' (missing, null, not a string or number, or the payload " +
+                "is not JSON). It becomes its own event, so a repeat of it is not recognised. Further messages without an id are " +
+                "only counted (queuey.edge.intake.without_id).",
+                topic, field);
+        }
+        return null;
     }
 
     private bool TakesRetained(MqttApplicationMessage message, string topic, byte[] payload) => _options.RetainedMessages switch
@@ -450,4 +489,5 @@ internal static class MqttLogEvents
     public static readonly EventId Refused = new(7404, "queuey.edge.mqtt.refused");
     public static readonly EventId Resumed = new(7405, "queuey.edge.mqtt.resumed");
     public static readonly EventId Lost = new(7406, "queuey.edge.mqtt.lost");
+    public static readonly EventId WithoutId = new(7407, "queuey.edge.mqtt.without_id");
 }

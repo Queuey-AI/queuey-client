@@ -45,6 +45,7 @@ allowed.
 | `GroupKeySegment` | Zero-based topic segment to use as the ordering lane. Null uses the queue's default lane. |
 | `EventType` | Recorded event type. Null uses the full topic. |
 | `DefaultContentType` | Content type for payloads that arrive without one. Defaults to JSON. |
+| `IdempotencyKeyField` | Path to the producer's event id in a JSON payload (`eventId`, `meta.id`). Null turns deduplication on the id off. See below. |
 
 Options are validated at composition, where the operator is looking, rather
 than on the first message hours later. A route without a queue, or a source
@@ -82,6 +83,53 @@ accept them, and each is logged as an error: a payload over the local
 spool cannot take is gone, since QoS 0 has no redelivery; it is counted as
 `lost`. Devices should publish at QoS 1.
 
+## Deduplication on the producer's event id
+
+MQTT has no message identity, so a message can reach Edge twice before Edge
+has a say: a device re-sends at QoS 1 because its acknowledgement was lost and
+the broker delivers both, or the broker re-sends a message because Edge
+crashed after writing it to the spool and before acknowledging it. Edge's own
+transfer identity is minted when it accepts a message, so each copy would
+become an event.
+
+When the devices put a stable event id in their JSON payload, name the field:
+
+```csharp
+m.Routes.Add(new MqttRoute
+{
+    TopicFilter         = "site/+/telemetry",
+    Queue               = "telemetry",
+    GroupKeySegment     = 1,
+    IdempotencyKeyField = "eventId"   // or "meta.id" for a nested field
+});
+```
+
+The daemon takes the same field for every route: `queuey edge run --mqtt-id-field eventId`,
+or `QUEUEY_MQTT_ID_FIELD=eventId`.
+
+The event's idempotency key is then the id plus the first 16 hex characters of
+the SHA-256 of the payload: `node-07-000123:3f9a…`. The spool and Queuey Cloud
+deduplicate on it, so a copy with the same id and the same bytes is
+acknowledged to the broker as a **duplicate** and is not a new event. The hash
+is there because Cloud's deduplication is permanent: a device that reuses an id
+(a counter that restarts at 1 after a reboot, say) sends new content under it,
+and that is a new event, not a repeat to swallow.
+
+- The id is a JSON string or number; a number is used as it was written. An id
+  that is longer than 128 characters, or that has characters outside visible
+  ASCII, is replaced by `h` and 32 hex characters of its own SHA-256, because
+  the key travels as an HTTP header.
+- The id must be unique per queue. Two devices that send the same id with
+  byte-identical payloads to the same queue become one event; a payload that
+  names its device, or an id that does, avoids that.
+- A message without a usable id (the field is missing, null, an object, an
+  array or a boolean, or the payload is not JSON) is taken as before, as its
+  own event. It is counted under `withoutId`, and the first one is logged as a
+  warning; it never holds up the intake.
+- Edge itself recognises a repeat while the original is still in its spool:
+  waiting to transfer, or for `SettledRetention` (24 hours) after. A later
+  repeat is sent, and Queuey Cloud answers that it already has the event.
+
 ## Retained messages
 
 A broker re-sends every retained message on every subscribe, and the source
@@ -101,7 +149,10 @@ full) is taken when the broker sends it again, even on a resumed session.
 
 The source registers with the node's health: `IQueueyEdgeHealth.Snapshot().Intakes`,
 the `queuey.edge.intake.*` instruments on the `Queuey.Edge` meter, `GET /health` on
-the daemon's local endpoint, and the health report to Cloud. Alert on
+the daemon's local endpoint, and the health report to Cloud. Each message is
+counted once by outcome (`accepted`, `duplicate`, `deferred`, `rejected`,
+`unrouted`, `retained_skipped`, `lost`), and `queuey.edge.intake.without_id`
+counts, across those, the messages that had no event id to deduplicate on. Alert on
 `queuey.edge.intake.connected` = 0: a broker that went away leaves an empty spool,
 which looks exactly like a quiet, healthy node.
 

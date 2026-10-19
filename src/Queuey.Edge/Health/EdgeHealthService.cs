@@ -92,7 +92,10 @@ internal sealed class EdgeHealthService : IQueueyEdgeHealth, IHostedService, IDi
             description: "Seconds since the source last handed the intake a message; -1 before the first.");
         _meter.CreateObservableCounter("queuey.edge.intake.messages",
             () => IntakeMessageMeasurements(),
-            description: "Messages each intake was handed, by outcome: accepted, deferred, rejected, unrouted, retained_skipped, lost.");
+            description: "Messages each intake was handed, by outcome: accepted, duplicate, deferred, rejected, unrouted, retained_skipped, lost.");
+        _meter.CreateObservableCounter("queuey.edge.intake.without_id",
+            () => IntakeMeasurements(i => i.Counters.WithoutId),
+            description: "Messages on a route that deduplicates on a producer id whose payload had none; each became its own event (or met its other outcome) as before.");
     }
 
     public EdgeHealth Snapshot()
@@ -187,6 +190,7 @@ internal sealed class EdgeHealthService : IQueueyEdgeHealth, IHostedService, IDi
         {
             var c = intake.Counters;
             yield return Outcome(intake.Name, "accepted", c.Accepted);
+            yield return Outcome(intake.Name, "duplicate", c.Duplicates);
             yield return Outcome(intake.Name, "deferred", c.Deferred);
             yield return Outcome(intake.Name, "rejected", c.Rejected);
             yield return Outcome(intake.Name, "unrouted", c.Unrouted);
