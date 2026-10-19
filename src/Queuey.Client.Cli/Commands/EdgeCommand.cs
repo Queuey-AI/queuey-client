@@ -90,8 +90,8 @@ internal static class EdgeCommand
             "drain" => await DrainAsync(spoolPath!, map),
             "retry" => await RetryAsync(spoolPath!, map),
             "discard" => await DiscardAsync(spoolPath!, map),
-            "recover" => await RecoverAsync(spoolPath!),
-            "reset" => Reset(spoolPath!, map.Has("accept-data-loss")),
+            "recover" => Recover(spoolPath!),
+            "reset" => await ResetAsync(spoolPath!, map.Has("accept-data-loss")),
             _ => UnknownSub(sub, optionArgs),
         };
     }
@@ -594,7 +594,7 @@ internal static class EdgeCommand
     /// a fresh spool, report exactly what could not be, then swap files. The
     /// faulted original is kept beside the new spool for support.
     /// </summary>
-    private static async Task<int> RecoverAsync(string spoolPath)
+    private static int Recover(string spoolPath)
     {
         if (!File.Exists(spoolPath))
         {
@@ -604,53 +604,11 @@ internal static class EdgeCommand
 
         var salvagePath = spoolPath + ".salvage";
         var faultedPath = spoolPath + ".faulted-" + DateTime.UtcNow.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
-        long copied = 0, unreadable = 0;
+        SpoolSalvage.Result salvage;
 
         try
         {
-            File.Delete(salvagePath);
-            // Not Mode=ReadOnly: ATTACH must be able to CREATE the salvage
-            // database on this connection. The source itself is only read.
-            await using var source = new SqliteConnection($"Data Source={spoolPath}");
-            await source.OpenAsync();
-            await using (var attach = source.CreateCommand())
-            {
-                attach.CommandText = "ATTACH DATABASE @path AS salvage;";
-                attach.Parameters.AddWithValue("@path", salvagePath);
-                await attach.ExecuteNonQueryAsync();
-            }
-            await using (var schema = source.CreateCommand())
-            {
-                schema.CommandText = """
-                    CREATE TABLE salvage.spool AS SELECT * FROM main.spool WHERE 0;
-                    """;
-                await schema.ExecuteNonQueryAsync();
-            }
-
-            // Row-by-row so one unreadable page loses one row, not the batch.
-            await using (var ids = source.CreateCommand())
-            {
-                ids.CommandText = "SELECT id FROM main.spool WHERE state IN ('Accepted','Claimed','Quarantined') ORDER BY id;";
-                await using var reader = await ids.ExecuteReaderAsync();
-                var all = new System.Collections.Generic.List<long>();
-                while (await reader.ReadAsync()) all.Add(reader.GetInt64(0));
-
-                foreach (var id in all)
-                {
-                    try
-                    {
-                        await using var copy = source.CreateCommand();
-                        copy.CommandText = "INSERT INTO salvage.spool SELECT * FROM main.spool WHERE id = @id;";
-                        copy.Parameters.AddWithValue("@id", id);
-                        await copy.ExecuteNonQueryAsync();
-                        copied++;
-                    }
-                    catch (SqliteException)
-                    {
-                        unreadable++;
-                    }
-                }
-            }
+            salvage = SpoolSalvage.Copy(spoolPath, salvagePath);
         }
         catch (SqliteException ex)
         {
@@ -660,36 +618,32 @@ internal static class EdgeCommand
             File.Delete(salvagePath);
             return ExitCodes.RuntimeError;
         }
+        catch (Queuey.Client.QueueyConfigurationException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            File.Delete(salvagePath);
+            return ExitCodes.RuntimeError;
+        }
 
+        // The salvage is complete before it is swapped in: the spool's own
+        // schema, owned rows with their ids, claims released.
         SqliteConnection.ClearAllPools();
         File.Move(spoolPath, faultedPath);
         foreach (var sidecar in new[] { spoolPath + "-wal", spoolPath + "-shm" })
             if (File.Exists(sidecar)) File.Move(sidecar, faultedPath + Path.GetExtension(sidecar));
         File.Move(salvagePath, spoolPath);
 
-        // Rebuild indexes/user_version by letting the spool bootstrap treat
-        // the salvage as data: rows carried over, schema completed on open.
-        await using (var finish = new SqliteConnection($"Data Source={spoolPath}"))
-        {
-            await finish.OpenAsync();
-            await using var cmd = finish.CreateCommand();
-            cmd.CommandText = """
-                CREATE UNIQUE INDEX IF NOT EXISTS ux_spool_queue_transfer ON spool(queue_name, transfer_id);
-                CREATE INDEX IF NOT EXISTS ix_spool_ready ON spool(state, next_attempt_utc, id);
-                CREATE INDEX IF NOT EXISTS ix_spool_lane  ON spool(lane, state, id);
-                CREATE TABLE IF NOT EXISTS edge_meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
-                UPDATE spool SET state = 'Accepted', claimed_until_utc = NULL WHERE state = 'Claimed';
-                PRAGMA user_version = 1;
-                """;
-            await cmd.ExecuteNonQueryAsync();
-        }
-
-        Console.WriteLine($"Salvaged {copied} event(s) into a fresh spool; {unreadable} unreadable.");
+        Console.WriteLine($"Salvaged {salvage.Copied} event(s) into a fresh spool; {salvage.Unreadable} unreadable.");
+        // Neither is an event lost, so neither changes the exit code; both change what Cloud sees.
+        if (salvage.MetaUnreadable)
+            Console.WriteLine("The node identity could not be read: health reporting mints a new one, and Queuey Cloud sees a new node.");
+        if (salvage.SettledUnreadable)
+            Console.WriteLine("The settled events could not be read: a repeat of one is accepted again (Queuey Cloud deduplicates it on its transfer id).");
         Console.WriteLine($"The faulted file is preserved at '{faultedPath}' for support.");
-        return unreadable == 0 ? ExitCodes.Success : ExitCodes.RuntimeError;
+        return salvage.Unreadable == 0 ? ExitCodes.Success : ExitCodes.RuntimeError;
     }
 
-    private static int Reset(string spoolPath, bool acknowledged)
+    private static async Task<int> ResetAsync(string spoolPath, bool acknowledged)
     {
         if (!acknowledged)
         {
@@ -707,6 +661,10 @@ internal static class EdgeCommand
             return ExitCodes.RuntimeError;
         }
 
+        // Read before the file moves: its WAL may hold the newest write, and
+        // SQLite finds a WAL only beside the file it belongs to.
+        var node = ReadNodeId(spoolPath);
+
         SqliteConnection.ClearAllPools();
         var faultedPath = spoolPath + ".faulted-" + DateTime.UtcNow.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
         File.Move(spoolPath, faultedPath);
@@ -714,8 +672,68 @@ internal static class EdgeCommand
             if (File.Exists(sidecar)) File.Move(sidecar, faultedPath + Path.GetExtension(sidecar));
 
         Console.WriteLine($"Spool reset. The old file (and any events in it) is preserved at '{faultedPath}'.");
-        Console.WriteLine("A fresh spool will be created on the next publish. Data loss acknowledged by --accept-data-loss.");
+        Console.WriteLine(await KeepNodeIdAsync(spoolPath, node));
+        Console.WriteLine("Data loss acknowledged by --accept-data-loss.");
         return ExitCodes.Success;
+    }
+
+    /// <summary>
+    /// The node id in a spool file that may be faulted. <c>Readable</c> is
+    /// false when the file would not give it up; a readable file without one
+    /// (health reporting never ran) gives <c>(true, null)</c>.
+    /// </summary>
+    private static (bool Readable, string? NodeId) ReadNodeId(string spoolPath)
+    {
+        try
+        {
+            // Not ReadOnly: a read-only connection leaves the -wal/-shm it opened
+            // behind, and they would travel with the preserved file. As the last
+            // connection, this one folds the WAL in and removes them, as
+            // recover's does.
+            using var conn = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = spoolPath,
+                Mode = SqliteOpenMode.ReadWrite,
+                Pooling = false
+            }.ToString());
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT v FROM edge_meta WHERE k = @k;";
+            cmd.Parameters.AddWithValue("@k", EdgeMetaKeys.NodeId);
+            return (true, cmd.ExecuteScalar() as string);
+        }
+        catch (SqliteException)
+        {
+            return (false, null);
+        }
+    }
+
+    /// <summary>
+    /// Reset starts the events over, not the machine: the node keeps its id,
+    /// so Queuey Cloud sees the same node. Only the id moves to the fresh
+    /// spool, never <c>settled</c>. Best effort: an id that cannot be read or
+    /// written means a new node, never a failed reset.
+    /// </summary>
+    private static async Task<string> KeepNodeIdAsync(string spoolPath, (bool Readable, string? NodeId) node)
+    {
+        const string nextPublish = "A fresh spool will be created on the next publish.";
+        const string newNode = "health reporting mints a new one, and Queuey Cloud sees a new node.";
+
+        if (!node.Readable)
+            return $"The node id could not be read from the old file: {newNode} {nextPublish}";
+        if (node.NodeId is not { } nodeId)
+            return nextPublish;
+
+        try
+        {
+            await OpenSpool(spoolPath).SetMetaAsync(EdgeMetaKeys.NodeId, nodeId, CancellationToken.None);
+            SqliteConnection.ClearAllPools();
+            return $"The fresh spool keeps node id {nodeId}: this is still the same node in Queuey Cloud.";
+        }
+        catch (Exception ex) when (ex is SqliteException or IOException or UnauthorizedAccessException or Queuey.Client.QueueyException)
+        {
+            return $"The node id {nodeId} could not be written to a fresh spool ({ex.Message}): {newNode}";
+        }
     }
 
     // ── plumbing ────────────────────────────────────────────────────────

@@ -351,11 +351,15 @@ the file untouched — it never silently starts a fresh spool.
 1. `queuey edge status --spool <path>` — confirms the fault.
 2. `queuey edge recover --spool <path>` — salvages every readable
    still-owned event into a fresh spool and reports **exactly how many were
-   unreadable**. The faulted file is kept beside it (`*.faulted-<ts>`).
+   unreadable**. It keeps the node id (Queuey Cloud still sees the same
+   node) and the record of recently settled events (a repeat is still
+   recognised), and says so if either could not be read. The faulted file
+   is kept beside it (`*.faulted-<ts>`).
 3. If the file is beyond reading:
    `queuey edge reset --accept-data-loss --spool <path>` — starts clean.
    The flag is the point: data loss is a human decision, taken in your
-   name, never Queuey's default.
+   name, never Queuey's default. Reset starts the events over, not the
+   machine: it keeps the node id when the old file still gives it up.
 4. Either way, keep the preserved file for support.
 
 Likely root causes: failing disk, AV/backup interference (see above), or a

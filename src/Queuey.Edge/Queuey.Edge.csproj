@@ -28,6 +28,8 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Queuey.Edge.Tests" />
+    <!-- 'queuey edge recover' builds the salvaged spool with the spool's own schema (SpoolSalvage) without making it public API. -->
+    <InternalsVisibleTo Include="Queuey.Client.Cli" />
   </ItemGroup>
 
   <ItemGroup>

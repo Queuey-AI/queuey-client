@@ -250,7 +250,7 @@ queuey edge status  --spool <path> [--json]
 queuey edge retry   --spool <path> (--id N | --all)   # after fixing a quarantine cause
 queuey edge discard --spool <path> --id N             # explicit, logged operator decision
 queuey edge recover --spool <path>                    # salvage a faulted spool, reports unreadable count
-queuey edge reset   --spool <path> --accept-data-loss # start clean; the old file is preserved
+queuey edge reset   --spool <path> --accept-data-loss # start clean; keeps the node id, preserves the old file
 ```
 
 ## Storage rules (the short version)
