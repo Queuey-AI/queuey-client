@@ -85,4 +85,15 @@ public sealed class PublishReceipt
     /// unless the caller supplied one.
     /// </summary>
     public DateTimeOffset OccurredAtUtc { get; init; }
+
+    /// <summary>
+    /// True when Edge already held an event for this queue under the same
+    /// <see cref="PublishOptions.IdempotencyKey"/>: nothing new was stored, and
+    /// <see cref="TransferId"/> and <see cref="AcceptedAtUtc"/> describe the
+    /// original accept. A repeat is still a success; the event is delivered once.
+    /// Edge sees a repeat only while the original is in its spool (until
+    /// <c>Storage.SettledRetention</c> after transfer); Queuey Cloud deduplicates
+    /// the key after that.
+    /// </summary>
+    public bool AlreadyAccepted { get; init; }
 }

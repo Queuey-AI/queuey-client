@@ -83,7 +83,8 @@ public class EdgeHealthReporterTests
             {
                 new EdgeIntakeHealth("mqtt:localhost:1883", Connected: false, Paused: true,
                     LastMessageAtUtc: at, LastConnectedAtUtc: at.AddMinutes(-5), LastError: "test: spool full",
-                    new EdgeIntakeCounters(Received: 10, Accepted: 7, Deferred: 2, Rejected: 0, Unrouted: 0, RetainedSkipped: 1, Lost: 0))
+                    new EdgeIntakeCounters(Received: 13, Accepted: 7, Deferred: 2, Rejected: 0, Unrouted: 0, RetainedSkipped: 1, Lost: 0,
+                        Duplicates: 3, WithoutId: 5))
             }
         };
 
@@ -97,11 +98,13 @@ public class EdgeHealthReporterTests
         Assert.False(intake.GetProperty("connected").GetBoolean());
         Assert.True(intake.GetProperty("paused").GetBoolean());
         Assert.Equal("test: spool full", intake.GetProperty("lastError").GetString());
-        Assert.Equal(10, intake.GetProperty("received").GetInt64());
+        Assert.Equal(13, intake.GetProperty("received").GetInt64());
         Assert.Equal(7, intake.GetProperty("accepted").GetInt64());
         Assert.Equal(2, intake.GetProperty("deferred").GetInt64());
         Assert.Equal(1, intake.GetProperty("retainedSkipped").GetInt64());
         Assert.Equal(0, intake.GetProperty("lost").GetInt64());
+        Assert.Equal(3, intake.GetProperty("duplicates").GetInt64());
+        Assert.Equal(5, intake.GetProperty("withoutId").GetInt64());
     }
 
     [Fact]

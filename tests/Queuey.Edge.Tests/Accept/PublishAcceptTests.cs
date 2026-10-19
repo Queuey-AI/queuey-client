@@ -45,6 +45,42 @@ public class PublishAcceptTests
     }
 
     [Fact]
+    public async Task A_second_accept_under_the_same_key_says_it_was_already_accepted()
+    {
+        using var fx = new PublisherFixture();
+
+        var first = await fx.Publisher.PublishAsync("orders", new { n = 1 },
+            new PublishOptions { IdempotencyKey = "order-123" });
+        fx.Spool.Clock.Advance(TimeSpan.FromSeconds(5));
+        var second = await fx.Publisher.PublishAsync("orders", new { n = 1 },
+            new PublishOptions { IdempotencyKey = "order-123" });
+
+        Assert.False(first.AlreadyAccepted);
+        Assert.True(second.AlreadyAccepted);
+        Assert.Equal(first.TransferId, second.TransferId);
+        Assert.Equal(first.AcceptedAtUtc, second.AcceptedAtUtc); // the original accept, not the repeat
+
+        // The same key on another queue is another dedup domain.
+        var otherQueue = await fx.Publisher.PublishAsync("invoices", new { n = 1 },
+            new PublishOptions { IdempotencyKey = "order-123" });
+        Assert.False(otherQueue.AlreadyAccepted);
+    }
+
+    [Fact]
+    public async Task The_spool_marks_a_repeated_transfer_identity_as_already_accepted()
+    {
+        using var fx = new SpoolFixture();
+
+        var first = await fx.Spool.EnqueueAsync(fx.Envelope(transferId: "dev-7:00ff"), CancellationToken.None);
+        var second = await fx.Spool.EnqueueAsync(fx.Envelope(transferId: "dev-7:00ff"), CancellationToken.None);
+
+        Assert.False(first.AlreadyAccepted);
+        Assert.True(second.AlreadyAccepted);
+        Assert.Equal(first.SpoolId, second.SpoolId);
+        Assert.Equal(first.TransferId, second.TransferId);
+    }
+
+    [Fact]
     public async Task Caller_supplied_occurrence_time_rides_the_receipt()
     {
         using var fx = new PublisherFixture();

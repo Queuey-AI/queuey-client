@@ -151,7 +151,8 @@ public class EdgeHealthServiceTests
             "queuey.edge.intake.connected",
             "queuey.edge.intake.paused",
             "queuey.edge.intake.last_message_age_seconds",
-            "queuey.edge.intake.messages"
+            "queuey.edge.intake.messages",
+            "queuey.edge.intake.without_id"
         }, seen);
     }
 
@@ -160,7 +161,8 @@ public class EdgeHealthServiceTests
     {
         var intake = new FixedIntake(new EdgeIntakeHealth("mqtt:localhost:1883", Connected: false, Paused: true,
             LastMessageAtUtc: null, LastConnectedAtUtc: null, LastError: "spool full",
-            new EdgeIntakeCounters(Received: 5, Accepted: 3, Deferred: 2, Rejected: 0, Unrouted: 0, RetainedSkipped: 0, Lost: 0)));
+            new EdgeIntakeCounters(Received: 7, Accepted: 3, Deferred: 2, Rejected: 0, Unrouted: 0, RetainedSkipped: 0, Lost: 0,
+                Duplicates: 2, WithoutId: 4)));
         using var fx = new HealthFixture(intake: intake);
 
         var snapshot = Assert.Single(fx.Health.Snapshot().Intakes!);
@@ -186,6 +188,8 @@ public class EdgeHealthServiceTests
         Assert.Contains(measured, m => m.Instrument == "queuey.edge.intake.last_message_age_seconds" && m.Value == -1);
         Assert.Contains(measured, m => m.Instrument == "queuey.edge.intake.messages" && m.Value == 2 && (string?)m.Tags["outcome"] == "deferred");
         Assert.Contains(measured, m => m.Instrument == "queuey.edge.intake.messages" && m.Value == 3 && (string?)m.Tags["outcome"] == "accepted");
+        Assert.Contains(measured, m => m.Instrument == "queuey.edge.intake.messages" && m.Value == 2 && (string?)m.Tags["outcome"] == "duplicate");
+        Assert.Contains(measured, m => m.Instrument == "queuey.edge.intake.without_id" && m.Value == 4 && (string?)m.Tags["intake"] == "mqtt:localhost:1883");
 
         static Dictionary<string, object?> Tags(ReadOnlySpan<KeyValuePair<string, object?>> tags)
         {
@@ -205,6 +209,34 @@ public class EdgeHealthServiceTests
         });
 
         Assert.Equal(64 * 1024, fx.Health.Snapshot().StorageLimitBytes);
+    }
+
+    [Fact]
+    public async Task A_one_megabyte_spool_takes_events_up_to_three_quarters_and_then_reports_full()
+    {
+        // --spool-max-mb 1: the default headroom shrinks to a quarter, so a test can fill the spool in minutes.
+        using var fx = new HealthFixture(o => o.MaxSpoolBytes = 1024 * 1024);
+        Assert.Equal(768 * 1024, fx.Health.Snapshot().StorageLimitBytes);
+
+        var accepted = 0;
+        QueueySpoolFullException? full = null;
+        for (var i = 0; i < 2000 && full is null; i++)
+        {
+            try
+            {
+                await fx.Spool.Spool.EnqueueAsync(fx.Spool.Envelope(payloadBytes: 1024), CancellationToken.None);
+                accepted++;
+            }
+            catch (QueueySpoolFullException ex)
+            {
+                full = ex;
+            }
+        }
+
+        Assert.NotNull(full);
+        Assert.InRange(accepted, 300, 767); // 1 KB events in 768 KB, less row overhead and the spool's own pages
+        fx.InvalidateCache();
+        Assert.Equal(EdgeState.StorageFull, fx.Health.Snapshot().State);
     }
 
     [Theory]

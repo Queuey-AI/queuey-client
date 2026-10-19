@@ -117,6 +117,19 @@ public sealed class MqttRoute
     /// <summary>Content type recorded for the payload when the message carries none. Default JSON.</summary>
     public string DefaultContentType { get; set; } = "application/json";
 
+    /// <summary>
+    /// Where the producer's own event id sits in a JSON payload, as a dot-separated
+    /// path: <c>eventId</c>, or <c>meta.id</c> for a nested field. When set, a
+    /// message the device or the broker sends twice becomes one event: the id and
+    /// a hash of the payload make the event's idempotency key, which the spool and
+    /// Queuey Cloud deduplicate on. The id must be a JSON string or number, and
+    /// unique per queue; a message without one is taken as its own event, counted
+    /// as without id, and logged once. Null (the default) leaves deduplication to
+    /// Edge's own transfer identity, which cannot see a repeat that reaches Edge
+    /// twice from the broker.
+    /// </summary>
+    public string? IdempotencyKeyField { get; set; }
+
     public void Validate()
     {
         if (string.IsNullOrWhiteSpace(TopicFilter))
@@ -127,6 +140,10 @@ public sealed class MqttRoute
             throw new QueueyConfigurationException($"MqttRoute for '{TopicFilter}': GroupKeySegment must be ≥ 0.");
         if (string.IsNullOrWhiteSpace(DefaultContentType))
             throw new QueueyConfigurationException($"MqttRoute for '{TopicFilter}' needs a DefaultContentType.");
+        if (IdempotencyKeyField is not null && !MqttIdempotencyKey.IsValidPath(IdempotencyKeyField))
+            throw new QueueyConfigurationException(
+                $"MqttRoute for '{TopicFilter}': IdempotencyKeyField '{IdempotencyKeyField}' must be a dot-separated path " +
+                "to a field in the JSON payload with no empty segments, such as eventId or meta.id.");
     }
 
     /// <summary>

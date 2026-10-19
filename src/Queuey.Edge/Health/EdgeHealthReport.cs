@@ -66,7 +66,9 @@ public sealed record EdgeHealthReportFailure(
 
 /// <summary>
 /// One intake in a health report: whether its source is connected, whether it
-/// stepped back because the spool was full, and what happened to the messages.
+/// stepped back because the spool was full, and what happened to the messages
+/// (<see cref="EdgeIntakeCounters"/>; <c>duplicates</c> and <c>withoutId</c> were
+/// added later and read as 0 from older nodes).
 /// </summary>
 public sealed record EdgeHealthReportIntake(
     [property: JsonPropertyName("name")] string Name,
@@ -81,10 +83,13 @@ public sealed record EdgeHealthReportIntake(
     [property: JsonPropertyName("rejected")] long Rejected,
     [property: JsonPropertyName("unrouted")] long Unrouted,
     [property: JsonPropertyName("retainedSkipped")] long RetainedSkipped,
-    [property: JsonPropertyName("lost")] long Lost)
+    [property: JsonPropertyName("lost")] long Lost,
+    [property: JsonPropertyName("duplicates")] long Duplicates = 0,
+    [property: JsonPropertyName("withoutId")] long WithoutId = 0)
 {
     internal static EdgeHealthReportIntake From(EdgeIntakeHealth intake)
         => new(intake.Name, intake.Connected, intake.Paused, intake.LastMessageAtUtc, intake.LastConnectedAtUtc,
             intake.LastError, intake.Counters.Received, intake.Counters.Accepted, intake.Counters.Deferred,
-            intake.Counters.Rejected, intake.Counters.Unrouted, intake.Counters.RetainedSkipped, intake.Counters.Lost);
+            intake.Counters.Rejected, intake.Counters.Unrouted, intake.Counters.RetainedSkipped, intake.Counters.Lost,
+            intake.Counters.Duplicates, intake.Counters.WithoutId);
 }

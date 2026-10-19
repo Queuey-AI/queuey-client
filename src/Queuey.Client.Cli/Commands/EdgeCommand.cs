@@ -34,9 +34,13 @@ internal static class EdgeCommand
     {
         ["status"] = new("edge status", flags: new[] { "json" }, values: new[] { "spool" }),
         ["publish"] = new("edge publish", flags: new[] { "json" },
-            values: new[] { "spool", "data", "file", "content-type", "idempotency-key", "event-type", "group-key", "occurred-at" }),
+            values: new[] { "spool", "spool-max-mb", "data", "file", "content-type", "idempotency-key", "event-type", "group-key", "occurred-at" }),
         ["run"] = new("edge run", flags: new[] { "report-health", "mqtt-tls" },
-            values: new[] { "spool", "listen", "node-name", "mqtt", "mqtt-routes", "mqtt-user", "mqtt-password", "mqtt-retained" }),
+            values: new[]
+            {
+                "spool", "spool-max-mb", "backoff-cap-seconds", "listen", "node-name",
+                "mqtt", "mqtt-routes", "mqtt-user", "mqtt-password", "mqtt-retained", "mqtt-id-field"
+            }),
         ["kick"] = new("edge kick", values: new[] { "spool" }),
         ["drain"] = new("edge drain", values: new[] { "spool", "timeout" }),
         ["retry"] = new("edge retry", flags: new[] { "all" }, values: new[] { "spool", "id" }),
@@ -113,6 +117,9 @@ internal static class EdgeCommand
         if (string.IsNullOrWhiteSpace(tenant))
             return CliErrors.Usage(map, "missing_argument", "Missing --tenant <ten_...> (or QUEUEY_TENANT).");
 
+        if (!TryReadSpoolMaxBytes(map, out var maxSpoolBytes, out var limitError))
+            return CliErrors.Usage(map, "invalid_value", limitError!);
+
         byte[] payload;
         var data = map.Get("data");
         var file = map.Get("file");
@@ -154,7 +161,7 @@ internal static class EdgeCommand
             source: map.Get("source"),
             occurredAtUtc: occurredAt);
 
-        var spool = OpenSpool(spoolPath);
+        var spool = OpenSpool(spoolPath, maxSpoolBytes);
         try
         {
             var accept = await spool.EnqueueAsync(envelope, CancellationToken.None);
@@ -168,8 +175,13 @@ internal static class EdgeCommand
                     queue = envelope.Queue,
                     acceptedAtUtc = accept.AcceptedAtUtc,
                     occurredAtUtc = envelope.OccurredAtUtc,
-                    pending = stats.PendingCount
+                    pending = stats.PendingCount,
+                    alreadyAccepted = accept.AlreadyAccepted
                 }, CliHost.JsonOut));
+            }
+            else if (accept.AlreadyAccepted)
+            {
+                Console.WriteLine($"Already accepted under this idempotency key; nothing new stored. transferId={accept.TransferId} pending={stats.PendingCount}");
             }
             else
             {
@@ -270,6 +282,13 @@ internal static class EdgeCommand
             listenPort = port;
         }
 
+        if (!TryReadSpoolMaxBytes(map, out var maxSpoolBytes, out var limitError)
+            || !TryReadBackoffCap(map, out var backoffCap, out limitError))
+        {
+            Console.Error.WriteLine(limitError);
+            return ExitCodes.Usage;
+        }
+
         // Fleet view: --report-health (or QUEUEY_REPORT_HEALTH=1) makes the
         // node check in to the console. Outbound only; never billed.
         var reportHealth = map.Has("report-health")
@@ -284,6 +303,10 @@ internal static class EdgeCommand
             o.Health.ApiKey = credentials.Health.ApiKey;
             o.TenantPublicId = tenant;
             o.Storage.Path = spoolPath;
+            if (maxSpoolBytes is { } max)
+                o.Storage.MaxSpoolBytes = max;
+            if (backoffCap is { } cap)
+                o.Transfer.BackoffCap = cap;
             if (spoolKey is not null)
                 o.Storage.PayloadKey = spoolKey;
             o.LocalEndpoint.Port = listenPort;
@@ -301,6 +324,7 @@ internal static class EdgeCommand
         // same gateway; every message is fsync'd into the spool before it is acked.
         var mqtt = map.Get("mqtt") ?? CliHost.Env("QUEUEY_MQTT");
         var mqttRoutes = map.Get("mqtt-routes") ?? CliHost.Env("QUEUEY_MQTT_ROUTES");
+        var mqttIdField = map.Get("mqtt-id-field") ?? CliHost.Env("QUEUEY_MQTT_ID_FIELD");
         if (!string.IsNullOrWhiteSpace(mqtt) || !string.IsNullOrWhiteSpace(mqttRoutes))
         {
             if (string.IsNullOrWhiteSpace(mqtt) || string.IsNullOrWhiteSpace(mqttRoutes))
@@ -315,6 +339,16 @@ internal static class EdgeCommand
             try
             {
                 var routes = Queuey.Edge.Mqtt.MqttRoute.ParseMany(mqttRoutes);
+                if (!string.IsNullOrWhiteSpace(mqttIdField))
+                {
+                    // Every route deduplicates on the same field. Checked here, where the operator is looking: the
+                    // source's own check runs when the host starts, and would end the daemon with a stack trace.
+                    foreach (var route in routes)
+                    {
+                        route.IdempotencyKeyField = mqttIdField.Trim();
+                        route.Validate();
+                    }
+                }
                 var retained = string.IsNullOrWhiteSpace(mqttRetained)
                     ? Queuey.Edge.Mqtt.MqttRetainedMessages.FirstSubscribe
                     : Queuey.Edge.Mqtt.MqttSourceOptions.ParseRetained(mqttRetained);
@@ -350,6 +384,8 @@ internal static class EdgeCommand
         {
             Console.WriteLine($"MQTT intake: {mqtt} → {mqttRoutes} (QoS 1; a message is acked only after it is durably in the spool; " +
                               "a full spool makes the intake step back from the broker until there is room).");
+            if (!string.IsNullOrWhiteSpace(mqttIdField))
+                Console.WriteLine($"MQTT deduplication: a message whose '{mqttIdField.Trim()}' and payload Edge already holds is acked as a duplicate, not a new event.");
         }
         if (listenPort is { } lp)
         {
@@ -708,8 +744,60 @@ internal static class EdgeCommand
         return rows;
     }
 
-    private static SqliteEventSpool OpenSpool(string spoolPath)
-        => new(new EdgeStorageOptions { Path = spoolPath }, new CliClock());
+    private static SqliteEventSpool OpenSpool(string spoolPath, long? maxSpoolBytes = null)
+    {
+        var storage = new EdgeStorageOptions { Path = spoolPath };
+        if (maxSpoolBytes is { } max) storage.MaxSpoolBytes = max;
+        return new SqliteEventSpool(storage, new CliClock());
+    }
+
+    /// <summary>
+    /// The spool limit from <c>--spool-max-mb</c> or <c>QUEUEY_SPOOL_MAX_MB</c>, in bytes; null when neither is set (the
+    /// default, 512 MB). <c>edge run</c> and <c>edge publish</c> both read it: they write the same spool, and a publish that
+    /// used the default would fill a spool the daemon holds to a smaller limit.
+    /// </summary>
+    internal static bool TryReadSpoolMaxBytes(ArgMap map, out long? bytes, out string? error)
+    {
+        bytes = null;
+        if (!TryReadWhole(map, "spool-max-mb", "QUEUEY_SPOOL_MAX_MB", 1, int.MaxValue, "a whole number of megabytes, 1 or more",
+                out var megabytes, out error))
+            return false;
+        if (megabytes is { } mb) bytes = mb * 1024L * 1024L;
+        return true;
+    }
+
+    /// <summary>
+    /// The transfer backoff cap from <c>--backoff-cap-seconds</c> or <c>QUEUEY_BACKOFF_CAP_SECONDS</c> (1–3600); null when
+    /// neither is set (the default, 5 minutes). After an outage, the first transfer comes at most this long after the
+    /// network is back.
+    /// </summary>
+    internal static bool TryReadBackoffCap(ArgMap map, out TimeSpan? cap, out string? error)
+    {
+        cap = null;
+        if (!TryReadWhole(map, "backoff-cap-seconds", "QUEUEY_BACKOFF_CAP_SECONDS", 1, 3600, "a whole number of seconds from 1 to 3600",
+                out var seconds, out error))
+            return false;
+        if (seconds is { } s) cap = TimeSpan.FromSeconds(s);
+        return true;
+    }
+
+    private static bool TryReadWhole(ArgMap map, string flag, string variable, int min, int max, string expected,
+        out int? value, out string? error)
+    {
+        value = null;
+        error = null;
+        var fromFlag = map.Get(flag);
+        var raw = fromFlag ?? CliHost.Env(variable);
+        if (string.IsNullOrWhiteSpace(raw)) return true;
+
+        if (!int.TryParse(raw.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out var parsed) || parsed < min || parsed > max)
+        {
+            error = $"{(fromFlag is null ? variable : "--" + flag)} must be {expected} (got '{CliErrors.Shown(raw.Trim())}').";
+            return false;
+        }
+        value = parsed;
+        return true;
+    }
 
     private static bool TryGetId(ArgMap map, out long id)
     {

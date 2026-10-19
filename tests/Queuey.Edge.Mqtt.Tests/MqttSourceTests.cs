@@ -277,7 +277,7 @@ public class MqttSourceTests
         Assert.False(intake.Paused);
         Assert.NotNull(intake.LastMessageAtUtc);
         Assert.NotNull(intake.LastConnectedAtUtc);
-        Assert.Equal(new EdgeIntakeCounters(1, 1, 0, 0, 0, 0, 0), intake.Counters);
+        Assert.Equal(new EdgeIntakeCounters(1, 1, 0, 0, 0, 0, 0, Duplicates: 0, WithoutId: 0), intake.Counters);
 
         await source.StopAsync(CancellationToken.None);
         Assert.False(registry.Snapshot()[0].Connected);
@@ -349,7 +349,7 @@ public class MqttSourceTests
     /// microseconds; under a full parallel test run it is wide enough to hit,
     /// which is what made these tests fail roughly one run in three.
     /// </summary>
-    private sealed class TestBroker : IDisposable
+    internal sealed class TestBroker : IDisposable
     {
         private int _subscriptions;
 
@@ -422,7 +422,7 @@ public class MqttSourceTests
         }
     }
 
-    private static int FreePort()
+    internal static int FreePort()
     {
         var l = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
         l.Start();

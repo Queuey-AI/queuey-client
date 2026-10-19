@@ -201,12 +201,25 @@ public sealed class EdgeStorageOptions
     /// </summary>
     public long MaxSpoolBytes { get; set; } = 512L * 1024 * 1024;
 
+    /// <summary>The bookkeeping margin a spool of the default size keeps: 4 MB.</summary>
+    public const long DefaultHeadroomBytes = 4L * 1024 * 1024;
+
+    private long? _headroomBytes;
+
     /// <summary>
     /// Reserved margin so BOOKKEEPING writes (settling transfers) still
     /// succeed at the limit — a spool that cannot record success re-sends
-    /// forever.
+    /// forever. Unless set, it is <see cref="DefaultHeadroomBytes"/>, or a
+    /// quarter of <see cref="MaxSpoolBytes"/> when that is smaller, so a
+    /// small spool (a 1 MB test limit, say) still has room for events: at
+    /// 1 MB the spool accepts up to 768 KB of live events. A value that is
+    /// set is used as it is.
     /// </summary>
-    public long HeadroomBytes { get; set; } = 4L * 1024 * 1024;
+    public long HeadroomBytes
+    {
+        get => _headroomBytes ?? Math.Min(DefaultHeadroomBytes, MaxSpoolBytes / 4);
+        set => _headroomBytes = value;
+    }
 
     /// <summary>
     /// The live bytes new events may fill: the limit minus the bookkeeping
