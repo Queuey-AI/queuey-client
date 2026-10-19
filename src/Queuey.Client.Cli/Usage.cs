@@ -761,7 +761,8 @@ EDGE
                  ONE quarantined event (an explicit, logged operator decision — pending events
                  cannot be discarded); recover salvages readable events from a faulted spool,
                  reporting exactly how many were unreadable; reset abandons the spool (requires
-                 --accept-data-loss, the old file is preserved for support either way).
+                 --accept-data-loss, the old file is preserved for support either way). Both keep
+                 the node id, so Queuey Cloud still sees the same node.
 
 WHOAMI
   queuey whoami [--profile <name>] [--json]

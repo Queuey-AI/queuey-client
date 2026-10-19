@@ -22,13 +22,22 @@ namespace Queuey.Edge;
 /// TABLE), where the current schema has it eighth; a copy by position would
 /// shift every value after the payload.</para>
 ///
-/// <para>Not carried over: the <c>settled</c> correlations (a repeat of an
-/// event settled before the fault is accepted again, and Cloud deduplicates
-/// it on its transfer id) and <c>edge_meta</c>.</para>
+/// <para>Carried over too, each best effort (a table that cannot be read
+/// costs only itself, never the salvage): <c>edge_meta</c>, which holds the
+/// node identity (a recover is the same machine and the same spool, so the
+/// same node in Cloud), and the <c>settled</c> correlations, so a repeat of
+/// an event settled before the fault is still a repeat within
+/// <c>SettledRetention</c>. A v1/v2 file keeps them as <c>Transferred</c>
+/// rows in <c>spool</c>; those become correlations, as the v2 → v3
+/// migration makes them.</para>
 /// </summary>
 internal static class SpoolSalvage
 {
-    internal readonly record struct Result(long Copied, long Unreadable);
+    /// <summary>
+    /// <paramref name="Copied"/> and <paramref name="Unreadable"/> count owned
+    /// events. The flags say which best-effort table could not be read.
+    /// </summary>
+    internal readonly record struct Result(long Copied, long Unreadable, bool MetaUnreadable, bool SettledUnreadable);
 
     /// <summary>
     /// Writes the salvage of <paramref name="faultedPath"/> to
@@ -63,7 +72,8 @@ internal static class SpoolSalvage
             attach.ExecuteNonQuery();
         }
 
-        RefuseNewerSchema(conn, faultedPath);
+        var version = SchemaVersion(conn);
+        RefuseNewerSchema(version, faultedPath);
 
         var columns = string.Join(", ", SharedColumns(conn).Select(c => "\"" + c + "\""));
         long copied = 0, unreadable = 0;
@@ -87,10 +97,27 @@ internal static class SpoolSalvage
 
         // A claim is a lease held by a process that is gone.
         Execute(conn, "UPDATE main.spool SET state = 'Accepted', claimed_until_utc = NULL WHERE state = 'Claimed';");
+
+        // One statement per table: a read that fails rolls the whole statement
+        // back, so a table is carried over whole or not at all.
+        var metaCopied = TryExecute(conn, "INSERT INTO main.edge_meta (k, v) SELECT k, v FROM faulted.edge_meta;");
+        var settledCopied = TryExecute(conn, version >= 3 ? CopySettledSql : CopyLegacyTransferredSql);
         ContinueIdSequence(conn);
 
-        return new Result(copied, unreadable);
+        return new Result(copied, unreadable, !metaCopied, !settledCopied);
     }
+
+    private const string CopySettledSql = """
+        INSERT OR IGNORE INTO main.settled (spool_id, queue_name, transfer_id, cloud_event_id, accepted_at_utc, transferred_utc)
+        SELECT spool_id, queue_name, transfer_id, cloud_event_id, accepted_at_utc, transferred_utc FROM faulted.settled;
+        """;
+
+    /// <summary>The v2 → v3 move (<c>MoveLegacyTransferredSql</c> in the spool), read from the faulted file.</summary>
+    private const string CopyLegacyTransferredSql = """
+        INSERT OR IGNORE INTO main.settled (spool_id, queue_name, transfer_id, cloud_event_id, accepted_at_utc, transferred_utc)
+        SELECT id, queue_name, transfer_id, cloud_event_id, accepted_at_utc, COALESCE(transferred_utc, accepted_at_utc)
+        FROM faulted.spool WHERE state = 'Transferred';
+        """;
 
     /// <summary>
     /// The salvage holds the spool's payloads, so it is owner-only from its
@@ -112,15 +139,19 @@ internal static class SpoolSalvage
         catch (UnauthorizedAccessException) { }
     }
 
+    private static long SchemaVersion(SqliteConnection conn)
+    {
+        using var read = conn.CreateCommand();
+        read.CommandText = "PRAGMA faulted.user_version;";
+        return (long)read.ExecuteScalar()!;
+    }
+
     /// <summary>
     /// A newer schema may hold columns this binary does not know, and the copy
     /// by name would drop them without a word. The newer CLI recovers it.
     /// </summary>
-    private static void RefuseNewerSchema(SqliteConnection conn, string faultedPath)
+    private static void RefuseNewerSchema(long version, string faultedPath)
     {
-        using var read = conn.CreateCommand();
-        read.CommandText = "PRAGMA faulted.user_version;";
-        var version = (long)read.ExecuteScalar()!;
         if (version > SqliteEventSpool.CurrentSchemaVersion)
         {
             throw new Client.QueueyConfigurationException(
@@ -159,26 +190,38 @@ internal static class SpoolSalvage
 
     /// <summary>
     /// AUTOINCREMENT never hands out an id twice; this carries that over from
-    /// the faulted file. Without it the next accept would reuse the id of an
-    /// event that settled before the fault, and the file kept for support
-    /// would name a different event by the same id. Best effort: an
-    /// unreadable <c>sqlite_sequence</c> costs only this, never the salvage.
+    /// the faulted file. Without it the next accept could reuse the id of an
+    /// event that settled before the fault: the file kept for support would
+    /// name a different event by the same id, and settling the new event would
+    /// replace the old one's correlation in <c>settled</c> (keyed on
+    /// <c>spool_id</c>), so a repeat of the old one would no longer be caught.
+    /// The carried <c>settled</c> rows are read from the new file, so they
+    /// always count; the faulted <c>sqlite_sequence</c> is best effort.
     /// </summary>
     private static void ContinueIdSequence(SqliteConnection conn)
     {
+        Execute(conn, RaiseIdSequenceSql("SELECT MAX(spool_id) FROM main.settled"));
+        TryExecute(conn, RaiseIdSequenceSql("SELECT MAX(seq) FROM faulted.sqlite_sequence WHERE name = 'spool'"));
+    }
+
+    private static string RaiseIdSequenceSql(string highestId) => $"""
+        UPDATE main.sqlite_sequence SET seq = MAX(seq, COALESCE(({highestId}), 0)) WHERE name = 'spool';
+        INSERT INTO main.sqlite_sequence (name, seq)
+        SELECT 'spool', high.id FROM (SELECT ({highestId}) AS id) AS high
+        WHERE high.id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM main.sqlite_sequence WHERE name = 'spool');
+        """;
+
+    private static bool TryExecute(SqliteConnection conn, string sql)
+    {
         try
         {
-            Execute(conn, """
-                UPDATE main.sqlite_sequence
-                SET seq = MAX(seq, COALESCE((SELECT MAX(seq) FROM faulted.sqlite_sequence WHERE name = 'spool'), 0))
-                WHERE name = 'spool';
-                INSERT INTO main.sqlite_sequence (name, seq)
-                SELECT 'spool', seq FROM faulted.sqlite_sequence
-                WHERE name = 'spool' AND NOT EXISTS (SELECT 1 FROM main.sqlite_sequence WHERE name = 'spool')
-                ORDER BY seq DESC LIMIT 1;
-                """);
+            Execute(conn, sql);
+            return true;
         }
-        catch (SqliteException) { }
+        catch (SqliteException)
+        {
+            return false;
+        }
     }
 
     private static void Execute(SqliteConnection conn, string sql)

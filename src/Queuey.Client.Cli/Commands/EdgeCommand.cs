@@ -91,7 +91,7 @@ internal static class EdgeCommand
             "retry" => await RetryAsync(spoolPath!, map),
             "discard" => await DiscardAsync(spoolPath!, map),
             "recover" => Recover(spoolPath!),
-            "reset" => Reset(spoolPath!, map.Has("accept-data-loss")),
+            "reset" => await ResetAsync(spoolPath!, map.Has("accept-data-loss")),
             _ => UnknownSub(sub, optionArgs),
         };
     }
@@ -634,11 +634,16 @@ internal static class EdgeCommand
         File.Move(salvagePath, spoolPath);
 
         Console.WriteLine($"Salvaged {salvage.Copied} event(s) into a fresh spool; {salvage.Unreadable} unreadable.");
+        // Neither is an event lost, so neither changes the exit code; both change what Cloud sees.
+        if (salvage.MetaUnreadable)
+            Console.WriteLine("The node identity could not be read: health reporting mints a new one, and Queuey Cloud sees a new node.");
+        if (salvage.SettledUnreadable)
+            Console.WriteLine("The settled events could not be read: a repeat of one is accepted again (Queuey Cloud deduplicates it on its transfer id).");
         Console.WriteLine($"The faulted file is preserved at '{faultedPath}' for support.");
         return salvage.Unreadable == 0 ? ExitCodes.Success : ExitCodes.RuntimeError;
     }
 
-    private static int Reset(string spoolPath, bool acknowledged)
+    private static async Task<int> ResetAsync(string spoolPath, bool acknowledged)
     {
         if (!acknowledged)
         {
@@ -656,6 +661,10 @@ internal static class EdgeCommand
             return ExitCodes.RuntimeError;
         }
 
+        // Read before the file moves: its WAL may hold the newest write, and
+        // SQLite finds a WAL only beside the file it belongs to.
+        var node = ReadNodeId(spoolPath);
+
         SqliteConnection.ClearAllPools();
         var faultedPath = spoolPath + ".faulted-" + DateTime.UtcNow.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
         File.Move(spoolPath, faultedPath);
@@ -663,8 +672,68 @@ internal static class EdgeCommand
             if (File.Exists(sidecar)) File.Move(sidecar, faultedPath + Path.GetExtension(sidecar));
 
         Console.WriteLine($"Spool reset. The old file (and any events in it) is preserved at '{faultedPath}'.");
-        Console.WriteLine("A fresh spool will be created on the next publish. Data loss acknowledged by --accept-data-loss.");
+        Console.WriteLine(await KeepNodeIdAsync(spoolPath, node));
+        Console.WriteLine("Data loss acknowledged by --accept-data-loss.");
         return ExitCodes.Success;
+    }
+
+    /// <summary>
+    /// The node id in a spool file that may be faulted. <c>Readable</c> is
+    /// false when the file would not give it up; a readable file without one
+    /// (health reporting never ran) gives <c>(true, null)</c>.
+    /// </summary>
+    private static (bool Readable, string? NodeId) ReadNodeId(string spoolPath)
+    {
+        try
+        {
+            // Not ReadOnly: a read-only connection leaves the -wal/-shm it opened
+            // behind, and they would travel with the preserved file. As the last
+            // connection, this one folds the WAL in and removes them, as
+            // recover's does.
+            using var conn = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = spoolPath,
+                Mode = SqliteOpenMode.ReadWrite,
+                Pooling = false
+            }.ToString());
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT v FROM edge_meta WHERE k = @k;";
+            cmd.Parameters.AddWithValue("@k", EdgeMetaKeys.NodeId);
+            return (true, cmd.ExecuteScalar() as string);
+        }
+        catch (SqliteException)
+        {
+            return (false, null);
+        }
+    }
+
+    /// <summary>
+    /// Reset starts the events over, not the machine: the node keeps its id,
+    /// so Queuey Cloud sees the same node. Only the id moves to the fresh
+    /// spool, never <c>settled</c>. Best effort: an id that cannot be read or
+    /// written means a new node, never a failed reset.
+    /// </summary>
+    private static async Task<string> KeepNodeIdAsync(string spoolPath, (bool Readable, string? NodeId) node)
+    {
+        const string nextPublish = "A fresh spool will be created on the next publish.";
+        const string newNode = "health reporting mints a new one, and Queuey Cloud sees a new node.";
+
+        if (!node.Readable)
+            return $"The node id could not be read from the old file: {newNode} {nextPublish}";
+        if (node.NodeId is not { } nodeId)
+            return nextPublish;
+
+        try
+        {
+            await OpenSpool(spoolPath).SetMetaAsync(EdgeMetaKeys.NodeId, nodeId, CancellationToken.None);
+            SqliteConnection.ClearAllPools();
+            return $"The fresh spool keeps node id {nodeId}: this is still the same node in Queuey Cloud.";
+        }
+        catch (Exception ex) when (ex is SqliteException or IOException or UnauthorizedAccessException or Queuey.Client.QueueyException)
+        {
+            return $"The node id {nodeId} could not be written to a fresh spool ({ex.Message}): {newNode}";
+        }
     }
 
     // ── plumbing ────────────────────────────────────────────────────────

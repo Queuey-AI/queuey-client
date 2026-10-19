@@ -117,6 +117,41 @@ public class EdgeCommandTests : IDisposable
     }
 
     [Fact]
+    public async Task Reset_keeps_the_node_identity_and_nothing_else()
+    {
+        // Reset starts the events over, not the machine: Cloud must still see the same node.
+        const string nodeId = "0199fc2e-7a41-7c3d-9b1e-4f2a6d8c0e11";
+        await _spool.SetMetaAsync(EdgeMetaKeys.NodeId, nodeId, CancellationToken.None);
+        var done = await _spool.EnqueueAsync(Envelope("done"), CancellationToken.None);
+        await _spool.ClaimReadyAsync(10, TimeSpan.FromMinutes(1), CancellationToken.None);
+        await _spool.SettleAsync(done.SpoolId, new CloudAck("evt_done", false, DateTimeOffset.UtcNow), CancellationToken.None);
+        await Seed(pending: 1, quarantined: 0);
+
+        var (exit, output) = await Run("reset", "--spool", _spoolPath, "--accept-data-loss");
+
+        Assert.Equal(ExitCodes.Success, exit);
+        Assert.Contains($"keeps node id {nodeId}", output);
+        var fresh = new SqliteEventSpool(new EdgeStorageOptions { Path = _spoolPath }, new Clock());
+        Assert.Equal(nodeId, await fresh.GetMetaAsync(EdgeMetaKeys.NodeId, CancellationToken.None));
+        Assert.Equal(0, (await fresh.GetStatsAsync(CancellationToken.None)).PendingCount);
+        Assert.False((await fresh.EnqueueAsync(Envelope("done"), CancellationToken.None)).AlreadyAccepted);
+    }
+
+    [Fact]
+    public async Task Reset_of_an_unreadable_spool_still_resets_and_says_the_node_is_new()
+    {
+        Directory.CreateDirectory(_dir);
+        await File.WriteAllBytesAsync(_spoolPath, Enumerable.Repeat((byte)0xFF, 4096).ToArray());
+
+        var (exit, output) = await Run("reset", "--spool", _spoolPath, "--accept-data-loss");
+
+        Assert.Equal(ExitCodes.Success, exit);
+        Assert.Contains("node id could not be read", output);
+        Assert.False(File.Exists(_spoolPath));
+        Assert.Single(Directory.GetFiles(_dir, "spool.db.faulted-*"));
+    }
+
+    [Fact]
     public async Task Publish_durably_enqueues_with_full_envelope()
     {
         var (exit, output) = await Run("publish", "sensor-readings",
@@ -251,6 +286,25 @@ public class EdgeCommandTests : IDisposable
     }
 
     [Fact]
+    public async Task Recover_never_reuses_a_settled_events_id_even_when_the_id_sequence_is_unreadable()
+    {
+        // A new event on a settled one's id would, once settled, replace that one's correlation in settled.
+        await _spool.EnqueueAsync(Envelope("kept"), CancellationToken.None);
+        var done = await _spool.EnqueueAsync(Envelope("done", groupKey: "other-lane"), CancellationToken.None);
+        await _spool.ClaimReadyAsync(10, TimeSpan.FromMinutes(5), CancellationToken.None);
+        await _spool.SettleAsync(done.SpoolId, new CloudAck("evt_done", false, DateTimeOffset.UtcNow), CancellationToken.None);
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        CorruptTable("sqlite_sequence");
+
+        var (exit, _) = await Run("recover", "--spool", _spoolPath);
+        Assert.Equal(ExitCodes.Success, exit);
+
+        var recovered = new SqliteEventSpool(new EdgeStorageOptions { Path = _spoolPath }, new Clock());
+        var fresh = await recovered.EnqueueAsync(Envelope("after-recover"), CancellationToken.None);
+        Assert.True(fresh.SpoolId > done.SpoolId, $"new id {fresh.SpoolId} reuses one at or below {done.SpoolId}");
+    }
+
+    [Fact]
     public async Task Recover_of_a_spool_that_began_as_v1_keeps_every_column_in_place()
     {
         // v1 → v2 added payload_enc with ALTER TABLE, so on such a file it is the LAST column, where a fresh spool has
@@ -273,6 +327,80 @@ public class EdgeCommandTests : IDisposable
         Assert.Null(claimed[0].Envelope.GroupKey);
         Assert.Equal("device-7", claimed[1].Envelope.GroupKey);
         Assert.Equal(new DateTimeOffset(2026, 10, 19, 8, 0, 1, TimeSpan.Zero), claimed[1].Envelope.OccurredAtUtc);
+    }
+
+    [Fact]
+    public async Task Recover_keeps_the_node_identity()
+    {
+        // Same machine, same spool: a new id would make Cloud see a new node and send the old one Silent.
+        const string nodeId = "0199fc2e-7a41-7c3d-9b1e-4f2a6d8c0e11";
+        await _spool.SetMetaAsync(EdgeMetaKeys.NodeId, nodeId, CancellationToken.None);
+        await Seed(pending: 1, quarantined: 0);
+
+        var (exit, _) = await Run("recover", "--spool", _spoolPath);
+        Assert.Equal(ExitCodes.Success, exit);
+
+        var recovered = new SqliteEventSpool(new EdgeStorageOptions { Path = _spoolPath }, new Clock());
+        Assert.Equal(nodeId, await recovered.GetMetaAsync(EdgeMetaKeys.NodeId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_repeat_of_an_event_settled_before_the_fault_is_still_a_repeat_after_recover()
+    {
+        var done = await _spool.EnqueueAsync(Envelope("done"), CancellationToken.None);
+        await _spool.ClaimReadyAsync(10, TimeSpan.FromMinutes(1), CancellationToken.None);
+        var settledAt = new DateTimeOffset(2026, 10, 19, 8, 30, 0, TimeSpan.Zero);
+        await _spool.SettleAsync(done.SpoolId, new CloudAck("evt_done", false, settledAt), CancellationToken.None);
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+
+        var (exit, _) = await Run("recover", "--spool", _spoolPath);
+        Assert.Equal(ExitCodes.Success, exit);
+
+        var recovered = new SqliteEventSpool(new EdgeStorageOptions { Path = _spoolPath }, new Clock());
+        var repeat = await recovered.EnqueueAsync(Envelope("done"), CancellationToken.None);
+        Assert.True(repeat.AlreadyAccepted);
+        Assert.Equal(done.SpoolId, repeat.SpoolId);
+        Assert.Equal(settledAt, (await recovered.GetStatsAsync(CancellationToken.None)).LastSettledAtUtc);
+    }
+
+    [Fact]
+    public async Task Recover_of_a_v2_spool_keeps_its_transferred_events_as_repeats()
+    {
+        // v2 kept a settled event in spool itself, as 'Transferred'; the salvage makes it a settled correlation.
+        Queuey.Edge.Tests.TestSupport.V2SpoolFile.Create(_spoolPath,
+            new("done", "Transferred", "2026-10-19T08:00:00.0000000Z", "2026-10-19T08:00:05.0000000Z", "evt_done"),
+            new("pending", "Accepted", "2026-10-19T09:00:00.0000000Z"));
+
+        var (exit, output) = await Run("recover", "--spool", _spoolPath);
+        Assert.Equal(ExitCodes.Success, exit);
+        Assert.Contains("Salvaged 1 event(s)", output);
+
+        var recovered = new SqliteEventSpool(new EdgeStorageOptions { Path = _spoolPath }, new Clock());
+        Assert.True((await recovered.EnqueueAsync(Envelope("done"), CancellationToken.None)).AlreadyAccepted);
+        Assert.False((await recovered.EnqueueAsync(Envelope("new"), CancellationToken.None)).AlreadyAccepted);
+    }
+
+    [Fact]
+    public async Task An_unreadable_node_identity_or_settled_record_does_not_stop_the_salvage()
+    {
+        await _spool.SetMetaAsync(EdgeMetaKeys.NodeId, "0199fc2e-7a41-7c3d-9b1e-4f2a6d8c0e11", CancellationToken.None);
+        var done = await _spool.EnqueueAsync(Envelope("done"), CancellationToken.None);
+        await _spool.ClaimReadyAsync(10, TimeSpan.FromMinutes(1), CancellationToken.None);
+        await _spool.SettleAsync(done.SpoolId, new CloudAck("evt_done", false, DateTimeOffset.UtcNow), CancellationToken.None);
+        await _spool.EnqueueAsync(Envelope("pending"), CancellationToken.None);
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        CorruptTable("edge_meta");
+        CorruptTable("settled");
+
+        var (exit, output) = await Run("recover", "--spool", _spoolPath);
+
+        Assert.Equal(ExitCodes.Success, exit);
+        Assert.Contains("Salvaged 1 event(s)", output);
+        Assert.Contains("node identity could not be read", output);
+        Assert.Contains("settled events could not be read", output);
+        var recovered = new SqliteEventSpool(new EdgeStorageOptions { Path = _spoolPath }, new Clock());
+        Assert.Null(await recovered.GetMetaAsync(EdgeMetaKeys.NodeId, CancellationToken.None));
+        Assert.False((await recovered.EnqueueAsync(Envelope("after-recover"), CancellationToken.None)).AlreadyAccepted);
     }
 
     [Fact]
@@ -308,6 +436,30 @@ public class EdgeCommandTests : IDisposable
     }
 
     // ── plumbing ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Overwrites the root page of <paramref name="table"/>, so reading that table fails as SQLITE_CORRUPT while the
+    /// rest of the file stays readable.
+    /// </summary>
+    private void CorruptTable(string table)
+    {
+        long rootPage, pageSize;
+        using (var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_spoolPath};Pooling=False"))
+        {
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+            cmd.ExecuteNonQuery();
+            cmd.CommandText = "PRAGMA page_size;";
+            pageSize = (long)cmd.ExecuteScalar()!;
+            cmd.CommandText = "SELECT rootpage FROM sqlite_master WHERE type = 'table' AND name = @table;";
+            cmd.Parameters.AddWithValue("@table", table);
+            rootPage = (long)cmd.ExecuteScalar()!;
+        }
+        using var file = new FileStream(_spoolPath, FileMode.Open, FileAccess.Write);
+        file.Position = (rootPage - 1) * pageSize;
+        file.Write(Enumerable.Repeat((byte)0xFF, (int)pageSize).ToArray());
+    }
 
     private static async Task<List<long>> SettleEverythingReady(SqliteEventSpool spool)
     {
