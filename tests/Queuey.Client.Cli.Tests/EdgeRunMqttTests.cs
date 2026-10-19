@@ -4,7 +4,7 @@ namespace Queuey.Client.Cli.Tests;
 
 /// <summary>
 /// `queuey edge run --mqtt …`: et ugyldig valg for retained-kopier stopper daemonen ved oppstart, der operatøren ser,
-/// i stedet for å gjette en modus (AREYTECH-avklaringen 2026-10-16).
+/// i stedet for å gjette en modus (2026-10-16).
 /// </summary>
 [Collection(ConsoleCollection.Name)]
 public sealed class EdgeRunMqttTests : IDisposable

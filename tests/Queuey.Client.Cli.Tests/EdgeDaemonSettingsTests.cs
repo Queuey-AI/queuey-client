@@ -3,7 +3,7 @@ using Queuey.Client.Cli;
 namespace Queuey.Client.Cli.Tests;
 
 /// <summary>
-/// `queuey edge run` og `edge publish` med innstillingene en test eller en liten gateway trenger (AREYTECH 2026-10-19):
+/// `queuey edge run` og `edge publish` med innstillingene en test eller en liten gateway trenger (2026-10-19):
 /// spool-grensen, som begge må lese fordi de skriver samme spool, taket på backoff, og feltet MQTT-dedup leser
 /// produsentens id fra. En ugyldig verdi stopper kommandoen før daemonen starter, der operatøren ser.
 /// </summary>
