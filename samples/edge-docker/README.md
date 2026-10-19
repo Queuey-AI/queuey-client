@@ -141,20 +141,6 @@ docker compose restart mosquitto                                                
   `docker compose exec edge queuey edge kick --spool /var/lib/queuey/spool.db`
   starts the drain at once.
 
-## Backpressure
-
-`docker-compose.backpressure.yml` gives Edge a 1 MB spool, which fills
-within a few minutes of an outage. Edge then stops taking messages, steps
-back from the broker, and lets the broker hold the overflow until it has room:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.backpressure.yml up -d
-```
-
-Use 0.1.0-preview.13 or later for this. Before it, a transferred event with a
-small payload kept its spool space for 24 hours, so a full spool of small
-events stayed full after the backlog had gone.
-
 ## Limits worth knowing
 
 - There is no official container image yet; this Dockerfile is the sample.

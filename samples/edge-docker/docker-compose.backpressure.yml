@@ -1,9 +1,0 @@
-# A 1 MB spool, which the default scenario fills within a few minutes of an
-# outage. Edge's store fills, the MQTT intake steps back from the broker, and
-# the broker holds the overflow until Edge has room again.
-#
-#   docker compose -f docker-compose.yml -f docker-compose.backpressure.yml up -d
-services:
-  edge:
-    environment:
-      QUEUEY_SPOOL_MAX_MB: "1"
