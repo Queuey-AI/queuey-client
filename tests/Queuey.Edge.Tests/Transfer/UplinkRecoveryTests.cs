@@ -50,7 +50,7 @@ public class UplinkRecoveryTests
         var seededAt = fx.Clock.UtcNow;
 
         await fx.ProbeThroughAnOutageAsync();
-        await fx.UntilAsync(() => Task.FromResult(fx.Row("transient").State == "Transferred"));
+        await fx.UntilAsync(() => Task.FromResult(fx.IsSettled("transient")));
 
         // At forbindelsen er tilbake, løser ikke Retry-After, auth, pause eller klokke.
         Assert.Equal(seededAt + TimeSpan.FromMinutes(2), fx.Row("throttled").NextAttemptUtc);
@@ -90,7 +90,7 @@ public class UplinkRecoveryTests
         await fx.EnqueueAsync("probe");
 
         await fx.StartAsync();
-        await fx.UntilAsync(() => Task.FromResult(fx.Row("probe").State == "Transferred"));
+        await fx.UntilAsync(() => Task.FromResult(fx.IsSettled("probe")));
         await Task.Delay(200); // flere runder med stående klokke
 
         Assert.Equal(["probe"], fx.Channel.Sends.Select(s => s.TransferId).ToArray());
@@ -114,7 +114,7 @@ public class UplinkRecoveryTests
         await fx.EnqueueAsync("good-2", groupKey: "good");
 
         await fx.StartAsync();
-        await fx.UntilAsync(() => Task.FromResult(fx.Row("good-2").State == "Transferred"));
+        await fx.UntilAsync(() => Task.FromResult(fx.IsSettled("good-2")));
         await Task.Delay(200); // flere runder med stående klokke
 
         Assert.Single(fx.Channel.Sends, s => s.TransferId == "bad");
@@ -225,6 +225,17 @@ public class UplinkRecoveryTests
                 await Task.Delay(5);
             }
             Assert.Fail("condition not reached within 10s");
+        }
+
+        /// <summary>Settlede events har forlatt <c>spool</c>; bare korreleringen i <c>settled</c> står igjen.</summary>
+        public bool IsSettled(string transferId)
+        {
+            using var conn = new SqliteConnection($"Data Source={Spool.Options.Path};Pooling=False");
+            conn.Open();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM settled WHERE transfer_id = @t;";
+            cmd.Parameters.AddWithValue("@t", transferId);
+            return (long)cmd.ExecuteScalar()! == 1;
         }
 
         public SpoolRow Row(string transferId)

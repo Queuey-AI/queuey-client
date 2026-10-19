@@ -51,8 +51,9 @@ joins `Queuey.Client.sln` — adding it there is part of the change, not a follo
   rejected.
 - **The spool never drops an event.** A payload Edge cannot decrypt is quarantined
   (`PayloadUnreadable`) — never sent, never deleted — and its lane keeps draining.
-  Settling blanks the payload while the row stays for correlation until
-  `SettledRetention` removes it.
+  Settling deletes the spool row, payload and all, and keeps a payload-free
+  correlation in `settled` until `SettledRetention` removes it. Blanking the
+  payload in place does not free a small payload's space; deleting the row does.
 - **`netstandard2.0` is a contract with .NET Framework consumers.** No net8-only
   API in the core or Waas libraries without a `#if`.
 

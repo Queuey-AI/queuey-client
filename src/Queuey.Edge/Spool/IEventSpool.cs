@@ -14,7 +14,8 @@ namespace Queuey.Edge;
 /// to the destination is Cloud's lifecycle, and Edge's terminates at
 /// Transferred):
 /// <code>
-///  Accepted → Claimed → (send) → Transferred → swept after SettledRetention
+///  Accepted → Claimed → (send) → Transferred (row leaves the spool; a
+///                                 payload-free correlation stays, swept after SettledRetention)
 ///     ▲          │               RetryScheduled → Claimed
 ///     └── lease expiry           Quarantined → explicit retry | discard
 /// </code>
@@ -62,11 +63,12 @@ public interface IEventSpool
 
     /// <summary>
     /// Records Cloud custody (fresh or replayed — both are success) and
-    /// releases Edge's ownership. The payload is blanked at once (Cloud
-    /// holds it now; the freed space is what lets a full spool accept
-    /// again); the row becomes Transferred and is swept after
-    /// <c>SettledRetention</c>, with the ack's cloud event id kept on it
-    /// until then purely for correlation/support.
+    /// releases Edge's ownership. The event leaves the spool at once, payload
+    /// and all (Cloud holds it now; the freed space is what lets a full spool
+    /// accept again, whatever the payload's size). Only its correlation —
+    /// queue, transfer id, the ack's cloud event id, accept and transfer
+    /// times — stays until <c>SettledRetention</c>, so a repeat accept is
+    /// still recognised and support can still correlate.
     /// </summary>
     Task SettleAsync(long spoolId, CloudAck ack, CancellationToken cancellationToken);
 
@@ -92,8 +94,8 @@ public interface IEventSpool
     Task<SpoolStats> GetStatsAsync(CancellationToken cancellationToken);
 
     /// <summary>
-    /// Housekeeping: expire stale leases back to ready, delete Transferred
-    /// rows past <c>SettledRetention</c>, hand freed pages back to the OS.
+    /// Housekeeping: expire stale leases back to ready, delete settled
+    /// correlations past <c>SettledRetention</c>, hand freed pages back to the OS.
     /// Returns rows touched. The ONLY deletion here is settled cleanup —
     /// accepted-but-untransferred events are never deleted by any sweep
     /// (rev 4 F4).

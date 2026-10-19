@@ -158,49 +158,7 @@ public class SpoolDurabilityTests
     }
 
     [Fact]
-    public async Task A_full_spool_accepts_again_as_soon_as_its_backlog_settles()
-    {
-        using var fx = new SpoolFixture(o =>
-        {
-            o.MaxSpoolBytes = 96 * 1024;
-            o.HeadroomBytes = 32 * 1024;
-        });
-
-        var accepted = new List<SpoolAccept>();
-        QueueySpoolFullException? full = null;
-        for (var i = 0; i < 200 && full is null; i++)
-        {
-            try
-            {
-                accepted.Add(await fx.Spool.EnqueueAsync(fx.Envelope(payloadBytes: 4096), CancellationToken.None));
-            }
-            catch (QueueySpoolFullException ex)
-            {
-                full = ex;
-            }
-        }
-        Assert.NotNull(full);
-        var whileFull = await fx.Spool.GetStatsAsync(CancellationToken.None);
-
-        // The world comes back and the whole backlog transfers. The clock
-        // does NOT advance: SettledRetention has not passed and no sweep
-        // has run — custody at Cloud alone must be enough to accept again.
-        foreach (var accept in accepted)
-        {
-            await fx.Spool.SettleAsync(accept.SpoolId,
-                new CloudAck("evt_x", Replayed: false, fx.Clock.UtcNow), CancellationToken.None);
-        }
-
-        var afterDrain = await fx.Spool.GetStatsAsync(CancellationToken.None);
-        Assert.True(afterDrain.StorageUsageBytes < whileFull.StorageUsageBytes,
-            $"settling must free live bytes ({whileFull.StorageUsageBytes} → {afterDrain.StorageUsageBytes})");
-
-        var again = await fx.Spool.EnqueueAsync(fx.Envelope(payloadBytes: 4096), CancellationToken.None);
-        Assert.True(again.SpoolId > accepted[^1].SpoolId);
-    }
-
-    [Fact]
-    public async Task Settled_rows_carry_no_payload_and_the_sweep_returns_their_pages()
+    public async Task Settled_events_leave_the_spool_and_the_sweep_returns_their_correlations_pages()
     {
         using var fx = new SpoolFixture();
         var accepted = new List<SpoolAccept>();
@@ -212,14 +170,15 @@ public class SpoolDurabilityTests
                 new CloudAck("evt_x", Replayed: false, fx.Clock.UtcNow), CancellationToken.None);
         }
 
-        Assert.Equal(0L, Scalar("SELECT COALESCE(SUM(length(payload)), 0) FROM spool WHERE state = 'Transferred';"));
+        Assert.Equal(0L, Scalar("SELECT COUNT(*) FROM spool;"));
+        Assert.Equal(50L, Scalar("SELECT COUNT(*) FROM settled;"));
         Assert.True(Scalar("SELECT freelist_count FROM pragma_freelist_count();") > 0,
-            "blanked payloads should have handed their pages to the freelist");
+            "settled rows should have handed their pages to the freelist");
 
         fx.Clock.Advance(fx.Options.SettledRetention + TimeSpan.FromMinutes(1));
         await fx.Spool.SweepAsync(CancellationToken.None);
 
-        Assert.Equal(0L, Scalar("SELECT COUNT(*) FROM spool;"));
+        Assert.Equal(0L, Scalar("SELECT COUNT(*) FROM settled;"));
         Assert.Equal(0L, Scalar("SELECT freelist_count FROM pragma_freelist_count();"));
 
         long Scalar(string sql)

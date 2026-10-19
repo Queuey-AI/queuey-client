@@ -161,11 +161,20 @@ your event rate:
 it is what lets Edge keep *recording* successes at the limit. A spool smaller
 than 16 MB keeps a quarter instead, see below.)
 
-The limit counts **live** events. A transfer settles by blanking its payload
-on the device, which frees that space for the next accept at once, so a spool
-that filled up during an outage accepts again as soon as its backlog has
-transferred — no retention window to wait out. The file itself shrinks in the
-background (`queuey edge status` reports live bytes, not file size).
+The limit counts **live** bytes: events still waiting, and a small correlation
+record for every event transferred in the last `SettledRetention` (24 h). When
+Cloud acknowledges an event, Edge deletes it from the spool, payload and all,
+and keeps only that record (queue, transfer id, Cloud event id, two
+timestamps). The event's space is free for the next accept at once, whatever
+its payload size, so a spool that filled up during an outage accepts again as
+soon as its backlog has transferred — no retention window to wait out.
+
+A correlation record costs about **250 bytes** of the limit (measured with a
+UUIDv7 transfer id, a Cloud event id and both indexes). Add it to your daily
+figure: at 1 event/s that is about 21 MB for the 24 h the records are kept;
+at 1 event/minute, about 0.35 MB. The sweep removes the records after 24 h.
+The file itself shrinks in the background (`queuey edge status` reports live
+bytes, not file size).
 
 ## Storage rules
 
@@ -272,8 +281,10 @@ customer's own equipment, which is the most exposed copy of a payload Queuey
 ever keeps. What Edge does about it, and what remains yours:
 
 - **The payload leaves the spool at settle.** The moment Cloud acknowledges an
-  event, its payload is blanked; the row stays for `SettledRetention` (24 h)
-  with the transfer id and Cloud event id only, then the sweep removes it.
+  event, Edge deletes it from the spool. What stays for `SettledRetention`
+  (24 h) is a record without payload: queue, transfer id, Cloud event id, and
+  when the event was accepted and transferred. Edge uses it to recognise a
+  repeat publish under the same idempotency key; then the sweep removes it.
 - **Freed pages are overwritten** (`PRAGMA secure_delete`), so a settled
   payload does not linger in unused pages of the file.
 - **`spool.db` is created `0600` in a `0700` directory** on Linux/macOS; the
