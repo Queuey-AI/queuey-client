@@ -36,22 +36,26 @@ public class EdgeHealthServiceTests
         Assert.Equal(fx.Spool.Clock.UtcNow, healthy.LastSuccessfulCloudContact);
     }
 
-    [Fact]
-    public async Task Storage_full_clears_the_moment_the_backlog_settles()
+    // 850 B er en vanlig IoT-melding og ligger inne i B-tre-løvsiden; 4096 B går til overflow-sider. Bare den siste
+    // frigjorde plass da settle tømte payloaden og lot raden stå (2026-10-19), så begge størrelsene må vises.
+    [Theory]
+    [InlineData(850)]
+    [InlineData(4096)]
+    public async Task Storage_full_clears_the_moment_the_backlog_settles(int payloadBytes)
     {
         using var fx = new HealthFixture(o =>
         {
-            o.MaxSpoolBytes = 96 * 1024;
+            o.MaxSpoolBytes = 160 * 1024;
             o.HeadroomBytes = 32 * 1024;
         });
 
         var accepted = new List<SpoolAccept>();
         QueueySpoolFullException? full = null;
-        for (var i = 0; i < 200 && full is null; i++)
+        for (var i = 0; i < 1000 && full is null; i++)
         {
             try
             {
-                accepted.Add(await fx.Spool.Spool.EnqueueAsync(fx.Spool.Envelope(payloadBytes: 4096), CancellationToken.None));
+                accepted.Add(await fx.Spool.Spool.EnqueueAsync(fx.Spool.Envelope(payloadBytes: payloadBytes), CancellationToken.None));
             }
             catch (QueueySpoolFullException ex)
             {
@@ -69,9 +73,11 @@ public class EdgeHealthServiceTests
         }
         fx.State.RecordSuccess(fx.Spool.Clock.UtcNow, replayed: false);
 
-        // No sweep, no retention window — Cloud custody alone clears the state.
+        // No sweep, no retention window — Cloud custody alone clears the state, and the spool takes events again.
         fx.InvalidateCache();
         Assert.Equal(EdgeState.Healthy, fx.Health.Snapshot().State);
+        var again = await fx.Spool.Spool.EnqueueAsync(fx.Spool.Envelope(payloadBytes: payloadBytes), CancellationToken.None);
+        Assert.False(again.AlreadyAccepted);
     }
 
     [Fact]

@@ -37,6 +37,41 @@ public class EdgeCommandTests : IDisposable
     }
 
     [Fact]
+    public async Task Status_reports_when_the_spool_last_settled()
+    {
+        var accept = await _spool.EnqueueAsync(Envelope("done"), CancellationToken.None);
+        await _spool.ClaimReadyAsync(10, TimeSpan.FromMinutes(1), CancellationToken.None);
+        var at = new DateTimeOffset(2026, 10, 19, 8, 30, 0, TimeSpan.Zero);
+        await _spool.SettleAsync(accept.SpoolId, new CloudAck("evt_done", false, at), CancellationToken.None);
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+
+        var (exit, output) = await Run("status", "--spool", _spoolPath, "--json");
+
+        Assert.Equal(ExitCodes.Success, exit);
+        Assert.Contains("\"pending\": 0", output);
+        Assert.Contains("\"lastSettledAtUtc\": \"2026-10-19T08:30:00+00:00\"", output);
+    }
+
+    [Fact]
+    public async Task Status_on_a_v2_spool_moves_its_transferred_rows_and_reports_the_last_settle()
+    {
+        Queuey.Edge.Tests.TestSupport.V2SpoolFile.Create(_spoolPath,
+            new("done-1", "Transferred", "2026-10-19T08:00:00.0000000Z", "2026-10-19T08:00:05.0000000Z", "evt_1"),
+            new("done-2", "Transferred", "2026-10-19T09:00:00.0000000Z", "2026-10-19T09:00:07.0000000Z", "evt_2"),
+            new("waiting", "Accepted", "2026-10-19T10:00:00.0000000Z"),
+            new("poison", "Quarantined", "2026-10-19T10:00:01.0000000Z", GroupKey: "q", LastReason: "PayloadTooLarge"));
+
+        var (exit, output) = await Run("status", "--spool", _spoolPath, "--json");
+
+        Assert.Equal(ExitCodes.Success, exit);
+        Assert.Contains("\"pending\": 1", output);
+        Assert.Contains("\"quarantined\": 1", output);
+        Assert.Contains("\"lastSettledAtUtc\": \"2026-10-19T09:00:07+00:00\"", output);
+        Assert.Contains("PayloadTooLarge", output);
+        Assert.Equal(2L, Queuey.Edge.Tests.TestSupport.V2SpoolFile.Scalar(_spoolPath, "SELECT COUNT(*) FROM settled;"));
+    }
+
+    [Fact]
     public async Task Retry_returns_a_quarantined_event_to_the_drain()
     {
         var quarantinedId = await Seed(pending: 0, quarantined: 1);

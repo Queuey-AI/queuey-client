@@ -22,6 +22,11 @@
     <ProjectReference Include="..\..\src\Queuey.Client.Cli\Queuey.Client.Cli.csproj" />
   </ItemGroup>
 
+  <!-- En v2-spool bygd med v2-DDL, for migreringen gjennom edge status. Én kopi, eid av Edge-testene. -->
+  <ItemGroup>
+    <Compile Include="..\Queuey.Edge.Tests\TestSupport\V2SpoolFile.cs" Link="TestSupport\V2SpoolFile.cs" />
+  </ItemGroup>
+
   <!-- Repoene advise leses mot (AdviseIntentTests): de bygges aldri, og koden deres hører ikke til testene. -->
   <ItemGroup>
     <Compile Remove="Fixtures/**" />

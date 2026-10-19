@@ -6,8 +6,8 @@ using Queuey.Edge.Tests.TestSupport;
 namespace Queuey.Edge.Tests.Spool;
 
 /// <summary>
-/// What the spool file holds, as the file holds it: a settled row keeps its
-/// identity and loses its payload; freed pages are overwritten; the file is
+/// What the spool file holds, as the file holds it: a settled event leaves
+/// the spool, payload and all, and only its correlation stays; freed pages are overwritten; the file is
 /// owner-only; an encrypted row is ciphertext on disk and plaintext to the
 /// transfer loop; a row this key cannot open is quarantined, and the lane
 /// moves on.
@@ -20,7 +20,7 @@ public class SpoolAtRestTests
     private static byte[] Key() => RandomNumberGenerator.GetBytes(SpoolPayloadProtection.KeyBytes);
 
     [Fact]
-    public async Task Settling_blanks_the_payload_but_keeps_the_row_for_correlation()
+    public async Task Settling_takes_the_payload_off_the_device_and_keeps_only_the_correlation()
     {
         using var fx = new SpoolFixture();
         var accepted = await fx.Spool.EnqueueAsync(fx.Envelope() with { Payload = Card }, CancellationToken.None);
@@ -28,9 +28,8 @@ public class SpoolAtRestTests
 
         await fx.Spool.SettleAsync(accepted.SpoolId, new CloudAck(CloudEventId: "evt_cloud_1", Replayed: false, AtUtc: fx.Clock.UtcNow), CancellationToken.None);
 
-        var row = fx.Spool.InspectRow(accepted.SpoolId);
-        Assert.Equal("Transferred", row.State);
-        Assert.Empty(row.Payload);
+        Assert.Throws<InvalidOperationException>(() => fx.Spool.InspectRow(accepted.SpoolId));
+        Assert.Equal(accepted.SpoolId, (await fx.Spool.EnqueueAsync(fx.Envelope(transferId: accepted.TransferId), CancellationToken.None)).SpoolId);
     }
 
     [Fact]

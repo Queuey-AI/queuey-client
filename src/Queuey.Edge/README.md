@@ -264,7 +264,10 @@ queuey edge reset   --spool <path> --accept-data-loss # start clean; the old fil
   Up to 4 MB of it is kept for bookkeeping, and a quarter of a spool smaller
   than 16 MB, so a 1 MB test spool takes 768 KB of events.
   A spool that hit the limit accepts again the moment its backlog has
-  transferred — the limit counts live events, not the file's size.
+  transferred: a transferred event leaves the spool at once, whatever its
+  size. The limit counts live bytes, not the file's size, and that includes a
+  record of about 250 bytes per event transferred in the last 24 hours (queue,
+  transfer id, Cloud event id; no payload).
 
 ## Semantics worth knowing
 

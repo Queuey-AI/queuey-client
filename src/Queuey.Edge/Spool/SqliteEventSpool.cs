@@ -24,26 +24,33 @@ namespace Queuey.Edge;
 /// the file is preserved untouched, and recovery is an explicit operator
 /// action. Queuey never silently starts a fresh spool.</para>
 ///
-/// <para>Deletion surface (rev 4 F4): settled cleanup after
-/// <c>SettledRetention</c>, explicit operator discard — nothing else. Age
-/// never deletes.</para>
+/// <para>Deletion surface (rev 4 F4): Cloud custody (settle moves the row
+/// out of <c>spool</c>), settled cleanup after <c>SettledRetention</c>,
+/// explicit operator discard — nothing else. Age never deletes.</para>
 ///
-/// <para>At rest (2026-08-29): the payload is blanked the moment a row is
-/// settled (the row stays for correlation), freed pages are overwritten
-/// (<c>secure_delete</c>), the file is owner-only on Unix, and payloads can
-/// be AES-GCM encrypted with a customer-held key (<see cref="SpoolPayloadProtection"/>).
-/// The device is the most exposed place a payload ever sits.</para>
+/// <para>At rest (2026-08-29): the payload leaves the file the moment a row
+/// is settled (only a payload-free correlation row in <c>settled</c> stays),
+/// freed pages are overwritten (<c>secure_delete</c>), the file is owner-only
+/// on Unix, and payloads can be AES-GCM encrypted with a customer-held key
+/// (<see cref="SpoolPayloadProtection"/>). The device is the most exposed
+/// place a payload ever sits.</para>
 ///
-/// <para>Capacity (2026-09-06): the limit is measured against LIVE pages
-/// (<c>page_count - freelist_count</c>), never the file size. SQLite hands
-/// freed pages to new rows before it grows the file, so a spool that hit
-/// <c>MaxSpoolBytes</c> accepts again the moment its backlog settles —
-/// settling blanks the payload, which is what frees the pages. Shrinking the
-/// file back is the sweep's background job and never gates an accept.</para>
+/// <para>Capacity (2026-09-06, 2026-10-19): the limit is measured against
+/// LIVE pages (<c>page_count - freelist_count</c>), never the file size.
+/// SQLite hands freed pages to new rows before it grows the file, so a spool
+/// that hit <c>MaxSpoolBytes</c> accepts again the moment its backlog
+/// settles. Settling DELETES the spool row (schema v3): blanking the payload
+/// in place, as v2 did, freed pages only for payloads big enough to live in
+/// overflow pages (over ~4 KB); a small payload sits inside its B-tree leaf,
+/// and the leaf stayed live until the sweep, so a full spool of IoT-sized
+/// events stayed full for up to 24 h after its backlog had transferred. The
+/// small <c>settled</c> rows for the last <c>SettledRetention</c> still
+/// count against the limit. Shrinking the file back is the sweep's
+/// background job and never gates an accept.</para>
 /// </summary>
 public sealed class SqliteEventSpool : IEventSpool
 {
-    private const int CurrentSchemaVersion = 2;
+    private const int CurrentSchemaVersion = 3;
     private const string DateFormat = "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'";
 
     private readonly EdgeStorageOptions _options;
@@ -83,6 +90,20 @@ public sealed class SqliteEventSpool : IEventSpool
 
                 var now = _clock.UtcNow;
                 using var tx = conn.BeginTransaction();
+
+                // Same (queue, transfer id) already accepted — the caller
+                // supplied their own idempotency key twice. One identity, one
+                // event: return the ORIGINAL accept, marked as such so an
+                // intake can count the repeat instead of a new event. The
+                // original may still be in the spool or already settled; both
+                // are looked up inside this write transaction (BEGIN
+                // IMMEDIATE), so a settle in between cannot slip past it.
+                if (FindExistingAccept(conn, tx, envelope) is { } existing)
+                {
+                    tx.Rollback();
+                    return existing;
+                }
+
                 using var insert = conn.CreateCommand();
                 insert.Transaction = tx;
                 insert.CommandText = """
@@ -111,20 +132,7 @@ public sealed class SqliteEventSpool : IEventSpool
                 insert.Parameters.AddWithValue("@mono", _clock.MonotonicMilliseconds);
                 insert.Parameters.AddWithValue("@now", Format(now));
 
-                long id;
-                try
-                {
-                    id = (long)insert.ExecuteScalar()!;
-                }
-                catch (SqliteException ex) when (ex.SqliteErrorCode == 19 /* SQLITE_CONSTRAINT */)
-                {
-                    // Same (queue, transfer id) already accepted — the caller
-                    // supplied their own idempotency key twice. One spool row,
-                    // one identity: return the ORIGINAL accept, marked as such
-                    // so an intake can count the repeat instead of a new event.
-                    tx.Rollback();
-                    return LookupExistingAccept(conn, envelope);
-                }
+                var id = (long)insert.ExecuteScalar()!;
 
                 // The commit is the durable boundary: under synchronous=FULL
                 // this returns only after fsync. PublishAsync's promise IS
@@ -148,8 +156,8 @@ public sealed class SqliteEventSpool : IEventSpool
             using var tx = conn.BeginTransaction();
 
             // The ready set: per lane, the HEAD (oldest row still owned by
-            // Edge — Accepted or Claimed; Quarantined and Transferred rows do
-            // not participate, which is exactly the step-aside rule). A lane
+            // Edge — Accepted or Claimed; Quarantined rows do not participate,
+            // which is exactly the step-aside rule). A lane
             // yields a claim only when its head is Accepted AND due: a head
             // in flight means the lane is busy (≤1 in-flight per lane = FIFO
             // at Cloud receive time), a head not yet due means the lane
@@ -238,21 +246,27 @@ public sealed class SqliteEventSpool : IEventSpool
     public Task SettleAsync(long spoolId, CloudAck ack, CancellationToken cancellationToken)
         => WriteLockedAsync<object?>(conn =>
         {
-            // Cloud holds custody now: the payload leaves the device at once
-            // (its pages return to the freelist, which is what lets a full
-            // spool accept again), while the row stays for correlation
-            // until SettledRetention sweeps it.
+            // Cloud holds custody now: the row leaves the spool at once, payload
+            // and all, and only its correlation goes to `settled` until
+            // SettledRetention sweeps it. Deleting the row is what frees its
+            // space: blanking a small payload in place (v2) freed nothing,
+            // because the row's B-tree leaf page stays live as long as the
+            // row does. Rows are accepted and settled roughly in id order, so
+            // whole leaves empty out and go to the freelist as the backlog
+            // drains. A second settle of the same id finds no row and is a
+            // no-op.
+            using var tx = conn.BeginTransaction();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = """
-                UPDATE spool
-                SET state = 'Transferred', claimed_until_utc = NULL, payload = X'',
-                    cloud_event_id = @cloudEventId, transferred_utc = @at
-                WHERE id = @id AND state <> 'Transferred';
+            cmd.Transaction = tx;
+            cmd.CommandText = $"""
+                {CorrelateSettledSql("id = @id", "@cloudEventId", "@at")}
+                DELETE FROM spool WHERE id = @id;
                 """;
             cmd.Parameters.AddWithValue("@cloudEventId", (object?)ack.CloudEventId ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@at", Format(ack.AtUtc));
             cmd.Parameters.AddWithValue("@id", spoolId);
             cmd.ExecuteNonQuery();
+            tx.Commit();
             return null;
         }, cancellationToken);
 
@@ -305,7 +319,7 @@ public sealed class SqliteEventSpool : IEventSpool
                     (SELECT MIN(accepted_at_utc) FROM spool WHERE state IN ('Accepted', 'Claimed')),
                     (SELECT (page_count - freelist_count) * page_size
                      FROM pragma_page_count(), pragma_freelist_count(), pragma_page_size()),
-                    (SELECT MAX(transferred_utc) FROM spool WHERE state = 'Transferred'),
+                    (SELECT MAX(transferred_utc) FROM settled),
                     (SELECT MIN(s.next_attempt_utc) FROM spool s
                      WHERE s.state = 'Accepted'
                        AND s.id = (SELECT MIN(h.id) FROM spool h
@@ -342,12 +356,13 @@ public sealed class SqliteEventSpool : IEventSpool
                 touched += expire.ExecuteNonQuery();
             }
 
-            // 2. Settled cleanup — the ONLY deletion in the sweep. Accepted
-            //    and Quarantined rows are never touched here, whatever their
-            //    age (rev 4 F4).
+            // 2. Settled cleanup — the ONLY deletion in the sweep, and it
+            //    reaches only payload-free correlation rows. Accepted and
+            //    Quarantined rows are never touched here, whatever their age
+            //    (rev 4 F4).
             using (var delete = conn.CreateCommand())
             {
-                delete.CommandText = "DELETE FROM spool WHERE state = 'Transferred' AND transferred_utc < @cutoff;";
+                delete.CommandText = "DELETE FROM settled WHERE transferred_utc < @cutoff;";
                 delete.Parameters.AddWithValue("@cutoff", Format(now - _options.SettledRetention));
                 touched += delete.ExecuteNonQuery();
             }
@@ -555,30 +570,37 @@ public sealed class SqliteEventSpool : IEventSpool
             version = (long)read.ExecuteScalar()!;
         }
 
-        switch (version)
+        if (version > CurrentSchemaVersion)
         {
-            case 0:
-                CreateSchema(conn);
-                break;
-            case 1:
-                MigrateV1ToV2(conn);
-                break;
-            case CurrentSchemaVersion:
-                break;
-            case > CurrentSchemaVersion:
-                // A DOWNGRADE. Refusing loudly beats a best-effort read of a
-                // schema this binary has never seen — silent best-effort is
-                // how spools get corrupted.
-                throw new Client.QueueyConfigurationException(
-                    $"The Edge spool at '{_options.Path}' was written by a NEWER Queuey.Edge " +
-                    $"(schema v{version}; this binary understands v{CurrentSchemaVersion}). " +
-                    "Downgrades are not supported: upgrade the package, or drain with the newer version first.");
-            default:
-                // Forward-only migrations land here as future versions ship.
-                break;
+            // A DOWNGRADE. Refusing loudly beats a best-effort read of a
+            // schema this binary has never seen — silent best-effort is how
+            // spools get corrupted.
+            throw new Client.QueueyConfigurationException(
+                $"The Edge spool at '{_options.Path}' was written by a NEWER Queuey.Edge " +
+                $"(schema v{version}; this binary understands v{CurrentSchemaVersion}). " +
+                "Downgrades are not supported: upgrade the package, or drain with the newer version first.");
+        }
+
+        // Forward-only, one step at a time, each step its own transaction:
+        // a crash between steps leaves a file at the earlier version, and
+        // the next open picks up from there.
+        var movedSettled = false;
+        if (version == 0)
+        {
+            CreateSchema(conn);
+        }
+        else
+        {
+            if (version < 2) MigrateV1ToV2(conn);
+            if (version < 3) movedSettled = MigrateV2ToV3(conn);
         }
 
         EnsureIncrementalVacuum(conn);
+
+        // The moved rows' pages are on the freelist now; hand them back to
+        // the OS at once rather than at the first sweep.
+        if (movedSettled)
+            ShrinkFile(conn);
     }
 
     /// <summary>
@@ -654,6 +676,8 @@ public sealed class SqliteEventSpool : IEventSpool
 
             CREATE TABLE IF NOT EXISTS edge_meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
 
+            {SettledTableDdl}
+
             PRAGMA user_version = {CurrentSchemaVersion};
             """;
         cmd.ExecuteNonQuery();
@@ -688,6 +712,71 @@ public sealed class SqliteEventSpool : IEventSpool
             bump.ExecuteNonQuery();
         }
         tx.Commit();
+    }
+
+    /// <summary>
+    /// The correlation a settled event leaves behind, and nothing else: no
+    /// payload, no envelope. It answers three questions until
+    /// <c>SettledRetention</c> has passed — "is this (queue, transfer id) a
+    /// repeat?" (<see cref="SpoolAccept.AlreadyAccepted"/>, with the original
+    /// spool id and accept time), "when did the spool last settle?"
+    /// (<see cref="SpoolStats.LastSettledAtUtc"/>), and "which Cloud event did
+    /// this become?" for support. <c>spool_id</c> is the row's id from
+    /// <c>spool</c> (AUTOINCREMENT there, so never reused by a later row).
+    /// </summary>
+    private const string SettledTableDdl = """
+        CREATE TABLE IF NOT EXISTS settled (
+            spool_id         INTEGER PRIMARY KEY,
+            queue_name       TEXT    NOT NULL,
+            transfer_id      TEXT    NOT NULL,
+            cloud_event_id   TEXT,
+            accepted_at_utc  TEXT    NOT NULL,
+            transferred_utc  TEXT    NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_settled_queue_transfer ON settled(queue_name, transfer_id);
+        CREATE INDEX IF NOT EXISTS ix_settled_transferred ON settled(transferred_utc);
+        """;
+
+    /// <summary>
+    /// Copies the correlation of the spool rows matching <paramref name="where"/>
+    /// into <c>settled</c>. OR REPLACE because settling must never fail on
+    /// bookkeeping (a spool that cannot record success re-sends forever): if
+    /// a correlation for the same identity is somehow already there, the newer
+    /// one wins and the identity stays covered.
+    /// </summary>
+    private static string CorrelateSettledSql(string where, string cloudEventId, string transferredUtc) => $"""
+        INSERT OR REPLACE INTO settled (spool_id, queue_name, transfer_id, cloud_event_id, accepted_at_utc, transferred_utc)
+        SELECT id, queue_name, transfer_id, {cloudEventId}, accepted_at_utc, {transferredUtc}
+        FROM spool WHERE {where};
+        """;
+
+    /// <summary>v2-style settled rows (blanked, left in <c>spool</c> as 'Transferred') move to <c>settled</c>.</summary>
+    private static readonly string MoveLegacyTransferredSql = $"""
+        {CorrelateSettledSql("state = 'Transferred'", "cloud_event_id", "COALESCE(transferred_utc, accepted_at_utc)")}
+        DELETE FROM spool WHERE state = 'Transferred';
+        """;
+
+    /// <summary>
+    /// v2 → v3: settled rows leave <c>spool</c> for the payload-free
+    /// <c>settled</c> table (see <see cref="SettleAsync"/> for why). One
+    /// transaction — table, move, delete and the version bump commit together
+    /// or not at all, so a crash mid-migration leaves a v2 file that the next
+    /// open migrates again. Pending and quarantined rows are not touched.
+    /// Returns whether any row moved.
+    /// </summary>
+    private static bool MigrateV2ToV3(SqliteConnection conn)
+    {
+        using var tx = conn.BeginTransaction();
+        using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = $"""
+            {SettledTableDdl}
+            {MoveLegacyTransferredSql}
+            PRAGMA user_version = 3;
+            """;
+        var moved = cmd.ExecuteNonQuery() > 0;
+        tx.Commit();
+        return moved;
     }
 
     private (byte[] Stored, long Scheme) ProtectForStorage(byte[] payload)
@@ -744,7 +833,7 @@ public sealed class SqliteEventSpool : IEventSpool
         return (long)cmd.ExecuteScalar()!;
     }
 
-    /// <summary>Test hook: the raw stored bytes + scheme + state of one row, as the file holds them.</summary>
+    /// <summary>Test hook: the raw stored bytes + scheme + state of one spool row (pending or quarantined), as the file holds them.</summary>
     internal (byte[] Payload, long Scheme, string State) InspectRow(long spoolId)
     {
         using var conn = Open();
@@ -801,15 +890,22 @@ public sealed class SqliteEventSpool : IEventSpool
         }
     }
 
-    private SpoolAccept LookupExistingAccept(SqliteConnection conn, EventEnvelope envelope)
+    private SpoolAccept? FindExistingAccept(SqliteConnection conn, SqliteTransaction tx, EventEnvelope envelope)
     {
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT id, accepted_at_utc FROM spool WHERE queue_name = @queue AND transfer_id = @transferId;";
+        cmd.Transaction = tx;
+        cmd.CommandText = """
+            SELECT id, accepted_at_utc FROM spool WHERE queue_name = @queue AND transfer_id = @transferId
+            UNION ALL
+            SELECT spool_id, accepted_at_utc FROM settled WHERE queue_name = @queue AND transfer_id = @transferId
+            LIMIT 1;
+            """;
         cmd.Parameters.AddWithValue("@queue", envelope.Queue);
         cmd.Parameters.AddWithValue("@transferId", envelope.TransferId);
         using var reader = cmd.ExecuteReader();
-        reader.Read();
-        return new SpoolAccept(reader.GetInt64(0), envelope.TransferId, Parse(reader.GetString(1)), AlreadyAccepted: true);
+        return reader.Read()
+            ? new SpoolAccept(reader.GetInt64(0), envelope.TransferId, Parse(reader.GetString(1)), AlreadyAccepted: true)
+            : null;
     }
 
     private static void AddOutcomeParameters(SqliteCommand cmd, TransferOutcome outcome)

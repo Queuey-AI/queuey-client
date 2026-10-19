@@ -235,7 +235,11 @@ public sealed class EdgeStorageOptions
     /// </summary>
     public TimeSpan SpoolAgeWarningThreshold { get; set; } = TimeSpan.FromHours(24);
 
-    /// <summary>How long settled (Transferred) rows are kept for correlation before the sweep removes them.</summary>
+    /// <summary>
+    /// How long a transferred event's correlation (queue, transfer id, Cloud event id, times; never the payload) is kept
+    /// before the sweep removes it. Within this window a repeat publish under the same idempotency key is recognised
+    /// locally. The correlation rows count against <see cref="MaxSpoolBytes"/>, at roughly 250 bytes per event.
+    /// </summary>
     public TimeSpan SettledRetention { get; set; } = TimeSpan.FromHours(24);
 
     /// <summary>v1 supports only <see cref="SpoolDurability.Durable"/>.</summary>
