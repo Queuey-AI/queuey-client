@@ -16,12 +16,14 @@ internal sealed class EdgeRuntimeState
 {
     private long _lastContactTicks;
     private volatile TransferFailure? _lastFailure;
-    private volatile bool _degraded;
+    // Int, ikke bool: overgangen fra degradert til frisk må kunne tas atomisk (Interlocked.Exchange),
+    // så bare én suksess gjenopptar de ventende lanene.
+    private int _degraded;
     private long _acceptedFresh;
     private long _acceptedReplayed;
     private readonly ConcurrentDictionary<(TransferClass Class, TransferReason Reason), long> _failures = new();
 
-    public bool Degraded => _degraded;
+    public bool Degraded => Volatile.Read(ref _degraded) == 1;
 
     public long AcceptedFreshCount => Interlocked.Read(ref _acceptedFresh);
 
@@ -67,18 +69,23 @@ internal sealed class EdgeRuntimeState
     /// <summary>The last transfer Cloud accepted, with its event id (blindtest 2, funn 13).</summary>
     public AcceptedTransfer? LastAcceptedTransfer => _lastAccepted;
 
-    public void RecordAccepted(AcceptedTransfer accepted)
+    /// <inheritdoc cref="RecordSuccess"/>
+    public bool RecordAccepted(AcceptedTransfer accepted)
     {
         _lastAccepted = accepted;
-        RecordSuccess(accepted.AtUtc, accepted.Replayed);
+        return RecordSuccess(accepted.AtUtc, accepted.Replayed);
     }
 
-    public void RecordSuccess(DateTimeOffset atUtc, bool replayed)
+    /// <summary>
+    /// Records Cloud contact and clears the degraded flag. Returns true for exactly one caller per failure period:
+    /// the success that ended it.
+    /// </summary>
+    public bool RecordSuccess(DateTimeOffset atUtc, bool replayed)
     {
         Interlocked.Exchange(ref _lastContactTicks, atUtc.UtcTicks);
         if (replayed) Interlocked.Increment(ref _acceptedReplayed);
         else Interlocked.Increment(ref _acceptedFresh);
-        _degraded = false;
+        return Interlocked.Exchange(ref _degraded, 0) == 1;
     }
 
     public void RecordFailure(TransferOutcome outcome)
@@ -90,6 +97,6 @@ internal sealed class EdgeRuntimeState
             outcome.Evidence?.AtUtc ?? DateTimeOffset.UtcNow,
             outcome.Evidence?.Snippet);
         _failures.AddOrUpdate((outcome.Class, outcome.Reason), 1, static (_, count) => count + 1);
-        _degraded = true;
+        Volatile.Write(ref _degraded, 1);
     }
 }

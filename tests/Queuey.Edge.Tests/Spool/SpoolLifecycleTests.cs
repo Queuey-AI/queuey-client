@@ -161,6 +161,48 @@ public class SpoolLifecycleTests
     }
 
     [Fact]
+    public async Task Resume_after_an_outage_makes_only_transient_waits_due_and_keeps_their_ladder()
+    {
+        using var fx = new SpoolFixture();
+        var now = fx.Clock.UtcNow;
+        var timeout = await fx.Spool.EnqueueAsync(fx.Envelope(groupKey: "timeout"), CancellationToken.None);
+        var unknown = await fx.Spool.EnqueueAsync(fx.Envelope(groupKey: "unknown"), CancellationToken.None);
+        var throttled = await fx.Spool.EnqueueAsync(fx.Envelope(groupKey: "throttled"), CancellationToken.None);
+        var auth = await fx.Spool.EnqueueAsync(fx.Envelope(groupKey: "auth"), CancellationToken.None);
+        var paused = await fx.Spool.EnqueueAsync(fx.Envelope(groupKey: "paused"), CancellationToken.None);
+        var skew = await fx.Spool.EnqueueAsync(fx.Envelope(groupKey: "skew"), CancellationToken.None);
+        var poisoned = await fx.Spool.EnqueueAsync(fx.Envelope(groupKey: "poisoned"), CancellationToken.None);
+        await fx.Spool.ClaimReadyAsync(10, Lease, CancellationToken.None);
+
+        async Task Wait(SpoolAccept row, TransferClass cls, TransferReason reason, TimeSpan wait, TimeSpan? retryAfter = null)
+            => await fx.Spool.RescheduleAsync(row.SpoolId, new TransferOutcome(cls, reason, null) { RetryAfter = retryAfter },
+                now + wait, wait, CancellationToken.None);
+        await Wait(timeout, TransferClass.Transient, TransferReason.Timeout, TimeSpan.FromMinutes(4));
+        await Wait(unknown, TransferClass.Unknown, TransferReason.Unclassified, TimeSpan.FromMinutes(3));
+        await Wait(throttled, TransferClass.Throttled, TransferReason.RateLimited, TimeSpan.FromMinutes(2), TimeSpan.FromMinutes(2));
+        await Wait(auth, TransferClass.RequiresAction, TransferReason.AuthenticationRejected, TimeSpan.FromMinutes(5));
+        await Wait(paused, TransferClass.RequiresAction, TransferReason.QueuePaused, TimeSpan.FromMinutes(1));
+        await Wait(skew, TransferClass.RequiresAction, TransferReason.ClockSkew, TimeSpan.FromMinutes(5));
+        await fx.Spool.QuarantineAsync(poisoned.SpoolId, Rejected(), CancellationToken.None);
+
+        Assert.Equal(2, await fx.Spool.ResumeTransientAsync(CancellationToken.None));
+
+        // Bare det nettet stoppet er klart nå, og stigen står: et nytt brudd fortsetter fra 4 og 3 minutter, ikke fra base.
+        var claims = await fx.Spool.ClaimReadyAsync(10, Lease, CancellationToken.None);
+        Assert.Equal(
+            new[] { (timeout.SpoolId, TimeSpan.FromMinutes(4)), (unknown.SpoolId, TimeSpan.FromMinutes(3)) },
+            claims.Select(c => (c.SpoolId, c.LastDelay)).ToArray());
+
+        // Retry-After, auth, pause og klokke venter som før; karantenen er urørt.
+        var stats = await fx.Spool.GetStatsAsync(CancellationToken.None);
+        Assert.Equal(now + TimeSpan.FromMinutes(1), stats.NextAttemptUtc);
+        Assert.Equal(1, stats.QuarantinedCount);
+        fx.Clock.Advance(TimeSpan.FromMinutes(5));
+        var later = await fx.Spool.ClaimReadyAsync(10, Lease, CancellationToken.None);
+        Assert.Equal(new[] { throttled.SpoolId, auth.SpoolId, paused.SpoolId, skew.SpoolId }, later.Select(c => c.SpoolId).ToArray());
+    }
+
+    [Fact]
     public async Task Quarantine_exits_only_via_explicit_retry_or_discard()
     {
         using var fx = new SpoolFixture();

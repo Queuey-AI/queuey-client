@@ -15,7 +15,9 @@ namespace Queuey.Edge;
 /// Concurrency is ACROSS lanes (≤1 in-flight per lane is FIFO, enforced by
 /// the spool's claim). After any failure the loop drops to a single probe
 /// until a success — never open the throttle on a cloud that just came
-/// back.
+/// back. When a probe has found the uplink down and a later one gets
+/// through, every lane that was waiting out a transient failure resumes at
+/// once instead of on its own retry schedule.
 /// </summary>
 internal sealed class EdgeTransferLoop : BackgroundService
 {
@@ -32,6 +34,11 @@ internal sealed class EdgeTransferLoop : BackgroundService
     private readonly ILogger<EdgeTransferLoop> _logger;
 
     private long _lastSweepMono = long.MinValue;
+
+    // 1 når en probe (en runde tatt mens løkka var degradert) feilet transient: utfallet er bekreftet, ikke bare
+    // én lane som feiler. Uten dette kravet ville én lane med vedvarende 500 bli gjenopptatt av hver suksess i de
+    // andre lanene, det vil si prøvd annenhver runde forbi backoff-en sin.
+    private int _uplinkDownConfirmed;
 
     public EdgeTransferLoop(
         IEventSpool spool,
@@ -67,7 +74,8 @@ internal sealed class EdgeTransferLoop : BackgroundService
 
                 // Probe-before-throttle: after a failure period, exactly one
                 // event tests the water; success reopens full concurrency.
-                var lanes = _state.Degraded ? 1 : _options.Transfer.MaxConcurrency;
+                var probing = _state.Degraded;
+                var lanes = probing ? 1 : _options.Transfer.MaxConcurrency;
                 var claims = await _spool.ClaimReadyAsync(lanes, _options.Transfer.ClaimLease, stoppingToken)
                     .ConfigureAwait(false);
 
@@ -77,7 +85,7 @@ internal sealed class EdgeTransferLoop : BackgroundService
                     continue;
                 }
 
-                await Task.WhenAll(claims.Select(c => ProcessAsync(c, stoppingToken))).ConfigureAwait(false);
+                await Task.WhenAll(claims.Select(c => ProcessAsync(c, probing, stoppingToken))).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -103,7 +111,7 @@ internal sealed class EdgeTransferLoop : BackgroundService
         _logger.LogInformation(EdgeLogEvents.LoopStopped, "Queuey Edge transfer loop stopped.");
     }
 
-    private async Task ProcessAsync(ClaimedEvent claim, CancellationToken ct)
+    private async Task ProcessAsync(ClaimedEvent claim, bool probe, CancellationToken ct)
     {
         var attemptNumber = claim.Attempts + 1;
         var attempt = await _channel.SendAsync(claim.Envelope, attemptNumber, ct).ConfigureAwait(false);
@@ -113,8 +121,8 @@ internal sealed class EdgeTransferLoop : BackgroundService
         {
             case TransferClass.Accepted:
                 await _spool.SettleAsync(claim.SpoolId, attempt.Ack!, ct).ConfigureAwait(false);
-                _state.RecordAccepted(new AcceptedTransfer(claim.Envelope.Queue, claim.Envelope.TransferId, attempt.Ack!.CloudEventId,
-                    attempt.Ack.Replayed, attempt.Ack.AtUtc));
+                var endedDegraded = _state.RecordAccepted(new AcceptedTransfer(claim.Envelope.Queue, claim.Envelope.TransferId,
+                    attempt.Ack!.CloudEventId, attempt.Ack.Replayed, attempt.Ack.AtUtc));
                 // Blindtest 2 (2026-10-09, funn 13): event-id-en Cloud ga, så hendelsen kan slås opp med events get.
                 // Security-review av queuey-client #71: Idempotency-Key-en er produsentens tekst og kan bære personopplysninger
                 // (en e-post, et ordrenummer), så den logges bare på Debug. Event-id-en er Queuey sin.
@@ -134,6 +142,10 @@ internal sealed class EdgeTransferLoop : BackgroundService
                         "Event {EventId} in {Queue} settled as a replay — Cloud already held custody (a lost ACK, resolved).",
                         attempt.Ack.CloudEventId ?? "(no id)", claim.Envelope.Queue);
                 }
+
+                // Bare suksessen som slo av degradert, og bare når en probe bekreftet utfallet: én gang per gjenoppretting.
+                if (endedDegraded && Interlocked.Exchange(ref _uplinkDownConfirmed, 0) == 1)
+                    await ResumeAfterOutageAsync(ct).ConfigureAwait(false);
                 break;
 
             case TransferClass.EventRejected:
@@ -155,6 +167,8 @@ internal sealed class EdgeTransferLoop : BackgroundService
                 await _spool.RescheduleAsync(claim.SpoolId, outcome, _clock.UtcNow + delay, delay, ct)
                     .ConfigureAwait(false);
                 _state.RecordFailure(outcome);
+                if (probe && outcome.Class is TransferClass.Transient or TransferClass.Unknown)
+                    Volatile.Write(ref _uplinkDownConfirmed, 1);
 
                 if (outcome.Reason == TransferReason.ClockSkew)
                 {
@@ -179,6 +193,20 @@ internal sealed class EdgeTransferLoop : BackgroundService
                 }
                 break;
         }
+    }
+
+    /// <summary>
+    /// The uplink is back: every lane head that was waiting out a transient failure is due now, and the loop wakes,
+    /// so the next round claims them all, up to <see cref="EdgeTransferOptions.MaxConcurrency"/>. Each row keeps its
+    /// backoff ladder. What Cloud or an operator must clear (Retry-After, auth, pause, billing, clock) keeps its wait.
+    /// </summary>
+    private async Task ResumeAfterOutageAsync(CancellationToken ct)
+    {
+        var resumed = await _spool.ResumeTransientAsync(ct).ConfigureAwait(false);
+        _wake.Poke();
+        if (resumed > 0)
+            _logger.LogInformation(EdgeLogEvents.UplinkRecovered,
+                "Uplink recovered: {Resumed} pending event(s) resumed at once.", resumed);
     }
 
     private async Task SweepIfDueAsync(CancellationToken ct)
@@ -216,4 +244,5 @@ internal static class EdgeLogEvents
     public static readonly EventId HealthReportStarted = new(7313, "queuey.edge.health_report_started");
     public static readonly EventId HealthReportFailed = new(7314, "queuey.edge.health_report_failed");
     public static readonly EventId Accepted = new(7315, "queuey.edge.accepted");
+    public static readonly EventId UplinkRecovered = new(7316, "queuey.edge.uplink_recovered");
 }

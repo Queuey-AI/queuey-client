@@ -250,12 +250,17 @@ have the same limit: give it the same `--spool-max-mb`, or keep
 `QUEUEY_SPOOL_MAX_MB` in the environment both run in.
 
 **The backoff cap.** While Queuey cannot be reached, the wait between attempts
-grows to the cap. After a long outage, the backlog starts to drain at most one
-cap after the network is back: five minutes by default. A lower cap starts the
-drain sooner, for one more attempt per cap while the network is down. It does
-not change the probes after Queuey refuses the credentials (five minutes, then
-up to an hour) or a paused queue (every minute). `queuey edge kick` starts the
-drain at once.
+grows to the cap, with a random part. After the network is back, the first
+attempt comes when its wait runs out: at most one cap, five minutes by default.
+When that attempt gets through, every lane that was waiting out the outage
+starts at once, and the log says `Uplink recovered: N pending event(s) resumed
+at once.` Each lane keeps the wait it had earned, so if the network drops
+again, the waits continue from there. A lower cap starts the drain sooner, for
+one more attempt per cap while the network is down. It does not change the
+probes after Queuey refuses the credentials (five minutes, then up to an hour)
+or a paused queue (every minute), nor a wait Queuey asked for with
+`Retry-After`; those lanes keep their wait when the network comes back.
+`queuey edge kick` starts the drain at once.
 
 An invalid value stops `edge run` and `edge publish` at startup with a message
 and exit code 2, as an invalid `--listen` does.
