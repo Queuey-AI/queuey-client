@@ -19,14 +19,22 @@ public static class V2SpoolFile
         string? GroupKey = null,
         string? LastReason = null);
 
-    public static void Create(string path, params Row[] rows)
+    public static void Create(string path, params Row[] rows) => Write(path, migratedFromV1: false, rows);
+
+    /// <summary>
+    /// Samme v2-fil, slik en spool som startet på v1 ser ut: v1 → v2 la til <c>payload_enc</c> med ALTER TABLE, så
+    /// kolonnen står sist, der en fersk spool har den som nummer åtte.
+    /// </summary>
+    public static void CreateMigratedFromV1(string path, params Row[] rows) => Write(path, migratedFromV1: true, rows);
+
+    private static void Write(string path, bool migratedFromV1, Row[] rows)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         using (var conn = new SqliteConnection($"Data Source={path};Pooling=False"))
         {
             conn.Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = """
+            cmd.CommandText = $"""
                 PRAGMA auto_vacuum = INCREMENTAL;
                 PRAGMA journal_mode = WAL;
                 CREATE TABLE spool (
@@ -37,7 +45,7 @@ public static class V2SpoolFile
                     tenant_public_id  TEXT    NOT NULL,
                     content_type      TEXT    NOT NULL,
                     payload           BLOB    NOT NULL,
-                    payload_enc       INTEGER NOT NULL DEFAULT 0,
+                    {(migratedFromV1 ? "" : "payload_enc       INTEGER NOT NULL DEFAULT 0,")}
                     event_type        TEXT,
                     group_key         TEXT,
                     lane              TEXT    NOT NULL,
@@ -57,6 +65,7 @@ public static class V2SpoolFile
                     transferred_utc   TEXT,
                     accepted_at_utc   TEXT    NOT NULL
                 );
+                {(migratedFromV1 ? "ALTER TABLE spool ADD COLUMN payload_enc INTEGER NOT NULL DEFAULT 0;" : "")}
                 CREATE UNIQUE INDEX ux_spool_queue_transfer ON spool(queue_name, transfer_id);
                 CREATE INDEX ix_spool_ready ON spool(state, next_attempt_utc, id);
                 CREATE INDEX ix_spool_lane  ON spool(lane, state, id);

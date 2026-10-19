@@ -50,7 +50,7 @@ namespace Queuey.Edge;
 /// </summary>
 public sealed class SqliteEventSpool : IEventSpool
 {
-    private const int CurrentSchemaVersion = 3;
+    internal const int CurrentSchemaVersion = 3;
     private const string DateFormat = "yyyy-MM-dd'T'HH:mm:ss.fffffff'Z'";
 
     private readonly EdgeStorageOptions _options;
@@ -635,7 +635,12 @@ public sealed class SqliteEventSpool : IEventSpool
         }
     }
 
-    private static void CreateSchema(SqliteConnection conn)
+    /// <summary>
+    /// The current schema on an empty file. The one place the spool's tables
+    /// are defined: <see cref="SpoolSalvage"/> builds a recovered spool with
+    /// it too.
+    /// </summary>
+    internal static void CreateSchema(SqliteConnection conn)
     {
         using var tx = conn.BeginTransaction();
         using var cmd = conn.CreateCommand();
@@ -686,9 +691,10 @@ public sealed class SqliteEventSpool : IEventSpool
 
     /// <summary>
     /// v1 → v2: the payload_enc scheme column. Existing rows are plain (0).
-    /// Idempotent on the column: a salvage copy of a v2 spool already carries
-    /// it while its user_version says v1 (recover rebuilds the schema by
-    /// letting bootstrap run), and ALTER ADD on an existing column is an error.
+    /// Idempotent on the column: a file salvaged by <c>queuey edge recover</c>
+    /// before 2026-10-19 already carries it while its user_version says v1
+    /// (recover then left the schema to bootstrap), and ALTER ADD on an
+    /// existing column is an error.
     /// </summary>
     private static void MigrateV1ToV2(SqliteConnection conn)
     {

@@ -90,7 +90,7 @@ internal static class EdgeCommand
             "drain" => await DrainAsync(spoolPath!, map),
             "retry" => await RetryAsync(spoolPath!, map),
             "discard" => await DiscardAsync(spoolPath!, map),
-            "recover" => await RecoverAsync(spoolPath!),
+            "recover" => Recover(spoolPath!),
             "reset" => Reset(spoolPath!, map.Has("accept-data-loss")),
             _ => UnknownSub(sub, optionArgs),
         };
@@ -594,7 +594,7 @@ internal static class EdgeCommand
     /// a fresh spool, report exactly what could not be, then swap files. The
     /// faulted original is kept beside the new spool for support.
     /// </summary>
-    private static async Task<int> RecoverAsync(string spoolPath)
+    private static int Recover(string spoolPath)
     {
         if (!File.Exists(spoolPath))
         {
@@ -604,53 +604,11 @@ internal static class EdgeCommand
 
         var salvagePath = spoolPath + ".salvage";
         var faultedPath = spoolPath + ".faulted-" + DateTime.UtcNow.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
-        long copied = 0, unreadable = 0;
+        SpoolSalvage.Result salvage;
 
         try
         {
-            File.Delete(salvagePath);
-            // Not Mode=ReadOnly: ATTACH must be able to CREATE the salvage
-            // database on this connection. The source itself is only read.
-            await using var source = new SqliteConnection($"Data Source={spoolPath}");
-            await source.OpenAsync();
-            await using (var attach = source.CreateCommand())
-            {
-                attach.CommandText = "ATTACH DATABASE @path AS salvage;";
-                attach.Parameters.AddWithValue("@path", salvagePath);
-                await attach.ExecuteNonQueryAsync();
-            }
-            await using (var schema = source.CreateCommand())
-            {
-                schema.CommandText = """
-                    CREATE TABLE salvage.spool AS SELECT * FROM main.spool WHERE 0;
-                    """;
-                await schema.ExecuteNonQueryAsync();
-            }
-
-            // Row-by-row so one unreadable page loses one row, not the batch.
-            await using (var ids = source.CreateCommand())
-            {
-                ids.CommandText = "SELECT id FROM main.spool WHERE state IN ('Accepted','Claimed','Quarantined') ORDER BY id;";
-                await using var reader = await ids.ExecuteReaderAsync();
-                var all = new System.Collections.Generic.List<long>();
-                while (await reader.ReadAsync()) all.Add(reader.GetInt64(0));
-
-                foreach (var id in all)
-                {
-                    try
-                    {
-                        await using var copy = source.CreateCommand();
-                        copy.CommandText = "INSERT INTO salvage.spool SELECT * FROM main.spool WHERE id = @id;";
-                        copy.Parameters.AddWithValue("@id", id);
-                        await copy.ExecuteNonQueryAsync();
-                        copied++;
-                    }
-                    catch (SqliteException)
-                    {
-                        unreadable++;
-                    }
-                }
-            }
+            salvage = SpoolSalvage.Copy(spoolPath, salvagePath);
         }
         catch (SqliteException ex)
         {
@@ -660,33 +618,24 @@ internal static class EdgeCommand
             File.Delete(salvagePath);
             return ExitCodes.RuntimeError;
         }
+        catch (Queuey.Client.QueueyConfigurationException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            File.Delete(salvagePath);
+            return ExitCodes.RuntimeError;
+        }
 
+        // The salvage is complete before it is swapped in: the spool's own
+        // schema, owned rows with their ids, claims released.
         SqliteConnection.ClearAllPools();
         File.Move(spoolPath, faultedPath);
         foreach (var sidecar in new[] { spoolPath + "-wal", spoolPath + "-shm" })
             if (File.Exists(sidecar)) File.Move(sidecar, faultedPath + Path.GetExtension(sidecar));
         File.Move(salvagePath, spoolPath);
 
-        // Rebuild indexes/user_version by letting the spool bootstrap treat
-        // the salvage as data: rows carried over, schema completed on open.
-        await using (var finish = new SqliteConnection($"Data Source={spoolPath}"))
-        {
-            await finish.OpenAsync();
-            await using var cmd = finish.CreateCommand();
-            cmd.CommandText = """
-                CREATE UNIQUE INDEX IF NOT EXISTS ux_spool_queue_transfer ON spool(queue_name, transfer_id);
-                CREATE INDEX IF NOT EXISTS ix_spool_ready ON spool(state, next_attempt_utc, id);
-                CREATE INDEX IF NOT EXISTS ix_spool_lane  ON spool(lane, state, id);
-                CREATE TABLE IF NOT EXISTS edge_meta (k TEXT PRIMARY KEY, v TEXT NOT NULL);
-                UPDATE spool SET state = 'Accepted', claimed_until_utc = NULL WHERE state = 'Claimed';
-                PRAGMA user_version = 1;
-                """;
-            await cmd.ExecuteNonQueryAsync();
-        }
-
-        Console.WriteLine($"Salvaged {copied} event(s) into a fresh spool; {unreadable} unreadable.");
+        Console.WriteLine($"Salvaged {salvage.Copied} event(s) into a fresh spool; {salvage.Unreadable} unreadable.");
         Console.WriteLine($"The faulted file is preserved at '{faultedPath}' for support.");
-        return unreadable == 0 ? ExitCodes.Success : ExitCodes.RuntimeError;
+        return salvage.Unreadable == 0 ? ExitCodes.Success : ExitCodes.RuntimeError;
     }
 
     private static int Reset(string spoolPath, bool acknowledged)
