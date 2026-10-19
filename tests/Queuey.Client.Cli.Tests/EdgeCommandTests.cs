@@ -152,6 +152,26 @@ public class EdgeCommandTests : IDisposable
     }
 
     [Fact]
+    public async Task A_spool_moved_aside_opens_with_its_WAL()
+    {
+        // A host that died leaves its last commits in the WAL, not yet in the file. Support opens the preserved file
+        // and must see them, so the WAL keeps the name SQLite looks for: the file's own name plus "-wal".
+        await _spool.EnqueueAsync(Envelope("only-in-the-wal"), CancellationToken.None);
+        var crashed = Path.Combine(_dir, "crashed");
+        CopyWhileOpen(_spoolPath, crashed);
+        CopyWhileOpen(_spoolPath + "-wal", crashed + "-wal");
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        File.Move(crashed, _spoolPath, overwrite: true);
+        File.Move(crashed + "-wal", _spoolPath + "-wal", overwrite: true);
+
+        var preserved = EdgeCommand.PreserveAside(_spoolPath);
+
+        var (exit, output) = await Run("status", "--spool", preserved, "--json");
+        Assert.Equal(ExitCodes.Success, exit);
+        Assert.Contains("\"pending\": 1", output);
+    }
+
+    [Fact]
     public async Task Publish_durably_enqueues_with_full_envelope()
     {
         var (exit, output) = await Run("publish", "sensor-readings",
@@ -436,6 +456,14 @@ public class EdgeCommandTests : IDisposable
     }
 
     // ── plumbing ────────────────────────────────────────────────────────
+
+    /// <summary>A file SQLite still holds open, copied as it stands on disk.</summary>
+    private static void CopyWhileOpen(string source, string destination)
+    {
+        using var from = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var to = new FileStream(destination, FileMode.Create, FileAccess.Write);
+        from.CopyTo(to);
+    }
 
     /// <summary>
     /// Overwrites the root page of <paramref name="table"/>, so reading that table fails as SQLITE_CORRUPT while the

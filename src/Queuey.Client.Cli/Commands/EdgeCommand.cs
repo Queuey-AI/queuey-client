@@ -603,7 +603,6 @@ internal static class EdgeCommand
         }
 
         var salvagePath = spoolPath + ".salvage";
-        var faultedPath = spoolPath + ".faulted-" + DateTime.UtcNow.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
         SpoolSalvage.Result salvage;
 
         try
@@ -627,10 +626,7 @@ internal static class EdgeCommand
 
         // The salvage is complete before it is swapped in: the spool's own
         // schema, owned rows with their ids, claims released.
-        SqliteConnection.ClearAllPools();
-        File.Move(spoolPath, faultedPath);
-        foreach (var sidecar in new[] { spoolPath + "-wal", spoolPath + "-shm" })
-            if (File.Exists(sidecar)) File.Move(sidecar, faultedPath + Path.GetExtension(sidecar));
+        var faultedPath = PreserveAside(spoolPath);
         File.Move(salvagePath, spoolPath);
 
         Console.WriteLine($"Salvaged {salvage.Copied} event(s) into a fresh spool; {salvage.Unreadable} unreadable.");
@@ -665,16 +661,31 @@ internal static class EdgeCommand
         // SQLite finds a WAL only beside the file it belongs to.
         var node = ReadNodeId(spoolPath);
 
-        SqliteConnection.ClearAllPools();
-        var faultedPath = spoolPath + ".faulted-" + DateTime.UtcNow.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
-        File.Move(spoolPath, faultedPath);
-        foreach (var sidecar in new[] { spoolPath + "-wal", spoolPath + "-shm" })
-            if (File.Exists(sidecar)) File.Move(sidecar, faultedPath + Path.GetExtension(sidecar));
+        var faultedPath = PreserveAside(spoolPath);
 
         Console.WriteLine($"Spool reset. The old file (and any events in it) is preserved at '{faultedPath}'.");
         Console.WriteLine(await KeepNodeIdAsync(spoolPath, node));
         Console.WriteLine("Data loss acknowledged by --accept-data-loss.");
         return ExitCodes.Success;
+    }
+
+    /// <summary>
+    /// Moves the spool aside as <c>&lt;spool&gt;.faulted-&lt;utc&gt;</c>, with
+    /// its <c>-wal</c> and <c>-shm</c>, and returns the new path. SQLite finds
+    /// a WAL only at the database's own name plus <c>-wal</c>, so each sidecar
+    /// keeps its suffix. Until 2026-10-19 the name came from
+    /// <c>Path.GetExtension</c>, which for <c>spool.db-wal</c> is
+    /// <c>.db-wal</c>: opening the preserved file then left every commit still
+    /// in its WAL out of sight.
+    /// </summary>
+    internal static string PreserveAside(string spoolPath)
+    {
+        SqliteConnection.ClearAllPools();
+        var faultedPath = spoolPath + ".faulted-" + DateTime.UtcNow.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
+        File.Move(spoolPath, faultedPath);
+        foreach (var suffix in new[] { "-wal", "-shm" })
+            if (File.Exists(spoolPath + suffix)) File.Move(spoolPath + suffix, faultedPath + suffix);
+        return faultedPath;
     }
 
     /// <summary>
