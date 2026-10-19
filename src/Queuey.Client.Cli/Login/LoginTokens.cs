@@ -34,16 +34,23 @@ internal sealed class LoginTokens
     public StoredLogin Login { get; private set; }
 
     /// <summary>A token with at least <see cref="Margin"/> left, renewed first when needed.</summary>
-    public async Task<string> AccessTokenAsync(CancellationToken cancellationToken)
+    public Task<string> AccessTokenAsync(CancellationToken cancellationToken) => AccessTokenAsync(refused: null, cancellationToken);
+
+    /// <summary>
+    /// A token with at least <see cref="Margin"/> left that is not <paramref name="refused"/>: a token Queuey refused while it
+    /// still looked fresh here is renewed, unless another process has stored a newer one meanwhile.
+    /// </summary>
+    // queuey listen (2026-10-19): klokken her og Queuey sin kan gå ulikt, så et token som ser ferskt ut, kan være utløpt der.
+    public async Task<string> AccessTokenAsync(string? refused, CancellationToken cancellationToken)
     {
-        if (Fresh(Login))
+        if (Usable(Login, refused))
             return Login.AccessToken;
 
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (!Fresh(Login))
-                Login = await RenewAsync(_path, _apiBase, Login.License, cancellationToken).ConfigureAwait(false);
+            if (!Usable(Login, refused))
+                Login = await RenewAsync(_path, _apiBase, Login.License, cancellationToken, refused).ConfigureAwait(false);
             return Login.AccessToken;
         }
         finally
@@ -55,19 +62,24 @@ internal sealed class LoginTokens
     internal static bool Fresh(StoredLogin login)
         => !string.IsNullOrWhiteSpace(login.AccessToken) && login.AccessTokenExpiresAt - Now() > Margin;
 
+    private static bool Usable(StoredLogin login, string? refused)
+        => Fresh(login) && !string.Equals(login.AccessToken, refused, StringComparison.Ordinal);
+
     /// <summary>
     /// The stored login for <paramref name="license"/> on <paramref name="apiBase"/> with a fresh access token: the one
     /// another process stored meanwhile, or a new one for the refresh token, with the new refresh token stored in its place.
-    /// A login Queuey no longer accepts is removed here, and the error says to log in again.
+    /// A stored token that is <paramref name="refused"/> counts as spent. A login Queuey no longer accepts is removed here,
+    /// and the error says to log in again.
     /// </summary>
-    internal static async Task<StoredLogin> RenewAsync(string path, Uri apiBase, string license, CancellationToken cancellationToken)
+    internal static async Task<StoredLogin> RenewAsync(
+        string path, Uri apiBase, string license, CancellationToken cancellationToken, string? refused = null)
     {
         string host = LoginStore.HostKey(apiBase);
         using IDisposable held = await LoginStore.LockAsync(path, cancellationToken).ConfigureAwait(false);
 
         CredentialsFile file = LoginStore.Read(path);
         StoredLogin login = file.Find(host, license) ?? throw Ended(host, license, "it is no longer stored on this machine");
-        if (Fresh(login))
+        if (Usable(login, refused))
             return login;
 
         if (string.IsNullOrWhiteSpace(login.RefreshToken))

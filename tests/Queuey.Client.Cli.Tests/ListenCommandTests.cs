@@ -83,7 +83,7 @@ public sealed class ListenCommandTests
         JsonElement[] refused = Run(o => o.Refused("listener_already_connected", "another queuey listen session has listened on it",
             "Stop it, or --take-over.", new DateTimeOffset(2026, 10, 6, 9, 0, 0, TimeSpan.Zero)));
         JsonElement[] superseded = Run(o => o.Superseded("Another queuey listen session took the queue over.", forwarded: 3));
-        JsonElement[] closed = Run(o => o.Closed("connection_lost", "The connection to Queuey was lost and did not come back.", forwarded: 3));
+        JsonElement[] closed = Run(o => o.Closed("terminated", null, forwarded: 3));
 
         foreach (var (lines, type) in new[] { (refused, "refused"), (superseded, "superseded"), (closed, "closed") })
         {
@@ -95,7 +95,7 @@ public sealed class ListenCommandTests
         Assert.True(refused[0].GetProperty("tookOver").GetBoolean());
         Assert.Equal("listener_already_connected", refused[1].GetProperty("code").GetString());
         Assert.Equal("2026-10-06T09:00:00+00:00", refused[1].GetProperty("heldSinceUtc").GetString());
-        Assert.Equal("connection_lost", closed[1].GetProperty("reason").GetString());
+        Assert.Equal("terminated", closed[1].GetProperty("reason").GetString());
     }
 
     [Fact]
@@ -106,12 +106,15 @@ public sealed class ListenCommandTests
         var output = new ListenOutput(json: true, stdout, stderr);
 
         output.Listening(new ListenTarget("queue", "que_1", Name: "orders"), "listen:queue:que_1", "http://localhost:5000", tookOver: false);
-        output.Reconnecting();
+        output.Reconnecting(1, TimeSpan.Zero, "Queuey closed the connection");
         output.Reconnected("listen:queue:que_1");
 
         JsonElement[] lines = Lines(stdout);
         Assert.Equal(new[] { "listening", "reconnecting", "reconnected" }, lines.Select(l => l.GetProperty("type").GetString()));
         Assert.All(lines, l => Assert.Equal(1, l.GetProperty("schemaVersion").GetInt32()));
+        Assert.Equal(1, lines[1].GetProperty("attempt").GetInt32());
+        Assert.Equal(0, lines[1].GetProperty("retryInSeconds").GetInt32());
+        Assert.Equal("Queuey closed the connection", lines[1].GetProperty("reason").GetString());
         Assert.Equal("listen:queue:que_1", lines[2].GetProperty("scopeKey").GetString());
         // En person ser det på stderr som før.
         Assert.Contains("… connection lost, reconnecting", stderr.ToString());
@@ -124,10 +127,12 @@ public sealed class ListenCommandTests
         var (stdout, stderr) = (new StringWriter(), new StringWriter());
         var output = new ListenOutput(json: false, stdout, stderr);
 
-        output.Reconnecting();
+        output.Reconnecting(1, TimeSpan.Zero, null);
+        output.Reconnecting(9, TimeSpan.FromSeconds(42.3), "Connection refused");
         output.Reconnected("listen:queue:que_1");
 
         Assert.Equal("", stdout.ToString());
+        Assert.Contains("… still reconnecting, attempt 9 in 43s (Connection refused)", stderr.ToString());
         Assert.Contains("… connection lost, reconnecting", stderr.ToString());
     }
 
@@ -302,10 +307,10 @@ public sealed class ListenCommandTests
     {
         { "stopped", null, "closed", ExitCodes.Success },
         { "terminated", null, "closed", ListenCommand.TerminatedExitCode },
-        { "connection_lost", null, "closed", ExitCodes.RuntimeError },
         { "superseded", null, "superseded", ExitCodes.RuntimeError },
         { "refused", "forbidden", "refused", ExitCodes.RuntimeError },
         { "refused", "unauthorized", "refused", ExitCodes.Configuration },
+        { "refused", "login_ended", "refused", ExitCodes.Configuration },
     };
 
     [Theory]
@@ -459,7 +464,7 @@ public sealed class ListenCommandTests
         // Re-review av #50: Queuey holder kravet i 10 s. Standardplanen (0, 2, 10, 30 s) nådde fram to ganger innen da.
         TimeSpan at = TimeSpan.Zero;
         int withinGrace = 0;
-        foreach (TimeSpan delay in ListenCommand.ReconnectDelays)
+        foreach (TimeSpan delay in ListenSession.ReconnectDelays)
         {
             at += delay;
             if (at < TimeSpan.FromSeconds(10))

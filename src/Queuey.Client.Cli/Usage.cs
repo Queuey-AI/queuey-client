@@ -650,11 +650,18 @@ LISTEN
                  and a ""type"": listening, then delivery per forward (eventId, path, localUrl,
                  status, durationMs, signatureHeaders; path and localUrl without the query or a
                  part that may be a secret), lost when a workspace session loses a queue,
-                 reconnecting and reconnected (scopeKey) when the connection drops and comes
-                 back, and one last line: refused (also for an error before the session), superseded, or
-                 closed. Output nobody reads any more (a closed pipe) stops the session too.
-                 Exit 0 after Ctrl-C, 1 when refused, taken over, the connection is lost for good
-                 or the output is gone, 2 on a usage error, 3 on a key error, 143 after SIGTERM.
+                 reconnecting (attempt, retryInSeconds, reason) before each attempt to come back
+                 and reconnected (scopeKey) once it is back, and one last line: refused (also
+                 for an error before the session), superseded, or closed. Output nobody reads
+                 any more (a closed pipe) stops the session too.
+                 A lost connection never ends the session: it connects again, at once and then
+                 after 1, 2, 4, 8, 16 and 30 s, then every 30-60 s until it is back, with a
+                 renewed login token, and claims its queue again. It ends on Ctrl-C or SIGTERM,
+                 when another session has the queue, or when Queuey refuses it for good (the
+                 login ended or was disconnected: run queuey login; the key may no longer
+                 listen; the queue is gone).
+                 Exit 0 after Ctrl-C, 1 when refused, taken over or the output is gone, 2 on a
+                 usage error, 3 on a key or login error, 143 after SIGTERM.
 
 REPLAY
   queuey replay <event-id> --queue <que_...> [--json]
