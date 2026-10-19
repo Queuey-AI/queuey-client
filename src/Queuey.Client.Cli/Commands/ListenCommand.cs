@@ -6,9 +6,7 @@ using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.SignalR;
-using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.Extensions.DependencyInjection;
 using Queuey.Client.Waas;
 
@@ -54,17 +52,6 @@ internal static class ListenCommand
 
     /// <summary>The exit code after SIGTERM, as a shell reports a process the signal ended: 128 + 15.</summary>
     internal const int TerminatedExitCode = 143;
-
-    private static readonly TimeSpan HeartbeatInterval = TimeSpan.FromSeconds(8);
-
-    // Fire forsøk innen 10 s, fristen Queuey holder kravet til en sesjon som mistet tilkoblingen (re-review av #50): med
-    // standardplanen (0, 2, 10, 30 s) nådde bare de to første fram i tide. Etter det prøver den videre i halvannet minutt.
-    internal static readonly TimeSpan[] ReconnectDelays =
-    {
-        TimeSpan.Zero, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(8),
-        TimeSpan.FromSeconds(16), TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30),
-    };
-    private static readonly TimeSpan StopTimeout = TimeSpan.FromSeconds(5);
 
     public static async Task<int> RunAsync(string[] args)
     {
@@ -226,150 +213,55 @@ internal static class ListenCommand
     {
         string hubUrl = config.ResolvedApiBase().ToString().TrimEnd('/') + "/hubs/listen";
 
-        // WebSockets uten forhandling (Kenneth, 2026-10-06): med forhandling må forhandlingen og WebSocketen treffe samme
-        // replika av API-et, og sticky sessions er ikke satt for api i ACA. Uten er det én forbindelse til én replika.
-        HubConnection connection = new HubConnectionBuilder()
-            .WithUrl(hubUrl, options =>
-            {
-                // En nøkkel som er satt, vinner; ellers innloggingen, som Bearer. Tokenet hentes ved hver tilkobling, også etter et
-                // brudd, så en økt som varer lenger enn tokenet, fornyer det.
-                if (!string.IsNullOrWhiteSpace(config.ApiKey))
-                    options.Headers["X-Api-Key"] = config.ApiKey!;
-                else if (config.Login is { } login)
-                    options.AccessTokenProvider = async () => await login.AccessTokenAsync(CancellationToken.None);
-                options.SkipNegotiation = true;
-                options.Transports = HttpTransportType.WebSockets;
-            })
-            .WithAutomaticReconnect(ReconnectDelays)
-            .Build();
-
-        // The session's own id, kept across reconnects, so a session that reconnects keeps its queue.
-        string sessionId = "cli_" + Guid.NewGuid().ToString("N");
-        bool ownerAware = true;
+        // En nøkkel som er satt, vinner; ellers innloggingen, som Bearer. Tokenet hentes ved hver tilkobling og fornyes når det
+        // går ut, så en økt som varer lenger enn tokenet, kobler seg til igjen med et nytt.
+        ListenLoginToken? login = string.IsNullOrWhiteSpace(config.ApiKey) && config.Login is { } tokens ? new ListenLoginToken(tokens) : null;
         long forwarded = 0;
-        var ended = new TaskCompletionSource<ListenEnd>(TaskCreationOptions.RunContinuationsAsynchronously);
         using var http = new HttpClient { Timeout = ListenForwarder.LocalTimeout };
 
-        connection.On<ListenEnvelope>("event", async env =>
-        {
-            LocalForwardResult result = await ListenForwarder.ForwardAsync(http, env, forwardTo, CancellationToken.None, preservePath);
-            Interlocked.Increment(ref forwarded);
+        ListenSession session = null!;
+        session = new ListenSession(
+            () => new HubListenConnection(hubUrl, config.ApiKey, login is null ? null : login.GetAsync,
+                async env =>
+                {
+                    LocalForwardResult result = await ListenForwarder.ForwardAsync(http, env, forwardTo, CancellationToken.None, preservePath);
+                    Interlocked.Increment(ref forwarded);
 
-            // The local response is the delivery's outcome, so it goes back before anything is printed (review of
-            // queuey-client #50, K3): output that blocks or fails must not cost the answer.
-            if (string.Equals(env.Mode, "Redirect", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(env.CorrelationId))
-                await AckAsync(connection, env.CorrelationId, result);
+                    // The local response is the delivery's outcome, so it goes back before anything is printed (review of
+                    // queuey-client #50, K3): output that blocks or fails must not cost the answer.
+                    if (string.Equals(env.Mode, "Redirect", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(env.CorrelationId))
+                        await AckAsync(session, env.CorrelationId, result);
 
-            output.Delivery(env, result);
-        });
-
-        connection.On<ListenLost>("lost", lost => output.Lost(lost));
+                    output.Delivery(env, result);
+                },
+                output.Lost),
+            target, hubUrl, forwardTo, output, login);
 
         // Ingen leser lenger (pipen er lukket, eller den leser ikke): økten stopper og frigjør køen (re-review av #50, K3b).
         _ = output.Gone.ContinueWith(
-            gone => ended.TrySetResult(new ListenEnd("output_closed", gone.Result)),
+            gone => session.End(new ListenEnd("output_closed", gone.Result)),
             CancellationToken.None, TaskContinuationOptions.OnlyOnRanToCompletion, TaskScheduler.Default);
-
-        connection.Reconnecting += _ =>
-        {
-            output.Reconnecting();
-            return Task.CompletedTask;
-        };
-        connection.Reconnected += async _ =>
-        {
-            // A reconnect gets a new connection id. The same session claims its queue again on it and keeps it. A session
-            // that took the queue over meanwhile has it now; any other refusal is a refusal (review of #50, K6).
-            try
-            {
-                ListenReply reply = await ClaimAsync(connection, target, sessionId, takeOver: false, ownerAware, CancellationToken.None);
-                if (reply.Listening)
-                    output.Reconnected(reply.ScopeKey);
-                else if (reply.Code == "listener_already_connected")
-                    ended.TrySetResult(new ListenEnd("superseded", reply.Message ?? "Another queuey listen session has the queue now."));
-                else
-                    ended.TrySetResult(new ListenEnd("refused", reply.Message ?? "Queuey refused the listen session.", reply.Code ?? "refused", HeldSinceUtc: reply.HeldSinceUtc));
-            }
-            catch (Exception ex)
-            {
-                ended.TrySetResult(new ListenEnd("connection_lost", $"Reconnected, but could not listen again: {ex.Message}"));
-            }
-        };
-        // Fires when the automatic reconnect gives up, or the server closes the connection: it will not come back.
-        connection.Closed += ex =>
-        {
-            ended.TrySetResult(new ListenEnd("connection_lost",
-                $"The connection to Queuey was lost and did not come back{(ex is null ? "." : $": {ex.Message}")}"));
-            return Task.CompletedTask;
-        };
 
         ConsoleCancelEventHandler onCancel = (_, e) =>
         {
             e.Cancel = true;
-            ended.TrySetResult(new ListenEnd("stopped"));
+            session.End(new ListenEnd("stopped"));
         };
         Console.CancelKeyPress += onCancel;
         // SIGTERM fra en agent eller en prosessleder avslutter som Ctrl-C, med siste linje og exit 143 (review av #50, K5).
-        using PosixSignalRegistration? terminate = OnTerminate(() => ended.TrySetResult(new ListenEnd("terminated")));
+        using PosixSignalRegistration? terminate = OnTerminate(() => session.End(new ListenEnd("terminated")));
 
-        using var heartbeats = new CancellationTokenSource();
         ListenEnd end;
         try
         {
-            end = await StartAsync(connection, target, sessionId, takeOver, hubUrl, forwardTo, output, isOwnerAware => ownerAware = isOwnerAware);
-            if (end.Reason == "listening")
-            {
-                _ = HeartbeatLoopAsync(connection, ended, heartbeats.Token);
-                end = await ended.Task;
-            }
+            end = await session.RunAsync(takeOver);
         }
         finally
         {
             Console.CancelKeyPress -= onCancel;
-            heartbeats.Cancel();
         }
 
-        // Økten stoppes før siste linje (review av #50, K5): den som leser linjen, kan stole på at køen er fri.
-        await StopQuietlyAsync(connection);
         return Finish(end, output, Interlocked.Read(ref forwarded));
-    }
-
-    /// <summary>Connects and claims the scope. <c>listening</c> once it does, else why not.</summary>
-    private static async Task<ListenEnd> StartAsync(
-        HubConnection connection, ListenTarget target, string sessionId, bool takeOver, string hubUrl, string forwardTo,
-        ListenOutput output, Action<bool> ownerAware)
-    {
-        ListenReply reply;
-        try
-        {
-            using var starting = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-            await connection.StartAsync(starting.Token);
-            try
-            {
-                reply = await ClaimAsync(connection, target, sessionId, takeOver, ownerAware: true, starting.Token);
-            }
-            catch (HubException ex) when (IsUnknownMethod(ex, "ListenAsOwner"))
-            {
-                // A Queuey from before single-owner listening: it has only the old method, and no take-over.
-                ownerAware(false);
-                output.Note("Note: this Queuey does not know single-owner listening yet" + (takeOver ? ", so --take-over has no effect." : "."));
-                reply = await ClaimAsync(connection, target, sessionId, takeOver, ownerAware: false, starting.Token);
-            }
-        }
-        catch (Exception ex) when (ex is HttpRequestException or System.Net.WebSockets.WebSocketException or OperationCanceledException)
-        {
-            return new ListenEnd("refused", $"Could not connect to {hubUrl}: {ex.Message}", "unreachable",
-                Action: "Check --api-base (QUEUEY_API_BASE) and the network.");
-        }
-        catch (HubException ex)
-        {
-            return new ListenEnd("refused", ServerMessage(ex), "refused");
-        }
-
-        if (!reply.Listening)
-            return new ListenEnd("refused", reply.Message ?? "Queuey refused the listen session.", reply.Code ?? "refused", HeldSinceUtc: reply.HeldSinceUtc);
-
-        output.Listening(target, reply.ScopeKey ?? string.Empty, forwardTo, reply.TookOver);
-        return new ListenEnd("listening");
     }
 
     /// <summary>Runs <paramref name="terminated"/> on SIGTERM instead of ending the process; null where the platform has no SIGTERM.</summary>
@@ -399,12 +291,9 @@ internal static class ListenCommand
                 case "refused":
                     string code = end.Code ?? "refused";
                     output.Refused(code, end.Message ?? "Queuey refused the listen session.", end.Action ?? ActionFor(code), end.HeldSinceUtc);
-                    return code == "unauthorized" ? ExitCodes.Configuration : ExitCodes.RuntimeError;
+                    return code is "unauthorized" or "login_ended" ? ExitCodes.Configuration : ExitCodes.RuntimeError;
                 case "superseded":
                     output.Superseded(end.Message ?? "Another queuey listen session took the queue over.", forwarded);
-                    return ExitCodes.RuntimeError;
-                case "connection_lost":
-                    output.Closed("connection_lost", end.Message, forwarded);
                     return ExitCodes.RuntimeError;
                 case "terminated":
                     output.Closed("terminated", null, forwarded);
@@ -423,35 +312,19 @@ internal static class ListenCommand
         }
     }
 
-    /// <summary>Claims the scope as this session; against an older Queuey, with the method it has.</summary>
-    private static async Task<ListenReply> ClaimAsync(
-        HubConnection connection, ListenTarget target, string sessionId, bool takeOver, bool ownerAware, CancellationToken ct)
-    {
-        if (ownerAware)
-            return await connection.InvokeAsync<ListenReply>("ListenAsOwner", target.Kind, target.Id, sessionId, takeOver, ct);
-
-        try
-        {
-            ListenAck ack = await connection.InvokeAsync<ListenAck>("Listen", target.Kind, target.Id, "redirect", ct);
-            return new ListenReply(Listening: true, ScopeKey: ack.ScopeKey);
-        }
-        catch (HubException ex)
-        {
-            return new ListenReply(Listening: false, Code: "refused", Message: ServerMessage(ex));
-        }
-    }
-
     /// <summary>
     /// Sends the local response back, and tries again when the call fails (review of #50, N1): Queuey waits 20 s, and an
-    /// answer that is lost while the connection blinks would otherwise read as no answer.
+    /// answer that is lost while the connection blinks would otherwise read as no answer. Each attempt goes over the
+    /// session's connection of the moment, so an answer can come back over the connection that replaced a lost one.
     /// </summary>
-    private static async Task AckAsync(HubConnection connection, string correlationId, LocalForwardResult result)
+    private static async Task AckAsync(ListenSession session, string correlationId, LocalForwardResult result)
     {
         for (int attempt = 1; attempt <= 3; attempt++)
         {
             try
             {
-                await connection.InvokeAsync("Ack", correlationId, result.Status, result.DurationMs, result.Error);
+                IListenConnection connection = session.Current ?? throw new InvalidOperationException("No connection.");
+                await connection.InvokeAsync("Ack", new object?[] { correlationId, result.Status, result.DurationMs, result.Error }, CancellationToken.None);
                 return;
             }
             catch when (attempt < 3)
@@ -462,62 +335,6 @@ internal static class ListenCommand
             {
                 // Queuey reads what the hub kept, or holds the event when the session has gone.
             }
-        }
-    }
-
-    /// <summary>
-    /// Beats every few seconds, which keeps the session's claim on its queue. A beat that says this session no longer
-    /// owns the queue means another one took it over.
-    /// </summary>
-    private static async Task HeartbeatLoopAsync(HubConnection connection, TaskCompletionSource<ListenEnd> ended, CancellationToken ct)
-    {
-        while (!ct.IsCancellationRequested)
-        {
-            try
-            {
-                await Task.Delay(HeartbeatInterval, ct);
-                ListenBeat? beat = await connection.InvokeAsync<ListenBeat?>("Heartbeat", ct);
-                if (beat is { Owner: false })
-                {
-                    ended.TrySetResult(new ListenEnd("superseded",
-                        "Another queuey listen session took the queue over, and forwards go to it now."));
-                    return;
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-            catch
-            {
-                // Reconnecting: the claim outlives a missed beat or two, and Reconnected claims again.
-            }
-        }
-    }
-
-    /// <summary>Frees the queue and closes the connection, each within a few seconds whatever the network does.</summary>
-    private static async Task StopQuietlyAsync(HubConnection connection)
-    {
-        try
-        {
-            if (connection.State == HubConnectionState.Connected)
-            {
-                using var stopping = new CancellationTokenSource(StopTimeout);
-                await connection.InvokeAsync("Stop", stopping.Token);
-            }
-        }
-        catch
-        {
-            // Best-effort; the claim also runs out once heartbeats stop.
-        }
-
-        try
-        {
-            await connection.DisposeAsync().AsTask().WaitAsync(StopTimeout);
-        }
-        catch
-        {
-            // The process ends either way.
         }
     }
 
@@ -537,13 +354,14 @@ internal static class ListenCommand
     {
         "listener_already_connected" => "Stop the other session, or run queuey listen again with --take-over to take the queue over.",
         "unauthorized" => "Check the API key: --api-key, QUEUEY_API_KEY or queuey.json.",
+        "login_ended" => "Run `queuey login` to log in again, then queuey listen again.",
         "forbidden" => "The key needs queue.listen on that queue or workspace (a Build, Full access or ProducerAdmin key).",
         "scope_not_found" => "Check the id, or give the queue's name with its workspace: --queue <name> --tenant <ten_…>.",
         _ => null,
     };
 
     // "An unexpected error occurred invoking 'Listen' on the server. HubException: Forbidden: …" → "Forbidden: …".
-    private static string ServerMessage(HubException ex)
+    internal static string ServerMessage(HubException ex)
     {
         const string marker = "HubException: ";
         int at = ex.Message.IndexOf(marker, StringComparison.Ordinal);
@@ -551,8 +369,8 @@ internal static class ListenCommand
     }
 
     /// <summary>
-    /// How a session ended: <c>listening</c> (it has not), <c>refused</c>, <c>superseded</c>, <c>connection_lost</c>,
-    /// <c>stopped</c>, <c>terminated</c> or <c>output_closed</c>.
+    /// How a session ended: <c>listening</c> (it has not), <c>refused</c>, <c>superseded</c>, <c>stopped</c>,
+    /// <c>terminated</c> or <c>output_closed</c>. A lost connection does not end it: the session connects again.
     /// </summary>
     internal sealed record ListenEnd(
         string Reason, string? Message = null, string? Code = null, string? Action = null, DateTimeOffset? HeldSinceUtc = null);

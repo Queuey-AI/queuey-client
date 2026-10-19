@@ -10,10 +10,10 @@ namespace Queuey.Client.Cli;
 /// <summary>
 /// What <c>queuey listen</c> prints. With <c>--json</c>: one JSON object per line on stdout (NDJSON), each with
 /// <c>schemaVersion</c> and a <c>type</c> — <c>listening</c>, then a <c>delivery</c> per forward, a <c>lost</c> when a
-/// workspace session loses one of its queues, <c>reconnecting</c> and <c>reconnected</c> when the connection drops and comes
-/// back, and one line that ends the stream: <c>refused</c> (it never listened, an
-/// error before the session included), <c>superseded</c> (another session took the queue over) or <c>closed</c>
-/// (stopped, terminated, or the connection was lost for good). Addresses are redacted as Queuey redacts them for agents.
+/// workspace session loses one of its queues, <c>reconnecting</c> before each attempt to come back after the connection
+/// was lost and <c>reconnected</c> once it is back, and one line that ends the stream: <c>refused</c> (it never listened,
+/// an error before the session included, or Queuey refused it when it came back), <c>superseded</c> (another session took
+/// the queue over) or <c>closed</c> (stopped or terminated). Addresses are redacted as Queuey redacts them for agents.
 /// Notes for a person go to stderr either way. Without <c>--json</c>: lines for a person.
 /// </summary>
 // Én linje per hendelse, så en agent kan lese strømmen mens lytteren går (F2.5, 2026-10-06). Versjonert fra første
@@ -141,15 +141,26 @@ internal sealed class ListenOutput
         Err($"Lost {lost.QueuePublicId}: {lost.Message}");
     }
 
-    /// <summary>The connection dropped, and the session tries to come back; deliveries wait until it does.</summary>
+    /// <summary>
+    /// The connection was lost, and the session tries to come back: attempt <paramref name="attempt"/> (from 1) starts after
+    /// <paramref name="retryIn"/>. <paramref name="reason"/> says why the connection, or the attempt before, failed.
+    /// Deliveries wait until the session is back.
+    /// </summary>
     // Gullflyten 2026-10-09: gjenoppkoblingen sto bare på stderr, så en agent som leste JSON-strømmen, så ingenting.
-    public void Reconnecting()
+    // 2026-10-19: én linje per forsøk, med når neste kommer, siden økten nå prøver til den stoppes.
+    public void Reconnecting(int attempt, TimeSpan retryIn, string? reason)
     {
         if (Ended)
             return;
+        int seconds = (int)Math.Ceiling(retryIn.TotalSeconds);
         if (_json)
-            Write(new { schemaVersion = JsonSchemaVersion, type = "reconnecting" });
-        Err("… connection lost, reconnecting");
+            Write(new { schemaVersion = JsonSchemaVersion, type = "reconnecting", attempt, retryInSeconds = seconds, reason });
+
+        string why = string.IsNullOrWhiteSpace(reason) ? string.Empty : $" ({reason})";
+        string when = seconds > 0 ? $" in {seconds}s" : string.Empty;
+        Err(attempt == 1
+            ? $"… connection lost, reconnecting{when}{why}"
+            : $"… still reconnecting, attempt {attempt}{when}{why}");
     }
 
     /// <summary>The connection came back, and the session listens on <paramref name="scopeKey"/> again.</summary>
@@ -190,7 +201,7 @@ internal sealed class ListenOutput
         Err($"Taken over: {message} Forwarded {forwarded} event(s).");
     }
 
-    /// <param name="reason"><c>stopped</c> (Ctrl-C), <c>terminated</c> (SIGTERM) or <c>connection_lost</c> (it will not come back).</param>
+    /// <param name="reason"><c>stopped</c> (Ctrl-C) or <c>terminated</c> (SIGTERM).</param>
     public void Closed(string reason, string? message, long forwarded)
     {
         if (!End())

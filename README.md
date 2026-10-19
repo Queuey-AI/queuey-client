@@ -1406,17 +1406,27 @@ Build, Full access or ProducerAdmin key).
 
 **`--json` for agents and scripts:** one JSON object per line on stdout, each with
 `"schemaVersion": 1` and a `type` — `listening` first, a `delivery` per forward, `lost` when a
-workspace session loses one of its queues, and one last line: `refused` (it never listened, an error
-before the session included), `superseded` (another session took the queue over) or `closed`
-(stopped, terminated, or the connection was lost for good). The last line comes after the session
+workspace session loses one of its queues, `reconnecting` (with `attempt`, `retryInSeconds` and
+`reason`) before each attempt to come back after a lost connection and `reconnected` once it is
+back, and one last line: `refused` (it never listened, an error before the session included, or
+Queuey refused it when it came back), `superseded` (another session took the queue over) or
+`closed` (stopped or terminated). The last line comes after the session
 has stopped, so the queue is free when you read it. When whatever reads the output closes it (as
 `head -n 5` does), or falls more than about 1024 lines behind, the session stops and frees the queue
-too: the stream then ends without a last line, and the exit code is 1. After a lost connection the
-session reconnects at once and again after 1, 2, 4 and 8 seconds, so it is back within the 10
-seconds Queuey keeps its queue for it. `path` and `localUrl` leave out the query and
+too: the stream then ends without a last line, and the exit code is 1.
+
+**A listener stays up until you stop it.** A lost connection never ends the session, whether the
+network dropped it or Queuey closed it (as it does when a `queuey login` access token runs out,
+every hour). The session connects again at once and after 1, 2, 4 and 8 seconds, so it is back
+within the 10 seconds Queuey keeps its queue for it, then after 16 and 30 seconds, then every 30–60
+seconds for as long as it takes. Each new connection gets a fresh login token, renewed when needed,
+and claims the queue again as the same session. It ends only on Ctrl-C or SIGTERM, when another
+session has the queue, or when Queuey refuses it for a reason another attempt does not change: the
+login has ended or was disconnected (run `queuey login`), the key may no longer listen, or the
+queue is gone. `path` and `localUrl` leave out the query and
 any part of the path that may be a secret; your app still gets the whole URL. Exit codes: 0 after
-Ctrl-C, 1 when refused, taken over or the connection is lost for good, 2 on a usage error, 3 when
-the key is missing or refused, and 143 after SIGTERM.
+Ctrl-C, 1 when refused or taken over, 2 on a usage error, 3 when the key or login is missing or
+refused, and 143 after SIGTERM.
 
 ```json
 {"schemaVersion":1,"type":"delivery","eventId":"evt_…","eventType":"invoice.paid","queue":"que_…","method":"POST","path":"/api/stripe","localUrl":"http://localhost:5000/api/stripe","status":200,"durationMs":12,"signatureHeaders":["Stripe-Signature"],"error":null}
