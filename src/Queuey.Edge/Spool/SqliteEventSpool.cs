@@ -362,15 +362,28 @@ public sealed class SqliteEventSpool : IEventSpool
         }, cancellationToken);
 
     public Task<int> KickAsync(CancellationToken cancellationToken)
+        => CollapseWaitingAsync("""
+            UPDATE spool SET next_attempt_utc = @now, last_delay_ms = 0
+            WHERE state = 'Accepted' AND next_attempt_utc > @now;
+            """, cancellationToken);
+
+    // Smalere enn kick: bare det nettet stoppet, og last_delay_ms står, så et nett som flapper fortsetter
+    // backoff der den slapp i stedet for å starte på BackoffBase igjen. Klassene lagres som enum-navn.
+    /// <inheritdoc/>
+    public Task<int> ResumeTransientAsync(CancellationToken cancellationToken)
+        => CollapseWaitingAsync("""
+            UPDATE spool SET next_attempt_utc = @now
+            WHERE state = 'Accepted' AND next_attempt_utc > @now
+              AND last_class IN ('Transient', 'Unknown');
+            """, cancellationToken);
+
+    // Collapse waiting only: due now, ladder per the caller. States, ids and lane
+    // order are untouched, so FIFO and dedup semantics hold.
+    private Task<int> CollapseWaitingAsync(string sql, CancellationToken cancellationToken)
         => WriteLockedAsync(conn =>
         {
-            // Collapse waiting only: due-now + ladder reset. States, ids and
-            // lane order are untouched, so FIFO and dedup semantics hold.
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = """
-                UPDATE spool SET next_attempt_utc = @now, last_delay_ms = 0
-                WHERE state = 'Accepted' AND next_attempt_utc > @now;
-                """;
+            cmd.CommandText = sql;
             cmd.Parameters.AddWithValue("@now", Format(_clock.UtcNow));
             return cmd.ExecuteNonQuery();
         }, cancellationToken);

@@ -111,6 +111,16 @@ public interface IEventSpool
     Task<int> KickAsync(CancellationToken cancellationToken);
 
     /// <summary>
+    /// The transfer loop's "the uplink is back": makes every pending (Accepted) row whose last attempt failed
+    /// <see cref="TransferClass.Transient"/> or <see cref="TransferClass.Unknown"/> due immediately, and keeps its
+    /// backoff ladder, so a link that drops again continues from the wait the row had earned. Rows Cloud asked to
+    /// wait (<see cref="TransferClass.Throttled"/>), rows that need an operator
+    /// (<see cref="TransferClass.RequiresAction"/>), and claimed and quarantined rows keep their schedule. Like
+    /// <see cref="KickAsync"/>, this only collapses waiting, so order and dedup hold. Returns rows resumed.
+    /// </summary>
+    Task<int> ResumeTransientAsync(CancellationToken cancellationToken);
+
+    /// <summary>
     /// Returns a quarantined row to the retry schedule (operator action),
     /// or removes it (explicit discard — logged and counted by the caller).
     /// </summary>

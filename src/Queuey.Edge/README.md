@@ -282,7 +282,9 @@ queuey edge reset   --spool <path> --accept-data-loss # start clean; the old fil
   its lane, ahead of anything accepted after it.
 - **Throttling:** none of Edge's own. Transfers run with bounded
   concurrency across lanes, back off with decorrelated jitter, probe with a
-  single event after a failure, and wait at least Cloud's `Retry-After`
+  single event after a failure (the probe comes at most one backoff cap after
+  the network is back, and when it gets through, every lane that was waiting
+  out the outage starts at once), and wait at least Cloud's `Retry-After`
   (plus a little jitter, so a fleet that went dark together does not knock
   again in lockstep).
 - **Honest history:** pass `PublishOptions.OccurredAtUtc` and a backlog
