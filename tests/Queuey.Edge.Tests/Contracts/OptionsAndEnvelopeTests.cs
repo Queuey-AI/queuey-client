@@ -47,6 +47,62 @@ public class OptionsAndEnvelopeTests
         o.Validate();
     }
 
+    [Theory]
+    [InlineData("gw-SN-48213")]
+    [InlineData("press_line.2")]
+    [InlineData("0199fc2e-7a41-7c3d-9b1e-4f2a6d8c0e11")]
+    public void A_node_id_of_letters_digits_dots_underscores_and_dashes_up_to_64_is_valid(string nodeId)
+    {
+        var o = new QueueyEdgeOptions { ApiKey = "qak_id.secret", TenantPublicId = "ten_x" };
+        o.Health.NodeId = nodeId;
+        o.Validate();
+
+        o.Health.NodeId = new string('a', 64);
+        o.Validate();
+    }
+
+    [Theory]
+    [InlineData("", "is empty")]
+    [InlineData("gw SN 48213", "it has U+0020")]
+    [InlineData("gw/48213", "it has '/'")]
+    [InlineData("gw%2F48213", "it has '%'")]
+    [InlineData("gåteway", "it has 'å'")]
+    [InlineData("..", "cannot be '.' or '..'")]
+    public void An_invalid_node_id_is_refused_at_composition(string nodeId, string reason)
+    {
+        var o = new QueueyEdgeOptions { ApiKey = "qak_id.secret", TenantPublicId = "ten_x" };
+        o.Health.NodeId = nodeId;
+
+        var ex = Assert.Throws<QueueyConfigurationException>(o.Validate);
+        Assert.Contains("QueueyEdgeOptions.Health.NodeId", ex.Message);
+        Assert.Contains(reason, ex.Message);
+    }
+
+    [Fact]
+    public void A_node_id_longer_than_64_is_refused_with_queuey_s_limit()
+    {
+        var o = new QueueyEdgeOptions { ApiKey = "qak_id.secret", TenantPublicId = "ten_x" };
+        o.Health.NodeId = new string('a', 65);
+
+        var ex = Assert.Throws<QueueyConfigurationException>(o.Validate);
+        Assert.Contains("is 65 characters", ex.Message);
+        Assert.Contains("at most 64", ex.Message);
+    }
+
+    [Fact]
+    public void QUEUEY_NODE_ID_fills_the_node_id_and_a_value_set_in_code_wins()
+    {
+        Func<string, string?> env = name => name == "QUEUEY_NODE_ID" ? " gw-SN-48213\n" : null;
+
+        Assert.Equal("gw-SN-48213", new QueueyEdgeOptions().UseSettings(env).Health.NodeId);
+
+        var inCode = new QueueyEdgeOptions();
+        inCode.Health.NodeId = "from-code";
+        Assert.Equal("from-code", inCode.UseEnvironmentVariables(env).Health.NodeId);
+
+        Assert.Null(new QueueyEdgeOptions().UseSettings(name => name == "QUEUEY_NODE_ID" ? "  " : null).Health.NodeId);
+    }
+
     [Fact]
     public void A_headroom_that_is_set_is_kept_whatever_the_limit()
     {

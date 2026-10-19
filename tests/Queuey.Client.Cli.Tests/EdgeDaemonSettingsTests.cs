@@ -5,7 +5,8 @@ namespace Queuey.Client.Cli.Tests;
 /// <summary>
 /// `queuey edge run` og `edge publish` med innstillingene en test eller en liten gateway trenger (2026-10-19):
 /// spool-grensen, som begge må lese fordi de skriver samme spool, taket på backoff, og feltet MQTT-dedup leser
-/// produsentens id fra. En ugyldig verdi stopper kommandoen før daemonen starter, der operatøren ser.
+/// produsentens id fra. En ugyldig verdi stopper kommandoen før daemonen starter, der operatøren ser. Nodens faste id
+/// (--node-id / QUEUEY_NODE_ID) følger samme regel.
 /// </summary>
 [Collection(ConsoleCollection.Name)]
 public sealed class EdgeDaemonSettingsTests : IDisposable
@@ -59,6 +60,42 @@ public sealed class EdgeDaemonSettingsTests : IDisposable
         // Som de andre MQTT-valgene (--mqtt-retained): en konfigurasjonsfeil, ikke en stacktrace når verten starter.
         Assert.Equal(ExitCodes.Configuration, run.Exit);
         Assert.Contains("no empty segments", run.Stderr);
+    }
+
+    [Theory]
+    [InlineData("--node-id", "gw/48213", "--node-id may hold only letters")]
+    [InlineData("--node-id", "", "--node-id is empty")]
+    [InlineData("QUEUEY_NODE_ID", "gw 48213", "QUEUEY_NODE_ID may hold only letters")]
+    [InlineData("QUEUEY_NODE_ID", "a-node-id-that-is-far-longer-than-the-sixty-four-characters-queuey-takes", "at most 64")]
+    public async Task Edge_run_refuses_an_invalid_node_id_as_it_refuses_an_invalid_mqtt_setting(string setting, string value, string message)
+    {
+        CliRun run = await RunGuarded(Run(setting, value));
+
+        Assert.Equal(ExitCodes.Configuration, run.Exit);
+        Assert.Contains(message, run.Stderr);
+    }
+
+    [Fact]
+    public async Task The_node_id_comes_from_the_flag_else_from_QUEUEY_NODE_ID()
+    {
+        string? fromFlag = null, fromEnv = null, unset = null;
+        var env = new Dictionary<string, string>(SigningPair) { ["QUEUEY_NODE_ID"] = "gw-SN-48213" };
+
+        await CliHarness.RunAsync(() =>
+        {
+            fromFlag = EdgeCommand.EdgeCredentials(Map("--node-id", "gw-SN-1")).Health.NodeId;
+            fromEnv = EdgeCommand.EdgeCredentials(Map()).Health.NodeId;
+            return Task.FromResult(0);
+        }, env: env);
+        await CliHarness.RunAsync(() =>
+        {
+            unset = EdgeCommand.EdgeCredentials(Map()).Health.NodeId;
+            return Task.FromResult(0);
+        }, env: new Dictionary<string, string>(SigningPair));
+
+        Assert.Equal("gw-SN-1", fromFlag);
+        Assert.Equal("gw-SN-48213", fromEnv);
+        Assert.Null(unset);
     }
 
     [Theory]

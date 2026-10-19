@@ -38,7 +38,7 @@ internal static class EdgeCommand
         ["run"] = new("edge run", flags: new[] { "report-health", "mqtt-tls" },
             values: new[]
             {
-                "spool", "spool-max-mb", "backoff-cap-seconds", "listen", "node-name",
+                "spool", "spool-max-mb", "backoff-cap-seconds", "listen", "node-name", "node-id",
                 "mqtt", "mqtt-routes", "mqtt-user", "mqtt-password", "mqtt-retained", "mqtt-id-field"
             }),
         ["kick"] = new("edge kick", values: new[] { "spool" }),
@@ -209,7 +209,7 @@ internal static class EdgeCommand
     /// <c>QUEUEY_SIGNING_SECRET</c> from the environment (in Development also from <c>.env</c>), else <c>QUEUEY_API_KEY</c>;
     /// and <c>QUEUEY_EDGE_HEALTH_API_KEY</c>, which only the health check-in sends. <c>--api-key</c> still works for a node
     /// that publishes with an API key, but no text suggests it: argv is visible to every user on the machine, and the
-    /// signing secret has no flag at all.
+    /// signing secret has no flag at all. The node's fixed id comes along: <c>--node-id</c>, else <c>QUEUEY_NODE_ID</c>.
     /// </summary>
     // Edge-signering (Kenneth 2026-10-09): daemonen leser de samme variablene som SDK-en, gjennom QueueyEdgeOptions.
     internal static QueueyEdgeOptions EdgeCredentials(ArgMap map)
@@ -218,7 +218,8 @@ internal static class EdgeCommand
         if (!string.IsNullOrWhiteSpace(map.Get("api-key")))
             Console.Error.WriteLine("Warning: --api-key: argv is visible to every user on this machine; move it to QUEUEY_API_KEY or " +
                                     "QUEUEY_EDGE_HEALTH_API_KEY in edge.env.");
-        return new QueueyEdgeOptions { ApiKey = map.Get("api-key") }.UseEnvironmentVariables(CliHost.Env);
+        return new QueueyEdgeOptions { ApiKey = map.Get("api-key"), Health = { NodeId = map.Get("node-id") } }
+            .UseEnvironmentVariables(CliHost.Env);
     }
 
     /// <summary>
@@ -245,6 +246,18 @@ internal static class EdgeCommand
                 "edge run needs --tenant <ten_...> (or QUEUEY_TENANT) and a key: the signing pair QUEUEY_SIGNING_KEY_ID and " +
                 "QUEUEY_SIGNING_SECRET in its environment, which queuey keys mint --write <file> writes for the service's " +
                 "environment file; or a publish-only key in QUEUEY_API_KEY.");
+            return ExitCodes.Configuration;
+        }
+
+        // Sjekket her, der operatøren ser det: Validate i verten ville først slått inn når daemonen starter.
+        var nodeId = credentials.Health.NodeId;
+        try
+        {
+            EdgeNodeId.Validate(nodeId, map.Get("node-id") is not null ? "--node-id" : QueueyEdgeEnvironmentVariables.NodeId);
+        }
+        catch (Queuey.Client.QueueyConfigurationException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
             return ExitCodes.Configuration;
         }
 
@@ -313,6 +326,7 @@ internal static class EdgeCommand
             o.Health.ReportToCloud = reportHealth;
             if (!string.IsNullOrWhiteSpace(nodeName))
                 o.Health.NodeName = nodeName;
+            o.Health.NodeId = nodeId;
             if (!string.IsNullOrWhiteSpace(ingressBase))
                 o.IngressBaseAddress = new Uri(ingressBase);
             if (map.Get("source") is { Length: > 0 } source)
@@ -379,6 +393,8 @@ internal static class EdgeCommand
             Console.WriteLine(
                 $"Health reporting: ON — this node appears as '{nodeName ?? Environment.MachineName}' under Edge nodes " +
                 "in the Queuey console (outbound only; reports are not events).");
+            if (nodeId is not null)
+                Console.WriteLine($"Node id: {nodeId} (configured; it stays the same with a new spool).");
         }
         if (!string.IsNullOrWhiteSpace(mqtt))
         {

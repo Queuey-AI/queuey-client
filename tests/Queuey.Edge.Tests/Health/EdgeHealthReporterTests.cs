@@ -32,6 +32,73 @@ public class EdgeHealthReporterTests
     }
 
     [Fact]
+    public async Task A_configured_node_id_is_the_id_in_the_report_url_and_is_written_to_the_spool()
+    {
+        using var fx = new SpoolFixture();
+        var (reporter, handler) = Reporter(fx, _ => new HttpResponseMessage(HttpStatusCode.NoContent), nodeId: "gw-SN-48213");
+
+        var nodeId = await reporter.GetNodeIdAsync(CancellationToken.None);
+        await reporter.SendAsync(nodeId, EdgeHealthReport.From(
+            Healthy(), "barge-07", "1.2.3", "linux-arm64", fx.Clock.UtcNow, TimeSpan.FromMinutes(5)), CancellationToken.None);
+
+        Assert.Equal("gw-SN-48213", nodeId);
+        Assert.Equal("/edge/ten_test/nodes/gw-SN-48213/health", Assert.Single(handler.Requests).Uri.AbsolutePath);
+        Assert.Equal("gw-SN-48213", await fx.Spool.GetMetaAsync(EdgeMetaKeys.NodeId, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Without_a_configured_id_the_id_in_the_spool_is_used_as_before()
+    {
+        using var fx = new SpoolFixture();
+        await fx.Spool.SetMetaAsync(EdgeMetaKeys.NodeId, "0199fc2e-7a41-7c3d-9b1e-4f2a6d8c0e11", CancellationToken.None);
+
+        var nodeId = await Reporter(fx, _ => new HttpResponseMessage(HttpStatusCode.NoContent)).Reporter
+            .GetNodeIdAsync(CancellationToken.None);
+
+        Assert.Equal("0199fc2e-7a41-7c3d-9b1e-4f2a6d8c0e11", nodeId);
+    }
+
+    [Fact]
+    public async Task A_configured_id_wins_over_another_id_in_the_spool_and_replaces_it_there()
+    {
+        using var fx = new SpoolFixture();
+        await fx.Spool.SetMetaAsync(EdgeMetaKeys.NodeId, "0199fc2e-7a41-7c3d-9b1e-4f2a6d8c0e11", CancellationToken.None);
+
+        var nodeId = await Reporter(fx, _ => new HttpResponseMessage(HttpStatusCode.NoContent), nodeId: "gw-SN-48213").Reporter
+            .GetNodeIdAsync(CancellationToken.None);
+
+        Assert.Equal("gw-SN-48213", nodeId);
+        Assert.Equal("gw-SN-48213", await fx.Spool.GetMetaAsync(EdgeMetaKeys.NodeId, CancellationToken.None));
+
+        // Fjernes innstillingen senere, er noden fortsatt den samme.
+        var unconfigured = await Reporter(fx, _ => new HttpResponseMessage(HttpStatusCode.NoContent)).Reporter
+            .GetNodeIdAsync(CancellationToken.None);
+        Assert.Equal("gw-SN-48213", unconfigured);
+    }
+
+    [Fact]
+    public async Task A_node_that_does_not_report_still_writes_its_configured_id_and_mints_none_without_one()
+    {
+        using var configured = new SpoolFixture();
+        var (reporter, handler) = Reporter(configured, _ => new HttpResponseMessage(HttpStatusCode.NoContent),
+            enabled: false, nodeId: "gw-SN-48213");
+        await reporter.StartAsync(CancellationToken.None);
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (await configured.Spool.GetMetaAsync(EdgeMetaKeys.NodeId, CancellationToken.None) is null && DateTime.UtcNow < deadline)
+            await Task.Delay(20);
+        await reporter.StopAsync(CancellationToken.None);
+
+        Assert.Equal("gw-SN-48213", await configured.Spool.GetMetaAsync(EdgeMetaKeys.NodeId, CancellationToken.None));
+        Assert.Empty(handler.Requests);
+
+        using var plain = new SpoolFixture();
+        var (silent, _) = Reporter(plain, _ => new HttpResponseMessage(HttpStatusCode.NoContent), enabled: false);
+        await silent.StartAsync(CancellationToken.None);
+        await silent.StopAsync(CancellationToken.None);
+        Assert.Null(await plain.Spool.GetMetaAsync(EdgeMetaKeys.NodeId, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task Report_goes_to_the_health_route_with_the_publish_key_and_every_field()
     {
         using var fx = new SpoolFixture();
@@ -221,7 +288,7 @@ public class EdgeHealthReporterTests
 
     private static EdgeHealth Healthy() => new(EdgeState.Healthy, 0, null, 0, null, null, 0, false);
 
-    private static QueueyEdgeOptions Options(bool enabled = true)
+    private static QueueyEdgeOptions Options(bool enabled = true, string? nodeId = null)
     {
         var o = new QueueyEdgeOptions
         {
@@ -231,14 +298,16 @@ public class EdgeHealthReporterTests
         };
         o.Health.ReportToCloud = enabled;
         o.Health.NodeName = "barge-07";
+        o.Health.NodeId = nodeId;
         return o;
     }
 
     private static (EdgeHealthReporter Reporter, ScriptedHandler Handler) Reporter(
-        SpoolFixture fx, Func<HttpRequestMessage, HttpResponseMessage> script, EdgeHealth? health = null, bool enabled = true)
+        SpoolFixture fx, Func<HttpRequestMessage, HttpResponseMessage> script, EdgeHealth? health = null, bool enabled = true,
+        string? nodeId = null)
     {
         var handler = new ScriptedHandler(script);
-        var reporter = new EdgeHealthReporter(new HttpClient(handler), Options(enabled), fx.Spool,
+        var reporter = new EdgeHealthReporter(new HttpClient(handler), Options(enabled, nodeId), fx.Spool,
             new StaticHealth(health ?? Healthy()), fx.Clock, NullLogger<EdgeHealthReporter>.Instance);
         return (reporter, handler);
     }

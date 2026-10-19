@@ -694,7 +694,8 @@ UNLOCK
 
 EDGE
   queuey edge run     --spool <path> --tenant <ten_...>
-                [--listen <port>] [--report-health] [--node-name <name>] [--ingress-base <uri>] [--source <s>]
+                [--listen <port>] [--report-health] [--node-name <name>] [--node-id <id>] [--ingress-base <uri>]
+                [--source <s>]
                 [--spool-max-mb <n>] [--backoff-cap-seconds <n>]
                 [--mqtt <host[:port]> --mqtt-routes ""filter=queue[@segment];…"" [--mqtt-user <u>] [--mqtt-tls]
                  [--mqtt-retained first|skip|all] [--mqtt-id-field <path>]]
@@ -717,6 +718,10 @@ EDGE
                  QUEUEY_EDGE_HEALTH_API_KEY, a publish-only key in the same environment file,
                  which nothing else uses;
                  --node-name (QUEUEY_NODE_NAME) is the label shown there, default: machine name.
+                 --node-id (QUEUEY_NODE_ID) gives the node a fixed identity, so a new spool (a new
+                 disk or container volume) is still the same node; without it the node mints an
+                 id into the spool once. Up to 64 of A-Z a-z 0-9 . _ -, unique per machine (a
+                 serial number): two machines with one id look like one node.
                  --mqtt subscribes to a (usually local) broker and spools every message durably
                  BEFORE acking it (QoS 1); a route's @segment makes that topic level the lane
                  (FIFO per machine). When the spool cannot take a message, the intake leaves it

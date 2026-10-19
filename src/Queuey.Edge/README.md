@@ -135,6 +135,7 @@ away leaves an empty spool, which looks exactly like a quiet, healthy node.
 ```csharp
 o.Health.ReportToCloud = true;   // or: queuey edge run --report-health --node-name barge-07
 o.Health.NodeName = "barge-07";  // defaults to the machine name
+o.Health.NodeId = "gw-SN-48213"; // optional fixed identity; or QUEUEY_NODE_ID / --node-id
 ```
 
 Queuey's check-in takes an API key today, not a signature. A node that signs its events checks in with
@@ -152,7 +153,13 @@ only** (Cloud never reaches into a node; the loopback endpoint stays
 loopback), reports are **not events** (not spooled, not retried, never
 billed — a stale report is worthless, the next one supersedes it), and the
 node's identity is a UUID minted once into the spool file, so a reinstall
-on the same disk is the same node and a fresh spool is a new one. A node
+on the same disk is the same node and a fresh spool is a new one. Where a
+fresh spool is routine (a new container volume, an automatically provisioned
+gateway), set `Health.NodeId` (`QUEUEY_NODE_ID`, `--node-id`): it wins over
+the spool's id and is written there, so the node stays the same node. Up to
+64 characters from `A–Z a–z 0–9 . _ -`; make it unique per machine, such as
+the gateway's serial number, because two machines with one id look like one
+node flipping between their reports. `NodeName` is only the label. A node
 that stops reporting shows as **silent** in the console — Cloud derives
 that from `last seen`; the node itself never escalates.
 
