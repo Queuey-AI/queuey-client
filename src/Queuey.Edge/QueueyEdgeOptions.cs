@@ -97,8 +97,8 @@ public sealed class QueueyEdgeOptions
     /// <see cref="QueueyOptions.UseEnvironmentVariables(Func{string, string?}?)"/>: <c>QUEUEY_SIGNING_KEY_ID</c> and
     /// <c>QUEUEY_SIGNING_SECRET</c> (in Development also from <c>.env</c> in the working folder, as a pair),
     /// <c>QUEUEY_API_KEY</c> only when the pair is not set, <c>QUEUEY_TENANT</c> and <c>QUEUEY_INGRESS_BASE</c>; and
-    /// <c>QUEUEY_EDGE_HEALTH_API_KEY</c> into <see cref="EdgeHealthReportOptions.ApiKey"/>, never from <c>.env</c>. A value
-    /// set in code wins. Returns these options.
+    /// <c>QUEUEY_EDGE_HEALTH_API_KEY</c> into <see cref="EdgeHealthReportOptions.ApiKey"/> and <c>QUEUEY_NODE_ID</c> into
+    /// <see cref="EdgeHealthReportOptions.NodeId"/>, never from <c>.env</c>. A value set in code wins. Returns these options.
     /// </summary>
     /// <param name="read">Reads a variable; <see cref="System.Environment.GetEnvironmentVariable(string)"/> when null.</param>
     public QueueyEdgeOptions UseEnvironmentVariables(Func<string, string?>? read = null)
@@ -128,7 +128,7 @@ public sealed class QueueyEdgeOptions
 
     /// <summary>
     /// The client's rules applied by <paramref name="fill"/> to a <see cref="QueueyOptions"/> with these values, and the
-    /// ones Edge uses taken back; then the health key from <paramref name="read"/>.
+    /// ones Edge uses taken back; then the health key and the node id from <paramref name="read"/>.
     /// </summary>
     // Reglene bor i QueueyOptions, så Edge og klienten aldri kan lese forskjellig. Edge går bare gjennom klientens offentlige
     // metoder (security-review av #70, K1); testene gir en fill med .env-mappa via klientens InternalsVisibleTo til testprosjektet.
@@ -153,6 +153,8 @@ public sealed class QueueyEdgeOptions
         if (string.IsNullOrWhiteSpace(Health.ApiKey) && read(QueueyEdgeEnvironmentVariables.HealthApiKey) is { } health
             && !string.IsNullOrWhiteSpace(health))
             Health.ApiKey = health.Trim();
+        if (Health.NodeId is null && read(QueueyEdgeEnvironmentVariables.NodeId) is { } nodeId && !string.IsNullOrWhiteSpace(nodeId))
+            Health.NodeId = nodeId.Trim();
         return this;
     }
 
@@ -178,6 +180,7 @@ public sealed class QueueyEdgeOptions
         if (Storage.MaxSpoolBytes <= Storage.HeadroomBytes)
             throw new QueueyConfigurationException(
                 "QueueyEdgeOptions.Storage.MaxSpoolBytes must exceed HeadroomBytes.");
+        EdgeNodeId.Validate(Health.NodeId, "QueueyEdgeOptions.Health.NodeId");
     }
 }
 
@@ -333,10 +336,26 @@ public sealed class EdgeHealthReportOptions
 
     /// <summary>
     /// Human-readable node name shown in the console (e.g. "barge-07",
-    /// "press-line-2"). Defaults to the machine name. The node's stable
-    /// IDENTITY is separate: a UUID minted once and stored in the spool.
+    /// "press-line-2"). Defaults to the machine name. It is only a label: the
+    /// node's IDENTITY is <see cref="NodeId"/>.
     /// </summary>
     public string? NodeName { get; set; }
+
+    /// <summary>
+    /// A fixed identity for this node, the id Queuey Cloud knows it by under Edge nodes. Unset, the node mints a UUID
+    /// once and keeps it in the spool file, so a new spool (a new disk, a new container volume) is a new node. Set, this
+    /// value is the node's id whatever the spool holds, and it is written to the spool too, so <c>queuey edge status</c>
+    /// shows it and the node keeps it if the setting is later removed. Read it from <c>QUEUEY_NODE_ID</c>
+    /// (<see cref="QueueyEdgeOptions.UseEnvironmentVariables"/> or
+    /// <see cref="QueueyEdgeOptions.UseSettings(System.Func{string, string?})"/>).
+    /// <para>
+    /// At most 64 characters, from <c>A–Z</c>, <c>a–z</c>, <c>0–9</c>, <c>.</c>, <c>_</c> and <c>-</c>, and not <c>.</c>
+    /// or <c>..</c>: it travels in the check-in's URL path. Use something unique to the machine, such as the gateway's
+    /// serial number. Two machines with the same id look like one node that flips between their reports.
+    /// <see cref="NodeName"/> is the label; this is the identity.
+    /// </para>
+    /// </summary>
+    public string? NodeId { get; set; }
 
     /// <summary>
     /// Steady-state cadence. A state change reports at the next 10 s tick —
@@ -356,4 +375,43 @@ public static class QueueyEdgeEnvironmentVariables
     /// check-in sends.
     /// </summary>
     public const string HealthApiKey = "QUEUEY_EDGE_HEALTH_API_KEY";
+
+    /// <summary><c>QUEUEY_NODE_ID</c>: <see cref="EdgeHealthReportOptions.NodeId"/>, the node's fixed identity.</summary>
+    public const string NodeId = "QUEUEY_NODE_ID";
+}
+
+/// <summary>The rule for <see cref="EdgeHealthReportOptions.NodeId"/>, in one place for the SDK and the CLI.</summary>
+internal static class EdgeNodeId
+{
+    /// <summary>Queuey Cloud's limit for a node id.</summary>
+    internal const int MaxLength = 64;
+
+    /// <summary>
+    /// Throws <see cref="QueueyConfigurationException"/> when <paramref name="value"/> is set and is not a node id Queuey
+    /// can route: empty, longer than <see cref="MaxLength"/>, outside <c>[A-Za-z0-9._-]</c>, or a dot segment.
+    /// </summary>
+    /// <param name="value">The configured id; null means not configured, which is valid.</param>
+    /// <param name="setting">How the operator set it, named in the message (an option, a flag or a variable).</param>
+    internal static void Validate(string? value, string setting)
+    {
+        if (value is null) return;
+        if (value.Length == 0)
+            throw new QueueyConfigurationException(
+                $"{setting} is empty. Leave it unset to let the node mint its own id, or give it a value unique to this machine.");
+        if (value.Length > MaxLength)
+            throw new QueueyConfigurationException(
+                $"{setting} is {value.Length} characters; Queuey takes a node id of at most {MaxLength}.");
+        foreach (var c in value)
+        {
+            if (c is (>= 'A' and <= 'Z') or (>= 'a' and <= 'z') or (>= '0' and <= '9') or '.' or '_' or '-') continue;
+            var shown = char.IsControl(c) || char.IsWhiteSpace(c) ? $"U+{(int)c:X4}" : $"'{c}'";
+            throw new QueueyConfigurationException(
+                $"{setting} may hold only letters A-Z and a-z, digits, '.', '_' and '-' (it travels in the check-in's URL path); " +
+                $"it has {shown}.");
+        }
+        // «.» og «..» er lovlige tegn, men en URI-oppløsning ville spist dem som sti-segmenter.
+        if (value is "." or "..")
+            throw new QueueyConfigurationException(
+                $"{setting} cannot be '.' or '..': a URL path would read it as a directory step, not an id.");
+    }
 }

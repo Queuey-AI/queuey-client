@@ -23,7 +23,9 @@ namespace Queuey.Edge;
 ///   are never billed.</item>
 /// <item>Identity is stable and local: a UUID minted once into
 ///   <c>edge_meta</c>, so a reinstall on the same disk is the same node and
-///   a fresh spool is a new one — which is exactly the truth.</item>
+///   a fresh spool is a new one — unless the operator gives the node a fixed
+///   id (<see cref="EdgeHealthReportOptions.NodeId"/>), which then wins and is
+///   written to <c>edge_meta</c> in its place.</item>
 /// </list>
 /// Cadence: a report at startup, one whenever <see cref="EdgeState"/>
 /// changes, and one every <see cref="EdgeHealthReportOptions.ReportInterval"/>
@@ -87,11 +89,26 @@ internal sealed class EdgeHealthReporter : BackgroundService
             : null;
     private int? _lastWarnedStatus;
 
-    /// <summary>The node's stable identity (minted on first use). Exposed for the CLI's status readout.</summary>
+    /// <summary>
+    /// The node's identity: the configured <see cref="EdgeHealthReportOptions.NodeId"/>, stored in the spool in place of
+    /// any other; without one, the id in the spool, minted on first use.
+    /// </summary>
     public async Task<string> GetNodeIdAsync(CancellationToken cancellationToken)
     {
         if (_nodeId is not null) return _nodeId;
         var existing = await _spool.GetMetaAsync(NodeIdMetaKey, cancellationToken).ConfigureAwait(false);
+        if (_options.Health.NodeId is { } configured)
+        {
+            if (!string.Equals(existing, configured, StringComparison.Ordinal))
+            {
+                await _spool.SetMetaAsync(NodeIdMetaKey, configured, cancellationToken).ConfigureAwait(false);
+                if (!string.IsNullOrWhiteSpace(existing))
+                    _logger.LogInformation(
+                        "This node now goes by its configured id {NodeId} instead of {PreviousNodeId}; Queuey Cloud lists it as that node from its next report.",
+                        configured, existing);
+            }
+            return _nodeId = configured;
+        }
         if (string.IsNullOrWhiteSpace(existing))
         {
             existing = Uuid7.NewString(_clock.UtcNow);
@@ -103,7 +120,10 @@ internal sealed class EdgeHealthReporter : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         if (!_options.Health.ReportToCloud)
+        {
+            await StoreConfiguredNodeIdAsync(stoppingToken).ConfigureAwait(false);
             return; // opt-in only
+        }
 
         // Queuey's check-in tar bare X-Api-Key (EdgeNodeResolveMiddleware, 2026-10-09). En node med bare signeringsnøkkel
         // ville fått 401 hvert intervall, med et råd om å sjekke ApiKey; den sier det én gang i stedet og sender ingenting.
@@ -113,6 +133,7 @@ internal sealed class EdgeHealthReporter : BackgroundService
                 "Health.ReportToCloud is on, but this node has only a signing key, and Queuey's check-in takes an API key. " +
                 "Events are signed and flow as before; the node does not appear under Edge nodes until " +
                 QueueyEdgeEnvironmentVariables.HealthApiKey + " holds a publish-only key, in the environment or configuration.");
+            await StoreConfiguredNodeIdAsync(stoppingToken).ConfigureAwait(false);
             return;
         }
 
@@ -170,6 +191,18 @@ internal sealed class EdgeHealthReporter : BackgroundService
             }
             catch (OperationCanceledException) { break; }
         }
+    }
+
+    /// <summary>
+    /// A configured id is the node's identity even when it does not report: the spool holds it for
+    /// <c>queuey edge status</c>, and for the day the setting is removed. Never throws.
+    /// </summary>
+    private async Task StoreConfiguredNodeIdAsync(CancellationToken cancellationToken)
+    {
+        if (_options.Health.NodeId is null) return;
+        try { await GetNodeIdAsync(cancellationToken).ConfigureAwait(false); }
+        catch (OperationCanceledException) { }
+        catch (Exception ex) { _logger.LogDebug(ex, "Could not store the configured node id in the spool."); }
     }
 
     /// <summary>Outcome of one send: whether Cloud took it, and how long Cloud asked us to wait if not.</summary>

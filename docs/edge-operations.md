@@ -334,6 +334,30 @@ Everything a node knows about itself reaches Cloud only while it can talk,
 so the local metric above still matters for a machine you cannot reach at
 all. *Forget* in the tab removes a node you took out of service.
 
+### Node identity
+
+Cloud knows a node by its node id. Without configuration, the node mints a
+UUID once and keeps it in the spool file: a reinstall on the same disk is
+the same node, and `recover` and `reset` keep the id. A new spool file is a
+new node, though: a new disk, a new container volume,
+`docker compose down -v`. Where machines or containers are provisioned
+automatically, give each node a fixed id instead:
+
+```bash
+queuey edge run … --report-health --node-id gw-SN-48213   # or QUEUEY_NODE_ID=gw-SN-48213 in edge.env
+```
+
+(In code: `o.Health.NodeId`, or `QUEUEY_NODE_ID` through
+`UseEnvironmentVariables()` / `UseSettings(…)`.) A configured id wins over
+the one in the spool and is written there in its place, so
+`queuey edge status` shows it and the node keeps it if the setting is later
+removed. It is up to 64 characters from `A–Z a–z 0–9 . _ -`, because it
+travels in the check-in's URL; anything else stops the node at startup with
+a configuration error. **Make it unique per machine**, such as the
+gateway's serial number: two machines with the same id look like one node
+that flips between their reports. `--node-name` / `NodeName` is only the
+label the console shows.
+
 A report is one small request every five minutes plus one on each state
 change, never billed and never an event. Cloud caps a node at one report
 per ten seconds and a license at a fleet's worth; beyond that it answers
