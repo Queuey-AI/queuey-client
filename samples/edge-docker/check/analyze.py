@@ -4,8 +4,10 @@ Reads the deliveries check/receiver.py recorded and reports, per node and in
 total: messages missing, duplicates (and whether a duplicate is the same
 Queuey event delivered again or a second event), order inversions, and
 latency from reading to arrival. With the phase log run-scenario.sh writes,
-it also reports, per outage, how long after the link came back the readings
-taken during the outage had arrived.
+it also reports the latency of the readings taken during the baseline, before
+any outage, and per outage, how long after the link came back the readings
+taken during the outage had arrived. A reading's time has whole seconds, so a
+latency can read up to a second high.
 
     python3 check/analyze.py [--results results]
 
@@ -97,6 +99,14 @@ def main():
 
     latencies = [(d["arrivedAtMs"] - epoch_ms(d["ts"])) / 1000 for d in deliveries if d.get("ts")]
 
+    # Normal operation: the readings taken during the baseline. The overall
+    # figures include every reading an outage held back.
+    baseline = next((p for p in phases if p.get("phase") == "baseline" and "endMs" in p), None)
+    baseline_latencies = [
+        (d["arrivedAtMs"] - epoch_ms(d["ts"])) / 1000 for d in deliveries
+        if baseline and d.get("ts") and baseline["startMs"] <= epoch_ms(d["ts"]) <= baseline["endMs"]
+    ]
+
     outages = []
     for phase in phases:
         if not phase.get("phase", "").startswith("outage") or "endMs" not in phase:
@@ -125,6 +135,12 @@ def main():
             "max": max(latencies) if latencies else None,
             "mean": round(statistics.mean(latencies), 1) if latencies else None,
         },
+        "latencyBaselineSeconds": {
+            "readings": len(baseline_latencies),
+            "p50": percentile(baseline_latencies, 50),
+            "p95": percentile(baseline_latencies, 95),
+            "max": max(baseline_latencies) if baseline_latencies else None,
+        },
         "outages": outages,
         "missingByNode": missing,
         "inversionsByNode": dict(inversions),
@@ -139,7 +155,10 @@ def main():
     print(f"Duplicates, new event: {second_events:>6}   (the reading reached Queuey twice)")
     print(f"Order inversions:      {summary['orderInversions']}")
     lat = summary["latencySeconds"]
-    print(f"Latency (s):           p50 {lat['p50']}  p95 {lat['p95']}  max {lat['max']}")
+    print(f"Latency, all (s):      p50 {lat['p50']}  p95 {lat['p95']}  max {lat['max']}")
+    base = summary["latencyBaselineSeconds"]
+    if base["readings"]:
+        print(f"Latency, baseline (s): p50 {base['p50']}  p95 {base['p95']}  max {base['max']}   ({base['readings']} readings taken before any outage)")
     for o in outages:
         print(f"{o['phase']}: {o['minutes']} min, {o['readingsDuringOutage']} readings taken during it; "
               f"first arrival {o['firstArrivalAfterLinkBackSeconds']} s after the link came back, "

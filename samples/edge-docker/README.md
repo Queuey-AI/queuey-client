@@ -181,6 +181,9 @@ broker in `docker-compose.yml`:
   to the queue `lighting-telemetry`, in order per `node-07`.
 - `QUEUEY_MQTT_ID_FIELD`: the JSON field in your payload with the message's
   own id, for deduplication.
+- `hostname`: Edge subscribes as `queuey-edge-<hostname>`, with a persistent
+  session, and the broker queues for Edge under that client id. Keep it fixed
+  (the Compose file sets it), and give every gateway on one broker its own.
 
 Edge then needs a route to the broker, and outbound HTTPS to
 `ingress.queuey.ai` (port 443), for events and its health check-in alike.

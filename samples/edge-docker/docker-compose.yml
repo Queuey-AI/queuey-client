@@ -23,6 +23,11 @@ services:
     # The tenant and the keys: QUEUEY_TENANT, QUEUEY_SIGNING_KEY_ID,
     # QUEUEY_SIGNING_SECRET and QUEUEY_EDGE_HEALTH_API_KEY.
     env_file: ./edge.env
+    # Edge's MQTT client id is queuey-edge-<hostname>, and the broker keeps
+    # Edge's session (and what it queued for it) under that id. A container's
+    # hostname is otherwise its id, new each time Compose recreates it, which
+    # would leave whatever the broker queued for the old session behind.
+    hostname: lighting-gateway-1
     # The loopback health endpoint, read with: docker compose exec edge … /health
     command: ["--listen", "7311"]
     environment:
