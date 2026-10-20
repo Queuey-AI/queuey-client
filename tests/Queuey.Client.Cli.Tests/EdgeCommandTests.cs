@@ -37,6 +37,19 @@ public class EdgeCommandTests : IDisposable
     }
 
     [Fact]
+    public async Task Status_shows_the_MQTT_client_id_the_spool_keeps()
+    {
+        await _spool.SetMetaAsync(EdgeMetaKeys.MqttClientId, "queueyedgeaa08433e724a7", CancellationToken.None);
+        await Seed(pending: 0, quarantined: 0);
+
+        var (_, json) = await Run("status", "--spool", _spoolPath, "--json");
+        var (_, text) = await Run("status", "--spool", _spoolPath);
+
+        Assert.Contains("\"mqttClientId\": \"queueyedgeaa08433e724a7\"", json);
+        Assert.Contains("MQTT client  : queueyedgeaa08433e724a7", text);
+    }
+
+    [Fact]
     public async Task Status_reports_when_the_spool_last_settled()
     {
         var accept = await _spool.EnqueueAsync(Envelope("done"), CancellationToken.None);
@@ -122,6 +135,7 @@ public class EdgeCommandTests : IDisposable
         // Reset starts the events over, not the machine: Cloud must still see the same node.
         const string nodeId = "0199fc2e-7a41-7c3d-9b1e-4f2a6d8c0e11";
         await _spool.SetMetaAsync(EdgeMetaKeys.NodeId, nodeId, CancellationToken.None);
+        await _spool.SetMetaAsync(EdgeMetaKeys.MqttClientId, "queueyedge0f3a9c2e81b7d", CancellationToken.None);
         var done = await _spool.EnqueueAsync(Envelope("done"), CancellationToken.None);
         await _spool.ClaimReadyAsync(10, TimeSpan.FromMinutes(1), CancellationToken.None);
         await _spool.SettleAsync(done.SpoolId, new CloudAck("evt_done", false, DateTimeOffset.UtcNow), CancellationToken.None);
@@ -131,10 +145,28 @@ public class EdgeCommandTests : IDisposable
 
         Assert.Equal(ExitCodes.Success, exit);
         Assert.Contains($"keeps node id {nodeId}", output);
+        Assert.Contains("also keeps MQTT client id queueyedge0f3a9c2e81b7d, so the broker session carries over", output);
         var fresh = new SqliteEventSpool(new EdgeStorageOptions { Path = _spoolPath }, new Clock());
         Assert.Equal(nodeId, await fresh.GetMetaAsync(EdgeMetaKeys.NodeId, CancellationToken.None));
+        Assert.Equal("queueyedge0f3a9c2e81b7d", await fresh.GetMetaAsync(EdgeMetaKeys.MqttClientId, CancellationToken.None));
         Assert.Equal(0, (await fresh.GetStatsAsync(CancellationToken.None)).PendingCount);
         Assert.False((await fresh.EnqueueAsync(Envelope("done"), CancellationToken.None)).AlreadyAccepted);
+    }
+
+    [Fact]
+    public async Task Reset_keeps_an_MQTT_client_id_the_node_has_without_a_node_id()
+    {
+        // A configured client id, or the one an older Edge used, comes without a minted node id.
+        await _spool.SetMetaAsync(EdgeMetaKeys.MqttClientId, "queuey-edge-gateway-7", CancellationToken.None);
+        await Seed(pending: 1, quarantined: 0);
+
+        var (exit, output) = await Run("reset", "--spool", _spoolPath, "--accept-data-loss");
+
+        Assert.Equal(ExitCodes.Success, exit);
+        Assert.Contains("The fresh spool keeps MQTT client id queuey-edge-gateway-7", output);
+        var fresh = new SqliteEventSpool(new EdgeStorageOptions { Path = _spoolPath }, new Clock());
+        Assert.Equal("queuey-edge-gateway-7", await fresh.GetMetaAsync(EdgeMetaKeys.MqttClientId, CancellationToken.None));
+        Assert.Null(await fresh.GetMetaAsync(EdgeMetaKeys.NodeId, CancellationToken.None));
     }
 
     [Fact]
@@ -355,13 +387,35 @@ public class EdgeCommandTests : IDisposable
         // Same machine, same spool: a new id would make Cloud see a new node and send the old one Silent.
         const string nodeId = "0199fc2e-7a41-7c3d-9b1e-4f2a6d8c0e11";
         await _spool.SetMetaAsync(EdgeMetaKeys.NodeId, nodeId, CancellationToken.None);
+        await _spool.SetMetaAsync(EdgeMetaKeys.MqttClientId, "queueyedge0f3a9c2e81b7d", CancellationToken.None);
         await Seed(pending: 1, quarantined: 0);
+        var created = await _spool.GetMetaAsync(EdgeMetaKeys.CreatedUtc, CancellationToken.None);
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+
+        var (exit, _) = await Run("recover", "--spool", _spoolPath);
+        Assert.Equal(ExitCodes.Success, exit);
+
+        // The salvaged file is the same spool: it keeps when it was created, and so the MQTT intake keeps its session.
+        var recovered = new SqliteEventSpool(new EdgeStorageOptions { Path = _spoolPath }, new Clock());
+        Assert.Equal(nodeId, await recovered.GetMetaAsync(EdgeMetaKeys.NodeId, CancellationToken.None));
+        Assert.Equal("queueyedge0f3a9c2e81b7d", await recovered.GetMetaAsync(EdgeMetaKeys.MqttClientId, CancellationToken.None));
+        Assert.NotNull(created);
+        Assert.Equal(created, await recovered.GetMetaAsync(EdgeMetaKeys.CreatedUtc, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Recover_of_a_spool_an_older_Edge_wrote_does_not_mark_it_as_new()
+    {
+        // Without the mark, an MQTT intake keeps the client id the older Edge used, and with it the broker session.
+        Queuey.Edge.Tests.TestSupport.V2SpoolFile.Create(_spoolPath,
+            new Queuey.Edge.Tests.TestSupport.V2SpoolFile.Row("waiting", "Accepted", "2026-08-22T10:00:00.0000000Z"));
 
         var (exit, _) = await Run("recover", "--spool", _spoolPath);
         Assert.Equal(ExitCodes.Success, exit);
 
         var recovered = new SqliteEventSpool(new EdgeStorageOptions { Path = _spoolPath }, new Clock());
-        Assert.Equal(nodeId, await recovered.GetMetaAsync(EdgeMetaKeys.NodeId, CancellationToken.None));
+        Assert.Equal(1, (await recovered.GetStatsAsync(CancellationToken.None)).PendingCount);
+        Assert.Null(await recovered.GetMetaAsync(EdgeMetaKeys.CreatedUtc, CancellationToken.None));
     }
 
     [Fact]

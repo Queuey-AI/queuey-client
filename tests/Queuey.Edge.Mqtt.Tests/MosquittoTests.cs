@@ -140,6 +140,59 @@ public sealed class MosquittoTests : IAsyncDisposable
         Assert.Equal(1, await edge.PendingAsync());
     }
 
+    [MosquittoFact]
+    public async Task A_recreated_container_resumes_its_Mosquitto_session()
+    {
+        // The case found with samples/edge-docker: Edge stopped while the nodes kept publishing, then came back as a new
+        // container. Mosquitto kept the readings in the old session; with the hostname in the client id, nothing came back.
+        using var folder = new SpoolFolder();
+        var mqtt = Configure(_port, new MqttRoute { TopicFilter = $"{_prefix}/+/telemetry", Queue = "telemetry", GroupKeySegment = 2 }, _host);
+        var expected = Enumerable.Range(1, 40).Select(i => $"r{i:00}").ToArray();
+
+        await using (var first = await EdgeGateway.StartAsync(folder.SpoolPath, $"c1-{_prefix[^8..]}", mqtt))
+        {
+            await WaitUntil(() => first.Source.Snapshot().Connected, TimeSpan.FromSeconds(10));
+            await Task.Delay(300); // the subscribe follows the connect
+        }
+
+        await using (var producer = await Producer.ConnectAsync(_port, _host))
+        {
+            foreach (var body in expected)
+                await producer.PublishAsync($"{_prefix}/node-{body[^1]}/telemetry", body);
+        }
+
+        await using var recreated = await EdgeGateway.StartAsync(folder.SpoolPath, $"c2-{_prefix[^8..]}", mqtt);
+        await WaitUntil(() => recreated.Source.Snapshot().Counters.Accepted >= expected.Length, TimeSpan.FromSeconds(20));
+
+        Assert.Equal(expected.Length, await recreated.PendingAsync());
+    }
+
+    [MosquittoFact]
+    public async Task An_upgrade_keeps_the_Mosquitto_session_the_hostname_named()
+    {
+        using var folder = new SpoolFolder();
+        await EdgeGateway.WriteSpoolFromBeforeAsync(folder.SpoolPath);
+        var route = new MqttRoute { TopicFilter = $"{_prefix}/+/telemetry", Queue = "telemetry", GroupKeySegment = 2 };
+        var hostname = $"gw-{_prefix[^8..]}";
+
+        var before = new MqttSource(Options(_port, route, _host), new SpoolDouble(), NullLogger<MqttSource>.Instance)
+        {
+            MachineName = () => hostname
+        };
+        await before.StartAsync(CancellationToken.None);
+        await WaitUntil(() => before.Snapshot().Connected, TimeSpan.FromSeconds(10));
+        await Task.Delay(300);
+        await before.StopAsync(CancellationToken.None);
+
+        await using (var producer = await Producer.ConnectAsync(_port, _host))
+            await producer.PublishAsync($"{_prefix}/node-1/telemetry", "published during the upgrade");
+
+        await using var upgraded = await EdgeGateway.StartAsync(folder.SpoolPath, hostname, Configure(_port, route, _host));
+        await WaitUntil(() => upgraded.Source.Snapshot().Counters.Accepted >= 1, TimeSpan.FromSeconds(10));
+
+        Assert.Equal($"queuey-edge-{hostname}", await upgraded.Spool.GetMetaAsync(EdgeMetaKeys.MqttClientId, CancellationToken.None));
+    }
+
     private MqttSource Source(SpoolDouble publisher, HealthDouble? health, string filter, string name,
         MqttRetainedMessages retained = MqttRetainedMessages.FirstSubscribe)
     {

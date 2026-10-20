@@ -29,14 +29,18 @@ public static class MqttSourceServiceCollectionExtensions
             return o;
         });
         // Health lets a source that stepped back resume the moment the spool
-        // has room; the registry puts its side in the node's health. Both come
-        // from AddQueueyEdge, and the source still runs without them.
+        // has room; the registry puts its side in the node's health; the spool
+        // and the node's identity keep the client id, and so the broker
+        // session, the same across a new hostname. All come from
+        // AddQueueyEdge, and the source still runs without them.
         services.AddHostedService(sp => new MqttSource(
             sp.GetRequiredService<MqttSourceOptions>(),
             sp.GetRequiredService<IQueueyPublisher>(),
             sp.GetRequiredService<ILogger<MqttSource>>(),
             sp.GetService<IQueueyEdgeHealth>(),
-            sp.GetService<EdgeIntakeRegistry>()));
+            sp.GetService<EdgeIntakeRegistry>(),
+            sp.GetService<IEventSpool>(),
+            sp.GetService<EdgeNodeIdentity>()));
         return services;
     }
 }

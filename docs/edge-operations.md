@@ -206,6 +206,15 @@ broker's rules. Three things follow:
 - **The broker's own durability is not Edge's.** Mosquitto, for one, writes
   its persistence file every `autosave_interval` seconds (default 1800). A
   power cut loses what it queued since then.
+- **The client id is the session.** The broker queues for Edge under Edge's
+  client id, and a new id is a new, empty session. Edge keeps the id in the
+  spool, so a new container (a new hostname) still finds its session; the
+  first id comes from the node id (`queueyedge` and 13 hex digits, 23 letters
+  and digits, which every MQTT 3.1.1 broker accepts). Give every Edge on one
+  broker its own id; `--mqtt-client-id` (`QUEUEY_MQTT_CLIENT_ID`) sets one. A
+  spool from 0.1.0-preview.13 or earlier keeps the id those versions used,
+  `queuey-edge-<hostname>`, so an upgrade keeps the session. See the
+  [Queuey.Edge.Mqtt readme](../src/Queuey.Edge.Mqtt/README.md#the-client-id-is-the-broker-session).
 - **A message can reach Edge twice.** A device re-sends at QoS 1 when its
   acknowledgement is lost, and the broker re-sends what Edge had not yet
   acknowledged when it stopped. With a stable event id in the payload,
@@ -353,7 +362,8 @@ the one in the spool and is written there in its place, so
 `queuey edge status` shows it and the node keeps it if the setting is later
 removed. It is up to 64 characters from `A–Z a–z 0–9 . _ -`, because it
 travels in the check-in's URL; anything else stops the node at startup with
-a configuration error. **Make it unique per machine**, such as the
+a configuration error. An MQTT intake derives its first broker client id from
+the node id, so with a fixed id even a new spool finds its broker session. **Make it unique per machine**, such as the
 gateway's serial number: two machines with the same id look like one node
 that flips between their reports. `--node-name` / `NodeName` is only the
 label the console shows.
@@ -376,14 +386,16 @@ the file untouched — it never silently starts a fresh spool.
 2. `queuey edge recover --spool <path>` — salvages every readable
    still-owned event into a fresh spool and reports **exactly how many were
    unreadable**. It keeps the node id (Queuey Cloud still sees the same
-   node) and the record of recently settled events (a repeat is still
-   recognised), and says so if either could not be read. The faulted file
+   node), the MQTT client id (the broker session carries over) and the
+   record of recently settled events (a repeat is still
+   recognised), and says so if the ids or that record could not be read. The faulted file
    is kept beside it (`*.faulted-<ts>`).
 3. If the file is beyond reading:
    `queuey edge reset --accept-data-loss --spool <path>` — starts clean.
    The flag is the point: data loss is a human decision, taken in your
    name, never Queuey's default. Reset starts the events over, not the
-   machine: it keeps the node id when the old file still gives it up.
+   machine: it keeps the node id and the MQTT client id when the old file
+   still gives them up.
 4. Either way, keep the preserved file for support.
 
 Likely root causes: failing disk, AV/backup interference (see above), or a
