@@ -1,5 +1,5 @@
 <Query Kind="Program">
-  <NuGetReference Version="0.1.0-preview.5" Prerelease="true">Queuey.Client.Waas</NuGetReference>
+  <NuGetReference Version="0.1.0-preview.14" Prerelease="true">Queuey.Client.Waas</NuGetReference>
   <NuGetReference>Microsoft.Extensions.DependencyInjection</NuGetReference>
   <Namespace>Microsoft.Extensions.DependencyInjection</Namespace>
   <Namespace>Queuey.Client</Namespace>
@@ -37,9 +37,9 @@ async Task Main()
 	queuey.Plan().Dump("Plan");
 
 	// On deploy: create/converge the stream(s) + their packages + memberships in Queuey.
-	var sync = await queuey.SyncModelsAsync();
-	sync.Applied.Dump("SyncModels — streams");
-	sync.Packages.Dump("SyncModels — packages");   // "standard" + "premium", each with the stream assigned
+	var sync = await queuey.SyncStreamsAsync();
+	sync.Applied.Dump("SyncStreams — streams");
+	sync.Packages.Dump("SyncStreams — packages");   // "standard" + "premium", each with the stream assigned
 
 	// Create a package explicitly (idempotent) — e.g. one with a description, independent of a model.
 	var pkg = await queuey.ApplyPackageAsync("enterprise", "Enterprise tier");
