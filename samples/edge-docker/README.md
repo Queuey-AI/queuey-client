@@ -12,11 +12,13 @@ nodes ──MQTT QoS 1──▶ Mosquitto ──▶ Queuey Edge ══ uplink �
 
 No .NET is needed: Edge is the self-contained `queuey` binary from a
 [GitHub release](https://github.com/Queuey-AI/queuey-client/releases), on
-Debian slim (`edge/Dockerfile`). The Compose file builds `0.1.0-preview.13`
-(`QUEUEY_VERSION` picks another). Use at least `0.1.0-preview.13`: before it,
-a spool did not free the space of small events it had handed over, so a small
-spool that filled stayed full, and binaries before `0.1.0-preview.10` cannot
-open the spool at all.
+Debian slim (`edge/Dockerfile`). The Compose file builds `0.1.0-preview.14`
+(`QUEUEY_VERSION` picks another). Use at least `0.1.0-preview.14`: before it,
+a recreated Edge container opened a new session on the broker, and what the
+broker had queued for the old one was never delivered. Before
+`0.1.0-preview.13`, a spool did not free the space of small events it had
+handed over, so a small spool that filled stayed full, and binaries before
+`0.1.0-preview.10` cannot open the spool at all.
 
 ## What you need
 
@@ -181,9 +183,15 @@ broker in `docker-compose.yml`:
   to the queue `lighting-telemetry`, in order per `node-07`.
 - `QUEUEY_MQTT_ID_FIELD`: the JSON field in your payload with the message's
   own id, for deduplication.
-- `hostname`: Edge subscribes as `queuey-edge-<hostname>`, with a persistent
-  session, and the broker queues for Edge under that client id. Keep it fixed
-  (the Compose file sets it), and give every gateway on one broker its own.
+- `QUEUEY_MQTT_CLIENT_ID`, to choose Edge's MQTT client id. Edge subscribes
+  with a persistent session, and the broker queues for Edge under that id.
+  Edge keeps the id in its spool, so a recreated container finds its session.
+  Without the variable, a new spool takes `queueyedge` and 13 hex digits from
+  the node id. Give every gateway on one broker its own id.
+- `hostname`: Edge 0.1.0-preview.13 and earlier subscribed as
+  `queuey-edge-<hostname>`, and a spool written by those versions keeps that
+  id. The Compose file sets a fixed hostname, so such a spool keeps its session
+  when you upgrade.
 
 Edge then needs a route to the broker, and outbound HTTPS to
 `ingress.queuey.ai` (port 443), for events and its health check-in alike.
