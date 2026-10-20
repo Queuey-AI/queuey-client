@@ -28,7 +28,7 @@ public class MqttIdDedupTests
             await producer.PublishAsync("site/node-07/telemetry", """{"eventId":"node-07-000123","temp":21.5}""");
             await producer.PublishAsync("site/node-07/telemetry", """{"eventId":"node-07-000123","temp":21.5}""");
         }
-        await WaitUntil(() => source.Snapshot().Counters.Received == 2);
+        await broker.WaitForAcknowledgedAsync(2);
         await source.StopAsync(CancellationToken.None);
 
         var counters = source.Snapshot().Counters;
@@ -54,7 +54,7 @@ public class MqttIdDedupTests
             await producer.PublishAsync("site/node-07/telemetry", """{"eventId":1,"temp":21.5}""");
             await producer.PublishAsync("site/node-07/telemetry", """{"eventId":1,"temp":22.0}""");
         }
-        await WaitUntil(() => source.Snapshot().Counters.Received == 2);
+        await broker.WaitForAcknowledgedAsync(2);
         await source.StopAsync(CancellationToken.None);
 
         var counters = source.Snapshot().Counters;
@@ -81,7 +81,7 @@ public class MqttIdDedupTests
             await producer.PublishAsync("site/node-07/telemetry", """{"temp":21.5}""");
             await producer.PublishAsync("site/node-07/telemetry", "not json");
         }
-        await WaitUntil(() => source.Snapshot().Counters.Received == 3);
+        await broker.WaitForAcknowledgedAsync(3);
         await source.StopAsync(CancellationToken.None);
 
         var counters = source.Snapshot().Counters;
@@ -106,7 +106,7 @@ public class MqttIdDedupTests
             await producer.PublishAsync("site/node-07/telemetry", """{"eventId":"a"}""");
             await producer.PublishAsync("site/node-07/telemetry", """{"eventId":"a"}""");
         }
-        await WaitUntil(() => source.Snapshot().Counters.Received == 2);
+        await broker.WaitForAcknowledgedAsync(2);
         await source.StopAsync(CancellationToken.None);
 
         Assert.Equal(new EdgeIntakeCounters(2, 2, 0, 0, 0, 0, 0, Duplicates: 0, WithoutId: 0), source.Snapshot().Counters);

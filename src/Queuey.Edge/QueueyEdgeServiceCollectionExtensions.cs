@@ -74,6 +74,14 @@ public static class QueueyEdgeServiceCollectionExtensions
         // hosted service when the port is unset.
         services.AddHostedService<EdgeLocalEndpoint>();
 
+        // The node's identity: one per host, so the check-in and an intake
+        // that names itself after the node never mint two different ids.
+        services.TryAddSingleton(sp => new EdgeNodeIdentity(
+            sp.GetRequiredService<QueueyEdgeOptions>(),
+            sp.GetRequiredService<IEventSpool>(),
+            sp.GetRequiredService<IEdgeClock>(),
+            sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<EdgeNodeIdentity>>()));
+
         // Opt-in health reporting to Cloud (Health.ReportToCloud). Outbound
         // only; a no-op hosted service when disabled.
         services.TryAddSingleton(sp => new EdgeHealthReporter(
@@ -83,7 +91,8 @@ public static class QueueyEdgeServiceCollectionExtensions
             sp.GetRequiredService<IQueueyEdgeHealth>(),
             sp.GetRequiredService<IEdgeClock>(),
             sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<EdgeHealthReporter>>(),
-            sp.GetRequiredService<EdgeRuntimeState>()));
+            sp.GetRequiredService<EdgeRuntimeState>(),
+            sp.GetRequiredService<EdgeNodeIdentity>()));
         services.AddHostedService(sp => sp.GetRequiredService<EdgeHealthReporter>());
 
         return services;

@@ -39,7 +39,7 @@ internal static class EdgeCommand
             values: new[]
             {
                 "spool", "spool-max-mb", "backoff-cap-seconds", "listen", "node-name", "node-id",
-                "mqtt", "mqtt-routes", "mqtt-user", "mqtt-password", "mqtt-retained", "mqtt-id-field"
+                "mqtt", "mqtt-routes", "mqtt-user", "mqtt-password", "mqtt-retained", "mqtt-id-field", "mqtt-client-id"
             }),
         ["kick"] = new("edge kick", values: new[] { "spool" }),
         ["drain"] = new("edge drain", values: new[] { "spool", "timeout" }),
@@ -223,6 +223,24 @@ internal static class EdgeCommand
     }
 
     /// <summary>
+    /// The MQTT client id the operator set: <c>--mqtt-client-id</c>, else <c>QUEUEY_MQTT_CLIENT_ID</c>, trimmed. Null when
+    /// neither is set (an empty variable counts as unset), and the source then connects with the id the spool keeps.
+    /// Throws <see cref="Queuey.Client.QueueyConfigurationException"/> for an id MQTT cannot carry.
+    /// </summary>
+    internal static string? MqttClientIdSetting(ArgMap map)
+    {
+        if (map.Get("mqtt-client-id") is { } flag)
+        {
+            MqttClientId.Validate(flag.Trim(), "--mqtt-client-id");
+            return flag.Trim();
+        }
+        if (CliHost.Env("QUEUEY_MQTT_CLIENT_ID") is not { } variable || string.IsNullOrWhiteSpace(variable))
+            return null;
+        MqttClientId.Validate(variable.Trim(), "QUEUEY_MQTT_CLIENT_ID");
+        return variable.Trim();
+    }
+
+    /// <summary>
     /// Hosts the Edge transfer loop as a STANDALONE daemon — the complete
     /// Edge story for machines with no .NET application of their own:
     /// <c>queuey edge run</c> under systemd, and anything on the box
@@ -352,6 +370,7 @@ internal static class EdgeCommand
             var mqttRetained = map.Get("mqtt-retained") ?? CliHost.Env("QUEUEY_MQTT_RETAINED");
             try
             {
+                var mqttClientId = MqttClientIdSetting(map);
                 var routes = Queuey.Edge.Mqtt.MqttRoute.ParseMany(mqttRoutes);
                 if (!string.IsNullOrWhiteSpace(mqttIdField))
                 {
@@ -375,6 +394,7 @@ internal static class EdgeCommand
                     m.Username = mqttUser;
                     m.Password = mqttPass;
                     m.RetainedMessages = retained;
+                    m.ClientId = mqttClientId;
                     m.Routes.AddRange(routes);
                 });
             }
@@ -515,6 +535,7 @@ internal static class EdgeCommand
             var stats = await spool.GetStatsAsync(CancellationToken.None);
             var quarantined = await ListQuarantinedAsync(spoolPath);
             var nodeId = await spool.GetMetaAsync(EdgeMetaKeys.NodeId, CancellationToken.None);
+            var mqttClientId = await spool.GetMetaAsync(EdgeMetaKeys.MqttClientId, CancellationToken.None);
 
             if (json)
             {
@@ -522,6 +543,7 @@ internal static class EdgeCommand
                 {
                     spool = spoolPath,
                     nodeId,
+                    mqttClientId,
                     pending = stats.PendingCount,
                     quarantined = stats.QuarantinedCount,
                     oldestPendingAgeSeconds = stats.OldestPendingAge?.TotalSeconds,
@@ -535,7 +557,9 @@ internal static class EdgeCommand
 
             Console.WriteLine("Queuey Edge spool");
             Console.WriteLine($"  Spool        : {spoolPath}");
-            Console.WriteLine($"  Node id      : {nodeId ?? "- (health reporting never enabled)"}");
+            Console.WriteLine($"  Node id      : {nodeId ?? "- (none minted yet)"}");
+            if (mqttClientId is not null)
+                Console.WriteLine($"  MQTT client  : {mqttClientId}");
             Console.WriteLine($"  Pending      : {stats.PendingCount}");
             Console.WriteLine($"  Quarantined  : {stats.QuarantinedCount}");
             Console.WriteLine($"  Oldest age   : {(stats.OldestPendingAge is { } age ? Humanize(age) : "-")}");
@@ -648,7 +672,9 @@ internal static class EdgeCommand
         Console.WriteLine($"Salvaged {salvage.Copied} event(s) into a fresh spool; {salvage.Unreadable} unreadable.");
         // Neither is an event lost, so neither changes the exit code; both change what Cloud sees.
         if (salvage.MetaUnreadable)
-            Console.WriteLine("The node identity could not be read: health reporting mints a new one, and Queuey Cloud sees a new node.");
+            Console.WriteLine("The node identity could not be read: health reporting mints a new one, and Queuey Cloud sees a new node. " +
+                              "An MQTT intake may connect with a new client id, which is a new broker session; to keep the old " +
+                              "one, set --mqtt-client-id to the id the broker's log shows for this node.");
         if (salvage.SettledUnreadable)
             Console.WriteLine("The settled events could not be read: a repeat of one is accepted again (Queuey Cloud deduplicates it on its transfer id).");
         Console.WriteLine($"The faulted file is preserved at '{faultedPath}' for support.");
@@ -675,12 +701,12 @@ internal static class EdgeCommand
 
         // Read before the file moves: its WAL may hold the newest write, and
         // SQLite finds a WAL only beside the file it belongs to.
-        var node = ReadNodeId(spoolPath);
+        var identity = ReadIdentity(spoolPath);
 
         var faultedPath = PreserveAside(spoolPath);
 
         Console.WriteLine($"Spool reset. The old file (and any events in it) is preserved at '{faultedPath}'.");
-        Console.WriteLine(await KeepNodeIdAsync(spoolPath, node));
+        Console.WriteLine(await KeepIdentityAsync(spoolPath, identity));
         Console.WriteLine("Data loss acknowledged by --accept-data-loss.");
         return ExitCodes.Success;
     }
@@ -704,12 +730,13 @@ internal static class EdgeCommand
         return faultedPath;
     }
 
-    /// <summary>
-    /// The node id in a spool file that may be faulted. <c>Readable</c> is
-    /// false when the file would not give it up; a readable file without one
-    /// (health reporting never ran) gives <c>(true, null)</c>.
-    /// </summary>
-    private static (bool Readable, string? NodeId) ReadNodeId(string spoolPath)
+    /// <summary>What names the node in a spool file that may be faulted: its node id and its MQTT client id.</summary>
+    /// <param name="Readable">False when the file would not give them up.</param>
+    /// <param name="NodeId">Null when the file has none (nothing ever needed one).</param>
+    /// <param name="MqttClientId">Null when no MQTT intake has connected with this file.</param>
+    private sealed record SpoolIdentity(bool Readable, string? NodeId, string? MqttClientId);
+
+    private static SpoolIdentity ReadIdentity(string spoolPath)
     {
         try
         {
@@ -725,41 +752,60 @@ internal static class EdgeCommand
             }.ToString());
             conn.Open();
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = "SELECT v FROM edge_meta WHERE k = @k;";
-            cmd.Parameters.AddWithValue("@k", EdgeMetaKeys.NodeId);
-            return (true, cmd.ExecuteScalar() as string);
+            cmd.CommandText = "SELECT k, v FROM edge_meta WHERE k IN (@node, @mqtt);";
+            cmd.Parameters.AddWithValue("@node", EdgeMetaKeys.NodeId);
+            cmd.Parameters.AddWithValue("@mqtt", EdgeMetaKeys.MqttClientId);
+            string? nodeId = null, mqttClientId = null;
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                if (reader.GetString(0) == EdgeMetaKeys.NodeId) nodeId = reader.GetString(1);
+                else mqttClientId = reader.GetString(1);
+            }
+            return new SpoolIdentity(true, nodeId, mqttClientId);
         }
         catch (SqliteException)
         {
-            return (false, null);
+            return new SpoolIdentity(false, null, null);
         }
     }
 
     /// <summary>
     /// Reset starts the events over, not the machine: the node keeps its id,
-    /// so Queuey Cloud sees the same node. Only the id moves to the fresh
-    /// spool, never <c>settled</c>. Best effort: an id that cannot be read or
-    /// written means a new node, never a failed reset.
+    /// so Queuey Cloud sees the same node, and its MQTT client id, so the
+    /// broker session and what the broker queued in it carry over. Only these
+    /// move to the fresh spool, never <c>settled</c>. Best effort: ids that
+    /// cannot be read or written mean a new node, never a failed reset.
     /// </summary>
-    private static async Task<string> KeepNodeIdAsync(string spoolPath, (bool Readable, string? NodeId) node)
+    private static async Task<string> KeepIdentityAsync(string spoolPath, SpoolIdentity old)
     {
         const string nextPublish = "A fresh spool will be created on the next publish.";
-        const string newNode = "health reporting mints a new one, and Queuey Cloud sees a new node.";
+        const string newNode = "health reporting mints a new one, and Queuey Cloud sees a new node; an MQTT intake connects " +
+                               "with a new client id, which is a new broker session.";
 
-        if (!node.Readable)
+        if (!old.Readable)
             return $"The node id could not be read from the old file: {newNode} {nextPublish}";
-        if (node.NodeId is not { } nodeId)
+        if (old.NodeId is null && old.MqttClientId is null)
             return nextPublish;
 
         try
         {
-            await OpenSpool(spoolPath).SetMetaAsync(EdgeMetaKeys.NodeId, nodeId, CancellationToken.None);
+            var fresh = OpenSpool(spoolPath);
+            if (old.NodeId is { } nodeId)
+                await fresh.SetMetaAsync(EdgeMetaKeys.NodeId, nodeId, CancellationToken.None);
+            if (old.MqttClientId is { } clientId)
+                await fresh.SetMetaAsync(EdgeMetaKeys.MqttClientId, clientId, CancellationToken.None);
             SqliteConnection.ClearAllPools();
-            return $"The fresh spool keeps node id {nodeId}: this is still the same node in Queuey Cloud.";
+
+            var kept = old.NodeId is { } id ? $"The fresh spool keeps node id {id}: this is still the same node in Queuey Cloud." : null;
+            if (old.MqttClientId is { } mqtt)
+                kept = (kept is null ? "The fresh spool keeps" : kept + " It also keeps") +
+                       $" MQTT client id {mqtt}, so the broker session carries over.";
+            return kept!;
         }
         catch (Exception ex) when (ex is SqliteException or IOException or UnauthorizedAccessException or Queuey.Client.QueueyException)
         {
-            return $"The node id {nodeId} could not be written to a fresh spool ({ex.Message}): {newNode}";
+            return $"The node's ids could not be written to a fresh spool ({ex.Message}): {newNode}";
         }
     }
 

@@ -25,6 +25,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Queuey.Edge.Mqtt.Tests" />
+    <InternalsVisibleTo Include="Queuey.Client.Cli" />
   </ItemGroup>
 
   <ItemGroup>

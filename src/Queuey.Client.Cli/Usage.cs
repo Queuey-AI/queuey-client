@@ -705,7 +705,7 @@ EDGE
                 [--source <s>]
                 [--spool-max-mb <n>] [--backoff-cap-seconds <n>]
                 [--mqtt <host[:port]> --mqtt-routes ""filter=queue[@segment];…"" [--mqtt-user <u>] [--mqtt-tls]
-                 [--mqtt-retained first|skip|all] [--mqtt-id-field <path>]]
+                 [--mqtt-retained first|skip|all] [--mqtt-id-field <path>] [--mqtt-client-id <id>]]
                  Signs every transfer with the queue's signing key, read from the environment
                  as QUEUEY_SIGNING_KEY_ID and QUEUEY_SIGNING_SECRET (queuey keys mint writes
                  them into the service's environment file). Without the pair it publishes with
@@ -741,9 +741,16 @@ EDGE
                  meta.id), for every route. A message Edge already holds with the same id and the
                  same payload (a device or broker re-sending it) is acked as a duplicate, not a
                  new event; the same id with new content is a new event. A message without an id
-                 is taken as before and counted (queuey.edge.intake.without_id). Env: QUEUEY_MQTT,
-                 QUEUEY_MQTT_ROUTES, QUEUEY_MQTT_USER, QUEUEY_MQTT_RETAINED, QUEUEY_MQTT_ID_FIELD;
-                 the broker's password only as QUEUEY_MQTT_PASSWORD, never in argv.
+                 is taken as before and counted (queuey.edge.intake.without_id).
+                 --mqtt-client-id: the client id Edge connects with, which names its broker session
+                 (what the broker queues for Edge while it is away). Edge keeps the id in the spool
+                 and connects with it again, so a new hostname or container keeps the session; a
+                 setting replaces it there, and it stays if the setting is removed. Unset, the first
+                 id is queueyedge and 13 hex digits from the node id (23 letters and digits, which
+                 every MQTT 3.1.1 broker accepts); a spool from 0.1.0-preview.13 or earlier keeps
+                 queuey-edge-<hostname>. Every Edge on one broker needs its own. Env: QUEUEY_MQTT,
+                 QUEUEY_MQTT_ROUTES, QUEUEY_MQTT_USER, QUEUEY_MQTT_RETAINED, QUEUEY_MQTT_ID_FIELD,
+                 QUEUEY_MQTT_CLIENT_ID; the broker's password only as QUEUEY_MQTT_PASSWORD, never in argv.
                  --spool-max-mb (QUEUEY_SPOOL_MAX_MB, whole MB, 1 or more; default 512): the spool's
                  limit. A small spool keeps a quarter for bookkeeping (at most 4 MB), so 1 MB takes
                  768 KB of events before the spool is full. Give edge publish the same value.

@@ -51,7 +51,13 @@ public sealed class MqttSource : BackgroundService, IEdgeIntake
     private readonly IQueueyPublisher _publisher;
     private readonly IQueueyEdgeHealth? _health;
     private readonly ILogger<MqttSource> _logger;
+    private readonly IEventSpool? _spool;
+    private readonly EdgeNodeIdentity? _identity;
     private readonly string _name;
+
+    // The client id this run connects with, decided before the first connect, and the one the spool holds.
+    private string? _clientId;
+    private string? _keptClientId;
 
     // Wakes the loop the moment the handler asks it to step back.
     private readonly SemaphoreSlim _stepBack = new(0, 1);
@@ -84,17 +90,19 @@ public sealed class MqttSource : BackgroundService, IEdgeIntake
     private long _duplicates;
     private long _withoutId;
 
-    /// <summary>A source without health access: after a refusal it resumes on the reconnect ladder alone.</summary>
+    /// <summary>
+    /// A source without health access: after a refusal it resumes on the reconnect ladder alone. Without the spool, its
+    /// client id is <see cref="MqttSourceOptions.ClientId"/>, else <c>queuey-edge-</c> and the machine name.
+    /// </summary>
     public MqttSource(MqttSourceOptions options, IQueueyPublisher publisher, ILogger<MqttSource> logger)
         : this(options, publisher, logger, health: null, intakes: null)
     {
     }
 
     /// <summary>
-    /// The source as <c>AddQueueyEdgeMqttSource</c> composes it. With
-    /// <paramref name="health"/>, a source that stepped back resumes when the
-    /// spool has room for the refused message; with <paramref name="intakes"/>,
-    /// its side shows in the node's health, meter and health report.
+    /// A source with health access and the intake registry, but not the spool: see the constructor
+    /// <c>AddQueueyEdgeMqttSource</c> uses. Its client id is <see cref="MqttSourceOptions.ClientId"/>, else
+    /// <c>queuey-edge-</c> and the machine name, which a new container changes.
     /// </summary>
     public MqttSource(
         MqttSourceOptions options,
@@ -102,15 +110,42 @@ public sealed class MqttSource : BackgroundService, IEdgeIntake
         ILogger<MqttSource> logger,
         IQueueyEdgeHealth? health,
         EdgeIntakeRegistry? intakes)
+        : this(options, publisher, logger, health, intakes, spool: null, identity: null)
+    {
+    }
+
+    /// <summary>
+    /// The source as <c>AddQueueyEdgeMqttSource</c> composes it. With
+    /// <paramref name="health"/>, a source that stepped back resumes when the
+    /// spool has room for the refused message; with <paramref name="intakes"/>,
+    /// its side shows in the node's health, meter and health report. With
+    /// <paramref name="spool"/> and <paramref name="identity"/>, the client id
+    /// is kept in the spool and the first one comes from the node id (see
+    /// <see cref="MqttSourceOptions.ClientId"/>), so the broker session
+    /// survives a new hostname.
+    /// </summary>
+    public MqttSource(
+        MqttSourceOptions options,
+        IQueueyPublisher publisher,
+        ILogger<MqttSource> logger,
+        IQueueyEdgeHealth? health,
+        EdgeIntakeRegistry? intakes,
+        IEventSpool? spool,
+        EdgeNodeIdentity? identity)
     {
         _options = options;
         _publisher = publisher;
         _logger = logger;
         _health = health;
+        _spool = spool;
+        _identity = identity;
         _name = $"mqtt:{options.Server}:{options.Port}";
         _resumeDelayTicks = options.ReconnectDelay.Ticks;
         intakes?.Register(this);
     }
+
+    // Test seam: a new container is a new machine name.
+    internal Func<string> MachineName { get; set; } = () => Environment.MachineName;
 
     /// <inheritdoc />
     public EdgeIntakeHealth Snapshot() => new(
@@ -155,16 +190,18 @@ public sealed class MqttSource : BackgroundService, IEdgeIntake
 
                 if (!client.IsConnected)
                 {
-                    var connected = await client.ConnectAsync(BuildClientOptions(), stoppingToken).ConfigureAwait(false);
+                    var clientId = _clientId ??= await ResolveClientIdAsync(stoppingToken).ConfigureAwait(false);
+                    var connected = await client.ConnectAsync(BuildClientOptions(clientId), stoppingToken).ConfigureAwait(false);
                     _sessionPresent = connected.IsSessionPresent;
+                    await KeepClientIdAsync(clientId, stoppingToken).ConfigureAwait(false);
                     await client.SubscribeAsync(BuildSubscribeOptions(), stoppingToken).ConfigureAwait(false);
                     _connected = true;
                     _lastError = null;
                     Interlocked.Exchange(ref _lastConnectedAtTicks, DateTimeOffset.UtcNow.UtcTicks);
                     delay = _options.ReconnectDelay;
                     _logger.LogInformation(MqttLogEvents.Connected,
-                        "MQTT source connected to {Server}:{Port}; {Routes} route(s) subscribed at QoS 1 (broker session {Session}).",
-                        _options.Server, _options.Port, _options.Routes.Count, _sessionPresent ? "resumed" : "new");
+                        "MQTT source connected to {Server}:{Port} as {ClientId}; {Routes} route(s) subscribed at QoS 1 (broker session {Session}).",
+                        _options.Server, _options.Port, clientId, _options.Routes.Count, _sessionPresent ? "resumed" : "new");
                 }
 
                 await _stepBack.WaitAsync(PauseCheckInterval, stoppingToken).ConfigureAwait(false);
@@ -451,11 +488,74 @@ public sealed class MqttSource : BackgroundService, IEdgeIntake
         return value == 0 ? null : new DateTimeOffset(value, TimeSpan.Zero);
     }
 
-    private MqttClientOptions BuildClientOptions()
+    /// <summary>
+    /// The client id for this run, which names the broker session. In order: the configured
+    /// <see cref="MqttSourceOptions.ClientId"/>; the id the spool kept from the last connect; for a spool from before
+    /// Edge kept one, the id it had then, so its session carries over; and for a new spool, one derived from the node
+    /// id. Without the spool, the configured id or the machine-name default. Throws what the spool throws; the loop
+    /// tries again on its reconnect ladder, and a spool that cannot be read could not take a message either.
+    /// </summary>
+    internal async Task<string> ResolveClientIdAsync(CancellationToken ct)
+    {
+        var configured = string.IsNullOrWhiteSpace(_options.ClientId) ? null : _options.ClientId;
+        if (_spool is null)
+            return configured ?? MqttClientId.ForMachine(MachineName());
+
+        var kept = await _spool.GetMetaAsync(EdgeMetaKeys.MqttClientId, ct).ConfigureAwait(false);
+        _keptClientId = kept;
+        if (configured is not null)
+        {
+            if (kept is not null && !string.Equals(kept, configured, StringComparison.Ordinal))
+                _logger.LogWarning(MqttLogEvents.ClientIdChanged,
+                    "MQTT client id is now {ClientId}, as configured, instead of {PreviousClientId}. The broker opens a new session " +
+                    "for it; what it queued for the old id while Edge was away is not delivered to Edge.",
+                    configured, kept);
+            return configured;
+        }
+        if (kept is not null)
+            return kept;
+
+        if (await _spool.GetMetaAsync(EdgeMetaKeys.CreatedUtc, ct).ConfigureAwait(false) is null)
+        {
+            // Edge 0.1.0-preview.13 and earlier connected as queuey-edge-<machine> and kept nothing. Any other id
+            // would open a new session, and leave what the broker queued during the upgrade with the old one.
+            var before = MqttClientId.ForMachine(MachineName());
+            _logger.LogInformation(MqttLogEvents.ClientIdCarriedOver,
+                "MQTT client id {ClientId}: the id this node connected with before Edge kept it in the spool, kept so that the " +
+                "broker session carries over. Edge keeps it from now on; a new hostname no longer changes it.",
+                before);
+            return before;
+        }
+
+        return _identity is null
+            ? MqttClientId.ForMachine(MachineName())
+            : MqttClientId.ForNode(await _identity.GetNodeIdAsync(ct).ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// Writes the id the broker just accepted to the spool, so the next start connects with it whatever the
+    /// hostname is then. Never throws: a write that fails is tried again at the next connect.
+    /// </summary>
+    private async Task KeepClientIdAsync(string clientId, CancellationToken ct)
+    {
+        if (_spool is null || string.Equals(_keptClientId, clientId, StringComparison.Ordinal)) return;
+        try
+        {
+            await _spool.SetMetaAsync(EdgeMetaKeys.MqttClientId, clientId, ct).ConfigureAwait(false);
+            _keptClientId = clientId;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(MqttLogEvents.ClientIdNotKept, ex,
+                "MQTT client id {ClientId} could not be written to the spool; Edge tries again at the next connect.", clientId);
+        }
+    }
+
+    private MqttClientOptions BuildClientOptions(string clientId)
     {
         var b = new MqttClientOptionsBuilder()
             .WithTcpServer(_options.Server, _options.Port)
-            .WithClientId(string.IsNullOrWhiteSpace(_options.ClientId) ? $"queuey-edge-{Environment.MachineName}" : _options.ClientId)
+            .WithClientId(clientId)
             .WithCleanSession(false)
             .WithProtocolVersion(MQTTnet.Formatter.MqttProtocolVersion.V311);
         if (!string.IsNullOrEmpty(_options.Username))
@@ -490,4 +590,7 @@ internal static class MqttLogEvents
     public static readonly EventId Resumed = new(7405, "queuey.edge.mqtt.resumed");
     public static readonly EventId Lost = new(7406, "queuey.edge.mqtt.lost");
     public static readonly EventId WithoutId = new(7407, "queuey.edge.mqtt.without_id");
+    public static readonly EventId ClientIdChanged = new(7408, "queuey.edge.mqtt.client_id_changed");
+    public static readonly EventId ClientIdCarriedOver = new(7409, "queuey.edge.mqtt.client_id_carried_over");
+    public static readonly EventId ClientIdNotKept = new(7410, "queuey.edge.mqtt.client_id_not_kept");
 }

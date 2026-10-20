@@ -51,9 +51,44 @@ Options are validated at composition, where the operator is looking, rather
 than on the first message hours later. A route without a queue, or a source
 without routes, fails the host build.
 
-The client id defaults to `queuey-edge-{machine}`, so a persistent broker
-session survives restarts. Reconnects use a doubling delay from one second up
-to a one-minute cap.
+Reconnects use a doubling delay from one second up to a one-minute cap.
+
+## The client id is the broker session
+
+The source connects with a persistent session (clean session off), so the
+broker keeps what it queues for Edge while Edge is away, under Edge's client
+id. A new client id is a new, empty session, and what the broker held for the
+old one is never delivered to Edge. So the id stays the same:
+
+- **Edge keeps the id in the spool.** Once the broker has accepted it, Edge
+  writes the id to the spool and connects with it from then on. A new hostname,
+  which every new container has, does not change it, and `queuey edge recover`
+  and `reset` keep it.
+- **The first id comes from the node id.** It is `queueyedge` followed by the
+  first 13 hex digits of the SHA-256 of the node id, such as
+  `queueyedge3f9a1c0b7d2e4`. That is 23 letters and digits, the client id
+  MQTT 3.1.1 requires every broker to accept (section 3.1.3.1). A node id is up
+  to 64 characters and may hold `.`, `_` and `-`, so it is hashed rather than
+  used as it is. With a fixed node id (`Health.NodeId`, `QUEUEY_NODE_ID`), even
+  a new spool connects with the same id and finds its session.
+- **`ClientId` sets it** (`--mqtt-client-id`, `QUEUEY_MQTT_CLIENT_ID`). A set id
+  replaces the one in the spool, and stays if the setting is later removed.
+  Changing it opens a new session, and Edge logs a warning when it does.
+- **Every Edge on one broker needs its own id.** A broker disconnects a client
+  when another connects with the same id.
+
+The log line at connect names the id (`connected to … as queueyedge…`), and
+`queuey edge status` shows the one in the spool.
+
+**Upgrading from 0.1.0-preview.13 or earlier.** Those versions connected as
+`queuey-edge-` and the machine name, and kept nothing. A spool they wrote has
+no stored id, so Edge connects with that id once more and keeps it. The
+session, and what the broker queued for it during the upgrade, carries over.
+A gateway that ran in a container without a fixed `hostname` got a new id with
+every new container, so the upgrade's new container starts a new session,
+as every recreate did before. To pick up the old session instead, set
+`--mqtt-client-id` for the first start to the id the broker's log shows for
+the old container. Edge keeps it from then on.
 
 ## When the spool is full
 

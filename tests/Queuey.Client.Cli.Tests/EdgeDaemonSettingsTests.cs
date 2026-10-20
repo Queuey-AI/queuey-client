@@ -6,7 +6,7 @@ namespace Queuey.Client.Cli.Tests;
 /// `queuey edge run` og `edge publish` med innstillingene en test eller en liten gateway trenger (2026-10-19):
 /// spool-grensen, som begge må lese fordi de skriver samme spool, taket på backoff, og feltet MQTT-dedup leser
 /// produsentens id fra. En ugyldig verdi stopper kommandoen før daemonen starter, der operatøren ser. Nodens faste id
-/// (--node-id / QUEUEY_NODE_ID) følger samme regel.
+/// (--node-id / QUEUEY_NODE_ID) og MQTT-klient-id-en (--mqtt-client-id / QUEUEY_MQTT_CLIENT_ID) følger samme regel.
 /// </summary>
 [Collection(ConsoleCollection.Name)]
 public sealed class EdgeDaemonSettingsTests : IDisposable
@@ -95,6 +95,49 @@ public sealed class EdgeDaemonSettingsTests : IDisposable
 
         Assert.Equal("gw-SN-1", fromFlag);
         Assert.Equal("gw-SN-48213", fromEnv);
+        Assert.Null(unset);
+    }
+
+    [Theory]
+    [InlineData("--mqtt-client-id", "", "--mqtt-client-id is empty")]
+    [InlineData("--mqtt-client-id", "   ", "--mqtt-client-id is empty")]
+    [InlineData("QUEUEY_MQTT_CLIENT_ID", "plant\u00017", "QUEUEY_MQTT_CLIENT_ID has the control character U+0001")]
+    public async Task Edge_run_refuses_a_client_id_MQTT_cannot_carry(string setting, string value, string message)
+    {
+        var (args, env) = Run(setting, value);
+        args.AddRange(new[] { "--mqtt", "localhost:1883", "--mqtt-routes", "site/+/telemetry=telemetry@1" });
+
+        CliRun run = await RunGuarded((args, env));
+
+        Assert.Equal(ExitCodes.Configuration, run.Exit);
+        Assert.Contains(message, run.Stderr);
+    }
+
+    [Fact]
+    public async Task The_mqtt_client_id_comes_from_the_flag_else_from_QUEUEY_MQTT_CLIENT_ID()
+    {
+        string? fromFlag = null, fromEnv = null, emptyEnv = null, unset = null;
+
+        await CliHarness.RunAsync(() =>
+        {
+            fromFlag = EdgeCommand.MqttClientIdSetting(Map("--mqtt-client-id", " plant-7-edge "));
+            fromEnv = EdgeCommand.MqttClientIdSetting(Map());
+            return Task.FromResult(0);
+        }, env: new Dictionary<string, string> { ["QUEUEY_MQTT_CLIENT_ID"] = "queuey-edge-gateway-7" });
+        await CliHarness.RunAsync(() =>
+        {
+            emptyEnv = EdgeCommand.MqttClientIdSetting(Map());
+            return Task.FromResult(0);
+        }, env: new Dictionary<string, string> { ["QUEUEY_MQTT_CLIENT_ID"] = "" });
+        await CliHarness.RunAsync(() =>
+        {
+            unset = EdgeCommand.MqttClientIdSetting(Map());
+            return Task.FromResult(0);
+        });
+
+        Assert.Equal("plant-7-edge", fromFlag);
+        Assert.Equal("queuey-edge-gateway-7", fromEnv);
+        Assert.Null(emptyEnv); // an empty variable in a Compose file means unset, as for the other MQTT variables
         Assert.Null(unset);
     }
 

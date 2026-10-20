@@ -324,6 +324,17 @@ public class MqttSourceTests
 
     // ── support ──────────────────────────────────────────────────────
 
+    /// <summary><see cref="Options"/> as the configure callback <c>AddQueueyEdgeMqttSource</c> takes.</summary>
+    internal static Action<MqttSourceOptions> Configure(int port, MqttRoute route, string server = "127.0.0.1") => m =>
+    {
+        var o = Options(port, route, server);
+        m.Server = o.Server;
+        m.Port = o.Port;
+        m.ReconnectDelay = o.ReconnectDelay;
+        m.ReconnectDelayCap = o.ReconnectDelayCap;
+        m.Routes.AddRange(o.Routes);
+    };
+
     internal static MqttSourceOptions Options(int port, MqttRoute route, string server = "127.0.0.1")
     {
         var o = new MqttSourceOptions
@@ -351,7 +362,9 @@ public class MqttSourceTests
     /// </summary>
     internal sealed class TestBroker : IDisposable
     {
+        private readonly List<string> _clientIds = new();
         private int _subscriptions;
+        private int _acknowledged;
 
         private TestBroker(MqttServer server)
         {
@@ -361,9 +374,23 @@ public class MqttSourceTests
                 Interlocked.Increment(ref _subscriptions);
                 return Task.CompletedTask;
             };
+            server.ClientConnectedAsync += e =>
+            {
+                if (!e.ClientId.StartsWith("test-producer-", StringComparison.Ordinal))
+                    lock (_clientIds) _clientIds.Add(e.ClientId);
+                return Task.CompletedTask;
+            };
+            server.ClientAcknowledgedPublishPacketAsync += _ =>
+            {
+                Interlocked.Increment(ref _acknowledged);
+                return Task.CompletedTask;
+            };
         }
 
         public MqttServer Server { get; }
+
+        /// <summary>The client ids subscribers connected with, in order; the test producers are left out.</summary>
+        public IReadOnlyList<string> ClientIds { get { lock (_clientIds) return _clientIds.ToArray(); } }
 
         public static async Task<TestBroker> StartAsync(int port)
         {
@@ -375,6 +402,15 @@ public class MqttSourceTests
 
         public Task WaitForSubscriptionsAsync(int atLeast, TimeSpan? timeout = null)
             => WaitUntil(() => Volatile.Read(ref _subscriptions) >= atLeast, timeout);
+
+        /// <summary>
+        /// Waits for the subscriber's acknowledgements. The source acknowledges a message only after it counted the
+        /// outcome, so after this its counters are final: a stop can no longer catch a message between the spool and
+        /// the ack, and count it deferred as well. Waiting for <c>Received</c> instead leaves that window open, and
+        /// the I/O of tests running alongside widens it.
+        /// </summary>
+        public Task WaitForAcknowledgedAsync(int atLeast, TimeSpan? timeout = null)
+            => WaitUntil(() => Volatile.Read(ref _acknowledged) >= atLeast, timeout);
 
         public void Dispose() => Server.Dispose();
     }

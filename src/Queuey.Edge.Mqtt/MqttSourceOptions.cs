@@ -25,7 +25,23 @@ public sealed class MqttSourceOptions
 
     public string? Password { get; set; }
 
-    /// <summary>Stable client id. Defaults to <c>queuey-edge-{machine}</c> so a persistent session survives restarts.</summary>
+    /// <summary>
+    /// The client id Edge connects to the broker with, which is also the name of its broker session: Edge connects with
+    /// a persistent session, and the broker keeps what it queues for Edge while Edge is away under this id. A new id is
+    /// a new, empty session, and what the broker held for the old one is never delivered to Edge.
+    /// <para>
+    /// Composed with <c>AddQueueyEdge</c>, Edge keeps the id it last connected with in the spool and connects with it
+    /// again, so a new hostname or a new container does not change it. Set, this value is used, and kept in the spool
+    /// in place of any other, so it stays if the setting is later removed. Unset, the first id is <c>queueyedge</c> and
+    /// 13 hex digits derived from the node id (<c>Health.NodeId</c>, or the id minted into the spool): 23 letters and
+    /// digits, which every MQTT 3.1.1 broker must accept. A spool written by Edge 0.1.0-preview.13 or earlier keeps the
+    /// id it had then, <c>queuey-edge-</c> and the machine name, so its session carries over.
+    /// </para>
+    /// <para>
+    /// Every Edge on one broker needs its own id: the broker disconnects a client when another connects with its id.
+    /// From the CLI: <c>--mqtt-client-id</c> or <c>QUEUEY_MQTT_CLIENT_ID</c>.
+    /// </para>
+    /// </summary>
     public string? ClientId { get; set; }
 
     /// <summary>Topic filter → queue routes. At least one is required.</summary>
@@ -55,6 +71,8 @@ public sealed class MqttSourceOptions
             throw new QueueyConfigurationException("MqttSourceOptions.Server is required.");
         if (Port is < 1 or > 65535)
             throw new QueueyConfigurationException("MqttSourceOptions.Port must be 1–65535.");
+        if (!string.IsNullOrWhiteSpace(ClientId))
+            MqttClientId.Validate(ClientId, "MqttSourceOptions.ClientId");
         if (!Enum.IsDefined(typeof(MqttRetainedMessages), RetainedMessages))
             throw new QueueyConfigurationException($"MqttSourceOptions.RetainedMessages '{RetainedMessages}' is not a known value.");
         if (Routes.Count == 0)

@@ -180,6 +180,9 @@ broker re-sends it first and nothing overtakes it. Meanwhile the broker holds th
 backlog in Edge's persistent session — within the broker's own queue limits, so size
 those for the outage you plan for (see the
 [operations notes](https://github.com/Queuey-AI/queuey-client/blob/main/docs/edge-operations.md#the-mqtt-broker-in-front-of-edge)).
+The session goes by Edge's client id, which Edge keeps in the spool, so a new container
+(a new hostname) still finds it; `--mqtt-client-id` sets it
+([details](https://github.com/Queuey-AI/queuey-client/blob/main/src/Queuey.Edge.Mqtt/README.md#the-client-id-is-the-broker-session)).
 `@1` makes topic level 1 (the machine) the lane, so per-machine order survives all
 the way to Cloud. Retained copies a broker re-sends on every subscribe are taken once
 per broker session, not once per reconnect (`--mqtt-retained first|skip|all`).
