@@ -3,7 +3,7 @@
 # against glibc (linux-x64, linux-arm64), and Alpine has musl.
 FROM debian:bookworm-slim
 
-ARG QUEUEY_VERSION=0.1.0-preview.10
+ARG QUEUEY_VERSION=0.1.0-preview.13
 ARG TARGETARCH
 
 RUN set -eu; \

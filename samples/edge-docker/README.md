@@ -12,9 +12,11 @@ nodes ──MQTT QoS 1──▶ Mosquitto ──▶ Queuey Edge ══ uplink �
 
 No .NET is needed: Edge is the self-contained `queuey` binary from a
 [GitHub release](https://github.com/Queuey-AI/queuey-client/releases), on
-Debian slim (`edge/Dockerfile`). The Compose file builds `0.1.0-preview.12`
-(`QUEUEY_VERSION` picks another). Use at least `0.1.0-preview.10`: older
-binaries cannot open the spool.
+Debian slim (`edge/Dockerfile`). The Compose file builds `0.1.0-preview.13`
+(`QUEUEY_VERSION` picks another). Use at least `0.1.0-preview.13`: before it,
+a spool did not free the space of small events it had handed over, so a small
+spool that filled stayed full, and binaries before `0.1.0-preview.10` cannot
+open the spool at all.
 
 ## What you need
 
@@ -113,6 +115,29 @@ docker compose kill -s SIGKILL edge && docker compose start edge                
 docker compose restart mosquitto                                                  # broker restart
 ```
 
+### Backpressure
+
+At this rate a 60-minute outage is about 4 MB on Edge, far below the default
+spool of 512 MB, so the store never fills. To see it fill, give Edge 1 MB:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.backpressure.yml up -d --build
+BASELINE=180 OUTAGE_1=1200 OUTAGE_2=60 SETTLE=120 ./run-scenario.sh
+```
+
+About ten minutes into the 20-minute outage the store is full. Edge stops
+acknowledging, its MQTT intake steps back from the broker (Edge's `/health`
+shows the intake `paused` while it lasts), and the broker holds the rest.
+When the uplink is back, the store drains, the intake connects again, and the
+broker re-sends what Edge left unacknowledged. The analysis should still show
+nothing missing and no duplicates.
+
+Keep the small spool to a short run like this one. For 24 hours after an
+event is handed over, Edge keeps a record of about 250 bytes to recognise a
+repeat, and those records count against the limit too: at 40 readings a minute
+that is about 600 KB an hour, so the full scenario, or a day of running,
+outgrows 1 MB on its own.
+
 ## What to expect
 
 - **Nothing missing.** Every reading the broker acknowledged to a node
@@ -141,9 +166,31 @@ docker compose restart mosquitto                                                
   `docker compose exec edge queuey edge kick --spool /var/lib/queuey/spool.db`
   starts the drain at once.
 
+## Your own broker and nodes
+
+Leave out the `mosquitto` and `simulator` services and point Edge at your
+broker in `docker-compose.yml`:
+
+- `QUEUEY_MQTT`: the broker, `host:port`.
+- `QUEUEY_MQTT_USER` and `QUEUEY_MQTT_PASSWORD`, if it requires a login (put
+  them in `edge.env`, not in the Compose file).
+- `--mqtt-tls`, added to `command`, if it takes TLS only.
+- `QUEUEY_MQTT_ROUTES`: `filter=queue@level`, separated by `;`. The level is
+  the topic level (from 0) that holds the node, and it becomes the ordering
+  key. `lighting/+/telemetry=lighting-telemetry@1` sends `lighting/node-07/telemetry`
+  to the queue `lighting-telemetry`, in order per `node-07`.
+- `QUEUEY_MQTT_ID_FIELD`: the JSON field in your payload with the message's
+  own id, for deduplication.
+
+Edge then needs a route to the broker, and outbound HTTPS to
+`ingress.queuey.ai` (port 443), for events and its health check-in alike.
+Nothing connects in to it.
+
 ## Limits worth knowing
 
 - There is no official container image yet; this Dockerfile is the sample.
+  Building it pulls `debian:bookworm-slim` and fetches the `queuey` binary
+  from the GitHub release.
 - The spool and the extraction directory must be volumes. The binary
   unpacks SQLite's native library at start and must be able to execute it
   there, which a Docker tmpfs (noexec) does not allow.
@@ -151,6 +198,8 @@ docker compose restart mosquitto                                                
   every `autosave_interval` (60 s here). See `mosquitto/mosquitto.conf` and the
   [operations notes](https://github.com/Queuey-AI/queuey-client/blob/main/docs/edge-operations.md#the-mqtt-broker-in-front-of-edge).
 - MQTT 3.1.1 only, and nodes must publish at QoS 1 for the guarantee.
+- On disk the spool can take its limit plus up to about 4 MB for SQLite's
+  write-ahead log.
 
 ## Clean up
 

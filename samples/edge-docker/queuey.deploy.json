@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/Queuey-AI/queuey-client/v0.1.0-preview.12/schema/queuey.deploy.schema.json",
+  "$schema": "https://raw.githubusercontent.com/Queuey-AI/queuey-client/v0.1.0-preview.13/schema/queuey.deploy.schema.json",
   "workspace": {
     "environment": "dev"
   },

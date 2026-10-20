@@ -19,7 +19,7 @@ services:
     build:
       context: ./edge
       args:
-        QUEUEY_VERSION: ${QUEUEY_VERSION:-0.1.0-preview.12}
+        QUEUEY_VERSION: ${QUEUEY_VERSION:-0.1.0-preview.13}
     # The tenant and the keys: QUEUEY_TENANT, QUEUEY_SIGNING_KEY_ID,
     # QUEUEY_SIGNING_SECRET and QUEUEY_EDGE_HEALTH_API_KEY.
     env_file: ./edge.env
