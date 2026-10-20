@@ -364,6 +364,7 @@ public class MqttSourceTests
     {
         private readonly List<string> _clientIds = new();
         private int _subscriptions;
+        private int _acknowledged;
 
         private TestBroker(MqttServer server)
         {
@@ -377,6 +378,11 @@ public class MqttSourceTests
             {
                 if (!e.ClientId.StartsWith("test-producer-", StringComparison.Ordinal))
                     lock (_clientIds) _clientIds.Add(e.ClientId);
+                return Task.CompletedTask;
+            };
+            server.ClientAcknowledgedPublishPacketAsync += _ =>
+            {
+                Interlocked.Increment(ref _acknowledged);
                 return Task.CompletedTask;
             };
         }
@@ -396,6 +402,15 @@ public class MqttSourceTests
 
         public Task WaitForSubscriptionsAsync(int atLeast, TimeSpan? timeout = null)
             => WaitUntil(() => Volatile.Read(ref _subscriptions) >= atLeast, timeout);
+
+        /// <summary>
+        /// Waits for the subscriber's acknowledgements. The source acknowledges a message only after it counted the
+        /// outcome, so after this its counters are final: a stop can no longer catch a message between the spool and
+        /// the ack, and count it deferred as well. Waiting for <c>Received</c> instead leaves that window open, and
+        /// the I/O of tests running alongside widens it.
+        /// </summary>
+        public Task WaitForAcknowledgedAsync(int atLeast, TimeSpan? timeout = null)
+            => WaitUntil(() => Volatile.Read(ref _acknowledged) >= atLeast, timeout);
 
         public void Dispose() => Server.Dispose();
     }

@@ -131,7 +131,8 @@ public sealed class MosquittoTests : IAsyncDisposable
             await producer.PublishAsync($"{_prefix}/node-07/telemetry", """{"eventId":"node-07-000123","temp":21.5}""");
             await producer.PublishAsync($"{_prefix}/node-07/telemetry", """{"eventId":"node-07-000123","temp":21.5}""");
         }
-        await WaitUntil(() => source.Snapshot().Counters.Received >= 2, TimeSpan.FromSeconds(10));
+        // The outcome, not the receipt: a message is received before the spool has it.
+        await WaitUntil(() => source.Snapshot().Counters is { Accepted: >= 1, Duplicates: >= 1 }, TimeSpan.FromSeconds(10));
         await source.StopAsync(CancellationToken.None);
 
         var counters = source.Snapshot().Counters;
