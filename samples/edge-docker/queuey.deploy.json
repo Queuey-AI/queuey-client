@@ -1,0 +1,24 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Queuey-AI/queuey-client/v0.1.0-preview.13/schema/queuey.deploy.schema.json",
+  "workspace": {
+    "environment": "dev"
+  },
+  "queues": {
+    "lighting-telemetry": {
+      "mode": "deliver",
+      "ordering": "bykey",
+      "dlqEnabled": true,
+      "retentionDays": 7,
+      "delivery": {
+        "kind": "localForward"
+      },
+      "ingress": {
+        "authMode": "SignedRequest",
+        "groupKey": {
+          "from": "header",
+          "name": "X-Queuey-Group-Key"
+        }
+      }
+    }
+  }
+}

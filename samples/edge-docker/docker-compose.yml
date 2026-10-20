@@ -1,0 +1,74 @@
+# One simulated gateway: an MQTT broker, Queuey Edge subscribed to it, and
+# lighting nodes publishing through the broker. Edge is the only service with
+# a route out (the uplink network), so cutting that one link is an outage.
+#
+#   cp edge.env.example edge.env      # then fill it in, see README.md
+#   docker compose up -d --build
+name: queuey-edge-mqtt
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+    networks: [gateway]
+    restart: unless-stopped
+
+  edge:
+    build:
+      context: ./edge
+      args:
+        QUEUEY_VERSION: ${QUEUEY_VERSION:-0.1.0-preview.13}
+    # The tenant and the keys: QUEUEY_TENANT, QUEUEY_SIGNING_KEY_ID,
+    # QUEUEY_SIGNING_SECRET and QUEUEY_EDGE_HEALTH_API_KEY.
+    env_file: ./edge.env
+    # Edge's MQTT client id is queuey-edge-<hostname>, and the broker keeps
+    # Edge's session (and what it queued for it) under that id. A container's
+    # hostname is otherwise its id, new each time Compose recreates it, which
+    # would leave whatever the broker queued for the old session behind.
+    hostname: lighting-gateway-1
+    # The loopback health endpoint, read with: docker compose exec edge … /health
+    command: ["--listen", "7311"]
+    environment:
+      QUEUEY_MQTT: mosquitto:1883
+      QUEUEY_MQTT_ROUTES: ${QUEUEY_MQTT_ROUTES:-lighting/+/telemetry=lighting-telemetry@1}
+      # The nodes' own id: a message that reaches Edge twice is one event.
+      QUEUEY_MQTT_ID_FIELD: ${QUEUEY_MQTT_ID_FIELD:-eventId}
+      QUEUEY_REPORT_HEALTH: "1"
+      QUEUEY_NODE_NAME: ${QUEUEY_NODE_NAME:-lighting-gateway-1}
+    volumes:
+      - edge-spool:/var/lib/queuey
+      - edge-extract:/var/cache/queuey
+    networks: [gateway, uplink]
+    depends_on: [mosquitto]
+    restart: unless-stopped
+
+  simulator:
+    image: eclipse-mosquitto:2
+    entrypoint: ["/bin/sh", "/simulator/publish.sh"]
+    environment:
+      NODES: ${NODES:-20}
+      INTERVAL: ${INTERVAL:-30}
+      START_DELAY: ${START_DELAY:-20}
+      DUPLICATE_EVERY: ${DUPLICATE_EVERY:-0}
+      BROKER: mosquitto
+    volumes:
+      - ./simulator:/simulator:ro
+      - simulator-state:/state
+    networks: [gateway]
+    depends_on: [mosquitto]
+    restart: unless-stopped
+
+networks:
+  # The gateway's own network: broker, Edge and nodes, no route out.
+  gateway:
+    internal: true
+  # Edge's route to Queuey Cloud.
+  uplink: {}
+
+volumes:
+  mosquitto-data:
+  edge-spool:
+  edge-extract:
+  simulator-state:

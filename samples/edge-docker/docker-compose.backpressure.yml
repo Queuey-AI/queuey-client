@@ -1,0 +1,12 @@
+# A 1 MB spool, which the scenario's 20 nodes fill within about ten minutes of
+# an outage. Edge's store fills, the MQTT intake steps back from the broker,
+# and the broker holds the overflow until Edge has room again.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.backpressure.yml up -d --build
+#   BASELINE=180 OUTAGE_1=1200 OUTAGE_2=60 SETTLE=120 ./run-scenario.sh
+#
+# For a short run only: see "Backpressure" in README.md.
+services:
+  edge:
+    environment:
+      QUEUEY_SPOOL_MAX_MB: "1"
