@@ -21,7 +21,7 @@ namespace Queuey.Edge;
 /// <item>Reports are not events. They bypass the spool, are never retried
 ///   (the next one supersedes), never share the lane with real work, and
 ///   are never billed.</item>
-/// <item>Identity is stable and local: a UUID minted once into
+/// <item>Identity is stable and local (<see cref="EdgeNodeIdentity"/>): a UUID minted once into
 ///   <c>edge_meta</c>, so a reinstall on the same disk is the same node and
 ///   a fresh spool is a new one — unless the operator gives the node a fixed
 ///   id (<see cref="EdgeHealthReportOptions.NodeId"/>), which then wins and is
@@ -34,7 +34,6 @@ namespace Queuey.Edge;
 /// </summary>
 internal sealed class EdgeHealthReporter : BackgroundService
 {
-    internal const string NodeIdMetaKey = EdgeMetaKeys.NodeId;
     private static readonly TimeSpan StateCheckInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan SendTimeout = TimeSpan.FromSeconds(15);
 
@@ -50,13 +49,11 @@ internal sealed class EdgeHealthReporter : BackgroundService
 
     private readonly HttpClient _http;
     private readonly QueueyEdgeOptions _options;
-    private readonly IEventSpool _spool;
     private readonly IQueueyEdgeHealth _health;
     private readonly IEdgeClock _clock;
     private readonly ILogger<EdgeHealthReporter> _logger;
     private readonly Uri _ingressBase;
-
-    private string? _nodeId;
+    private readonly EdgeNodeIdentity _identity;
 
     public EdgeHealthReporter(
         HttpClient http,
@@ -65,15 +62,16 @@ internal sealed class EdgeHealthReporter : BackgroundService
         IQueueyEdgeHealth health,
         IEdgeClock clock,
         ILogger<EdgeHealthReporter> logger,
-        EdgeRuntimeState? state = null)
+        EdgeRuntimeState? state = null,
+        EdgeNodeIdentity? identity = null)
     {
         _http = http;
         _options = options;
-        _spool = spool;
         _health = health;
         _clock = clock;
         _logger = logger;
         _state = state ?? new EdgeRuntimeState();
+        _identity = identity ?? new EdgeNodeIdentity(options, spool, clock, logger);
         _ingressBase = options.ResolveIngressBaseAddress();
     }
 
@@ -89,33 +87,8 @@ internal sealed class EdgeHealthReporter : BackgroundService
             : null;
     private int? _lastWarnedStatus;
 
-    /// <summary>
-    /// The node's identity: the configured <see cref="EdgeHealthReportOptions.NodeId"/>, stored in the spool in place of
-    /// any other; without one, the id in the spool, minted on first use.
-    /// </summary>
-    public async Task<string> GetNodeIdAsync(CancellationToken cancellationToken)
-    {
-        if (_nodeId is not null) return _nodeId;
-        var existing = await _spool.GetMetaAsync(NodeIdMetaKey, cancellationToken).ConfigureAwait(false);
-        if (_options.Health.NodeId is { } configured)
-        {
-            if (!string.Equals(existing, configured, StringComparison.Ordinal))
-            {
-                await _spool.SetMetaAsync(NodeIdMetaKey, configured, cancellationToken).ConfigureAwait(false);
-                if (!string.IsNullOrWhiteSpace(existing))
-                    _logger.LogInformation(
-                        "This node now goes by its configured id {NodeId} instead of {PreviousNodeId}; Queuey Cloud lists it as that node from its next report.",
-                        configured, existing);
-            }
-            return _nodeId = configured;
-        }
-        if (string.IsNullOrWhiteSpace(existing))
-        {
-            existing = Uuid7.NewString(_clock.UtcNow);
-            await _spool.SetMetaAsync(NodeIdMetaKey, existing, cancellationToken).ConfigureAwait(false);
-        }
-        return _nodeId = existing;
-    }
+    /// <summary>The node's identity, from the host's <see cref="EdgeNodeIdentity"/>.</summary>
+    public Task<string> GetNodeIdAsync(CancellationToken cancellationToken) => _identity.GetNodeIdAsync(cancellationToken);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {

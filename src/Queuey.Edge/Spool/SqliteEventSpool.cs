@@ -587,7 +587,7 @@ public sealed class SqliteEventSpool : IEventSpool
         var movedSettled = false;
         if (version == 0)
         {
-            CreateSchema(conn);
+            CreateSchema(conn, createdUtc: _clock.UtcNow);
         }
         else
         {
@@ -640,7 +640,14 @@ public sealed class SqliteEventSpool : IEventSpool
     /// are defined: <see cref="SpoolSalvage"/> builds a recovered spool with
     /// it too.
     /// </summary>
-    internal static void CreateSchema(SqliteConnection conn)
+    /// <param name="conn">An open connection to the empty file.</param>
+    /// <param name="createdUtc">
+    /// For a new spool, the moment it is created, written as
+    /// <see cref="EdgeMetaKeys.CreatedUtc"/> in the same transaction as the
+    /// tables. Null for a salvaged spool, which carries over the value of the
+    /// file it came from, or none when that file had none.
+    /// </param>
+    internal static void CreateSchema(SqliteConnection conn, DateTimeOffset? createdUtc = null)
     {
         using var tx = conn.BeginTransaction();
         using var cmd = conn.CreateCommand();
@@ -686,6 +693,20 @@ public sealed class SqliteEventSpool : IEventSpool
             PRAGMA user_version = {CurrentSchemaVersion};
             """;
         cmd.ExecuteNonQuery();
+
+        if (createdUtc is { } created)
+        {
+            // Every first open of an empty file bootstraps it, and they can race: the transfer loop and an intake in
+            // one host (reads take no lock), or edge publish in another process. The tables tolerate that (IF NOT
+            // EXISTS); the mark must too, so the first creation time stays.
+            using var marker = conn.CreateCommand();
+            marker.Transaction = tx;
+            marker.CommandText = "INSERT OR IGNORE INTO edge_meta (k, v) VALUES ($k, $v);";
+            marker.Parameters.AddWithValue("$k", EdgeMetaKeys.CreatedUtc);
+            marker.Parameters.AddWithValue("$v", Format(created));
+            marker.ExecuteNonQuery();
+        }
+
         tx.Commit();
     }
 
