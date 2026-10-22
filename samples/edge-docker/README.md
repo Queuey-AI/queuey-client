@@ -140,6 +140,43 @@ repeat, and those records count against the limit too: at 40 readings a minute
 that is about 600 KB an hour, so the full scenario, or a day of running,
 outgrows 1 MB on its own.
 
+### More faults
+
+`run-faults.sh` makes three faults that `run-scenario.sh` does not, on the
+running stack, in about 15 minutes:
+
+```bash
+./run-faults.sh
+TESTS="crash-with-backlog recreate" ./run-faults.sh   # a subset
+```
+
+- **crash-with-backlog:** Edge is killed (SIGKILL) halfway through a
+  4-minute outage, while events wait in its store, and started again before
+  the uplink is back. Nothing may be missing.
+- **recreate:** Edge is stopped for 70 s while the nodes publish, then its
+  container is recreated with another hostname. Edge keeps its MQTT client id
+  in its store, so the broker resumes its session and nothing may be missing.
+- **broker-kill:** Edge is stopped for 70 s while the broker queues for it,
+  then the broker is killed (SIGKILL) and started again. This tests the
+  broker, not Edge: the readings exist only in the broker, which has
+  acknowledged them to the nodes. Mosquitto writes its queue to disk every
+  `autosave_interval` (60 s here), so it loses what it queued since the last
+  write, and the script counts those readings apart.
+
+On 0.1.0-preview.14, the run lost nothing in the first two. In the third,
+the broker restored the one round it had saved and lost the two rounds
+after it (40 readings). With these two lines in `mosquitto.conf` the broker
+writes after every change, and the same kill lost nothing:
+
+```text
+autosave_interval 1
+autosave_on_changes true
+```
+
+Each write rewrites Mosquitto's whole database file, so the cost grows with
+the backlog the broker holds. That is small at this rate, but worth
+measuring before you use it with a large backlog.
+
 ## What to expect
 
 - **Nothing missing.** Every reading the broker acknowledged to a node
@@ -206,7 +243,8 @@ Nothing connects in to it.
   unpacks SQLite's native library at start and must be able to execute it
   there, which a Docker tmpfs (noexec) does not allow.
 - The broker's durability is not Edge's: Mosquitto writes its queue to disk
-  every `autosave_interval` (60 s here). See `mosquitto/mosquitto.conf` and the
+  every `autosave_interval` (60 s here), and a hard kill loses what it queued
+  since (see "More faults"). See `mosquitto/mosquitto.conf` and the
   [operations notes](https://github.com/Queuey-AI/queuey-client/blob/main/docs/edge-operations.md#the-mqtt-broker-in-front-of-edge).
 - MQTT 3.1.1 only, and nodes must publish at QoS 1 for the guarantee.
 - On disk the spool can take its limit plus up to about 4 MB for SQLite's
