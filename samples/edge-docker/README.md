@@ -166,7 +166,8 @@ TESTS="crash-with-backlog recreate" ./run-faults.sh   # a subset
 On 0.1.0-preview.14, the run lost nothing in the first two. In the third,
 the broker restored the one round it had saved and lost the two rounds
 after it (40 readings). With these two lines in `mosquitto.conf` the broker
-writes after every change, and the same kill lost nothing:
+writes after every change, and the same kill lost nothing in our test. That
+is a test result, not a general guarantee:
 
 ```text
 autosave_interval 1
@@ -179,9 +180,15 @@ measuring before you use it with a large backlog.
 
 ## What to expect
 
-- **Nothing missing.** Every reading the broker acknowledged to a node
-  arrives. A reading Edge took survives outages, crashes and restarts on its
-  volume.
+- **Nothing missing that Edge has taken.** Edge acknowledges a message to
+  the broker only once it is on Edge's volume. From then on it survives
+  outages, crashes and restarts, and it arrives.
+- **Until then the message is the broker's.** A reading the broker has
+  acknowledged to a node, but not yet handed to Edge, survives a broker crash
+  only if the broker has written it to disk. That depends on the broker's
+  persistence settings, not on Edge. With the Mosquitto configuration here,
+  which writes every 60 s, a hard kill of the broker lost the readings it had
+  queued since its last write (see "More faults").
 - **Order per node.** The route makes topic level 1 (the node) the lane, and
   Edge hands a lane to Cloud one event at a time. Deliver in order with a
   queue that keeps order: FIFO, or by group key for parallel nodes.
