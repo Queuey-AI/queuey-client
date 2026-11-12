@@ -24,5 +24,5 @@ SOFTWARE.
 
 The software in this package starts a self-hosted Queuey on the machine it runs on. Queuey itself is not part of
 this package: it runs from the container images queuey/server and queuey/console, which the package fetches with
-Docker. Those images are not covered by the license above; they are licensed under Queuey's own terms, which come
-with each installation's license file.
+Docker. Those images are not covered by the license above; they are licensed under Queuey's own terms, separately
+from this package.

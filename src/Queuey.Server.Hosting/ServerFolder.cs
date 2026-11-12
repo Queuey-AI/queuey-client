@@ -271,13 +271,46 @@ internal sealed class ServerFolder
         writer.Write(content);
     }
 
-    /// <summary>Creates the installation folder so only the user can enter it (0700).</summary>
+    private const UnixFileMode Private = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+
+    /// <summary>
+    /// Creates the installation folder so only the user can enter it (0700), and sets that mode on a folder that exists.
+    /// Only the folder's owner may set it, so a folder someone else made is refused.
+    /// </summary>
+    // Security review av 4.9 (2026-11-12): en tom mappe en annen bruker har laget med 0777 (/tmp/queuey) ble godtatt, og
+    // den brukeren kunne bytte compose.yaml før neste `up`.
     public void CreatePrivate()
     {
         if (OperatingSystem.IsWindows())
+        {
             Directory.CreateDirectory(Path);
-        else
-            Directory.CreateDirectory(Path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            return;
+        }
+        Directory.CreateDirectory(Path, Private);
+        try
+        {
+            System.IO.File.SetUnixFileMode(Path, Private);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            throw new QueueyConfigurationException($"{Path} belongs to another user, so an installation is not made there.")
+            {
+                SuggestedAction = "Choose a folder of your own, such as the default ~/.queuey/server.",
+            };
+        }
+    }
+
+    /// <summary>Throws when others than the user may write in the folder, so they could change what Compose runs.</summary>
+    public void RequirePrivate()
+    {
+        if (OperatingSystem.IsWindows() || !Directory.Exists(Path))
+            return;
+        UnixFileMode mode = System.IO.File.GetUnixFileMode(Path);
+        if ((mode & (UnixFileMode.GroupWrite | UnixFileMode.OtherWrite)) != 0)
+            throw new QueueyConfigurationException($"Others than you may write in {Path}, so they could change what it runs. Nothing was started.")
+            {
+                SuggestedAction = $"Run `chmod 700 {Path}` if the folder is yours, and check its files.",
+            };
     }
 
     /// <summary>Whether the folder is missing or empty, the only places init writes to.</summary>

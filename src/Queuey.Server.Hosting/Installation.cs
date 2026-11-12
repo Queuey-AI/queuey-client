@@ -81,6 +81,7 @@ internal static class Installation
     // sjekkes i konfigurasjonen Compose faktisk bruker.
     public static async Task GuardAsync(ServerFolder folder, CancellationToken ct)
     {
+        folder.RequirePrivate();
         DockerResult config = await ServerDocker.ComposeAsync(folder.Path, ct, "config", "--format", "json");
         if (config.ExitCode != 0)
             throw new QueueyConfigurationException($"docker compose cannot read the installation in {folder.Path}: {ServerDocker.Detail(config)}")

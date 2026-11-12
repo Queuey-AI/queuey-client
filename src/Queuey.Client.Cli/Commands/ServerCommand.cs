@@ -77,6 +77,10 @@ internal static class ServerCommand
         {
             ServerFolder folder = ServerFolder.Resolve(map.Get("dir"), CliHost.Env);
             await ServerDocker.RequireComposeAsync(cancel.Token);
+            // Det som endrer installasjonen, tar samme lås som Queuey.Server.Hosting, så en AppHost som starter samtidig venter.
+            using FolderLock? held = sub is "init" or "start" or "stop" or "upgrade"
+                ? await FolderLock.TakeAsync(folder, Console.Error.WriteLine, cancel.Token)
+                : null;
             return sub switch
             {
                 "init" => await InitAsync(folder, map, cancel.Token),
@@ -196,7 +200,7 @@ internal static class ServerCommand
 
         Console.WriteLine();
         Console.Write("Test delivery … ");
-        TestDeliveryResult result = await TestDelivery.RunAsync(ports, developer, http, ct);
+        TestDeliveryResult result = await TestDelivery.RunAsync(ports, developer, http, AppKeyRecord.Read(folder)?.Tenant, ct);
         Console.WriteLine($"{result.EventId} went in through the ingress and reached a receiver on this machine in {result.Took.TotalMilliseconds:0} ms " +
                           $"(queue {TestDelivery.QueueName}).");
         return ExitCodes.Success;

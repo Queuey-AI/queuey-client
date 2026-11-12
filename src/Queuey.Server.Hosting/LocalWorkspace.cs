@@ -41,13 +41,17 @@ internal sealed class LocalApi(HttpClient http, string baseUrl, string token)
 /// </summary>
 internal static class LocalWorkspace
 {
-    /// <summary>Signs in as the developer and returns the API with the account's license, and the workspace.</summary>
-    public static async Task<(LocalApi Api, string Tenant)> OpenAsync(LocalPorts ports, DeveloperRecord developer, HttpClient http, CancellationToken ct)
+    /// <summary>
+    /// Signs in as the developer and returns the API with the account's license, and the workspace:
+    /// <paramref name="preferred"/> while it exists, so the app keeps its workspace when the developer makes another.
+    /// </summary>
+    public static async Task<(LocalApi Api, string Tenant)> OpenAsync(
+        LocalPorts ports, DeveloperRecord developer, HttpClient http, string? preferred, CancellationToken ct)
     {
         string token = await LocalDeveloper.TokenAsync(ports, developer, http, ct);
         var api = new LocalApi(http, ports.ApiUrl, token);
         api.License = await AccountAsync(api, developer, ct);
-        return (api, await WorkspaceAsync(api, ct));
+        return (api, await WorkspaceAsync(api, preferred, ct));
     }
 
     /// <summary>The queue named <paramref name="name"/> in the workspace, unless archived, or null.</summary>
@@ -82,12 +86,19 @@ internal static class LocalWorkspace
         return account.RootElement.GetProperty("licenseId").GetString()!;
     }
 
-    // Arbeidsområdet er det første som finnes (evalueringsplanen har ett), ellers et nytt, «Local».
-    private static async Task<string> WorkspaceAsync(LocalApi api, CancellationToken ct)
+    // Det foretrukne arbeidsområdet mens det finnes; ellers «Local», så det første etter id. /tenants har ingen fast rekkefølge
+    // (security review av 4.9: en oppdatering i konsollet kunne gjort et annet arbeidsområde til det første, og appen fikk en
+    // ny nøkkel dit i det stille). Ellers et nytt, «Local».
+    private static async Task<string> WorkspaceAsync(LocalApi api, string? preferred, CancellationToken ct)
     {
         using var tenants = await api.GetJsonAsync("/tenants", ct);
         if (tenants.RootElement.ValueKind == JsonValueKind.Array && tenants.RootElement.GetArrayLength() > 0)
-            return Str(tenants.RootElement[0], "publicId");
+        {
+            var all = tenants.RootElement.EnumerateArray().ToList();
+            if (preferred is not null && all.Any(t => Str(t, "publicId") == preferred))
+                return preferred;
+            return Str(all.OrderBy(t => Str(t, "displayName") == "Local" ? 0 : 1).ThenBy(t => Str(t, "publicId"), StringComparer.Ordinal).First(), "publicId");
+        }
 
         using var created = await api.SendAsync(HttpMethod.Post, "/tenants", new { displayName = "Local", createDefaultQueue = false }, ct);
         return Str(created.RootElement, "publicId");

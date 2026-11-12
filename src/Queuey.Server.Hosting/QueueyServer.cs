@@ -137,10 +137,14 @@ public static class QueueyServer
         if (!ServerFolder.IsPinnedVersion(options.Version))
             throw new ArgumentException($"The version must be pinned, such as 1.0.0 or 1.0.0-rc.1; got '{options.Version}'.", nameof(options));
 
+        // En relativ sti ville havnet i prosessens arbeidsmappe, ofte et repo, med passord og nøkkel (security review av 4.9).
+        if (options.Directory is { Length: > 0 } chosen && !Path.IsPathRooted(chosen))
+            throw new ArgumentException($"The directory must be an absolute path; got '{chosen}'.", nameof(options));
+
         await ServerDocker.RequireComposeAsync(cancellationToken);
         ServerFolder folder = ServerFolder.Resolve(options.Directory, Environment.GetEnvironmentVariable);
 
-        using FolderLock _ = await FolderLock.TakeAsync(folder, cancellationToken);
+        using FolderLock _ = await FolderLock.TakeAsync(folder, options.Log, cancellationToken);
         if (!folder.HasPackage)
         {
             var ports = new LocalPorts(options.ConsolePort, options.ApiPort, options.IngressPort, options.IdpPort);
@@ -178,7 +182,18 @@ public static class QueueyServer
 }
 
 /// <summary>The key an app gets, kept in <c>app-key.json</c> in the folder (readable by the user only).</summary>
-internal sealed record AppKeyRecord(string ApiKey, string Tenant, string License);
+internal sealed record AppKeyRecord(string ApiKey, string Tenant, string License)
+{
+    /// <summary>The workspace and account, never the key.</summary>
+    public override string ToString() => $"key for {Tenant} ({License})";
+
+    /// <summary>The key kept in the folder, or null.</summary>
+    public static AppKeyRecord? Read(ServerFolder folder)
+    {
+        string path = folder.File(ServerFolder.AppKeyFile);
+        return File.Exists(path) ? JsonSerializer.Deserialize<AppKeyRecord>(File.ReadAllText(path), Text.Json) : null;
+    }
+}
 
 /// <summary>
 /// The key <see cref="QueueyServer.EnsureRunningAsync"/> gives an app: a starter key for the developer's workspace, which may
@@ -188,10 +203,10 @@ internal static class AppKey
 {
     public static async Task<AppKeyRecord> EnsureAsync(ServerFolder folder, DeveloperRecord developer, HttpClient http, CancellationToken ct)
     {
-        (LocalApi api, string tenant) = await LocalWorkspace.OpenAsync(folder.Ports, developer, http, ct);
+        AppKeyRecord? kept = AppKeyRecord.Read(folder);
+        (LocalApi api, string tenant) = await LocalWorkspace.OpenAsync(folder.Ports, developer, http, kept?.Tenant, ct);
         string path = folder.File(ServerFolder.AppKeyFile);
-        if (File.Exists(path) && JsonSerializer.Deserialize<AppKeyRecord>(File.ReadAllText(path), Text.Json) is { } kept
-            && kept.Tenant == tenant && kept.License == api.License)
+        if (kept is not null && kept.Tenant == tenant && kept.License == api.License)
             return kept;
 
         // Startnøkkelen for arbeidsområdet (POST /licenses/{lic}/apikeys/starter): ProducerAdmin for det, og aldri mer enn
@@ -209,22 +224,36 @@ internal static class AppKey
 }
 
 /// <summary>
-/// A lock on the installation folder across processes, so an AppHost and the CLI starting at once do not both create the
-/// developer or the key. A file held open without sharing; the operating system releases it if the process dies.
+/// A lock on one installation across processes, so an AppHost, a test run and the CLI starting at once do not each create
+/// the developer, the account or the key. A file in <c>~/.queuey/locks</c> (0700) held open without sharing (flock on
+/// Unix); the operating system releases it if the process dies. The file stays: deleting it on close would let a waiting
+/// process lock a new file while another holds the old.
 /// </summary>
+// Security review av 4.9 (2026-11-12): låsen lå ved siden av mappen og ble hoppet over når foreldremappen ikke fantes, og
+// CLI-en tok den ikke. I /tmp kunne en annen bruker også lage eller holde fila.
 internal sealed class FolderLock : IDisposable
 {
-    private readonly FileStream? _stream;
+    private readonly FileStream _stream;
 
-    private FolderLock(FileStream? stream) => _stream = stream;
+    private FolderLock(FileStream stream) => _stream = stream;
 
-    public static async Task<FolderLock> TakeAsync(ServerFolder folder, CancellationToken ct)
+    /// <summary>The folder the locks are in. A seam: the tests use their own.</summary>
+    internal static Func<string> LocksDirectory { get; set; } = () =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".queuey", "locks");
+
+    public static async Task<FolderLock> TakeAsync(ServerFolder folder, Action<string>? log, CancellationToken ct)
     {
-        // Mappen lages av init; før det finnes ingenting å låse, og init krever en ny eller tom mappe uansett.
-        string? parent = Path.GetDirectoryName(folder.Path);
-        if (parent is null || !System.IO.Directory.Exists(parent))
-            return new FolderLock(null);
-        string path = Path.Combine(parent, "." + Path.GetFileName(folder.Path) + ".lock");
+        string locks = LocksDirectory();
+        if (OperatingSystem.IsWindows())
+            System.IO.Directory.CreateDirectory(locks);
+        else
+        {
+            var mode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+            System.IO.Directory.CreateDirectory(Path.GetDirectoryName(locks)!, mode);
+            System.IO.Directory.CreateDirectory(locks, mode);
+        }
+        string path = Path.Combine(locks, ServerFolder.ProjectNameFor(folder.Path) + ".lock");
+        bool said = false;
         while (true)
         {
             try
@@ -233,10 +262,13 @@ internal sealed class FolderLock : IDisposable
             }
             catch (IOException)
             {
+                if (!said)
+                    log?.Invoke($"Waiting for another process that is starting or changing the installation in {folder.Path} …");
+                said = true;
                 await Task.Delay(500, ct);
             }
         }
     }
 
-    public void Dispose() => _stream?.Dispose();
+    public void Dispose() => _stream.Dispose();
 }

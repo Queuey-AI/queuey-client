@@ -25,6 +25,7 @@ public sealed class QueueyServerTests : IDisposable
         ServerDocker.Runner = _docker.RunAsync;
         QueueyServer.HttpFactory = () => new HttpClient(_queuey, disposeHandler: false);
         Installation.PollInterval = TimeSpan.Zero;
+        FolderLock.LocksDirectory = () => Path.Combine(_root, "locks");
     }
 
     public void Dispose()
@@ -114,6 +115,65 @@ public sealed class QueueyServerTests : IDisposable
     }
 
     [Fact]
+    public async Task Two_processes_starting_at_once_create_the_developer_and_the_key_once()
+    {
+        _queuey.Delay = TimeSpan.FromMilliseconds(50);
+
+        QueueyServerConnection[] both = await Task.WhenAll(
+            Task.Run(() => QueueyServer.EnsureRunningAsync(Options())), Task.Run(() => QueueyServer.EnsureRunningAsync(Options())));
+
+        Assert.Equal(both[0].ApiKey, both[1].ApiKey);
+        Assert.Single(_queuey.Calls, c => c == "POST /admin/realms/queuey/users");
+        Assert.Single(_queuey.Calls, c => c == "POST /licenses/lic_own/apikeys/starter");
+    }
+
+    [Fact]
+    public async Task The_app_keeps_its_workspace_when_the_developer_makes_another_that_lists_first()
+    {
+        _queuey.Tenants = """[{"publicId":"ten_b","displayName":"Other"},{"publicId":"ten_a","displayName":"Local"}]""";
+        QueueyServerConnection first = await QueueyServer.EnsureRunningAsync(Options());
+        _queuey.Tenants = """[{"publicId":"ten_c","displayName":"Newer"},{"publicId":"ten_a","displayName":"Local"}]""";
+        _queuey.Calls.Clear();
+
+        QueueyServerConnection again = await QueueyServer.EnsureRunningAsync(Options());
+
+        Assert.Equal("ten_a", first.TenantPublicId);
+        Assert.Equal("ten_a", again.TenantPublicId);
+        Assert.DoesNotContain(_queuey.Calls, c => c.Contains("apikeys", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task A_relative_directory_is_refused_before_anything_runs()
+    {
+        var options = new QueueyServerOptions("1.0.0") { Directory = ".queuey" };
+
+        await Assert.ThrowsAsync<ArgumentException>(() => QueueyServer.EnsureRunningAsync(options));
+
+        Assert.Empty(_docker.Calls);
+    }
+
+    [Fact]
+    public async Task A_folder_others_may_write_in_does_not_start()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        await QueueyServer.EnsureRunningAsync(Options());
+        File.SetUnixFileMode(_dir, (UnixFileMode)Convert.ToInt32("777", 8));
+        _docker.Calls.Clear();
+
+        var refused = await Assert.ThrowsAsync<QueueyConfigurationException>(() => QueueyServer.EnsureRunningAsync(Options()));
+
+        Assert.Contains("Others than you may write", refused.Message);
+        Assert.DoesNotContain("compose up -d", _docker.Calls);
+    }
+
+    [Fact]
+    public void Neither_the_key_nor_the_password_is_in_what_the_records_print()
+    {
+        Assert.DoesNotContain("qak_secret", new AppKeyRecord("qak_secret.s", "ten_1", "lic_1").ToString());
+        Assert.DoesNotContain("pw-secret", new DeveloperRecord("d@x", "pw-secret", "sub").ToString());
+    }
+
+    [Fact]
     public void An_app_in_a_container_reaches_this_machine_as_host_docker_internal()
     {
         var connection = new QueueyServerConnection("/x", "1.0.0", new LocalPorts(Api: 18080, Ingress: 18081), "d@x",
@@ -133,25 +193,33 @@ public sealed class QueueyServerTests : IDisposable
     private sealed class FakeQueuey : HttpMessageHandler
     {
         public List<string> Calls { get; } = new();
+        public string Tenants { get; set; } = """[{"publicId":"ten_local","displayName":"Local","queues":[]}]""";
+        public TimeSpan Delay { get; set; }
 
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            if (Delay > TimeSpan.Zero) await Task.Delay(Delay, ct);
+            return Answer(request);
+        }
+
+        private HttpResponseMessage Answer(HttpRequestMessage request)
         {
             string key = $"{request.Method} {request.RequestUri!.AbsolutePath}";
             lock (Calls) Calls.Add(key);
             HttpResponseMessage Json(string body, HttpStatusCode status = HttpStatusCode.OK)
                 => new(status) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
 
-            if (key.EndsWith("/openid-connect/token", StringComparison.Ordinal)) return Task.FromResult(Json("""{"access_token":"t"}"""));
+            if (key.EndsWith("/openid-connect/token", StringComparison.Ordinal)) return (Json("""{"access_token":"t"}"""));
             if (key == "POST /admin/realms/queuey/users")
             {
                 var created = new HttpResponseMessage(HttpStatusCode.Created);
                 created.Headers.Location = new Uri("http://127.0.0.1:8082/admin/realms/queuey/users/kc-1");
-                return Task.FromResult(created);
+                return created;
             }
-            if (key == "POST /admin/realms/queuey/clients") return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Created));
-            if (key == "GET /auth/me") return Task.FromResult(Json("""{"licenses":[{"licensePublicId":"lic_own","role":"Owner","accessSource":"direct"}]}"""));
-            if (key == "GET /tenants") return Task.FromResult(Json("""[{"publicId":"ten_local","queues":[]}]"""));
-            if (key == "POST /licenses/lic_own/apikeys/starter") return Task.FromResult(Json("""{"apiKey":"qak_minted.secret"}"""));
+            if (key == "POST /admin/realms/queuey/clients") return new HttpResponseMessage(HttpStatusCode.Created);
+            if (key == "GET /auth/me") return (Json("""{"licenses":[{"licensePublicId":"lic_own","role":"Owner","accessSource":"direct"}]}"""));
+            if (key == "GET /tenants") return Json(Tenants);
+            if (key == "POST /licenses/lic_own/apikeys/starter") return (Json("""{"apiKey":"qak_minted.secret"}"""));
             throw new InvalidOperationException($"Unexpected {key}");
         }
     }

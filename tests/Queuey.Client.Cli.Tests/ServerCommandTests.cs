@@ -24,6 +24,7 @@ public sealed class ServerCommandTests : IDisposable
         _docker.Images["queuey/server:1.1.0"] = Package("1.1.0", "README.md", "docs/upgrade.md");
         ServerDocker.Runner = _docker.RunAsync;
         ServerCommand.IsTerminal = () => false;
+        FolderLock.LocksDirectory = () => Path.Combine(_root, "locks");
     }
 
     public void Dispose()

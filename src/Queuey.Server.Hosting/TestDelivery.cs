@@ -34,9 +34,10 @@ internal static class TestDelivery
     /// <summary>How long to wait for the event at the receiver. A seam: the tests do not wait a minute.</summary>
     internal static TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(60);
 
-    public static async Task<TestDeliveryResult> RunAsync(LocalPorts ports, DeveloperRecord developer, HttpClient http, CancellationToken ct)
+    /// <param name="preferred">The workspace the app's key is for, when there is one, so the test uses the same.</param>
+    public static async Task<TestDeliveryResult> RunAsync(LocalPorts ports, DeveloperRecord developer, HttpClient http, string? preferred, CancellationToken ct)
     {
-        (LocalApi api, string tenant) = await LocalWorkspace.OpenAsync(ports, developer, http, ct);
+        (LocalApi api, string tenant) = await LocalWorkspace.OpenAsync(ports, developer, http, preferred, ct);
         string queue = await QueueAsync(api, tenant, ct);
 
         using var receiver = Receiver.Start();

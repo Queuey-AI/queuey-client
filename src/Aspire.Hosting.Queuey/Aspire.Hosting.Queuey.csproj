@@ -34,8 +34,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Samme versjon som Queuey-backendens AppHost. -->
-    <PackageReference Include="Aspire.Hosting" Version="13.4.6" />
+    <!-- 13.6.5: 13.4.6 har GHSA-f7vh-h5g3-7jrh (macOS, High), og en offentlig pakke setter gulvet for AppHost-ene som bruker den. -->
+    <PackageReference Include="Aspire.Hosting" Version="13.6.5" />
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
   </ItemGroup>
 

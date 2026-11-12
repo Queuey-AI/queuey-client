@@ -17,7 +17,11 @@ namespace Queuey.Server.Hosting;
 /// The person a local installation is made for, kept in <c>developer.json</c> in the folder (readable by the user alone):
 /// who they are in the bundled Keycloak, and the password they sign in to the console with.
 /// </summary>
-internal sealed record DeveloperRecord(string Email, string Password, string Subject);
+internal sealed record DeveloperRecord(string Email, string Password, string Subject)
+{
+    /// <summary>Who, never the password.</summary>
+    public override string ToString() => Email;
+}
 
 /// <summary>
 /// The first person of an installation <c>queuey server init</c> made. On the first start it creates them in the bundled
