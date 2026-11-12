@@ -1,0 +1,297 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace Queuey.Client.Cli.Server;
+
+/// <summary>The ports a local installation publishes on this machine, and the addresses that follow from them.</summary>
+internal sealed record LocalPorts(int Console = 3000, int Api = 8080, int Ingress = 8081, int Idp = 8082)
+{
+    [System.Text.Json.Serialization.JsonIgnore] public string ConsoleUrl => $"http://localhost:{Console}";
+    [System.Text.Json.Serialization.JsonIgnore] public string ApiUrl => $"http://localhost:{Api}";
+    [System.Text.Json.Serialization.JsonIgnore] public string IngressUrl => $"http://localhost:{Ingress}";
+    [System.Text.Json.Serialization.JsonIgnore] public string IdpUrl => $"http://localhost:{Idp}";
+}
+
+/// <summary>
+/// What <c>queuey server</c> keeps about an installation it made, in <c>.queuey-server.json</c> in the folder: the ports, and
+/// which files came from the package, so an upgrade can remove the ones the new version no longer has.
+/// </summary>
+/// <param name="DeveloperEmail">The email the first person gets, when the first start creates them.</param>
+internal sealed record ServerState(string Version, LocalPorts Ports, IReadOnlyList<string> PackageFiles, string DeveloperEmail);
+
+/// <summary>
+/// An installation folder: the Compose package from the server image, plus the files that are this installation's own
+/// (<c>.env</c>, <c>oidc-client-secret</c>, <c>compose.override.yaml</c>, the license, backups). It is the same folder the
+/// package's README describes, so <c>docker compose</c> run by hand in it does what <c>queuey server</c> does.
+/// </summary>
+internal sealed class ServerFolder
+{
+    public const string ComposeFile = "compose.yaml";
+    public const string EnvFileName = ".env";
+    public const string OverrideFile = "compose.override.yaml";
+    public const string ClientSecretFile = "oidc-client-secret";
+    public const string StateFile = ".queuey-server.json";
+    public const string DeveloperFile = "developer.json";
+
+    /// <summary>The folder the package sits in inside the server image (Queuey 4.8 and later).</summary>
+    public const string PackageInImage = "/app/package";
+
+    // Samme form som scripts/release/server-image.sh godtar: en festet versjon, aldri «latest».
+    private static readonly Regex VersionShape = new(@"^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$", RegexOptions.CultureInvariant);
+
+    private static readonly JsonSerializerOptions StateJson = new(JsonSerializerDefaults.Web) { WriteIndented = true };
+
+    public ServerFolder(string path) => Path = System.IO.Path.GetFullPath(path);
+
+    /// <summary>The folder's full path.</summary>
+    public string Path { get; }
+
+    /// <summary>
+    /// The installation folder: <c>--dir</c>, else <c>QUEUEY_SERVER_DIR</c>, else <c>~/.queuey/server</c>, so every verb
+    /// finds the installation <c>init</c> made without being told where.
+    /// </summary>
+    public static ServerFolder Resolve(ArgMap map)
+    {
+        string? chosen = map.Get("dir");
+        if (string.IsNullOrWhiteSpace(chosen))
+            chosen = CliHost.Env("QUEUEY_SERVER_DIR");
+        if (string.IsNullOrWhiteSpace(chosen))
+            chosen = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".queuey", "server");
+        return new ServerFolder(chosen!.Trim());
+    }
+
+    /// <summary>A file in the folder.</summary>
+    public string File(string name) => System.IO.Path.Combine(Path, name);
+
+    /// <summary>Whether the folder holds a Compose package.</summary>
+    public bool HasPackage => System.IO.File.Exists(File(ComposeFile));
+
+    /// <summary>Throws when the folder holds no installation, with how to make one.</summary>
+    public void RequirePackage()
+    {
+        if (!HasPackage)
+            throw new QueueyConfigurationException($"There is no Queuey installation in {Path}: it has no {ComposeFile}.")
+            {
+                SuggestedAction = "Make one with `queuey server init --version <version>`, or point at yours with --dir.",
+            };
+    }
+
+    /// <summary>The installation's <c>QUEUEY_VERSION</c> from <c>.env</c>, or null.</summary>
+    public string? Version
+        => System.IO.File.Exists(File(EnvFileName)) && ReadEnv(File(EnvFileName)).TryGetValue("QUEUEY_VERSION", out string? v) && v.Length > 0 ? v : null;
+
+    /// <summary>What <c>init</c> or <c>upgrade</c> wrote down, or null for a folder set up by hand.</summary>
+    public ServerState? State
+        => System.IO.File.Exists(File(StateFile)) ? JsonSerializer.Deserialize<ServerState>(System.IO.File.ReadAllText(File(StateFile)), StateJson) : null;
+
+    /// <summary>The ports: from the state, else the package's defaults.</summary>
+    public LocalPorts Ports => State?.Ports ?? new LocalPorts();
+
+    public void WriteState(ServerState state) => System.IO.File.WriteAllText(File(StateFile), JsonSerializer.Serialize(state, StateJson) + "\n");
+
+    /// <summary>The image a version runs, as the package's compose.yaml names it.</summary>
+    public static string ServerImage(string version) => $"queuey/server:{version}";
+
+    /// <summary>Throws a usage error unless <paramref name="version"/> is a pinned version.</summary>
+    public static string RequireVersion(string? version, string option = "--version")
+    {
+        string? v = version?.Trim();
+        if (string.IsNullOrEmpty(v))
+            throw new CliUsageException("missing_argument", $"Missing {option} <version>, such as 1.0.0.",
+                "The version is pinned: an installation runs the version you name until you upgrade it.");
+        if (!VersionShape.IsMatch(v))
+            throw new CliUsageException("invalid_value", $"{option} takes a pinned version such as 1.0.0 or 1.0.0-rc.1; got '{CliErrors.Shown(v)}'.", null);
+        return v;
+    }
+
+    /// <summary>
+    /// The Compose package of <paramref name="version"/>, copied out of its server image into a new temporary folder. The
+    /// image is pulled when it is not on this machine. Returns the folder; the caller deletes it.
+    /// </summary>
+    public static async Task<string> ExtractPackageAsync(string version, CancellationToken ct)
+    {
+        string image = ServerImage(version);
+        if ((await ServerDocker.DockerAsync(ct, "image", "inspect", "--format", "{{.Id}}", image)).ExitCode != 0)
+        {
+            Console.Error.WriteLine($"Pulling {image} …");
+            DockerResult pulled = await ServerDocker.DockerAsync(ct, "pull", "--quiet", image);
+            if (pulled.ExitCode != 0)
+                throw new QueueyConfigurationException($"The image {image} is not on this machine, and it could not be pulled: {ServerDocker.Detail(pulled)}")
+                {
+                    SuggestedAction = $"Check the version, or load the image first (docker load -i <archive>).",
+                };
+        }
+
+        DockerResult created = await ServerDocker.DockerAsync(ct, "create", image);
+        if (created.ExitCode != 0)
+            throw new QueueyException($"Could not read {image}: {ServerDocker.Detail(created)}");
+        string container = created.Stdout.Trim();
+
+        string target = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "queuey-server-package-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(target);
+        try
+        {
+            DockerResult copied = await ServerDocker.DockerAsync(ct, "cp", $"{container}:{PackageInImage}/.", target);
+            if (copied.ExitCode != 0 || !System.IO.File.Exists(System.IO.Path.Combine(target, ComposeFile)))
+                throw new QueueyConfigurationException($"{image} has no Compose package in {PackageInImage}.")
+                {
+                    SuggestedAction = "queuey server needs a Queuey version that carries its package in the image. Use a newer version, " +
+                                      "or set the installation up by hand from the package's README.",
+                };
+            return target;
+        }
+        catch
+        {
+            TryDelete(target);
+            throw;
+        }
+        finally
+        {
+            await ServerDocker.DockerAsync(CancellationToken.None, "rm", container);
+        }
+    }
+
+    /// <summary>
+    /// Copies every file of an extracted package into the folder, replacing the package's own files and leaving the
+    /// installation's. Returns the files, as paths relative to the folder with '/'.
+    /// </summary>
+    public IReadOnlyList<string> WritePackage(string extracted)
+    {
+        var written = new List<string>();
+        foreach (string source in Directory.EnumerateFiles(extracted, "*", SearchOption.AllDirectories).OrderBy(p => p, StringComparer.Ordinal))
+        {
+            string relative = System.IO.Path.GetRelativePath(extracted, source).Replace('\\', '/');
+            if (IsInstallationsOwn(relative))
+                continue;
+            string destination = File(relative);
+            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(destination)!);
+            System.IO.File.Copy(source, destination, overwrite: true);
+            written.Add(relative);
+        }
+        return written;
+    }
+
+    // En pakke skal aldri ha disse, men skulle den få dem, er det installasjonens filer som gjelder.
+    private static bool IsInstallationsOwn(string relative)
+        => relative is EnvFileName or OverrideFile or ClientSecretFile or StateFile or DeveloperFile
+           || relative.StartsWith("backups/", StringComparison.Ordinal)
+           || (relative.StartsWith("license/", StringComparison.Ordinal) && relative.EndsWith(".license", StringComparison.Ordinal));
+
+    /// <summary>
+    /// The <c>.env</c> of an installation only this machine uses: the bundled Keycloak (profile <c>idp</c>, always on through
+    /// <c>COMPOSE_PROFILES</c>), and every address on localhost.
+    /// </summary>
+    public static string LocalEnv(string version, LocalPorts ports) => $"""
+        # Written by `queuey server init` for an installation only this machine uses: every address is on localhost,
+        # without TLS, and the bundled Keycloak signs people in. The settings are the package's; see .env.example and
+        # README.md. `queuey server upgrade` changes QUEUEY_VERSION and nothing else.
+        QUEUEY_VERSION={version}
+        COMPOSE_PROFILES=idp
+
+        QUEUEY_CONSOLE_URL={ports.ConsoleUrl}
+        QUEUEY_API_URL={ports.ApiUrl}
+        QUEUEY_INGRESS_URL={ports.IngressUrl}
+        QUEUEY_CONSOLE_PORT={ports.Console}
+        QUEUEY_API_PORT={ports.Api}
+        QUEUEY_INGRESS_PORT={ports.Ingress}
+
+        QUEUEY_OIDC_PROVIDER_ID=oidc
+        QUEUEY_OIDC_PROVIDER_NAME=Keycloak
+        QUEUEY_OIDC_CONSOLE_CLIENT_ID=queuey-console
+        QUEUEY_OIDC_AUDIENCE=queuey-api
+
+        QUEUEY_IDP_URL={ports.IdpUrl}
+        QUEUEY_IDP_PORT={ports.Idp}
+        QUEUEY_OIDC_AUTHORITY=http://keycloak:8080/realms/queuey
+        QUEUEY_OIDC_ISSUER={ports.IdpUrl}/realms/queuey
+        QUEUEY_OIDC_REQUIRE_HTTPS_METADATA=false
+
+        """;
+
+    /// <summary>
+    /// <c>compose.override.yaml</c>, which Compose reads after <c>compose.yaml</c>: what makes the installation one for this
+    /// machine only. The ports listen on the loopback interface alone, the console may be plain http on localhost, and
+    /// deliveries may reach this machine as <c>host.docker.internal</c>, where a developer's own receiver runs.
+    /// </summary>
+    public const string LocalOverride = """
+        # Written by `queuey server init`: what makes this installation one for this machine only. Compose reads it after
+        # compose.yaml, and `queuey server upgrade` keeps it.
+        services:
+          server:
+            environment:
+              # The console is http://localhost, which the server accepts only when told that only this machine uses it.
+              - Cors__AllowLoopbackHttp=true
+              # Your own receivers on this machine, as http://host.docker.internal:<port>/...
+              - Delivery__Egress__AllowedHosts__0=host.docker.internal
+            extra_hosts:
+              - host.docker.internal:host-gateway
+            ports: !override
+              - 127.0.0.1:${QUEUEY_API_PORT:-8080}:8080
+              - 127.0.0.1:${QUEUEY_INGRESS_PORT:-8081}:8081
+          console:
+            ports: !override
+              - 127.0.0.1:${QUEUEY_CONSOLE_PORT:-3000}:3000
+          keycloak:
+            ports: !override
+              - 127.0.0.1:${QUEUEY_IDP_PORT:-8082}:8080
+        """;
+
+    /// <summary>Writes a file only the user may read, as the client secret and the developer's password are.</summary>
+    public static void WritePrivate(string path, string content)
+    {
+        System.IO.File.WriteAllText(path, content);
+        if (!OperatingSystem.IsWindows())
+            System.IO.File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+    }
+
+    /// <summary>A random secret as hex, as the package's README makes the client secret with <c>openssl rand -hex 32</c>.</summary>
+    public static string RandomHex(int bytes) => Convert.ToHexString(RandomNumberGenerator.GetBytes(bytes)).ToLowerInvariant();
+
+    /// <summary>Sets <c>QUEUEY_VERSION</c> in <c>.env</c>, leaving every other line as it was.</summary>
+    public void SetVersion(string version)
+    {
+        string path = File(EnvFileName);
+        string[] lines = System.IO.File.Exists(path) ? System.IO.File.ReadAllLines(path) : Array.Empty<string>();
+        bool found = false;
+        for (int i = 0; i < lines.Length; i++)
+        {
+            if (lines[i].TrimStart().StartsWith("QUEUEY_VERSION=", StringComparison.Ordinal))
+            {
+                lines[i] = "QUEUEY_VERSION=" + version;
+                found = true;
+            }
+        }
+        IEnumerable<string> result = found ? lines : lines.Append("QUEUEY_VERSION=" + version);
+        System.IO.File.WriteAllText(path, string.Join("\n", result) + "\n");
+    }
+
+    /// <summary>The <c>NAME=value</c> lines of an env file. Comments and blank lines are skipped; quotes are not interpreted.</summary>
+    public static Dictionary<string, string> ReadEnv(string path)
+    {
+        var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (string raw in System.IO.File.ReadAllLines(path))
+        {
+            string line = raw.Trim();
+            int eq = line.IndexOf('=');
+            if (line.Length == 0 || line[0] == '#' || eq <= 0)
+                continue;
+            values[line.Substring(0, eq).Trim()] = line.Substring(eq + 1).Trim();
+        }
+        return values;
+    }
+
+    public static void TryDelete(string folder)
+    {
+        try { Directory.Delete(folder, recursive: true); }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+    }
+}

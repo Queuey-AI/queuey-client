@@ -73,6 +73,7 @@ internal static class CliEntry
                 "resume" => await ResumeCommand.RunAsync(rest),
                 "unlock" => await UnlockCommand.RunAsync(rest),
                 "edge" => await EdgeCommand.RunAsync(rest),
+                "server" => await ServerCommand.RunAsync(rest),
                 _ => Unknown(command, json),
             };
         }

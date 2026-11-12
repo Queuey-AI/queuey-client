@@ -65,6 +65,31 @@ waits; without one (an agent) it prints the link and exits `5`, and
 an API key then uses the login. `queuey logout` ends it. Publishing to the
 ingress still needs a key.
 
+## Run Queuey on your own machine
+
+`queuey server` runs a self-hosted Queuey with Docker Compose: the server,
+the console, PostgreSQL, Redis and a Keycloak to sign in with, for this
+machine only.
+
+```bash
+queuey server init --version <version>   # the package for that version, in ~/.queuey/server
+queuey server start                      # waits until it is healthy, then a test delivery
+queuey server status
+queuey server logs server --follow
+queuey server stop                       # keeps the data
+queuey server upgrade --version <newer>  # backup, new package, migrate plan, start
+```
+
+The package comes out of the server image for the version, so it is always the
+one that version was released with; the folder is the package's own, and
+`docker compose` in it does the same as `queuey server`. The first `start`
+creates you in Keycloak with a generated password (in `developer.json` in the
+folder) and makes you the installation's owner. Then it sends one event in
+through the ingress and checks that a receiver on this machine gets it.
+Deliveries reach your own receivers as `http://host.docker.internal:<port>`.
+Every port listens on 127.0.0.1 only. `queuey server stop --delete-data`
+deletes the data, and asks first.
+
 ## Configuration
 
 Connection settings resolve with the precedence **CLI flag > environment
