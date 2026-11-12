@@ -1,6 +1,6 @@
 using System.ComponentModel;
 using Queuey.Client.Cli;
-using Queuey.Client.Cli.Server;
+using Queuey.Server.Hosting;
 
 namespace Queuey.Client.Cli.Tests;
 
@@ -253,12 +253,14 @@ public sealed class ServerCommandTests : IDisposable
     {
         await Init();
         File.WriteAllText(Path.Combine(_dir, "developer.json"), "{}");
+        File.WriteAllText(Path.Combine(_dir, "app-key.json"), "{}");
 
         var run = await Run("server", "stop", "--delete-data", "--yes", "--dir", _dir);
 
         Assert.Equal(ExitCodes.Success, run.Exit);
         Assert.Contains("compose down --volumes --remove-orphans", _docker.Calls);
         Assert.False(File.Exists(Path.Combine(_dir, "developer.json")));
+        Assert.False(File.Exists(Path.Combine(_dir, "app-key.json")), "the key belonged to the data that is gone");
         Assert.True(File.Exists(Path.Combine(_dir, ".env")));
         Assert.True(File.Exists(Path.Combine(_dir, "compose.yaml")));
     }
@@ -356,12 +358,12 @@ public sealed class ServerCommandTests : IDisposable
 
         foreach (string output in new[] { lines, list })
         {
-            var services = ServerCommand.ParseServices(output);
+            var services = Installation.ParseServices(output);
             Assert.Equal(new[] { "migrate", "server" }, services.Select(s => s.Service));
             Assert.False(services[0].Completed);
             Assert.True(services[1].Running);
         }
-        Assert.Empty(ServerCommand.ParseServices(""));
+        Assert.Empty(Installation.ParseServices(""));
     }
 
     [Fact]

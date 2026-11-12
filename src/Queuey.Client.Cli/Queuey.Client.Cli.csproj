@@ -49,6 +49,8 @@
     <ProjectReference Include="../Queuey.Client.Waas/Queuey.Client.Waas.csproj" />
     <ProjectReference Include="../Queuey.Edge/Queuey.Edge.csproj" />
     <ProjectReference Include="../Queuey.Edge.Mqtt/Queuey.Edge.Mqtt.csproj" />
+    <!-- queuey server: de samme stegene og standardene som pakkene for Aspire og .NET (selfhost 4.9). -->
+    <ProjectReference Include="../Queuey.Server.Hosting/Queuey.Server.Hosting.csproj" />
   </ItemGroup>
 
   <ItemGroup>
