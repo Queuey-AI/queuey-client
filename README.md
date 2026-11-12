@@ -1159,6 +1159,11 @@ still goes to the inbox. Every command without an API key uses it for the API ho
 | `server stop` | Stop it and keep the data; `--delete-data` deletes the data, and asks first |
 | `server upgrade --version <v>` | Back up, swap in the new version's package, show `migrate plan`, and start |
 
+The same installation is there for .NET without the CLI: `QueueyServer.EnsureRunningAsync(new QueueyServerOptions("1.0.0"))`
+in [`Queuey.Server.Hosting`](src/Queuey.Server.Hosting/README.md) starts it and returns the addresses and a key for
+Queuey.Client, and `builder.AddQueuey("queuey", "1.0.0")` in [`Aspire.Hosting.Queuey`](src/Aspire.Hosting.Queuey/README.md)
+does it in an AppHost, where `WithReference(queuey)` gives an app those as environment variables.
+
 ### Exit codes
 
 A stable contract, so CI can branch on them:

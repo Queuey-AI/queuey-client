@@ -12,7 +12,9 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace Queuey.Client.Cli.Server;
+using Queuey.Client;
+
+namespace Queuey.Server.Hosting;
 
 /// <summary>What the test delivery did: the event, where it went, and how long from the ingress to the receiver.</summary>
 internal sealed record TestDeliveryResult(string EventId, string Workspace, string Queue, TimeSpan Took);
@@ -32,14 +34,11 @@ internal static class TestDelivery
     /// <summary>How long to wait for the event at the receiver. A seam: the tests do not wait a minute.</summary>
     internal static TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(60);
 
-    public static async Task<TestDeliveryResult> RunAsync(LocalPorts ports, DeveloperRecord developer, HttpClient http, CancellationToken ct)
+    /// <param name="preferred">The workspace the app's key is for, when there is one, so the test uses the same.</param>
+    public static async Task<TestDeliveryResult> RunAsync(LocalPorts ports, DeveloperRecord developer, HttpClient http, string? preferred, CancellationToken ct)
     {
-        string token = await LocalDeveloper.TokenAsync(ports, developer, http, ct);
-        var api = new Api(http, ports.ApiUrl, token);
-
-        string license = await AccountAsync(api, developer, ct);
-        api.License = license;
-        (string tenant, string queue) = await QueueAsync(api, ct);
+        (LocalApi api, string tenant) = await LocalWorkspace.OpenAsync(ports, developer, http, preferred, ct);
+        string queue = await QueueAsync(api, tenant, ct);
 
         using var receiver = Receiver.Start();
         string nonce = ServerFolder.RandomHex(12);
@@ -47,7 +46,7 @@ internal static class TestDelivery
 
         var clock = Stopwatch.StartNew();
         using var sent = await http.PostAsync($"{ports.IngressUrl}/events/{tenant}/{QueueName}",
-            Json(new { test = "queuey server start", nonce }), ct);
+            LocalApi.Json(new { test = "queuey server start", nonce }), ct);
         string sentBody = await sent.Content.ReadAsStringAsync(ct);
         if (sent.StatusCode != HttpStatusCode.Accepted)
             throw new QueueyException($"The ingress did not take the test event ({(int)sent.StatusCode}): {LocalDeveloper.Short(sentBody)}");
@@ -76,53 +75,19 @@ internal static class TestDelivery
         return new TestDeliveryResult(eventId, tenant, queue, took);
     }
 
-    // Kontoen: den første personen har ingen før denne testen eller konsollet lager den. bootstrap-admin gir plattformens
-    // lisens med Viewer (accessSource «platform»), som bare leser; den teller ikke.
-    private static async Task<string> AccountAsync(Api api, DeveloperRecord developer, CancellationToken ct)
+    // Køen server-test i arbeidsområdet, laget og satt til å levere første gang.
+    private static async Task<string> QueueAsync(LocalApi api, string tenant, CancellationToken ct)
     {
-        using var me = await api.GetJsonAsync("/auth/me", ct);
-        if (me.RootElement.TryGetProperty("licenses", out JsonElement licenses) && licenses.ValueKind == JsonValueKind.Array
-            && licenses.EnumerateArray().FirstOrDefault(l => Str(l, "accessSource") == "direct" && Str(l, "role") is "Owner" or "Admin") is
-            { ValueKind: JsonValueKind.Object } own)
-            return Str(own, "licensePublicId");
-
-        using var account = await api.SendAsync(HttpMethod.Post, "/onboarding", new
-        {
-            organization = new { organizationName = "Local", countryCode = "NO" },
-            contact = new { email = developer.Email },
-        }, ct);
-        return account.RootElement.GetProperty("licenseId").GetString()!;
-    }
-
-    // Arbeidsområdet er det første som finnes (evalueringsplanen har ett), og køen server-test i det.
-    private static async Task<(string Tenant, string Queue)> QueueAsync(Api api, CancellationToken ct)
-    {
-        using var tenants = await api.GetJsonAsync("/tenants", ct);
-        JsonElement? workspace = tenants.RootElement.ValueKind == JsonValueKind.Array && tenants.RootElement.GetArrayLength() > 0
-            ? tenants.RootElement[0] : null;
-
-        string tenant;
-        if (workspace is { } found)
-        {
-            tenant = found.GetProperty("publicId").GetString()!;
-            if (found.TryGetProperty("queues", out JsonElement queues) && queues.ValueKind == JsonValueKind.Array
-                && queues.EnumerateArray().FirstOrDefault(q => Str(q, "name") == QueueName && !Archived(q)) is
-                { ValueKind: JsonValueKind.Object } existing)
-                return (tenant, existing.GetProperty("publicId").GetString()!);
-        }
-        else
-        {
-            using var created = await api.SendAsync(HttpMethod.Post, "/tenants", new { displayName = "Local", createDefaultQueue = false }, ct);
-            tenant = created.RootElement.GetProperty("publicId").GetString()!;
-        }
+        if (await LocalWorkspace.QueueAsync(api, tenant, QueueName, ct) is { } existing)
+            return existing;
 
         using var queue = await api.SendAsync(HttpMethod.Post, "/queues", new { tenantPublicId = tenant, displayName = QueueName }, ct);
         string queueId = queue.RootElement.GetProperty("publicId").GetString()!;
         (await api.SendAsync(HttpMethod.Patch, $"/queues/{queueId}", new { mode = DeliverMode }, ct)).Dispose();
-        return (tenant, queueId);
+        return queueId;
     }
 
-    private static async Task<string> EventStatusAsync(Api api, string queue, string eventId, CancellationToken ct)
+    private static async Task<string> EventStatusAsync(LocalApi api, string queue, string eventId, CancellationToken ct)
     {
         try
         {
@@ -134,36 +99,6 @@ internal static class TestDelivery
         catch (QueueyException)
         {
             return "status unknown";
-        }
-    }
-
-    private static bool Archived(JsonElement queue)
-        => queue.TryGetProperty("archivedAtUtc", out JsonElement at) && at.ValueKind != JsonValueKind.Null;
-
-    private static string Str(JsonElement e, string name) => e.TryGetProperty(name, out JsonElement v) && v.ValueKind == JsonValueKind.String ? v.GetString()! : "";
-
-    private static StringContent Json(object body) => new(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
-
-    /// <summary>The API, as the developer, with the account's license header once it is known.</summary>
-    private sealed class Api(HttpClient http, string baseUrl, string token)
-    {
-        public string? License { get; set; }
-
-        public async Task<JsonDocument> GetJsonAsync(string path, CancellationToken ct) => await SendAsync(HttpMethod.Get, path, null, ct);
-
-        public async Task<JsonDocument> SendAsync(HttpMethod method, string path, object? body, CancellationToken ct)
-        {
-            using var request = new HttpRequestMessage(method, baseUrl + path);
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-            if (License is not null)
-                request.Headers.Add("X-License-PublicId", License);
-            if (body is not null)
-                request.Content = Json(body);
-            using var response = await http.SendAsync(request, ct);
-            string text = await response.Content.ReadAsStringAsync(ct);
-            if (!response.IsSuccessStatusCode)
-                throw new QueueyException($"{method} {path} answered {(int)response.StatusCode}: {LocalDeveloper.Short(text)}");
-            return JsonDocument.Parse(text.Length == 0 ? "{}" : text);
         }
     }
 

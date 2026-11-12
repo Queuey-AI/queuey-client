@@ -9,7 +9,9 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace Queuey.Client.Cli.Server;
+using Queuey.Client;
+
+namespace Queuey.Server.Hosting;
 
 /// <summary>
 /// The ports a local installation publishes on this machine, and the addresses that follow from them. The addresses are
@@ -44,6 +46,7 @@ internal sealed class ServerFolder
     public const string ClientSecretFile = "oidc-client-secret";
     public const string StateFile = ".queuey-server.json";
     public const string DeveloperFile = "developer.json";
+    public const string AppKeyFile = "app-key.json";
 
     /// <summary>The folder the package sits in inside the server image (Queuey 4.8 and later).</summary>
     public const string PackageInImage = "/app/package";
@@ -58,15 +61,17 @@ internal sealed class ServerFolder
     /// <summary>The folder's full path.</summary>
     public string Path { get; }
 
+    /// <summary>The variable that names the installation folder when nothing else does.</summary>
+    public const string DirectoryVariable = "QUEUEY_SERVER_DIR";
+
     /// <summary>
-    /// The installation folder: <c>--dir</c>, else <c>QUEUEY_SERVER_DIR</c>, else <c>~/.queuey/server</c>, so every verb
-    /// finds the installation <c>init</c> made without being told where.
+    /// The installation folder: the one chosen, else <c>QUEUEY_SERVER_DIR</c>, else <c>~/.queuey/server</c>. The CLI and the
+    /// hosting packages resolve it the same way, so they find the same installation.
     /// </summary>
-    public static ServerFolder Resolve(ArgMap map)
+    public static ServerFolder Resolve(string? chosen, Func<string, string?> env)
     {
-        string? chosen = map.Get("dir");
         if (string.IsNullOrWhiteSpace(chosen))
-            chosen = CliHost.Env("QUEUEY_SERVER_DIR");
+            chosen = env(DirectoryVariable);
         if (string.IsNullOrWhiteSpace(chosen))
             chosen = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".queuey", "server");
         return new ServerFolder(chosen!.Trim());
@@ -104,28 +109,19 @@ internal sealed class ServerFolder
     /// <summary>The image a version runs, as the package's compose.yaml names it.</summary>
     public static string ServerImage(string version) => $"queuey/server:{version}";
 
-    /// <summary>Throws a usage error unless <paramref name="version"/> is a pinned version.</summary>
-    public static string RequireVersion(string? version, string option = "--version")
-    {
-        string? v = version?.Trim();
-        if (string.IsNullOrEmpty(v))
-            throw new CliUsageException("missing_argument", $"Missing {option} <version>, such as 1.0.0.",
-                "The version is pinned: an installation runs the version you name until you upgrade it.");
-        if (!VersionShape.IsMatch(v))
-            throw new CliUsageException("invalid_value", $"{option} takes a pinned version such as 1.0.0 or 1.0.0-rc.1; got '{CliErrors.Shown(v)}'.", null);
-        return v;
-    }
+    /// <summary>Whether <paramref name="version"/> is a pinned version, such as 1.0.0 or 1.0.0-rc.1; never <c>latest</c>.</summary>
+    public static bool IsPinnedVersion(string? version) => version is not null && VersionShape.IsMatch(version);
 
     /// <summary>
     /// The Compose package of <paramref name="version"/>, copied out of its server image into a new temporary folder. The
     /// image is pulled when it is not on this machine. Returns the folder; the caller deletes it.
     /// </summary>
-    public static async Task<string> ExtractPackageAsync(string version, CancellationToken ct)
+    public static async Task<string> ExtractPackageAsync(string version, Action<string>? log, CancellationToken ct)
     {
         string image = ServerImage(version);
         if ((await ServerDocker.DockerAsync(ct, "image", "inspect", "--format", "{{.Id}}", image)).ExitCode != 0)
         {
-            Console.Error.WriteLine($"Pulling {image} …");
+            log?.Invoke($"Pulling {image} …");
             DockerResult pulled = await ServerDocker.DockerAsync(ct, "pull", "--quiet", image);
             if (pulled.ExitCode != 0)
                 throw new QueueyConfigurationException($"The image {image} is not on this machine, and it could not be pulled: {ServerDocker.Detail(pulled)}")
@@ -147,7 +143,7 @@ internal sealed class ServerFolder
             if (copied.ExitCode != 0 || !System.IO.File.Exists(System.IO.Path.Combine(target, ComposeFile)))
                 throw new QueueyConfigurationException($"{image} has no Compose package in {PackageInImage}.")
                 {
-                    SuggestedAction = "queuey server needs a Queuey version that carries its package in the image. Use a newer version, " +
+                    SuggestedAction = "A local Queuey needs a version that carries its package in the image. Use a newer version, " +
                                       "or set the installation up by hand from the package's README.",
                 };
             return target;
@@ -186,7 +182,7 @@ internal sealed class ServerFolder
 
     // En pakke skal aldri ha disse, men skulle den få dem, er det installasjonens filer som gjelder.
     private static bool IsInstallationsOwn(string relative)
-        => relative is EnvFileName or OverrideFile or ClientSecretFile or StateFile or DeveloperFile
+        => relative is EnvFileName or OverrideFile or ClientSecretFile or StateFile or DeveloperFile or AppKeyFile
            || relative.StartsWith("backups/", StringComparison.Ordinal)
            || (relative.StartsWith("license/", StringComparison.Ordinal) && relative.EndsWith(".license", StringComparison.Ordinal));
 
@@ -275,13 +271,46 @@ internal sealed class ServerFolder
         writer.Write(content);
     }
 
-    /// <summary>Creates the installation folder so only the user can enter it (0700).</summary>
+    private const UnixFileMode Private = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+
+    /// <summary>
+    /// Creates the installation folder so only the user can enter it (0700), and sets that mode on a folder that exists.
+    /// Only the folder's owner may set it, so a folder someone else made is refused.
+    /// </summary>
+    // Security review av 4.9 (2026-11-12): en tom mappe en annen bruker har laget med 0777 (/tmp/queuey) ble godtatt, og
+    // den brukeren kunne bytte compose.yaml før neste `up`.
     public void CreatePrivate()
     {
         if (OperatingSystem.IsWindows())
+        {
             Directory.CreateDirectory(Path);
-        else
-            Directory.CreateDirectory(Path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            return;
+        }
+        Directory.CreateDirectory(Path, Private);
+        try
+        {
+            System.IO.File.SetUnixFileMode(Path, Private);
+        }
+        catch (UnauthorizedAccessException)
+        {
+            throw new QueueyConfigurationException($"{Path} belongs to another user, so an installation is not made there.")
+            {
+                SuggestedAction = "Choose a folder of your own, such as the default ~/.queuey/server.",
+            };
+        }
+    }
+
+    /// <summary>Throws when others than the user may write in the folder, so they could change what Compose runs.</summary>
+    public void RequirePrivate()
+    {
+        if (OperatingSystem.IsWindows() || !Directory.Exists(Path))
+            return;
+        UnixFileMode mode = System.IO.File.GetUnixFileMode(Path);
+        if ((mode & (UnixFileMode.GroupWrite | UnixFileMode.OtherWrite)) != 0)
+            throw new QueueyConfigurationException($"Others than you may write in {Path}, so they could change what it runs. Nothing was started.")
+            {
+                SuggestedAction = $"Run `chmod 700 {Path}` if the folder is yours, and check its files.",
+            };
     }
 
     /// <summary>Whether the folder is missing or empty, the only places init writes to.</summary>

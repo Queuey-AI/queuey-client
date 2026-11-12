@@ -6,7 +6,7 @@ using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using Queuey.Client.Cli.Server;
+using Queuey.Server.Hosting;
 
 namespace Queuey.Client.Cli;
 
@@ -75,8 +75,12 @@ internal static class ServerCommand
         Console.CancelKeyPress += onCancel;
         try
         {
-            ServerFolder folder = ServerFolder.Resolve(map);
+            ServerFolder folder = ServerFolder.Resolve(map.Get("dir"), CliHost.Env);
             await ServerDocker.RequireComposeAsync(cancel.Token);
+            // Det som endrer installasjonen, tar samme lås som Queuey.Server.Hosting, så en AppHost som starter samtidig venter.
+            using FolderLock? held = sub is "init" or "start" or "stop" or "upgrade"
+                ? await FolderLock.TakeAsync(folder, Console.Error.WriteLine, cancel.Token)
+                : null;
             return sub switch
             {
                 "init" => await InitAsync(folder, map, cancel.Token),
@@ -102,7 +106,7 @@ internal static class ServerCommand
 
     private static async Task<int> InitAsync(ServerFolder folder, ArgMap map, CancellationToken ct)
     {
-        string version = ServerFolder.RequireVersion(map.Get("version"));
+        string version = RequireVersion(map);
         LocalPorts ports = ReadPorts(map);
         string email = (map.Get("email") ?? LocalDeveloper.DefaultEmail).Trim();
         if (email.Count(c => c == '@') != 1 || email.StartsWith('@') || email.EndsWith('@'))
@@ -112,33 +116,11 @@ internal static class ServerCommand
             return CliErrors.Usage(map, "already_initialized", $"{folder.Path} already holds an installation ({ServerFolder.ComposeFile} is there).",
                 "Start it with `queuey server start`, or move to another version with `queuey server upgrade --version <version>`. " +
                 "Use --dir for a second installation somewhere else.");
-        // Bare en ny eller tom mappe: --dir . i en repo-rot ville ellers skrevet over README.md og docs/ (security review av 4.8).
         if (!folder.IsMissingOrEmpty)
             return CliErrors.Usage(map, "folder_not_empty", $"{folder.Path} is not empty, and init writes only into a new or empty folder.",
                 "Choose another --dir, such as a new folder for the installation.");
 
-        // Volumer fra en tidligere installasjon i samme mappe ville blitt tatt i bruk av den nye, med gamle hemmeligheter.
-        string project = ServerFolder.ProjectNameFor(folder.Path);
-        DockerResult volumes = await ServerDocker.DockerAsync(ct, "volume", "ls", "--quiet", "--filter", $"label=com.docker.compose.project={project}");
-        if (volumes.ExitCode == 0 && volumes.Stdout.Trim().Length > 0)
-            return CliErrors.Write(false, "data_remains", $"Docker still has the volumes of an earlier installation in {folder.Path} (project {project}).",
-                $"Remove them with `docker volume rm {string.Join(" ", volumes.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))}` " +
-                "if that data may go, or choose another --dir.", status: null, ExitCodes.Configuration, "Config error");
-
-        string extracted = await ServerFolder.ExtractPackageAsync(version, ct);
-        try
-        {
-            folder.CreatePrivate();
-            IReadOnlyList<string> files = folder.WritePackage(extracted);
-            File.WriteAllText(folder.File(ServerFolder.EnvFileName), ServerFolder.LocalEnv(version, ports, project));
-            File.WriteAllText(folder.File(ServerFolder.OverrideFile), ServerFolder.LocalOverride + "\n");
-            ServerFolder.WritePrivate(folder.File(ServerFolder.ClientSecretFile), ServerFolder.RandomHex(32) + "\n");
-            folder.WriteState(new ServerState(version, ports, files, email));
-        }
-        finally
-        {
-            ServerFolder.TryDelete(extracted);
-        }
+        await Installation.InitAsync(folder, version, ports, email, Console.Error.WriteLine, ct);
 
         Console.WriteLine($"Queuey {version} is set up in {folder.Path}, for this machine only.");
         Console.WriteLine($"  console  {ports.ConsoleUrl}");
@@ -148,6 +130,17 @@ internal static class ServerCommand
         Console.WriteLine();
         Console.WriteLine("Next: queuey server start");
         return ExitCodes.Success;
+    }
+
+    private static string RequireVersion(ArgMap map)
+    {
+        string? version = map.Get("version")?.Trim();
+        if (string.IsNullOrEmpty(version))
+            throw new CliUsageException("missing_argument", "Missing --version <version>, such as 1.0.0.",
+                "The version is pinned: an installation runs the version you name until you upgrade it.");
+        if (!ServerFolder.IsPinnedVersion(version))
+            throw new CliUsageException("invalid_value", $"--version takes a pinned version such as 1.0.0 or 1.0.0-rc.1; got '{CliErrors.Shown(version)}'.", null);
+        return version;
     }
 
     private static LocalPorts ReadPorts(ArgMap map)
@@ -174,84 +167,15 @@ internal static class ServerCommand
     private static async Task<int> StartAsync(ServerFolder folder, ArgMap map, CancellationToken ct)
     {
         folder.RequirePackage();
-        await GuardAsync(folder, ct);
-        if (await UpAsync(folder, ct) is { } failed)
-            return failed;
+        await Installation.GuardAsync(folder, ct);
+        await Installation.UpAsync(folder, Console.Error.WriteLine, ct);
         return await AfterStartAsync(folder, testDelivery: !map.Has("no-test"), ct);
-    }
-
-    /// <summary>
-    /// Before anything that starts, stops or deletes: the folder's Compose project must be this folder's alone, and a folder
-    /// init made must still publish every port on 127.0.0.1 only. Throws with what is wrong.
-    /// </summary>
-    // Security review av 4.8 (2026-11-12): pakken heter `queuey`, så to mapper delte prosjekt, og --delete-data kunne slettet
-    // den andres data. Og at installasjonen er lokal, hviler på at Compose leser override-filen og forstår !override; det
-    // sjekkes i konfigurasjonen Compose faktisk bruker.
-    internal static async Task GuardAsync(ServerFolder folder, CancellationToken ct)
-    {
-        DockerResult config = await ServerDocker.ComposeAsync(folder.Path, ct, "config", "--format", "json");
-        if (config.ExitCode != 0)
-            throw new QueueyConfigurationException($"docker compose cannot read the installation in {folder.Path}: {ServerDocker.Detail(config)}")
-            {
-                SuggestedAction = "Run `docker compose config` in the folder to see what is wrong.",
-            };
-        using JsonDocument effective = JsonDocument.Parse(config.Stdout);
-        string project = effective.RootElement.GetProperty("name").GetString()!;
-
-        DockerResult owners = await ServerDocker.DockerAsync(ct, "ps", "--all", "--filter", $"label=com.docker.compose.project={project}",
-            "--format", "{{.Label \"com.docker.compose.project.working_dir\"}}");
-        string? other = owners.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .FirstOrDefault(dir => !string.Equals(dir, folder.Path, StringComparison.Ordinal));
-        if (other is not null)
-            throw new QueueyConfigurationException(
-                $"The Compose project '{project}' belongs to the installation in {other}, not to {folder.Path}. Nothing was started, stopped or deleted.")
-            {
-                SuggestedAction = $"Use `--dir {other}` for that installation. Two folders need two project names (COMPOSE_PROJECT_NAME in .env).",
-            };
-
-        if (folder.State is null)
-            return;
-        if (effective.RootElement.TryGetProperty("services", out JsonElement services))
-            foreach (JsonProperty service in services.EnumerateObject())
-                if (service.Value.TryGetProperty("ports", out JsonElement ports))
-                    foreach (JsonElement port in ports.EnumerateArray())
-                        if (!port.TryGetProperty("host_ip", out JsonElement ip) || ip.GetString() != "127.0.0.1")
-                            throw new QueueyConfigurationException(
-                                $"{service.Name} publishes port {(port.TryGetProperty("published", out JsonElement p) ? p.ToString() : "?")} on more than 127.0.0.1, " +
-                                "so the installation is no longer one for this machine only. Nothing was started.")
-                            {
-                                SuggestedAction = $"Restore {ServerFolder.OverrideFile} as init wrote it, and check that COMPOSE_FILE is not set. " +
-                                                  "An installation for other people is set up from .env.example, without queuey server.",
-                            };
-    }
-
-    // `up -d` venter selv på det pakken krever: migrate fullført, serveren frisk før konsollet. Feiler migrate, feiler up.
-    private static async Task<int?> UpAsync(ServerFolder folder, CancellationToken ct)
-    {
-        Console.Error.WriteLine($"Starting Queuey {folder.Version} in {folder.Path} …");
-        DockerResult up = await ServerDocker.ComposeToTerminalAsync(folder.Path, ct, "up", "-d");
-        if (up.ExitCode == 0)
-            return null;
-
-        DockerResult migrate = await ServerDocker.ComposeAsync(folder.Path, ct, "logs", "--no-color", "--tail", "20", "migrate");
-        if (migrate.ExitCode == 0 && !string.IsNullOrWhiteSpace(migrate.Stdout))
-        {
-            Console.Error.WriteLine();
-            Console.Error.WriteLine("The last lines from migrate:");
-            foreach (string line in migrate.Stdout.TrimEnd().Split('\n'))
-                Console.Error.WriteLine("  " + TerminalText.Line(line));
-        }
-        return CliErrors.Write(false, "start_failed", "docker compose up did not start the installation.",
-            "See `queuey server status` and `queuey server logs`. The data is untouched.", status: null, ExitCodes.RuntimeError, "Error");
     }
 
     private static async Task<int> AfterStartAsync(ServerFolder folder, bool testDelivery, CancellationToken ct)
     {
         LocalPorts ports = folder.Ports;
-        IReadOnlyList<ServiceState> services = await WaitForHealthyAsync(folder, TimeSpan.FromMinutes(4), ct);
-        if (services.FirstOrDefault(s => s.Running && s.Health is not ("healthy" or "")) is { } unhealthy)
-            return CliErrors.Write(false, "not_healthy", $"{unhealthy.Service} is {unhealthy.Health} after four minutes.",
-                $"See `queuey server logs {unhealthy.Service}`.", status: null, ExitCodes.RuntimeError, "Error");
+        await Installation.WaitForHealthyAsync(folder, TimeSpan.FromMinutes(4), ct);
 
         Console.WriteLine($"Queuey {folder.Version} is running.");
         Console.WriteLine($"  console  {ports.ConsoleUrl}");
@@ -276,7 +200,7 @@ internal static class ServerCommand
 
         Console.WriteLine();
         Console.Write("Test delivery … ");
-        TestDeliveryResult result = await TestDelivery.RunAsync(ports, developer, http, ct);
+        TestDeliveryResult result = await TestDelivery.RunAsync(ports, developer, http, AppKeyRecord.Read(folder)?.Tenant, ct);
         Console.WriteLine($"{result.EventId} went in through the ingress and reached a receiver on this machine in {result.Took.TotalMilliseconds:0} ms " +
                           $"(queue {TestDelivery.QueueName}).");
         return ExitCodes.Success;
@@ -287,43 +211,16 @@ internal static class ServerCommand
             ? new HttpClient(handler, disposeHandler: false) { Timeout = TimeSpan.FromSeconds(30) }
             : new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
 
-    /// <summary>How long to wait between looks while services start. A seam: the tests do not wait.</summary>
-    internal static TimeSpan PollInterval { get; set; } = TimeSpan.FromSeconds(3);
-
-    // Konsollet og Keycloak har ingen avhengige, så `up -d` venter ikke på at de blir friske. Det gjør dette.
-    private static async Task<IReadOnlyList<ServiceState>> WaitForHealthyAsync(ServerFolder folder, TimeSpan timeout, CancellationToken ct)
-    {
-        DateTimeOffset until = DateTimeOffset.UtcNow + timeout;
-        while (true)
-        {
-            IReadOnlyList<ServiceState> services = await ServicesAsync(folder, ct);
-            if (services.All(s => !s.Running || s.Health is "healthy" or "") || DateTimeOffset.UtcNow >= until)
-                return services;
-            await Task.Delay(PollInterval, ct);
-        }
-    }
-
     // ── status ──────────────────────────────────────────────────────────
-
-    /// <summary>One service, as <c>docker compose ps</c> reports it.</summary>
-    internal sealed record ServiceState(string Service, string State, string Health, int ExitCode)
-    {
-        public bool Running => State == "running";
-
-        /// <summary>A service that runs once and is done, as setup and migrate are when they ended with 0.</summary>
-        public bool Completed => State == "exited" && ExitCode == 0;
-    }
-
-    private static readonly string[] OneShot = { "setup", "migrate", "keycloak-db" };
 
     private static async Task<int> StatusAsync(ServerFolder folder, bool json, CancellationToken ct)
     {
         folder.RequirePackage();
-        IReadOnlyList<ServiceState> services = await ServicesAsync(folder, ct);
+        IReadOnlyList<ServiceState> services = await Installation.ServicesAsync(folder, ct);
         LocalPorts ports = folder.Ports;
         bool healthy = services.Count > 0
-                       && services.Where(s => !OneShot.Contains(s.Service)).All(s => s.Running && s.Health is "healthy" or "")
-                       && services.Where(s => OneShot.Contains(s.Service)).All(s => s.Completed);
+                       && services.Where(s => !Installation.OneShot.Contains(s.Service)).All(s => s.Healthy)
+                       && services.Where(s => Installation.OneShot.Contains(s.Service)).All(s => s.Completed);
         // Etter `stop` står containerne igjen som exited; da er installasjonen stoppet, ikke halvveis.
         string state = services.All(s => !s.Running) ? "stopped" : healthy ? "running" : "degraded";
 
@@ -352,33 +249,6 @@ internal static class ServerCommand
         return state == "running" ? ExitCodes.Success : ExitCodes.RuntimeError;
     }
 
-    /// <summary>The installation's services, from <c>docker compose ps --all --format json</c>.</summary>
-    internal static async Task<IReadOnlyList<ServiceState>> ServicesAsync(ServerFolder folder, CancellationToken ct)
-    {
-        DockerResult ps = await ServerDocker.ComposeAsync(folder.Path, ct, "ps", "--all", "--format", "json");
-        if (ps.ExitCode != 0)
-            throw new QueueyException($"docker compose ps failed: {ServerDocker.Detail(ps)}");
-        return ParseServices(ps.Stdout);
-    }
-
-    // Compose skriver ett objekt per linje (v2.21 og senere) eller én liste (eldre); begge leses.
-    internal static IReadOnlyList<ServiceState> ParseServices(string output)
-    {
-        string text = output.Trim();
-        if (text.Length == 0)
-            return Array.Empty<ServiceState>();
-        IEnumerable<JsonElement> items = text.StartsWith('[')
-            ? JsonDocument.Parse(text).RootElement.EnumerateArray().Select(e => e.Clone()).ToList()
-            : text.Split('\n').Where(l => l.Trim().Length > 0).Select(l => JsonDocument.Parse(l).RootElement.Clone()).ToList();
-        return items.Select(e => new ServiceState(
-                Str(e, "Service"), Str(e, "State"), Str(e, "Health"),
-                e.TryGetProperty("ExitCode", out JsonElement code) && code.ValueKind == JsonValueKind.Number ? code.GetInt32() : 0))
-            .OrderBy(s => s.Service, StringComparer.Ordinal)
-            .ToList();
-
-        static string Str(JsonElement e, string name) => e.TryGetProperty(name, out JsonElement v) && v.ValueKind == JsonValueKind.String ? v.GetString()! : "";
-    }
-
     // ── logs ────────────────────────────────────────────────────────────
 
     private static async Task<int> LogsAsync(ServerFolder folder, ArgMap map, CancellationToken ct)
@@ -399,7 +269,7 @@ internal static class ServerCommand
     private static async Task<int> StopAsync(ServerFolder folder, ArgMap map, CancellationToken ct)
     {
         folder.RequirePackage();
-        await GuardAsync(folder, ct);
+        await Installation.GuardAsync(folder, ct);
         if (!map.Has("delete-data"))
         {
             DockerResult stopped = await ServerDocker.ComposeToTerminalAsync(folder.Path, ct, "stop");
@@ -427,8 +297,10 @@ internal static class ServerCommand
         DockerResult down = await ServerDocker.ComposeToTerminalAsync(folder.Path, ct, "down", "--volumes", "--remove-orphans");
         if (down.ExitCode != 0)
             return CliErrors.Write(false, "delete_failed", "docker compose down --volumes failed.", null, status: null, ExitCodes.RuntimeError, "Error");
-        if (File.Exists(folder.File(ServerFolder.DeveloperFile)))
-            File.Delete(folder.File(ServerFolder.DeveloperFile));
+        // Personen og nøkkelen fantes bare i dataene som nå er borte.
+        foreach (string gone in new[] { ServerFolder.DeveloperFile, ServerFolder.AppKeyFile })
+            if (File.Exists(folder.File(gone)))
+                File.Delete(folder.File(gone));
         Console.WriteLine($"Deleted the data. The folder {folder.Path} keeps its configuration; `queuey server start` makes a new, empty installation from it.");
         return ExitCodes.Success;
     }
@@ -438,15 +310,15 @@ internal static class ServerCommand
     private static async Task<int> UpgradeAsync(ServerFolder folder, ArgMap map, CancellationToken ct)
     {
         folder.RequirePackage();
-        string version = ServerFolder.RequireVersion(map.Get("version"));
+        string version = RequireVersion(map);
         string? current = folder.Version;
         if (current == version)
             return CliErrors.Usage(map, "same_version", $"The installation already runs {version}.", "Start it with `queuey server start`.");
 
-        await GuardAsync(folder, ct);
+        await Installation.GuardAsync(folder, ct);
 
         // Pakken for den nye versjonen hentes før noe endres, så en versjon som ikke finnes, endrer ingenting.
-        string extracted = await ServerFolder.ExtractPackageAsync(version, ct);
+        string extracted = await ServerFolder.ExtractPackageAsync(version, Console.Error.WriteLine, ct);
         try
         {
             // 1. Backup, som README-en sier: det er veien tilbake. Backup-tjenesten trenger Postgres, og compose run starter den.
@@ -482,8 +354,7 @@ internal static class ServerCommand
 
         // 4. Start, som `start`: migreringene kjøres før serveren.
         Console.WriteLine();
-        if (await UpAsync(folder, ct) is { } failed)
-            return failed;
+        await Installation.UpAsync(folder, Console.Error.WriteLine, ct);
         return await AfterStartAsync(folder, testDelivery: !map.Has("no-test"), ct);
     }
 }

@@ -9,13 +9,19 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace Queuey.Client.Cli.Server;
+using Queuey.Client;
+
+namespace Queuey.Server.Hosting;
 
 /// <summary>
 /// The person a local installation is made for, kept in <c>developer.json</c> in the folder (readable by the user alone):
 /// who they are in the bundled Keycloak, and the password they sign in to the console with.
 /// </summary>
-internal sealed record DeveloperRecord(string Email, string Password, string Subject);
+internal sealed record DeveloperRecord(string Email, string Password, string Subject)
+{
+    /// <summary>Who, never the password.</summary>
+    public override string ToString() => Email;
+}
 
 /// <summary>
 /// The first person of an installation <c>queuey server init</c> made. On the first start it creates them in the bundled
@@ -34,7 +40,7 @@ internal static class LocalDeveloper
     public static DeveloperRecord? Read(ServerFolder folder)
     {
         string path = folder.File(ServerFolder.DeveloperFile);
-        return File.Exists(path) ? JsonSerializer.Deserialize<DeveloperRecord>(File.ReadAllText(path), CliHost.JsonOut) : null;
+        return File.Exists(path) ? JsonSerializer.Deserialize<DeveloperRecord>(File.ReadAllText(path), Text.Json) : null;
     }
 
     /// <summary>Creates the developer when the folder has none yet, and returns them.</summary>
@@ -55,7 +61,7 @@ internal static class LocalDeveloper
             throw new QueueyException($"bootstrap-admin did not give {email} access: {ServerDocker.Detail(granted)}");
 
         var developer = new DeveloperRecord(email, password, subject);
-        ServerFolder.WritePrivate(folder.File(ServerFolder.DeveloperFile), JsonSerializer.Serialize(developer, CliHost.JsonOut) + "\n");
+        ServerFolder.WritePrivate(folder.File(ServerFolder.DeveloperFile), JsonSerializer.Serialize(developer, Text.Json) + "\n");
         return developer;
     }
 
@@ -180,5 +186,5 @@ internal static class LocalDeveloper
         return http.SendAsync(request, ct);
     }
 
-    internal static string Short(string text) => TerminalText.Line(text.Length > 300 ? text.Substring(0, 300) + "…" : text);
+    internal static string Short(string text) => Text.Line(text.Length > 300 ? text.Substring(0, 300) + "…" : text);
 }
