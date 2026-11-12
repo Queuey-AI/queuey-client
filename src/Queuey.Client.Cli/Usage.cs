@@ -789,14 +789,18 @@ SERVER
   queuey server init --version <v> [--dir <path>] [--email <e>] [--console-port <p>] [--api-port <p>]
                      [--ingress-port <p>] [--idp-port <p>]
                  Sets up a self-hosted Queuey for this machine only, in ~/.queuey/server (or --dir,
-                 QUEUEY_SERVER_DIR): the Compose package for that version, copied out of the image
-                 queuey/server:<v> (pulled when it is not here), a .env with every address on
-                 localhost and the bundled Keycloak for sign-in, the console's client secret, and
+                 QUEUEY_SERVER_DIR; a new or empty folder): the Compose package for that version,
+                 copied out of the image queuey/server:<v> (pulled when it is not here), a .env
+                 with every address on 127.0.0.1, the bundled Keycloak for sign-in and a Compose
+                 project of the folder's own, the console's client secret, and
                  compose.override.yaml, which publishes the ports on 127.0.0.1 only and lets
                  deliveries reach this machine as http://host.docker.internal:<port>. Ports default
                  to 3000 (console), 8080 (API), 8081 (ingress) and 8082 (sign-in). Starts nothing.
                  The folder is the package's own: `docker compose` in it does what queuey server
-                 does, and its README.md covers the rest (backups, restore, the license).
+                 does, and its README.md covers the rest (backups, restore, the license). Do not
+                 expose it: it is for this machine only. start, stop and upgrade refuse when its
+                 ports publish beyond 127.0.0.1, or when its Compose project belongs to another
+                 folder.
   queuey server start [--dir <path>] [--no-test]
                  docker compose up -d, and waits until every service is healthy. The first start
                  creates you in Keycloak (--email at init; default developer@queuey.localhost),

@@ -11,13 +11,17 @@ using System.Threading.Tasks;
 
 namespace Queuey.Client.Cli.Server;
 
-/// <summary>The ports a local installation publishes on this machine, and the addresses that follow from them.</summary>
+/// <summary>
+/// The ports a local installation publishes on this machine, and the addresses that follow from them. The addresses are
+/// 127.0.0.1, not localhost: the ports listen on IPv4 loopback only, and localhost tries [::1] first, where another program
+/// could listen and get the admin password or a token (security review of 4.8, 2026-11-12).
+/// </summary>
 internal sealed record LocalPorts(int Console = 3000, int Api = 8080, int Ingress = 8081, int Idp = 8082)
 {
-    [System.Text.Json.Serialization.JsonIgnore] public string ConsoleUrl => $"http://localhost:{Console}";
-    [System.Text.Json.Serialization.JsonIgnore] public string ApiUrl => $"http://localhost:{Api}";
-    [System.Text.Json.Serialization.JsonIgnore] public string IngressUrl => $"http://localhost:{Ingress}";
-    [System.Text.Json.Serialization.JsonIgnore] public string IdpUrl => $"http://localhost:{Idp}";
+    [System.Text.Json.Serialization.JsonIgnore] public string ConsoleUrl => $"http://127.0.0.1:{Console}";
+    [System.Text.Json.Serialization.JsonIgnore] public string ApiUrl => $"http://127.0.0.1:{Api}";
+    [System.Text.Json.Serialization.JsonIgnore] public string IngressUrl => $"http://127.0.0.1:{Ingress}";
+    [System.Text.Json.Serialization.JsonIgnore] public string IdpUrl => $"http://127.0.0.1:{Idp}";
 }
 
 /// <summary>
@@ -171,7 +175,8 @@ internal sealed class ServerFolder
             string relative = System.IO.Path.GetRelativePath(extracted, source).Replace('\\', '/');
             if (IsInstallationsOwn(relative))
                 continue;
-            string destination = File(relative);
+            if (Inside(relative) is not { } destination)
+                continue;
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(destination)!);
             System.IO.File.Copy(source, destination, overwrite: true);
             written.Add(relative);
@@ -187,14 +192,24 @@ internal sealed class ServerFolder
 
     /// <summary>
     /// The <c>.env</c> of an installation only this machine uses: the bundled Keycloak (profile <c>idp</c>, always on through
-    /// <c>COMPOSE_PROFILES</c>), and every address on localhost.
+    /// <c>COMPOSE_PROFILES</c>), and every address on 127.0.0.1.
     /// </summary>
-    public static string LocalEnv(string version, LocalPorts ports) => $"""
-        # Written by `queuey server init` for an installation only this machine uses: every address is on localhost,
+    /// <summary>
+    /// The Compose project of a folder: <c>queuey-</c> and a hash of its path. The package names its project <c>queuey</c>,
+    /// so without this two folders on one machine would share containers and volumes, and deleting one installation's data
+    /// would delete the other's.
+    /// </summary>
+    public static string ProjectNameFor(string path)
+        => "queuey-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(System.IO.Path.GetFullPath(path)))).Substring(0, 10).ToLowerInvariant();
+
+    public static string LocalEnv(string version, LocalPorts ports, string project) => $"""
+        # Written by `queuey server init` for an installation only this machine uses: every address is on 127.0.0.1,
         # without TLS, and the bundled Keycloak signs people in. The settings are the package's; see .env.example and
         # README.md. `queuey server upgrade` changes QUEUEY_VERSION and nothing else.
         QUEUEY_VERSION={version}
         COMPOSE_PROFILES=idp
+        # This folder's own Compose project, so another installation on this machine is never touched.
+        COMPOSE_PROJECT_NAME={project}
 
         QUEUEY_CONSOLE_URL={ports.ConsoleUrl}
         QUEUEY_API_URL={ports.ApiUrl}
@@ -218,7 +233,7 @@ internal sealed class ServerFolder
 
     /// <summary>
     /// <c>compose.override.yaml</c>, which Compose reads after <c>compose.yaml</c>: what makes the installation one for this
-    /// machine only. The ports listen on the loopback interface alone, the console may be plain http on localhost, and
+    /// machine only. The ports listen on the loopback interface alone, the console may be plain http on 127.0.0.1, and
     /// deliveries may reach this machine as <c>host.docker.internal</c>, where a developer's own receiver runs.
     /// </summary>
     public const string LocalOverride = """
@@ -227,7 +242,7 @@ internal sealed class ServerFolder
         services:
           server:
             environment:
-              # The console is http://localhost, which the server accepts only when told that only this machine uses it.
+              # The console is http://127.0.0.1, which the server accepts only when told that only this machine uses it.
               - Cors__AllowLoopbackHttp=true
               # Your own receivers on this machine, as http://host.docker.internal:<port>/...
               - Delivery__Egress__AllowedHosts__0=host.docker.internal
@@ -244,12 +259,39 @@ internal sealed class ServerFolder
               - 127.0.0.1:${QUEUEY_IDP_PORT:-8082}:8080
         """;
 
-    /// <summary>Writes a file only the user may read, as the client secret and the developer's password are.</summary>
+    /// <summary>
+    /// Writes a file only the user may read, as the client secret and the developer's password are. It is created with that
+    /// mode, so it is never readable by others, not even for the moment between writing and a chmod.
+    /// </summary>
     public static void WritePrivate(string path, string content)
     {
-        System.IO.File.WriteAllText(path, content);
+        if (System.IO.File.Exists(path))
+            System.IO.File.Delete(path);
+        var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write };
         if (!OperatingSystem.IsWindows())
-            System.IO.File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        using var stream = new FileStream(path, options);
+        using var writer = new StreamWriter(stream);
+        writer.Write(content);
+    }
+
+    /// <summary>Creates the installation folder so only the user can enter it (0700).</summary>
+    public void CreatePrivate()
+    {
+        if (OperatingSystem.IsWindows())
+            Directory.CreateDirectory(Path);
+        else
+            Directory.CreateDirectory(Path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+    }
+
+    /// <summary>Whether the folder is missing or empty, the only places init writes to.</summary>
+    public bool IsMissingOrEmpty => !Directory.Exists(Path) || !Directory.EnumerateFileSystemEntries(Path).Any();
+
+    /// <summary>A path in the folder from a relative path, or null when it would lead outside it.</summary>
+    public string? Inside(string relative)
+    {
+        string full = System.IO.Path.GetFullPath(System.IO.Path.Combine(Path, relative));
+        return full.StartsWith(Path + System.IO.Path.DirectorySeparatorChar, StringComparison.Ordinal) ? full : null;
     }
 
     /// <summary>A random secret as hex, as the package's README makes the client secret with <c>openssl rand -hex 32</c>.</summary>

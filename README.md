@@ -1153,7 +1153,7 @@ still goes to the inbox. Every command without an API key uses it for the API ho
 
 | Command | What it does |
 | --- | --- |
-| `server init --version <v>` | Set up that version for this machine only: its Compose package (copied out of its image), every address on localhost, a bundled Keycloak |
+| `server init --version <v>` | Set up that version for this machine only: its Compose package (copied out of its image), every address on 127.0.0.1, a bundled Keycloak, into a new or empty folder |
 | `server start` | Start it, wait until it is healthy, and run a test delivery to a receiver on this machine. The first start makes you the owner |
 | `server status` / `server logs` | Each service's state and health, or its logs |
 | `server stop` | Stop it and keep the data; `--delete-data` deletes the data, and asks first |

@@ -87,7 +87,8 @@ creates you in Keycloak with a generated password (in `developer.json` in the
 folder) and makes you the installation's owner. Then it sends one event in
 through the ingress and checks that a receiver on this machine gets it.
 Deliveries reach your own receivers as `http://host.docker.internal:<port>`.
-Every port listens on 127.0.0.1 only. `queuey server stop --delete-data`
+Every address is 127.0.0.1, and every port listens there only; the folder
+has a Compose project of its own, so another installation is never touched. `queuey server stop --delete-data`
 deletes the data, and asks first.
 
 ## Configuration

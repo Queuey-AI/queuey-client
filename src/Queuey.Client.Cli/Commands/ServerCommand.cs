@@ -112,13 +112,25 @@ internal static class ServerCommand
             return CliErrors.Usage(map, "already_initialized", $"{folder.Path} already holds an installation ({ServerFolder.ComposeFile} is there).",
                 "Start it with `queuey server start`, or move to another version with `queuey server upgrade --version <version>`. " +
                 "Use --dir for a second installation somewhere else.");
+        // Bare en ny eller tom mappe: --dir . i en repo-rot ville ellers skrevet over README.md og docs/ (security review av 4.8).
+        if (!folder.IsMissingOrEmpty)
+            return CliErrors.Usage(map, "folder_not_empty", $"{folder.Path} is not empty, and init writes only into a new or empty folder.",
+                "Choose another --dir, such as a new folder for the installation.");
+
+        // Volumer fra en tidligere installasjon i samme mappe ville blitt tatt i bruk av den nye, med gamle hemmeligheter.
+        string project = ServerFolder.ProjectNameFor(folder.Path);
+        DockerResult volumes = await ServerDocker.DockerAsync(ct, "volume", "ls", "--quiet", "--filter", $"label=com.docker.compose.project={project}");
+        if (volumes.ExitCode == 0 && volumes.Stdout.Trim().Length > 0)
+            return CliErrors.Write(false, "data_remains", $"Docker still has the volumes of an earlier installation in {folder.Path} (project {project}).",
+                $"Remove them with `docker volume rm {string.Join(" ", volumes.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))}` " +
+                "if that data may go, or choose another --dir.", status: null, ExitCodes.Configuration, "Config error");
 
         string extracted = await ServerFolder.ExtractPackageAsync(version, ct);
         try
         {
-            Directory.CreateDirectory(folder.Path);
+            folder.CreatePrivate();
             IReadOnlyList<string> files = folder.WritePackage(extracted);
-            File.WriteAllText(folder.File(ServerFolder.EnvFileName), ServerFolder.LocalEnv(version, ports));
+            File.WriteAllText(folder.File(ServerFolder.EnvFileName), ServerFolder.LocalEnv(version, ports, project));
             File.WriteAllText(folder.File(ServerFolder.OverrideFile), ServerFolder.LocalOverride + "\n");
             ServerFolder.WritePrivate(folder.File(ServerFolder.ClientSecretFile), ServerFolder.RandomHex(32) + "\n");
             folder.WriteState(new ServerState(version, ports, files, email));
@@ -162,9 +174,55 @@ internal static class ServerCommand
     private static async Task<int> StartAsync(ServerFolder folder, ArgMap map, CancellationToken ct)
     {
         folder.RequirePackage();
+        await GuardAsync(folder, ct);
         if (await UpAsync(folder, ct) is { } failed)
             return failed;
         return await AfterStartAsync(folder, testDelivery: !map.Has("no-test"), ct);
+    }
+
+    /// <summary>
+    /// Before anything that starts, stops or deletes: the folder's Compose project must be this folder's alone, and a folder
+    /// init made must still publish every port on 127.0.0.1 only. Throws with what is wrong.
+    /// </summary>
+    // Security review av 4.8 (2026-11-12): pakken heter `queuey`, så to mapper delte prosjekt, og --delete-data kunne slettet
+    // den andres data. Og at installasjonen er lokal, hviler på at Compose leser override-filen og forstår !override; det
+    // sjekkes i konfigurasjonen Compose faktisk bruker.
+    internal static async Task GuardAsync(ServerFolder folder, CancellationToken ct)
+    {
+        DockerResult config = await ServerDocker.ComposeAsync(folder.Path, ct, "config", "--format", "json");
+        if (config.ExitCode != 0)
+            throw new QueueyConfigurationException($"docker compose cannot read the installation in {folder.Path}: {ServerDocker.Detail(config)}")
+            {
+                SuggestedAction = "Run `docker compose config` in the folder to see what is wrong.",
+            };
+        using JsonDocument effective = JsonDocument.Parse(config.Stdout);
+        string project = effective.RootElement.GetProperty("name").GetString()!;
+
+        DockerResult owners = await ServerDocker.DockerAsync(ct, "ps", "--all", "--filter", $"label=com.docker.compose.project={project}",
+            "--format", "{{.Label \"com.docker.compose.project.working_dir\"}}");
+        string? other = owners.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .FirstOrDefault(dir => !string.Equals(dir, folder.Path, StringComparison.Ordinal));
+        if (other is not null)
+            throw new QueueyConfigurationException(
+                $"The Compose project '{project}' belongs to the installation in {other}, not to {folder.Path}. Nothing was started, stopped or deleted.")
+            {
+                SuggestedAction = $"Use `--dir {other}` for that installation. Two folders need two project names (COMPOSE_PROJECT_NAME in .env).",
+            };
+
+        if (folder.State is null)
+            return;
+        if (effective.RootElement.TryGetProperty("services", out JsonElement services))
+            foreach (JsonProperty service in services.EnumerateObject())
+                if (service.Value.TryGetProperty("ports", out JsonElement ports))
+                    foreach (JsonElement port in ports.EnumerateArray())
+                        if (!port.TryGetProperty("host_ip", out JsonElement ip) || ip.GetString() != "127.0.0.1")
+                            throw new QueueyConfigurationException(
+                                $"{service.Name} publishes port {(port.TryGetProperty("published", out JsonElement p) ? p.ToString() : "?")} on more than 127.0.0.1, " +
+                                "so the installation is no longer one for this machine only. Nothing was started.")
+                            {
+                                SuggestedAction = $"Restore {ServerFolder.OverrideFile} as init wrote it, and check that COMPOSE_FILE is not set. " +
+                                                  "An installation for other people is set up from .env.example, without queuey server.",
+                            };
     }
 
     // `up -d` venter selv på det pakken krever: migrate fullført, serveren frisk før konsollet. Feiler migrate, feiler up.
@@ -341,6 +399,7 @@ internal static class ServerCommand
     private static async Task<int> StopAsync(ServerFolder folder, ArgMap map, CancellationToken ct)
     {
         folder.RequirePackage();
+        await GuardAsync(folder, ct);
         if (!map.Has("delete-data"))
         {
             DockerResult stopped = await ServerDocker.ComposeToTerminalAsync(folder.Path, ct, "stop");
@@ -384,6 +443,8 @@ internal static class ServerCommand
         if (current == version)
             return CliErrors.Usage(map, "same_version", $"The installation already runs {version}.", "Start it with `queuey server start`.");
 
+        await GuardAsync(folder, ct);
+
         // Pakken for den nye versjonen hentes før noe endres, så en versjon som ikke finnes, endrer ingenting.
         string extracted = await ServerFolder.ExtractPackageAsync(version, ct);
         try
@@ -399,8 +460,8 @@ internal static class ServerCommand
             IReadOnlyList<string> previous = folder.State?.PackageFiles ?? Array.Empty<string>();
             IReadOnlyList<string> files = folder.WritePackage(extracted);
             foreach (string gone in previous.Except(files, StringComparer.Ordinal))
-                if (File.Exists(folder.File(gone)))
-                    File.Delete(folder.File(gone));
+                if (folder.Inside(gone) is { } path && File.Exists(path))
+                    File.Delete(path);
             folder.SetVersion(version);
             if (folder.State is { } state)
                 folder.WriteState(state with { Version = version, PackageFiles = files });

@@ -177,6 +177,9 @@ internal static class TestDelivery
     {
         private readonly TcpListener _listener;
 
+        // Testeventet er noen titalls byte; mer enn dette leses ikke, så en annen prosess kan ikke fylle minnet.
+        private const int MaxBody = 1024 * 1024;
+
         private Receiver(TcpListener listener)
         {
             _listener = listener;
@@ -199,7 +202,19 @@ internal static class TestDelivery
             {
                 using TcpClient client = await _listener.AcceptTcpClientAsync(ct);
                 using NetworkStream stream = client.GetStream();
-                (string? target, string body) = await ReadRequestAsync(stream, ct);
+                // Én forbindelse om gangen, så en som ikke sender noe, får ti sekunder før neste slipper til.
+                using var perConnection = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                perConnection.CancelAfter(TimeSpan.FromSeconds(10));
+                string? target;
+                string body;
+                try
+                {
+                    (target, body) = await ReadRequestAsync(stream, perConnection.Token);
+                }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    continue;
+                }
                 bool ours = target == path && body.Contains(nonce, StringComparison.Ordinal);
                 byte[] answer = Encoding.ASCII.GetBytes(
                     $"HTTP/1.1 {(ours ? "200 OK" : "404 Not Found")}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
@@ -231,6 +246,8 @@ internal static class TestDelivery
 
             async Task<bool> More()
             {
+                if (body.Count > MaxBody)
+                    return false;
                 int read = await stream.ReadAsync(chunk, ct);
                 if (read > 0) body.AddRange(chunk.AsSpan(0, read).ToArray());
                 return read > 0;
@@ -238,6 +255,8 @@ internal static class TestDelivery
 
             if (headers.TryGetValue("content-length", out string? length) && int.TryParse(length, out int expected))
             {
+                if (expected > MaxBody)
+                    return (target, "");
                 while (body.Count < expected && await More()) { }
                 return (target, Encoding.UTF8.GetString(body.Take(expected).ToArray()));
             }

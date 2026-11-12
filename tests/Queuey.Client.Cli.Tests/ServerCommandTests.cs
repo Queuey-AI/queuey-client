@@ -48,9 +48,11 @@ public sealed class ServerCommandTests : IDisposable
         var env = ServerFolder.ReadEnv(Path.Combine(_dir, ".env"));
         Assert.Equal("1.0.0", env["QUEUEY_VERSION"]);
         Assert.Equal("idp", env["COMPOSE_PROFILES"]);
-        Assert.Equal("http://localhost:13000", env["QUEUEY_CONSOLE_URL"]);
+        Assert.Equal("http://127.0.0.1:13000", env["QUEUEY_CONSOLE_URL"]);
+        Assert.Equal(ServerFolder.ProjectNameFor(_dir), env["COMPOSE_PROJECT_NAME"]);
+        Assert.NotEqual(ServerFolder.ProjectNameFor(_dir), ServerFolder.ProjectNameFor(_dir + "-2"));
         Assert.Equal("13000", env["QUEUEY_CONSOLE_PORT"]);
-        Assert.Equal("http://localhost:8082/realms/queuey", env["QUEUEY_OIDC_ISSUER"]);
+        Assert.Equal("http://127.0.0.1:8082/realms/queuey", env["QUEUEY_OIDC_ISSUER"]);
 
         string overrides = File.ReadAllText(Path.Combine(_dir, "compose.override.yaml"));
         Assert.Contains("Cors__AllowLoopbackHttp=true", overrides);
@@ -59,7 +61,10 @@ public sealed class ServerCommandTests : IDisposable
 
         Assert.Equal(64, File.ReadAllText(Path.Combine(_dir, "oidc-client-secret")).Trim().Length);
         if (!OperatingSystem.IsWindows())
+        {
             Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(Path.Combine(_dir, "oidc-client-secret")));
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, File.GetUnixFileMode(_dir));
+        }
 
         Assert.Contains("create queuey/server:1.0.0", _docker.Calls);
         Assert.Contains(_docker.Calls, c => c.StartsWith("cp container-1:/app/package/. ", StringComparison.Ordinal));
@@ -79,6 +84,64 @@ public sealed class ServerCommandTests : IDisposable
         Assert.Contains("already holds an installation", run.Stderr);
         Assert.Equal("mine", File.ReadAllText(Path.Combine(_dir, "compose.yaml")));
         Assert.DoesNotContain(_docker.Calls, c => c.StartsWith("create", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Init_writes_only_into_a_new_or_empty_folder()
+    {
+        Directory.CreateDirectory(_dir);
+        File.WriteAllText(Path.Combine(_dir, "README.md"), "the repository's own");
+
+        var run = await Run("server", "init", "--version", "1.0.0", "--dir", _dir);
+
+        Assert.Equal(ExitCodes.Usage, run.Exit);
+        Assert.Contains("not empty", run.Stderr);
+        Assert.Equal("the repository's own", File.ReadAllText(Path.Combine(_dir, "README.md")));
+        Assert.DoesNotContain(_docker.Calls, c => c.StartsWith("create", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Init_refuses_when_docker_still_has_the_volumes_of_an_earlier_installation_in_the_folder()
+    {
+        _docker.Volumes = $"{ServerFolder.ProjectNameFor(_dir)}_postgres\n{ServerFolder.ProjectNameFor(_dir)}_secrets\n";
+
+        var run = await Run("server", "init", "--version", "1.0.0", "--dir", _dir);
+
+        Assert.Equal(ExitCodes.Configuration, run.Exit);
+        Assert.Contains("docker volume rm", run.Stderr);
+        Assert.False(Directory.Exists(_dir));
+    }
+
+    [Fact]
+    public async Task Nothing_starts_stops_or_deletes_when_the_compose_project_belongs_to_another_folder()
+    {
+        await Init();
+        _docker.Owners = "/home/someone/queuey\n";
+
+        var start = await Run("server", "start", "--dir", _dir);
+        var stop = await Run("server", "stop", "--dir", _dir);
+        var delete = await Run("server", "stop", "--delete-data", "--yes", "--dir", _dir);
+        var upgrade = await Run("server", "upgrade", "--version", "1.1.0", "--dir", _dir);
+
+        foreach (var run in new[] { start, stop, delete, upgrade })
+        {
+            Assert.Equal(ExitCodes.Configuration, run.Exit);
+            Assert.Contains("belongs to the installation in /home/someone/queuey", run.Stderr);
+        }
+        Assert.DoesNotContain(_docker.Calls, c => c is "compose up -d" or "compose stop" || c.Contains("down", StringComparison.Ordinal) || c.Contains("backup", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task A_folder_init_made_does_not_start_when_a_port_listens_beyond_127_0_0_1()
+    {
+        await Init();
+        _docker.Config = """{"name":"queuey-x","services":{"server":{"ports":[{"host_ip":"127.0.0.1","published":"8080"}]},"console":{"ports":[{"published":"3000"}]}}}""";
+
+        var run = await Run("server", "start", "--dir", _dir);
+
+        Assert.Equal(ExitCodes.Configuration, run.Exit);
+        Assert.Contains("console publishes port 3000 on more than 127.0.0.1", run.Stderr);
+        Assert.DoesNotContain("compose up -d", _docker.Calls);
     }
 
     [Theory]
@@ -383,6 +446,73 @@ public sealed class ServerCommandTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task The_first_start_creates_the_developer_with_a_private_password_file_and_never_shows_the_admin_password()
+    {
+        await Init();
+        var keycloak = new FakeKeycloak(createStatus: System.Net.HttpStatusCode.Created);
+
+        var run = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "server", "start", "--no-test", "--dir", _dir }), keycloak.Handler);
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        string file = Path.Combine(_dir, "developer.json");
+        Assert.Contains("\"subject\": \"kc-user-1\"", File.ReadAllText(file));
+        if (!OperatingSystem.IsWindows())
+            Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(file));
+        Assert.Contains("compose run --rm migrate bootstrap-admin --provider oidc --sub kc-user-1 --email developer@queuey.localhost --role Admin.Owner --yes", _docker.Calls);
+        Assert.Contains("POST /admin/realms/queuey/clients", keycloak.Handler.Requests.Select(r => r.Key));
+        Assert.DoesNotContain(_docker.AdminPassword, run.Stdout + run.Stderr);
+        Assert.DoesNotContain(_docker.AdminPassword, string.Join(" ", _docker.Calls));
+        Assert.All(keycloak.Handler.Requests, r => Assert.Equal("127.0.0.1", r.Uri.Host));
+    }
+
+    [Fact]
+    public async Task A_developer_who_exists_already_gets_a_new_password_only_when_exactly_one_person_has_the_email()
+    {
+        await Init();
+        var one = new FakeKeycloak(System.Net.HttpStatusCode.Conflict, found: """[{"id":"kc-existing"}]""");
+        var run = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "server", "start", "--no-test", "--dir", _dir }), one.Handler);
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.Contains("PUT /admin/realms/queuey/users/kc-existing/reset-password", one.Handler.Requests.Select(r => r.Key));
+
+        File.Delete(Path.Combine(_dir, "developer.json"));
+        var two = new FakeKeycloak(System.Net.HttpStatusCode.Conflict, found: """[{"id":"a"},{"id":"b"}]""");
+        var refused = await CliHarness.RunAsync(() => CliEntry.RunAsync(new[] { "server", "start", "--no-test", "--dir", _dir }), two.Handler);
+
+        Assert.Equal(ExitCodes.RuntimeError, refused.Exit);
+        Assert.DoesNotContain(two.Handler.Requests, r => r.Method == HttpMethod.Put);
+        Assert.False(File.Exists(Path.Combine(_dir, "developer.json")));
+    }
+
+    /// <summary>The Keycloak admin API, as the first start uses it.</summary>
+    private sealed class FakeKeycloak
+    {
+        public FakeKeycloak(System.Net.HttpStatusCode createStatus, string found = "[]")
+            => Handler = new RecordingHandler(request =>
+            {
+                string key = request.Key;
+                if (key.EndsWith("/openid-connect/token", StringComparison.Ordinal))
+                    return Json(System.Net.HttpStatusCode.OK, """{"access_token":"admin-token"}""");
+                if (key == "POST /admin/realms/queuey/users")
+                {
+                    var created = new HttpResponseMessage(createStatus);
+                    if (createStatus == System.Net.HttpStatusCode.Created)
+                        created.Headers.Location = new Uri("http://127.0.0.1:8082/admin/realms/queuey/users/kc-user-1");
+                    return created;
+                }
+                if (key == "GET /admin/realms/queuey/users") return Json(System.Net.HttpStatusCode.OK, found);
+                if (request.Method == HttpMethod.Put) return new HttpResponseMessage(System.Net.HttpStatusCode.NoContent);
+                if (key == "POST /admin/realms/queuey/clients") return new HttpResponseMessage(System.Net.HttpStatusCode.Created);
+                throw new InvalidOperationException($"Unexpected {key}");
+            });
+
+        public RecordingHandler Handler { get; }
+
+        private static HttpResponseMessage Json(System.Net.HttpStatusCode status, string body)
+            => new(status) { Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json") };
+    }
+
     private void WriteDeveloper()
         => File.WriteAllText(Path.Combine(_dir, "developer.json"), """{"email":"developer@queuey.localhost","password":"pw","subject":"sub-1"}""");
 
@@ -479,6 +609,12 @@ public sealed class ServerCommandTests : IDisposable
         public HashSet<string> Fail { get; } = new(StringComparer.Ordinal);
         public bool Missing { get; set; }
         public string Ps { get; set; } = "";
+        public string Config { get; set; } = LoopbackConfig;
+        public string Owners { get; set; } = "";
+        public string Volumes { get; set; } = "";
+        public string AdminPassword { get; set; } = "adm1n-only-in-the-volume";
+
+        public const string LoopbackConfig = """{"name":"queuey-x","services":{"server":{"ports":[{"host_ip":"127.0.0.1","published":"8080"}]},"console":{"ports":[{"host_ip":"127.0.0.1","published":"3000"}]}}}""";
 
         public Task<DockerResult> RunAsync(DockerCall call, CancellationToken ct)
         {
@@ -511,6 +647,14 @@ public sealed class ServerCommandTests : IDisposable
                     return Done(0, "", "");
                 case "compose" when a.Length > 1 && a[1] == "ps":
                     return Done(0, Ps, "");
+                case "compose" when a.Length > 1 && a[1] == "config":
+                    return Done(0, Config, "");
+                case "compose" when a.Contains("cat"):
+                    return Done(0, AdminPassword + "\n", "");
+                case "ps":
+                    return Done(0, Owners, "");
+                case "volume":
+                    return Done(0, Volumes, "");
                 default:
                     return Done(0, "", "");
             }
