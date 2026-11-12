@@ -38,6 +38,8 @@ COMMANDS
   resume         Verify a queue's receiver and resume delivery to it.
   unlock         Lift the lock Queuey put on a queue's delivery.
   edge           Operate a Queuey Edge spool: status | retry | discard | recover | reset.
+  server         Run a self-hosted Queuey on this machine with Docker Compose: server init | start | status |
+                 logs | stop | upgrade.
   whoami         Show the resolved hosts / tenant / license, and the key (masked) or the login.
 
 LOGIN
@@ -782,6 +784,46 @@ EDGE
                  reporting exactly how many were unreadable; reset abandons the spool (requires
                  --accept-data-loss, the old file is preserved for support either way). Both keep
                  the node id, so Queuey Cloud still sees the same node.
+
+SERVER
+  queuey server init --version <v> [--dir <path>] [--email <e>] [--console-port <p>] [--api-port <p>]
+                     [--ingress-port <p>] [--idp-port <p>]
+                 Sets up a self-hosted Queuey for this machine only, in ~/.queuey/server (or --dir,
+                 QUEUEY_SERVER_DIR; a new or empty folder): the Compose package for that version,
+                 copied out of the image queuey/server:<v> (pulled when it is not here), a .env
+                 with every address on 127.0.0.1, the bundled Keycloak for sign-in and a Compose
+                 project of the folder's own, the console's client secret, and
+                 compose.override.yaml, which publishes the ports on 127.0.0.1 only and lets
+                 deliveries reach this machine as http://host.docker.internal:<port>. Ports default
+                 to 3000 (console), 8080 (API), 8081 (ingress) and 8082 (sign-in). Starts nothing.
+                 The folder is the package's own: `docker compose` in it does what queuey server
+                 does, and its README.md covers the rest (backups, restore, the license). Do not
+                 expose it: it is for this machine only. start, stop and upgrade refuse when its
+                 ports publish beyond 127.0.0.1, or when its Compose project belongs to another
+                 folder.
+  queuey server start [--dir <path>] [--no-test]
+                 docker compose up -d, and waits until every service is healthy. The first start
+                 creates you in Keycloak (--email at init; default developer@queuey.localhost),
+                 with a generated password in developer.json in the folder, and makes you the
+                 installation's owner. Then the test delivery: one event in through the ingress,
+                 to the queue server-test, delivered to a receiver the CLI runs on this machine.
+                 --no-test skips it. Exit 0 only when the event arrived.
+  queuey server status [--dir <path>] [--json]
+                 Each service's state and health. Exit 0 when everything runs and is healthy.
+  queuey server logs [<service> ...] [--dir <path>] [--follow] [--tail <n>] [--since <time>] [--timestamps]
+                 docker compose logs, the last 200 lines unless --tail. Services: server,
+                 console, migrate, postgres, redis, keycloak, setup.
+  queuey server stop [--dir <path>]
+                 Stops every service and keeps the data.
+  queuey server stop --delete-data [--yes] [--dir <path>]
+                 Deletes the installation's data: docker compose down --volumes. Asks you to type
+                 delete; without a terminal it needs --yes. The folder and its configuration stay.
+  queuey server upgrade --version <v> [--dir <path>] [--no-test]
+                 A step of its own: takes a backup into backups/ first, replaces the package
+                 files with the new version's (keeping .env, the secrets, the override, the
+                 license and backups/), sets QUEUEY_VERSION, shows `migrate plan` (what the
+                 migrations do and whether the previous version still runs on them), and starts
+                 it as start does. Going back is restoring that backup; see README.md.
 
 WHOAMI
   queuey whoami [--profile <name>] [--json]

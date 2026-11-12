@@ -1149,6 +1149,16 @@ still goes to the inbox. Every command without an API key uses it for the API ho
 | `login` / `logout` | Log in with your Queuey account (open the link, approve the code), or end the login |
 | `whoami` | The resolved hosts (Production, Local or Custom), tenant and license, and the key (masked) or the login |
 
+**Run Queuey yourself** — a self-hosted Queuey on this machine, with Docker Compose:
+
+| Command | What it does |
+| --- | --- |
+| `server init --version <v>` | Set up that version for this machine only: its Compose package (copied out of its image), every address on 127.0.0.1, a bundled Keycloak, into a new or empty folder |
+| `server start` | Start it, wait until it is healthy, and run a test delivery to a receiver on this machine. The first start makes you the owner |
+| `server status` / `server logs` | Each service's state and health, or its logs |
+| `server stop` | Stop it and keep the data; `--delete-data` deletes the data, and asks first |
+| `server upgrade --version <v>` | Back up, swap in the new version's package, show `migrate plan`, and start |
+
 ### Exit codes
 
 A stable contract, so CI can branch on them:
