@@ -809,7 +809,13 @@ SERVER
                  to the queue server-test, delivered to a receiver the CLI runs on this machine.
                  --no-test skips it. Exit 0 only when the event arrived.
   queuey server status [--dir <path>] [--json]
-                 Each service's state and health. Exit 0 when everything runs and is healthy.
+                 Each service's state and health, then the license as the server judges it: the
+                 plan and whether it counts, is in grace or has frozen the installation, the
+                 events received over 30 days against what the plan covers, and the activation
+                 code to register the installation or buy a license with (`license` in the server
+                 container; --json has the server's object as license). An older server, or one
+                 that is not running, shows no license and says why. Exit 0 when everything runs
+                 and is healthy; the license never changes it.
   queuey server logs [<service> ...] [--dir <path>] [--follow] [--tail <n>] [--since <time>] [--timestamps]
                  docker compose logs, the last 200 lines unless --tail. Services: server,
                  console, migrate, postgres, redis, keycloak, setup.

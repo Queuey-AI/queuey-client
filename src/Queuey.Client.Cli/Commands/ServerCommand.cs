@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -224,6 +225,12 @@ internal static class ServerCommand
         // Etter `stop` står containerne igjen som exited; da er installasjonen stoppet, ikke halvveis.
         string state = services.All(s => !s.Running) ? "stopped" : healthy ? "running" : "degraded";
 
+        // Lisensen leses bare fra en server som kjører (steg 1.3), og den endrer aldri utgangskoden: den sier hva
+        // installasjonen har lov til, ikke om den virker.
+        LicenseAnswer license = services.Any(s => s.Service == "server" && s.Running)
+            ? await ServerLicense.ReadAsync(folder, ct)
+            : LicenseAnswer.Missing("not read, because the server is not running.");
+
         if (json)
         {
             Console.WriteLine(JsonSerializer.Serialize(new
@@ -234,6 +241,8 @@ internal static class ServerCommand
                 madeByInit = folder.State is not null,
                 addresses = folder.State is null ? null : new { console = ports.ConsoleUrl, api = ports.ApiUrl, ingress = ports.IngressUrl, signIn = ports.IdpUrl },
                 services = services.Select(s => new { service = s.Service, state = s.State, health = s.Health.Length == 0 ? null : s.Health, exitCode = s.Running ? (int?)null : s.ExitCode }),
+                license = license.Json,
+                licenseUnavailable = license.Unavailable,
             }, CliHost.JsonOut));
         }
         else
@@ -245,8 +254,48 @@ internal static class ServerCommand
                 Console.WriteLine("  Nothing runs. Start it with `queuey server start`; the data is kept.");
             else if (folder.State is not null)
                 Console.WriteLine($"  console {ports.ConsoleUrl} · ingress {ports.IngressUrl}");
+            foreach (string line in LicenseLines(license))
+                Console.WriteLine(line);
         }
         return state == "running" ? ExitCodes.Success : ExitCodes.RuntimeError;
+    }
+
+    // Samme ordlyd som serverens egen `license`-utskrift, så det operatøren ser i status og i containeren, er det samme.
+    // Teksten kommer fra serveren og vises i en terminal, så kontrolltegn fjernes.
+    private static IEnumerable<string> LicenseLines(LicenseAnswer answer)
+    {
+        if (answer.License is not { } license)
+        {
+            yield return $"License: {answer.Unavailable}";
+            yield break;
+        }
+
+        string Clean(string? text) => Text.Line(text ?? "");
+        string state = license.State switch
+        {
+            "frozen" => ", frozen",
+            "grace" => license.GraceEndsAt is { } ends
+                ? string.Create(CultureInfo.InvariantCulture, $", expired, counts until {ends:yyyy-MM-dd}")
+                : ", expired",
+            _ => "",
+        };
+        yield return $"License: {Clean(license.Plan)}{state}" + (license.Reason is null ? "" : $". {Clean(license.Reason)}");
+        if (license.LicenseId is not null)
+            yield return $"  {Clean(license.LicenseId)} for {Clean(license.Customer)} ({Clean(license.Environment)})" +
+                         (license.ExpiresAt is { } expires ? string.Create(CultureInfo.InvariantCulture, $", expires {expires:yyyy-MM-dd}") : "");
+
+        string received = license.ReceivedLastDays is { } count
+            ? string.Create(CultureInfo.InvariantCulture, $"{count:N0} received events")
+            : "not counted yet";
+        string limit = license.ReceivedLimit is { } most
+            ? string.Create(CultureInfo.InvariantCulture, $"of {most:N0} covered")
+            : license.UnlimitedUntil is { } until && until > DateTimeOffset.UtcNow
+                ? string.Create(CultureInfo.InvariantCulture, $"with no limit until {until:yyyy-MM-dd}")
+                : "with no limit";
+        yield return $"  Volume over {license.VolumeWindowDays ?? 30} days: {received}, {limit}";
+        yield return license.ActivationCode is { } code
+            ? $"  Activation code: {Clean(code)}"
+            : "  No activation code yet: the installation gets its id when migrate has run.";
     }
 
     // ── logs ────────────────────────────────────────────────────────────

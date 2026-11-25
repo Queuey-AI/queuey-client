@@ -74,7 +74,7 @@ machine only.
 ```bash
 queuey server init --version <version>   # the package for that version, in ~/.queuey/server
 queuey server start                      # waits until it is healthy, then a test delivery
-queuey server status
+queuey server status                     # services, then the license and the activation code
 queuey server logs server --follow
 queuey server stop                       # keeps the data
 queuey server upgrade --version <newer>  # backup, new package, migrate plan, start
@@ -90,6 +90,14 @@ Deliveries reach your own receivers as `http://host.docker.internal:<port>`.
 Every address is 127.0.0.1, and every port listens there only; the folder
 has a Compose project of its own, so another installation is never touched. `queuey server stop --delete-data`
 deletes the data, and asks first.
+
+`queuey server status` also shows the license as the server judges it: the
+plan, whether the installation is in grace or frozen, the events it received
+over 30 days against what the plan covers, and the activation code to register
+the installation or buy a license with. `--json` carries the server's own
+license object as `license`. A server from before the license command, or one
+that is not running, shows the services as before and says why there is no
+license; the license never changes the exit code.
 
 ## Configuration
 
