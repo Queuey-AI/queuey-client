@@ -351,6 +351,165 @@ public sealed class ServerCommandTests : IDisposable
         Assert.Contains("the data is kept", stopped.Stdout);
     }
 
+    // ── status: lisensen (steg 1.3) ─────────────────────────────────────
+
+    private const string FrozenFree = """
+        {
+          "edition": "free",
+          "plan": "Free",
+          "state": "frozen",
+          "reason": "The installation received 7,412 events in the last 30 days, and Free covers 5,000. No license file.",
+          "receivedLimit": 5000,
+          "receivedLastDays": 7412,
+          "volumeWindowDays": 30,
+          "installationId": "6f1c2e7a-0d7b-4c55-9a43-2a1b3c4d5e6f",
+          "installedAt": "2026-11-01T08:00:00+00:00",
+          "version": "1.0.0",
+          "activationCode": "QY1.abc-def_123"
+        }
+        """;
+
+    private const string License = "compose exec -T server dotnet Queuey.Server.dll license --format json";
+
+    private async Task RunningInstallation()
+    {
+        await Init();
+        _docker.Ps = Ps(("server", "running", "healthy", 0), ("console", "running", "healthy", 0), ("migrate", "exited", "", 0));
+    }
+
+    [Fact]
+    public async Task Status_shows_the_license_under_the_services_with_the_volume_and_the_activation_code()
+    {
+        await RunningInstallation();
+        _docker.License = new DockerResult(0, FrozenFree, "");
+
+        var run = await Run("server", "status", "--dir", _dir);
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.Contains(License, _docker.Calls);
+        string[] lines = run.Stdout.TrimEnd().Split('\n').Select(l => l.TrimEnd('\r')).ToArray();
+        int license = Array.FindIndex(lines, l => l.StartsWith("License:", StringComparison.Ordinal));
+        Assert.True(license > Array.FindIndex(lines, l => l.TrimStart().StartsWith("server ", StringComparison.Ordinal)), run.Stdout);
+        Assert.Equal(new[]
+        {
+            "License: Free, frozen. The installation received 7,412 events in the last 30 days, and Free covers 5,000. No license file.",
+            "  Volume over 30 days: 7,412 received events, of 5,000 covered",
+            "  Activation code: QY1.abc-def_123",
+        }, lines[license..]);
+    }
+
+    [Fact]
+    public async Task A_license_in_grace_says_it_has_expired_and_until_when_it_counts()
+    {
+        await RunningInstallation();
+        _docker.License = new DockerResult(0, """
+            {"edition":"custom","plan":"Team","state":"grace","reason":"The license expired on 2026-11-20.\u001b[2J",
+             "licenseId":"lic-42","customer":"Acme","environment":"production","expiresAt":"2026-11-20T00:00:00+00:00",
+             "graceEndsAt":"2026-12-04T00:00:00+00:00","receivedLastDays":120000,"volumeWindowDays":30,"version":"1.0.0"}
+            """, "");
+
+        var run = await Run("server", "status", "--dir", _dir);
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        Assert.Contains("License: Team, expired, counts until 2026-12-04. The license expired on 2026-11-20. [2J", run.Stdout);
+        Assert.False(run.Stdout.Contains('\u001b'), "the escape character from the server reached the terminal");
+        Assert.Contains("  lic-42 for Acme (production), expires 2026-11-20", run.Stdout);
+        Assert.Contains("  Volume over 30 days: 120,000 received events, with no limit", run.Stdout);
+        Assert.Contains("  No activation code yet", run.Stdout);
+    }
+
+    [Fact]
+    public async Task Status_json_carries_the_servers_license_object_unchanged()
+    {
+        await RunningInstallation();
+        _docker.License = new DockerResult(0, FrozenFree, "");
+
+        var run = await Run("server", "status", "--dir", _dir, "--json");
+
+        Assert.Equal(ExitCodes.Success, run.Exit);
+        using var status = System.Text.Json.JsonDocument.Parse(run.Stdout);
+        using var server = System.Text.Json.JsonDocument.Parse(FrozenFree);
+        Assert.True(System.Text.Json.JsonElement.DeepEquals(server.RootElement, status.RootElement.GetProperty("license")), run.Stdout);
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, status.RootElement.GetProperty("licenseUnavailable").ValueKind);
+    }
+
+    [Fact]
+    public async Task A_server_from_before_the_license_command_shows_the_services_as_before_and_says_why_there_is_no_license()
+    {
+        await RunningInstallation();
+
+        var text = await Run("server", "status", "--dir", _dir);
+        var json = await Run("server", "status", "--dir", _dir, "--json");
+
+        Assert.Equal(ExitCodes.Success, text.Exit);
+        Assert.Contains(": running", text.Stdout);
+        Assert.Contains("License: not available from this server version.", text.Stdout);
+        Assert.DoesNotContain("Unknown command", text.Stdout + text.Stderr);
+        Assert.Equal(ExitCodes.Success, json.Exit);
+        using var status = System.Text.Json.JsonDocument.Parse(json.Stdout);
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, status.RootElement.GetProperty("license").ValueKind);
+        Assert.Equal("not available from this server version.", status.RootElement.GetProperty("licenseUnavailable").GetString());
+    }
+
+    [Fact]
+    public async Task Status_does_not_ask_a_server_that_is_not_running_for_its_license()
+    {
+        await Init();
+        _docker.License = new DockerResult(0, FrozenFree, "");
+        _docker.Ps = Ps(("server", "exited", "", 143), ("console", "running", "healthy", 0), ("migrate", "exited", "", 0));
+        var degraded = await Run("server", "status", "--dir", _dir);
+        _docker.Ps = Ps(("server", "exited", "", 143), ("migrate", "exited", "", 0));
+        var stopped = await Run("server", "status", "--dir", _dir, "--json");
+
+        Assert.DoesNotContain(_docker.Calls, c => c.Contains("license", StringComparison.Ordinal));
+        Assert.Equal(ExitCodes.RuntimeError, degraded.Exit);
+        Assert.Contains("License: not read, because the server is not running.", degraded.Stdout);
+        Assert.Equal(ExitCodes.RuntimeError, stopped.Exit);
+        Assert.Contains("\"license\": null", stopped.Stdout);
+    }
+
+    [Theory]
+    [InlineData(0, "{\"edition\":\"free\",\"plan\":\"Free\",\"state\":\"free\",\"volumeWindowDays\":30,\"version\":\"1.0.0\"}", "", "License: Free")]
+    [InlineData(0, "Starting Queuey …", "", "License: not read: the server's answer is not a license.")]
+    [InlineData(0, "[1,2]", "", "License: not read: the server's answer is not a license.")]
+    [InlineData(1, "", "The license could not be read: the database did not answer.", "License: not read. The license could not be read: the database did not answer.")]
+    [InlineData(2, "", "Unknown command 'license'.", "License: not available from this server version.")]
+    public async Task The_license_never_changes_the_exit_code_of_status(int exit, string stdout, string stderr, string shown)
+    {
+        await Init();
+        _docker.License = new DockerResult(exit, stdout, stderr);
+
+        _docker.Ps = Ps(("server", "running", "healthy", 0), ("migrate", "exited", "", 0));
+        var running = await Run("server", "status", "--dir", _dir);
+        _docker.Ps = Ps(("server", "running", "unhealthy", 0), ("migrate", "exited", "", 0));
+        var degraded = await Run("server", "status", "--dir", _dir);
+
+        Assert.Equal(ExitCodes.Success, running.Exit);
+        Assert.Contains(shown, running.Stdout);
+        Assert.Equal(ExitCodes.RuntimeError, degraded.Exit);
+        Assert.Contains(shown, degraded.Stdout);
+    }
+
+    [Fact]
+    public async Task A_server_that_does_not_answer_about_its_license_does_not_hold_status_up()
+    {
+        await RunningInstallation();
+        _docker.LicenseDelay = ct => Task.Delay(Timeout.InfiniteTimeSpan, ct);
+        TimeSpan before = ServerLicense.Timeout;
+        ServerLicense.Timeout = TimeSpan.FromMilliseconds(200);
+        try
+        {
+            var run = await Run("server", "status", "--dir", _dir);
+
+            Assert.Equal(ExitCodes.Success, run.Exit);
+            Assert.Contains("License: not read: the server did not answer within 0.2 seconds.", run.Stdout);
+        }
+        finally
+        {
+            ServerLicense.Timeout = before;
+        }
+    }
+
     [Fact]
     public void Compose_ps_is_read_as_one_object_per_line_and_as_one_list()
     {
@@ -617,9 +776,23 @@ public sealed class ServerCommandTests : IDisposable
         public string Volumes { get; set; } = "";
         public string AdminPassword { get; set; } = "adm1n-only-in-the-volume";
 
+        /// <summary>What <c>license --format json</c> in the server container answers. A server without the command by default.</summary>
+        public DockerResult License { get; set; } = new(2, "", "Unknown command 'license'. Use serve (default), migrate, bootstrap-admin, validate-config, setup or health.");
+
+        /// <summary>When set, the license command waits for this before it answers, as a server that hangs.</summary>
+        public Func<CancellationToken, Task>? LicenseDelay { get; set; }
+
         public const string LoopbackConfig = """{"name":"queuey-x","services":{"server":{"ports":[{"host_ip":"127.0.0.1","published":"8080"}]},"console":{"ports":[{"host_ip":"127.0.0.1","published":"3000"}]}}}""";
 
-        public Task<DockerResult> RunAsync(DockerCall call, CancellationToken ct)
+        public async Task<DockerResult> RunAsync(DockerCall call, CancellationToken ct)
+        {
+            DockerResult result = Answer(call);
+            if (LicenseDelay is not null && call.Args.Contains("license"))
+                await LicenseDelay(ct);
+            return result;
+        }
+
+        private DockerResult Answer(DockerCall call)
         {
             if (Missing)
                 throw new Win32Exception("No such file or directory");
@@ -652,6 +825,8 @@ public sealed class ServerCommandTests : IDisposable
                     return Done(0, Ps, "");
                 case "compose" when a.Length > 1 && a[1] == "config":
                     return Done(0, Config, "");
+                case "compose" when a.Length > 1 && a[1] == "exec" && a.Contains("license"):
+                    return License;
                 case "compose" when a.Contains("cat"):
                     return Done(0, AdminPassword + "\n", "");
                 case "ps":
@@ -663,6 +838,6 @@ public sealed class ServerCommandTests : IDisposable
             }
         }
 
-        private static Task<DockerResult> Done(int exit, string stdout, string stderr) => Task.FromResult(new DockerResult(exit, stdout, stderr));
+        private static DockerResult Done(int exit, string stdout, string stderr) => new(exit, stdout, stderr);
     }
 }
